@@ -76,6 +76,12 @@ function sanitizeTranscript(value: unknown, key = "", depth = 0): unknown {
 }
 
 const transcript = new PiTranscript(sanitizeTranscript);
+let conversationEpoch = 0;
+let transcriptOpen = true;
+
+function broadcastSession(payload: Record<string, unknown>) {
+  broadcast({ ...payload, epoch: conversationEpoch });
+}
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -121,12 +127,15 @@ function authorized(request: IncomingMessage) {
 }
 
 pi.subscribe(event => {
-  for (const payload of transcript.handle(event)) broadcast(payload);
+  if (transcriptOpen) {
+    for (const payload of transcript.handle(event)) broadcastSession(payload);
+  }
   if (event.type === "agent_ready") {
     broadcast({ type: "agent_status", ready: true, streaming: false });
     runtimeLog("READY", `Pi connected. Provider: ${process.env.PI_PROVIDER || "xiaomi-token-plan-cn"}; model: ${process.env.PI_MODEL || "provider default"}.`);
   }
   if (event.type === "agent_start") {
+    if (!transcriptOpen) return;
     runtimeLog("PI", "Natural-language task started.");
     broadcast({ type: "agent_status", ready: true, streaming: true });
   }
@@ -135,6 +144,10 @@ pi.subscribe(event => {
     runtimeLog("PI", "Natural-language task completed.");
   }
   if (event.type === "extension_ui_request") {
+    if (!transcriptOpen) {
+      try { pi.respondToUi({ id: event.id, cancelled: true }); } catch { /* already cancelled */ }
+      return;
+    }
     if (event.method === "confirm") {
       runtimeLog("PI", `Auto-approved confirmation: ${event.title || event.message || "operation"}.`);
       try {
@@ -169,17 +182,19 @@ pi.subscribe(event => {
 });
 
 async function resetWorkbench() {
-  if (pi.status().streaming) {
-    await pi.abort().catch(() => {});
-    broadcast({ type: "agent_status", ready: pi.status().ready, streaming: false });
+  conversationEpoch += 1;
+  transcriptOpen = false;
+  if (studio.recorder.isActive()) {
+    studio.recorder.disposeImmediate();
+    runtimeLog("BROWSER", "Active recording was discarded so the next conversation starts clean.");
   }
-  if (pi.status().ready) {
-    await pi.newSession().catch(error => {
-      runtimeLog("WARN", `Failed to start a new Pi session: ${errorMessage(error)}`);
-    });
-  }
+  await pi.beginFreshConversation().catch(error => {
+    runtimeLog("WARN", `Failed to start a new Pi session: ${errorMessage(error)}`);
+  });
   transcript.clear();
-  broadcast({ type: "session_reset" });
+  broadcast({ type: "agent_status", ready: pi.status().ready, streaming: false });
+  broadcast({ type: "browser_changed" });
+  broadcast({ type: "session_reset", epoch: conversationEpoch });
 }
 
 async function browserStart(url: string, name?: string) {
@@ -273,8 +288,9 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     }
     if (request.method === "POST" && action === "invoke") {
       const invocation = await studio.invokeSkill(name, typeof body.goal === "string" ? body.goal : "");
+      transcriptOpen = true;
       const userEvent = transcript.addUser(invocation.prompt);
-      broadcast(userEvent);
+      broadcastSession(userEvent);
       await pi.prompt(invocation.prompt);
       sendJson(response, 202, { accepted: true, skill: invocation.record.name });
       return;
@@ -304,8 +320,8 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     if (result.observed && (result.observed.eventType === "input" || result.observed.eventType === "change" || result.observed.label || result.observed.value !== undefined)) {
       const label = result.observed.label || result.observed.name || "页面字段";
       runtimeLog("BROWSER", `Manual ${result.observed.eventType || "action"}: ${label}=${String(result.observed.value ?? "")}`);
-      if (result.observed.eventType === "input" || result.observed.eventType === "change") {
-        broadcast(transcript.addManual(result.observed));
+      if (transcriptOpen && (result.observed.eventType === "input" || result.observed.eventType === "change")) {
+        broadcastSession(transcript.addManual(result.observed));
       }
     }
     sendJson(response, 200, result);
@@ -330,8 +346,8 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
 
   if (request.method === "POST" && pathname === "/api/session/clear") {
     await resetWorkbench();
-    runtimeLog("PI", "Workbench conversation history was cleared.");
-    sendJson(response, 200, { cleared: true, sessionItems: transcript.items });
+    runtimeLog("PI", "All recordings ended and the workbench started a new conversation.");
+    sendJson(response, 200, { cleared: true, epoch: conversationEpoch, sessionItems: transcript.items });
     return;
   }
 
@@ -339,8 +355,9 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     const body = await readJsonBody(request);
     const messageText = typeof body.message === "string" ? body.message.trim() : "";
     if (!messageText) throw new Error("A message is required");
+    transcriptOpen = true;
     const userEvent = transcript.addUser(messageText);
-    broadcast(userEvent);
+    broadcastSession(userEvent);
     await pi.prompt(messageText);
     sendJson(response, 202, { accepted: true, item: userEvent.item });
     return;

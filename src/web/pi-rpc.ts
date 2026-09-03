@@ -16,6 +16,7 @@ export class PiRpcBridge {
   }>();
   private readonly listeners = new Set<EventListener>();
   private readonly pendingUiRequests = new Set<string>();
+  private suppressEvents = false;
 
   constructor(
     private readonly cwd: string,
@@ -115,6 +116,7 @@ export class PiRpcBridge {
 
   async prompt(message: string) {
     if (!this.ready) throw new Error("Pi is still starting");
+    this.suppressEvents = false;
     return this.request({
       type: "prompt",
       message,
@@ -128,7 +130,29 @@ export class PiRpcBridge {
 
   async newSession() {
     if (this.streaming) await this.abort().catch(() => {});
+    this.streaming = false;
+    this.cancelPendingUi();
     return this.request({ type: "new_session" });
+  }
+
+  async beginFreshConversation() {
+    this.suppressEvents = true;
+    this.cancelPendingUi();
+    if (this.streaming) await this.abort().catch(() => {});
+    this.streaming = false;
+    if (!this.ready || !this.child || this.child.exitCode !== null) return;
+    return this.request({ type: "new_session" });
+  }
+
+  cancelPendingUi() {
+    for (const id of [...this.pendingUiRequests]) {
+      this.pendingUiRequests.delete(id);
+      try {
+        this.write({ type: "extension_ui_response", id, cancelled: true });
+      } catch {
+        /* process may already be gone */
+      }
+    }
   }
 
   respondToUi(input: { id: string; confirmed?: boolean; value?: string; cancelled?: boolean }) {
@@ -194,6 +218,21 @@ export class PiRpcBridge {
         clearTimeout(request.timer);
         if (event.success) request.resolve(event.data);
         else request.reject(new Error(event.error || `Pi command failed: ${event.command}`));
+      }
+      return;
+    }
+    if (this.suppressEvents) {
+      if (event.type === "agent_settled") this.streaming = false;
+      if (event.type === "extension_ui_request") {
+        try {
+          this.write({ type: "extension_ui_response", id: event.id, cancelled: true });
+        } catch {
+          /* process may already be gone */
+        }
+        return;
+      }
+      if (event.type === "agent_ready" || event.type === "agent_process_exit" || event.type === "agent_diagnostic") {
+        this.emit(event);
       }
       return;
     }

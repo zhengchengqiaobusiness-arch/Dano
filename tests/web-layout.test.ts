@@ -72,14 +72,21 @@ test("recording workbench can clear conversation history in one click", async ()
     readFile(path.join(root, "src", "web", "server.ts"), "utf8"),
     readFile(path.join(root, "src", "web", "pi-rpc.ts"), "utf8")
   ]);
+  const resetWorkbench = server.match(/async function resetWorkbench\(\)[\s\S]*?broadcast\(\{ type: "session_reset"/)?.[0] || "";
 
   assert.match(html, /id="clear-session"[^>]*>清空历史</);
   assert.match(css, /\.session-toolbar\s*\{/);
   assert.match(app, /async function clearSessionHistory\(\)[\s\S]*\/api\/session\/clear/);
   assert.match(app, /elements\.clearSession\.addEventListener\("click"/);
+  assert.match(app, /resetBrowserWorkbench/);
+  assert.match(app, /已结束录制并清空全部内容；下一条消息是新对话/);
   assert.match(app, /studio_shutdown/);
   assert.match(server, /pathname === "\/api\/session\/clear"/);
-  assert.match(server, /await pi\.newSession\(\)/);
+  assert.match(resetWorkbench, /studio\.recorder\.disposeImmediate\(\)/);
+  assert.match(resetWorkbench, /beginFreshConversation/);
+  assert.match(resetWorkbench, /transcript\.clear\(\)/);
+  assert.match(bridge, /async beginFreshConversation\(\)[\s\S]*type: "new_session"/);
+  assert.match(bridge, /this\.suppressEvents = true/);
   assert.match(bridge, /async newSession\(\)[\s\S]*type: "new_session"/);
 });
 
@@ -96,7 +103,7 @@ test("starting a recording keeps the workbench conversation", async () => {
   assert.doesNotMatch(browserStart, /resetWorkbench|transcript\.clear|pi\.abort|abortAgent/);
   assert.doesNotMatch(openBrowser, /resetWorkbench/);
   assert.doesNotMatch(openBrowser, /工作台已清空/);
-  assert.match(app, /if \(event\.type === "session_reset"\) resetWorkbench\(\)/);
+  assert.match(app, /if \(event\.type === "session_reset"\) \{\s*if \(event\.epoch != null\) state\.sessionEpoch = event\.epoch;\s*resetWorkbench\(\);/s);
   assert.doesNotMatch(server, /studio\.recorder\.control\(\{\s*action:\s*"goto"/);
 });
 

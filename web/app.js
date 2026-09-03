@@ -24,9 +24,9 @@ const elements = {
 const state = {
   view: "recording", browserActive: false, browserMode: "automatic", agentReady: false, agentStreaming: false, agentAborting: false,
   currentUiRequest: null, localConfirmation: null, invokeSkill: null,
-  sessionNodes: new Map(), toastTimer: null, skills: [], sessionFollow: false,
+  sessionNodes: new Map(), toastTimer: null, skills: [], sessionFollow: false, sessionLive: true, sessionEpoch: 0,
   manualQueue: Promise.resolve(), manualRefreshTimers: [], recordingAction: null, clearingSession: false,
-  pollInFlight: false, frameLoading: false, frameBlobUrl: null, lastFrameAt: 0,
+  pollInFlight: false, frameLoading: false, frameBlobUrl: null, lastFrameAt: 0, frameEpoch: 0,
   lastStatusText: "", viewport: { width: 1440, height: 960 },
   imeComposing: false, imeBuffer: "", imeTimer: null
 };
@@ -98,7 +98,30 @@ function dataText(value) {
   try { return JSON.stringify(value, null, 2); } catch { return String(value); }
 }
 
+function resetBrowserWorkbench() {
+  state.browserActive = false;
+  state.recordingAction = null;
+  state.pollInFlight = false;
+  state.frameLoading = false;
+  state.frameEpoch += 1;
+  for (const timer of state.manualRefreshTimers) clearTimeout(timer);
+  state.manualRefreshTimers = [];
+  state.manualQueue = Promise.resolve();
+  state.imeComposing = false;
+  state.imeBuffer = "";
+  clearTimeout(state.imeTimer);
+  if (elements.browserIme) elements.browserIme.value = "";
+  if (elements.browserUrl) elements.browserUrl.value = "";
+  if (elements.prompt) elements.prompt.value = "";
+  clearBrowserFrame();
+  elements.browserFrame.classList.remove("active");
+  if (elements.reloadBrowser) elements.reloadBrowser.disabled = true;
+  renderBrowserMode();
+  renderRecordingActions();
+}
+
 function resetWorkbench() {
+  state.sessionLive = false;
   for (const node of state.sessionNodes.values()) node.remove();
   state.sessionNodes.clear();
   elements.conversation.querySelectorAll("[data-session-id]").forEach(node => node.remove());
@@ -109,8 +132,12 @@ function resetWorkbench() {
   }
   state.currentUiRequest = null;
   elements.confirmationModal.hidden = true;
+  if (elements.invokeModal) elements.invokeModal.hidden = true;
+  state.invokeSkill = null;
   state.sessionFollow = false;
   elements.conversation.scrollTop = 0;
+  updateAgentStatus(state.agentReady, false);
+  resetBrowserWorkbench();
 }
 
 async function clearSessionHistory() {
@@ -118,10 +145,11 @@ async function clearSessionHistory() {
   state.clearingSession = true;
   if (elements.clearSession) elements.clearSession.disabled = true;
   try {
-    if (state.agentStreaming) await abortAgent();
-    await api("/api/session/clear", { method: "POST", body: "{}" });
+    const result = await api("/api/session/clear", { method: "POST", body: "{}" });
+    if (result?.epoch != null) state.sessionEpoch = result.epoch;
     resetWorkbench();
-    showToast("已清空会话历史；下一条消息会作为新对话开始");
+    await pollBrowser(true);
+    showToast("已结束录制并清空全部内容；下一条消息是新对话");
   } catch (error) {
     showToast(error.message);
   } finally {
@@ -242,9 +270,11 @@ function clearBrowserFrame() {
 async function refreshBrowserFrame(force = false) {
   if (!state.browserActive || state.frameLoading || document.hidden) return;
   if (!force && Date.now() - state.lastFrameAt < 160) return;
+  const epoch = state.frameEpoch;
   state.frameLoading = true;
   try {
     const response = await fetch(`/api/browser/frame?t=${Date.now()}`, { cache: "no-store", signal: AbortSignal.timeout(1200) });
+    if (epoch !== state.frameEpoch) return;
     if (response.status === 204 || !response.ok) return;
     const blob = await response.blob();
     if (!blob || blob.size < 80) return;
@@ -252,6 +282,10 @@ async function refreshBrowserFrame(force = false) {
     const probe = new Image();
     probe.src = url;
     await (probe.decode ? probe.decode() : Promise.resolve()).catch(() => {});
+    if (epoch !== state.frameEpoch) {
+      URL.revokeObjectURL(url);
+      return;
+    }
     const previous = state.frameBlobUrl;
     state.frameBlobUrl = url;
     elements.browserFrame.src = url;
@@ -261,15 +295,17 @@ async function refreshBrowserFrame(force = false) {
   } catch {
     // Keep the last decoded frame so a hung capture does not blank the workbench.
   } finally {
-    state.frameLoading = false;
+    if (epoch === state.frameEpoch) state.frameLoading = false;
   }
 }
 
 async function pollBrowserState() {
   if (state.pollInFlight) return;
+  const epoch = state.frameEpoch;
   state.pollInFlight = true;
   try {
     const browser = await api("/api/browser/state");
+    if (epoch !== state.frameEpoch) return;
     state.browserActive = Boolean(browser.active);
     state.browserMode = browser.mode || state.browserMode;
     renderBrowserMode();
@@ -290,9 +326,9 @@ async function pollBrowserState() {
     }
     setBrowserStatus(browser.pageError || browser.title || "浏览器运行中", Boolean(browser.pageError));
   } catch {
-    setBrowserStatus("浏览器状态暂时不可用，可继续点击或刷新", true);
+    if (epoch === state.frameEpoch) setBrowserStatus("浏览器状态暂时不可用，可继续点击或刷新", true);
   } finally {
-    state.pollInFlight = false;
+    if (epoch === state.frameEpoch) state.pollInFlight = false;
   }
 }
 
@@ -359,6 +395,7 @@ async function submitPrompt(message) {
   const text = message.trim();
   if (!text || !state.agentReady) return;
   elements.prompt.value = "";
+  state.sessionLive = true;
   state.sessionFollow = true;
   followSessionIfWanted();
   updateAgentStatus(true, true);
@@ -511,7 +548,14 @@ function connectEvents() {
   stream.onmessage = message => {
     const event = JSON.parse(message.data);
     if (event.type === "agent_status") updateAgentStatus(event.ready, event.streaming);
-    if (event.type === "session_reset") resetWorkbench();
+    if (event.type === "session_reset") {
+      if (event.epoch != null) state.sessionEpoch = event.epoch;
+      resetWorkbench();
+      void pollBrowser(true);
+      return;
+    }
+    if (event.epoch != null && event.epoch !== state.sessionEpoch) return;
+    if ((event.type === "session_item" || event.type === "session_patch" || event.type === "session_replace" || event.type === "ui_request") && !state.sessionLive) return;
     if (event.type === "session_item") renderSessionItem(event.item);
     if (event.type === "session_patch") patchSessionItem(event);
     if (event.type === "session_replace") renderSessionItem(event.item);
@@ -550,6 +594,7 @@ elements.invokeSubmit.addEventListener("click", async () => {
   if (!state.invokeSkill || !elements.invokeGoal.value.trim()) return showToast("请先描述业务目标");
   try {
     await api(`/api/skills/${encodeURIComponent(state.invokeSkill.name)}/invoke`, { method: "POST", body: JSON.stringify({ goal: elements.invokeGoal.value }) });
+    state.sessionLive = true;
     elements.invokeModal.hidden = true; state.invokeSkill = null; setView("recording"); showToast("已交给 Pi，执行中的选择和确认会显示在这里");
   } catch (error) { showToast(error.message); }
 });
