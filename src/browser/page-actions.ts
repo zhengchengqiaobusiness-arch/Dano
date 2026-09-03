@@ -40,12 +40,15 @@ export interface PageSnapshot {
   errors?: string[];
   frames?: unknown[];
   recentUserActions?: unknown[];
+  recordedManualSteps?: unknown[];
+  followManualSteps?: boolean;
 }
 
 export interface PageActionHost {
   page(): Page;
   writePageInventory(page: Page, snapshot: PageSnapshot): Promise<void>;
   recentUserActions(): unknown[];
+  recordedManualSteps?(): unknown[];
   recordSelectObservation?(info: {
     label?: string;
     name?: string;
@@ -941,7 +944,8 @@ export class PageActions {
       formFields,
       todoFields,
       todoCount: todoFields.length,
-      recentUserActions: this.host.recentUserActions()
+      recentUserActions: this.host.recentUserActions(),
+      recordedManualSteps: this.host.recordedManualSteps?.() || []
     };
     await this.host.writePageInventory(page, snapshot);
     return snapshot;
@@ -1237,15 +1241,18 @@ export class PageActions {
     const leftoverFailed = failed.filter(item =>
       (after.formFields || []).some(field => field.label === item.label && !field.filled && !field.skip && !field.disabled)
     );
+    const ok = this.formReady(after, startUrl) && leftoverFailed.length === 0;
     return {
-      ok: this.formReady(after, startUrl) && leftoverFailed.length === 0,
+      ok,
       scope: after.scope,
       filled,
       failed,
       errors: after.errors || [],
       todoFields: after.todoFields || [],
       todoCount: after.todoCount ?? (after.todoFields || []).length,
-      formFields: after.formFields || []
+      formFields: after.formFields || [],
+      recordedManualSteps: after.recordedManualSteps || [],
+      followManualSteps: !ok
     };
   }
 
@@ -1273,7 +1280,9 @@ export class PageActions {
         scope: before.scope,
         todoFields: before.todoFields || [],
         todoCount: before.todoCount ?? (before.todoFields || []).length,
-        formFields: before.formFields || []
+        formFields: before.formFields || [],
+        recordedManualSteps: before.recordedManualSteps || [],
+        followManualSteps: true
       };
     }
     const write = /^(提交|确定|save|submit|ok|confirm|apply)/i.test(button.text) && !/搜索|查询|search/i.test(button.text);
@@ -1286,10 +1295,11 @@ export class PageActions {
     const closed = this.page().url() !== startUrl || after.scope !== before.scope;
     const invalid = (after.formFields || []).some(field => field.invalid || this.requiredNumberInvalid(field));
     const leftoverTodos = (after.todoFields || []).filter(field => !field.skip && !field.disabled);
+    const ok = write
+      ? Boolean(sawRequest && leftoverErrors.length === 0 && (closed || (!invalid && leftoverTodos.length === 0)))
+      : closed || Boolean(sawRequest && leftoverErrors.length === 0 && !invalid && leftoverTodos.length === 0);
     return {
-      ok: write
-        ? Boolean(sawRequest && leftoverErrors.length === 0 && (closed || (!invalid && leftoverTodos.length === 0)))
-        : closed || Boolean(sawRequest && leftoverErrors.length === 0 && !invalid && leftoverTodos.length === 0),
+      ok,
       submitted: button.text,
       repaired,
       sawRequest,
@@ -1298,7 +1308,9 @@ export class PageActions {
       scope: after.scope,
       todoFields: after.todoFields || [],
       todoCount: after.todoCount ?? (after.todoFields || []).length,
-      formFields: after.formFields || []
+      formFields: after.formFields || [],
+      recordedManualSteps: after.recordedManualSteps || [],
+      followManualSteps: !ok
     };
   }
 }

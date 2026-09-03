@@ -255,6 +255,7 @@ export interface RecordingSession {
   stoppedAt?: string;
   startUrl: string;
   eventsFile: string;
+  manualStepsFile?: string;
 }
 
 export type ReviewStage = "record" | "analyze" | "validate" | "export";

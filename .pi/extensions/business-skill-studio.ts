@@ -73,12 +73,14 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_record_stop",
     label: "Stop business recording",
-    description: "Stop the active browser recording and persist its evidence.",
+    description: "Stop the active browser recording and persist its evidence, including session.json, events.jsonl, and manual-steps.md for later replay when automatic clicking fails.",
     parameters: parameters({}),
     async execute() {
       const session = await stopBrowser();
       return {
-        content: [{ type: "text", text: `Recording saved: ${session.id}` }],
+        content: [{ type: "text", text: session.manualStepsFile
+          ? `Recording saved: ${session.id}. Manual steps: ${session.manualStepsFile}`
+          : `Recording saved: ${session.id}` }],
         details: session
       };
     }

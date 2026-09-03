@@ -1,4 +1,5 @@
 import path from "node:path";
+import { writeFile } from "node:fs/promises";
 import { chromium, type BrowserContext, type Browser, type Request, type Response, type Page } from "playwright";
 import type { EvidenceEvent, NetworkEvidence, RecordingSession, UiEvidence } from "../domain.js";
 import type { StudioConfig } from "../config.js";
@@ -6,6 +7,7 @@ import { appendJsonl, ensureDir, id, writeJson } from "../utils.js";
 import { parsePossiblyJson, redactHeaders, redactValue } from "../security/redact.js";
 import { UI_RECORDER_SCRIPT } from "./page-script.js";
 import { PageActions, type PageSnapshot } from "./page-actions.js";
+import { buildManualSteps, renderManualStepsMarkdown, type ManualStep } from "../record/manual-steps.js";
 
 const INSPECT_TARGET_IN_PAGE = new Function("el", String.raw`
   const text = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 800);
@@ -30,6 +32,7 @@ interface ActiveRecording {
   requestIds: WeakMap<Request, string>;
   lastUiByPage: WeakMap<Page, UiEvidence>;
   recentUi: UiEvidence[];
+  manualEvents: UiEvidence[];
   externalBrowser: boolean;
 }
 
@@ -51,6 +54,7 @@ export class BrowserRecorder {
     page: () => this.currentPage(),
     writePageInventory: (page, snapshot) => this.writePageInventory(page, snapshot),
     recentUserActions: () => this.recentUserActions(),
+    recordedManualSteps: () => this.recordedManualSteps(),
     recordSelectObservation: info => this.writeUiEvent(this.currentPage(), {
       eventType: "change",
       label: info.label,
@@ -187,6 +191,7 @@ export class BrowserRecorder {
       requestIds: new WeakMap(),
       lastUiByPage: new WeakMap(),
       recentUi: [],
+      manualEvents: [],
       externalBrowser: false
     };
 
@@ -428,6 +433,9 @@ export class BrowserRecorder {
     }
     active.lastUiByPage.set(page, event);
     active.recentUi = [...active.recentUi, event].slice(-40);
+    if (event.eventType !== "snapshot") {
+      active.manualEvents = [...active.manualEvents, event].slice(-200);
+    }
     await appendJsonl(active.eventsFile, event);
     return event;
   }
@@ -650,6 +658,20 @@ export class BrowserRecorder {
     }));
   }
 
+  private recordedManualSteps(): ManualStep[] {
+    return buildManualSteps(this.active?.manualEvents || []);
+  }
+
+  private async writeManualStepsFile(active: ActiveRecording) {
+    const steps = buildManualSteps(active.manualEvents);
+    const file = path.join(path.dirname(active.eventsFile), "manual-steps.md");
+    active.session.manualStepsFile = file;
+    await writeFile(file, renderManualStepsMarkdown(steps, {
+      sessionId: active.session.id,
+      startUrl: active.session.startUrl
+    }), "utf8");
+  }
+
   async manualControl(command:
     | { action: "click"; x: number; y: number; button?: "left" | "right" | "middle"; clickCount?: number }
     | { action: "text"; value: string }
@@ -807,6 +829,7 @@ export class BrowserRecorder {
 
     await this.drainNetwork();
     active.session.stoppedAt = new Date().toISOString();
+    await this.writeManualStepsFile(active);
     const dir = path.dirname(active.eventsFile);
     await writeJson(path.join(dir, "session.json"), active.session);
 
