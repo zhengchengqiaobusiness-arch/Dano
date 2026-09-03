@@ -25,7 +25,7 @@ const state = {
   view: "recording", browserActive: false, browserMode: "automatic", agentReady: false, agentStreaming: false, agentAborting: false,
   currentUiRequest: null, localConfirmation: null, invokeSkill: null,
   sessionNodes: new Map(), toastTimer: null, skills: [],
-  manualQueue: Promise.resolve(), manualRefreshTimer: null, recordingAction: null, clearingSession: false,
+  manualQueue: Promise.resolve(), manualRefreshTimers: [], recordingAction: null, clearingSession: false,
   pollInFlight: false, frameLoading: false, frameBlobUrl: null, lastFrameAt: 0,
   lastStatusText: "", viewport: { width: 1440, height: 960 },
   imeComposing: false, imeBuffer: "", imeTimer: null
@@ -317,9 +317,12 @@ async function completeRecording() {
 async function manualCommand(command) {
   if (!state.browserActive) return;
   await api("/api/browser/manual", { method: "POST", body: JSON.stringify(command) });
-  clearTimeout(state.manualRefreshTimer);
+  for (const timer of state.manualRefreshTimers) clearTimeout(timer);
+  state.manualRefreshTimers = [];
   void refreshBrowserFrame(true);
-  state.manualRefreshTimer = setTimeout(() => void refreshBrowserFrame(true), 120);
+  for (const ms of [160, 420, 900, 1500]) {
+    state.manualRefreshTimers.push(setTimeout(() => void refreshBrowserFrame(true), ms));
+  }
 }
 
 function enqueueManualCommand(command) {

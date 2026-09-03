@@ -2391,6 +2391,78 @@ test("preview stays fresh while a delayed panel paints and in-page clicks do not
   }
 });
 
+test("clicking a page control waits for the opened overlay iframe to paint", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-overlay-"));
+  const server = http.createServer((request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    if (request.url === "/pane") {
+      response.end(`<!doctype html><html><head><title>图层内容已加载</title></head>
+        <body style="margin:0;background:#c81e1e;color:#fff">
+          <h1 style="padding:24px">图层内容已加载</h1>
+          <button>问数结果</button>
+        </body></html>`);
+      return;
+    }
+    response.end(`<!doctype html><html><head><title>图层页</title></head><body style="margin:0;background:#e8eef5">
+      <button id="open-layer" style="position:fixed;left:20px;top:20px;width:140px;height:36px">打开层</button>
+      <aside id="layer" style="display:none;position:fixed;right:0;top:0;width:360px;height:100%;background:#fff;box-shadow:-8px 0 24px rgba(0,0,0,.12);flex-direction:column">
+        <header style="height:48px;border-bottom:1px solid #ddd;padding:12px">弹出层</header>
+        <div id="pane-host" style="flex:1;background:#fff"></div>
+        <footer style="height:56px;border-top:1px solid #ddd;padding:12px">输入框</footer>
+      </aside>
+      <script>
+        document.getElementById("open-layer").onclick = () => {
+          const layer = document.getElementById("layer");
+          layer.style.display = "flex";
+          setTimeout(() => {
+            const pane = document.createElement("iframe");
+            pane.id = "pane";
+            pane.src = "/pane";
+            pane.style.cssText = "width:100%;height:100%;border:0;background:#fff";
+            document.getElementById("pane-host").appendChild(pane);
+          }, 350);
+        };
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "overlay-page");
+    const opened: any = await recorder.control({ action: "click", selector: "#open-layer" });
+    assert.equal(opened.stopped, undefined, JSON.stringify(opened));
+    const snap: any = await recorder.control({ action: "snapshot" });
+    const encoded = JSON.stringify(snap);
+    assert.match(encoded, /\/pane/, encoded);
+    assert.match(encoded, /图层内容已加载/, encoded);
+    assert.equal((snap.frames || []).some((frame: any) => /\/pane/.test(String(frame.frameUrl || "")) && frame.visible), true, encoded);
+    const preview = await recorder.preview();
+    assert.equal(preview[0], 0xff);
+    assert.equal(preview[1], 0xd8);
+    assert.ok(preview.length > 2000, `preview too small: ${preview.length}`);
+
+    await recorder.control({ action: "goto", url: `http://127.0.0.1:${address.port}/` });
+    await recorder.manualControl({ action: "click", x: 90, y: 38 });
+    const afterManual: any = await recorder.control({ action: "snapshot" });
+    assert.match(JSON.stringify(afterManual), /图层内容已加载/, JSON.stringify(afterManual));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("follows a new tab after a link click and stays on the old page if the tab dies", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-newpage-"));
   const server = http.createServer((request, response) => {

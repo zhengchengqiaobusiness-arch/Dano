@@ -131,7 +131,7 @@ export class BrowserRecorder {
       type: "jpeg",
       quality: 52,
       fullPage: false,
-      animations: "disabled",
+      animations: "allow",
       caret: "hide"
     }), 2_500, undefined);
     if (!buffer || buffer.length < 800) return this.lastPreview?.buffer || EMPTY_JPEG;
@@ -150,6 +150,7 @@ export class BrowserRecorder {
       return await work();
     } finally {
       this.actionBusy -= 1;
+      this.lastPreview = undefined;
     }
   }
 
@@ -188,7 +189,7 @@ export class BrowserRecorder {
       headless: this.config.headless,
       viewport: { width: 1440, height: 960 },
       deviceScaleFactor: 1,
-      args: ["--disable-features=TranslateUI", "--disable-background-timer-throttling"]
+      args: ["--disable-features=TranslateUI", "--disable-background-timer-throttling", "--disable-site-isolation-trials"]
     };
     const context = await chromium.launchPersistentContext(this.config.profileDir, launchOptions).catch(error => {
       if (!/Executable doesn't exist/i.test(String(error))) throw error;
@@ -613,7 +614,12 @@ export class BrowserRecorder {
     };
   }
 
-  private async followAfterGesture(origin: Page, known: Set<Page>, appeared: Page[] = []) {
+  private async followAfterGesture(
+    origin: Page,
+    known: Set<Page>,
+    appeared: Page[] = [],
+    layersBefore?: Awaited<ReturnType<PageActions["inspectLayerPaint"]>>
+  ) {
     const beforeUrl = origin.isClosed() ? "" : origin.url();
     const newcomers = () => {
       const live = this.livePages().filter(page => page !== origin && !known.has(page));
@@ -631,45 +637,53 @@ export class BrowserRecorder {
       this.pageError = undefined;
       await this.waitForPageQuiet(origin, 400);
     };
+    let switched = false;
     const takeNewPage = async (page: Page) => {
       if (page.isClosed()) {
         this.pageError = this.pageError || "新页面打开失败";
         if (!origin.isClosed()) this.setFocused(origin);
         return false;
       }
-      if (await this.adoptIfReady(page)) return true;
+      if (await this.adoptIfReady(page)) {
+        switched = true;
+        return true;
+      }
       if (!origin.isClosed()) this.setFocused(origin);
       return false;
     };
 
-    if (!origin.isClosed() && origin.url() !== beforeUrl) {
-      await settleOrigin();
-      return;
-    }
-    let extra = newcomers();
-    if (extra.length) {
-      await takeNewPage(extra[extra.length - 1]!);
-      return;
-    }
-    let waited = 0;
-    const budget = appeared.length ? 400 : 120;
-    while (waited <= budget) {
+    try {
       if (!origin.isClosed() && origin.url() !== beforeUrl) {
         await settleOrigin();
         return;
       }
-      extra = newcomers();
+      let extra = newcomers();
       if (extra.length) {
         await takeNewPage(extra[extra.length - 1]!);
         return;
       }
-      await new Promise(resolve => setTimeout(resolve, 20));
-      waited += 20;
+      let waited = 0;
+      const budget = appeared.length ? 400 : 120;
+      while (waited <= budget) {
+        if (!origin.isClosed() && origin.url() !== beforeUrl) {
+          await settleOrigin();
+          return;
+        }
+        extra = newcomers();
+        if (extra.length) {
+          await takeNewPage(extra[extra.length - 1]!);
+          return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 20));
+        waited += 20;
+      }
+      if (appeared.some(page => page !== origin && (page.isClosed() || this.isErrorUrl(page.url())))) {
+        this.pageError = this.pageError || "新页面打开失败";
+      }
+      if (!origin.isClosed()) this.setFocused(origin);
+    } finally {
+      if (!switched) await this.actions.waitForOpenedLayer(layersBefore);
     }
-    if (appeared.some(page => page !== origin && (page.isClosed() || this.isErrorUrl(page.url())))) {
-      this.pageError = this.pageError || "新页面打开失败";
-    }
-    if (!origin.isClosed()) this.setFocused(origin);
   }
 
   private currentPage(): Page {
@@ -734,6 +748,9 @@ export class BrowserRecorder {
       const page = this.currentPage();
       const known = new Set(this.livePages());
       const watch = command.action === "click" || command.action === "key" ? this.watchNewPages() : undefined;
+      const layersBefore = command.action === "click" || command.action === "key"
+        ? await this.actions.inspectLayerPaint()
+        : undefined;
       if (command.action === "click") {
         const viewport = page.viewportSize();
         if (!viewport || !Number.isFinite(command.x) || !Number.isFinite(command.y)) throw new Error("manual click requires finite x and y coordinates");
@@ -761,7 +778,7 @@ export class BrowserRecorder {
       if (command.action !== "scroll") await this.actions.recordFormInventory().catch(() => {});
       try {
         if (command.action === "click" || command.action === "key") {
-          await this.followAfterGesture(page, known, watch?.appeared || []);
+          await this.followAfterGesture(page, known, watch?.appeared || [], layersBefore);
         }
         const current = this.currentPage();
         return {
@@ -848,8 +865,9 @@ export class BrowserRecorder {
           if (!command.selector) throw new Error("click requires selector");
           try {
             return await this.guardedPageAction("click", command.selector, async () => {
+              const layersBefore = await this.actions.inspectLayerPaint();
               const clicked = await this.actions.click(command.selector!);
-              await this.followAfterGesture(page, known, watch?.appeared || []);
+              await this.followAfterGesture(page, known, watch?.appeared || [], layersBefore);
               return { ...clicked, url: this.currentPage().url(), pageError: this.pageError };
             });
           } finally {
