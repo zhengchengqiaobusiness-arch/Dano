@@ -119,6 +119,8 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
   assert.match(piControlRoute, /当前是手动录制模式；Pi 只能读取页面/);
   assert.match(app, /classList\.toggle\("interactive", state\.browserActive\)/);
   assert.match(css, /\.browser-viewport\.interactive/);
+  assert.doesNotMatch(css, /\.browser-frame\s*\{[^}]*contain:\s*strict/);
+  assert.doesNotMatch(await readFile(path.join(root, "src", "browser", "recorder.ts"), "utf8"), /startScreencast|screencastFrame|attachScreencast/);
   assert.match(app, /if \(state\.pollInFlight\) return;/);
   assert.match(app, /if \(!state\.browserActive \|\| state\.frameLoading \|\| document\.hidden\) return;/);
   assert.match(app, /setInterval\(\(\) => \{ if \(!document\.hidden && state\.browserActive\) void refreshBrowserFrame\(\); \}, 240\)/);

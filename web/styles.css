@@ -64,7 +64,7 @@ button { color: inherit; }
 .icon-button:hover, .suggestions button:hover { color: var(--text); border-color: #496258; }
 
 .browser-viewport { min-height: 0; position: relative; overflow: hidden; display: grid; place-items: center; contain: layout paint; background-color: #07100e; }
-.browser-frame { display: none; width: 100%; height: 100%; object-fit: contain; background: #fff; user-select: none; -webkit-user-drag: none; contain: strict; }
+.browser-frame { display: none; width: 100%; height: 100%; object-fit: contain; background: #fff; user-select: none; -webkit-user-drag: none; }
 .browser-frame.active { display: block; }
 .browser-viewport.interactive { outline: 1px solid rgba(69, 210, 173, .48); outline-offset: -1px; }
 .browser-viewport.interactive .browser-frame { cursor: crosshair; }

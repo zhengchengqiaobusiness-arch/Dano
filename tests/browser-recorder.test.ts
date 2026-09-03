@@ -2372,13 +2372,16 @@ test("preview stays fresh while a delayed panel paints and in-page clicks do not
     await recorder.start(`http://127.0.0.1:${address.port}/`, "smooth-page");
     const first = await recorder.preview();
     assert.equal(first[0], 0xff);
+    assert.equal(first[1], 0xd8);
+    assert.ok(first.length > 2000, `preview too small to be a real page: ${first.length}`);
     const began = Date.now();
     await recorder.control({ action: "click", selector: "#open-panel" });
     assert.ok(Date.now() - began < 1500, `in-page click was too slow: ${Date.now() - began}ms`);
     await recorder.control({ action: "wait", ms: 450 });
     const after = await recorder.preview();
     assert.equal(after[0], 0xff);
-    assert.ok(after.length > 80);
+    assert.equal(after[1], 0xd8);
+    assert.ok(after.length > 2000, `preview too small to be a real page: ${after.length}`);
     const snap: any = await recorder.control({ action: "snapshot" });
     assert.match(String(snap.title || ""), /流畅页/);
   } finally {

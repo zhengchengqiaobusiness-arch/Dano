@@ -1,6 +1,6 @@
 import path from "node:path";
 import { writeFile } from "node:fs/promises";
-import { chromium, type BrowserContext, type Browser, type CDPSession, type Request, type Response, type Page } from "playwright";
+import { chromium, type BrowserContext, type Browser, type Request, type Response, type Page } from "playwright";
 import type { EvidenceEvent, NetworkEvidence, RecordingSession, UiEvidence } from "../domain.js";
 import type { StudioConfig } from "../config.js";
 import { appendJsonl, ensureDir, id, writeJson } from "../utils.js";
@@ -59,7 +59,6 @@ export class BrowserRecorder {
   private pageError?: string;
   private lastGoodUrl?: string;
   private lastTitle = { at: 0, value: "" };
-  private screencast?: { page: Page; session: CDPSession };
   private readonly actions = new PageActions({
     page: () => this.currentPage(),
     writePageInventory: (page, snapshot) => this.writePageInventory(page, snapshot),
@@ -112,7 +111,7 @@ export class BrowserRecorder {
   }
 
   async preview(): Promise<Buffer> {
-    if (this.lastPreview && (this.screencast || Date.now() - this.lastPreview.at < 400)) {
+    if (this.lastPreview && (this.actionBusy > 0 || Date.now() - this.lastPreview.at < 180)) {
       return this.lastPreview.buffer;
     }
     if (this.previewInFlight) return this.previewInFlight;
@@ -128,15 +127,14 @@ export class BrowserRecorder {
       this.pageError = this.pageError || `页面打开失败：${page.url()}`;
       return this.lastPreview?.buffer || EMPTY_JPEG;
     }
-    void this.attachScreencast(page);
     const buffer = await this.withTimeout<Buffer | undefined>(page.screenshot({
       type: "jpeg",
-      quality: 48,
+      quality: 52,
       fullPage: false,
       animations: "disabled",
       caret: "hide"
-    }), 1_600, undefined);
-    if (!buffer?.length) return this.lastPreview?.buffer || EMPTY_JPEG;
+    }), 2_500, undefined);
+    if (!buffer || buffer.length < 800) return this.lastPreview?.buffer || EMPTY_JPEG;
     this.lastPreview = { at: Date.now(), buffer };
     this.lastGoodUrl = page.url();
     return buffer;
@@ -144,39 +142,6 @@ export class BrowserRecorder {
 
   private setFocused(page?: Page) {
     this.focused = page;
-    if (page && !page.isClosed()) void this.attachScreencast(page);
-    else void this.detachScreencast();
-  }
-
-  private async attachScreencast(page: Page) {
-    if (this.screencast?.page === page) return;
-    await this.detachScreencast();
-    if (page.isClosed()) return;
-    try {
-      const session = await page.context().newCDPSession(page);
-      await session.send("Page.startScreencast", {
-        format: "jpeg",
-        quality: 52,
-        maxWidth: 1440,
-        maxHeight: 960,
-        everyNthFrame: 2
-      });
-      session.on("Page.screencastFrame", (event: { data: string; sessionId: number }) => {
-        this.lastPreview = { at: Date.now(), buffer: Buffer.from(event.data, "base64") };
-        void session.send("Page.screencastFrameAck", { sessionId: event.sessionId }).catch(() => {});
-      });
-      this.screencast = { page, session };
-    } catch {
-      this.screencast = undefined;
-    }
-  }
-
-  private async detachScreencast() {
-    const current = this.screencast;
-    this.screencast = undefined;
-    if (!current) return;
-    await current.session.send("Page.stopScreencast").catch(() => {});
-    await current.session.detach().catch(() => {});
   }
 
   private async withAction<T>(work: () => Promise<T>): Promise<T> {
@@ -271,7 +236,6 @@ export class BrowserRecorder {
     } catch {
       this.pageError = `无法打开页面：${startUrl}`;
     }
-    await this.attachScreencast(page);
     return session;
   }
 
@@ -978,7 +942,6 @@ export class BrowserRecorder {
     if (!this.active) throw new Error("No active recording");
     const active = this.active;
     this.active = undefined;
-    await this.detachScreencast();
     this.focused = undefined;
     this.pageError = undefined;
     this.lastGoodUrl = undefined;
