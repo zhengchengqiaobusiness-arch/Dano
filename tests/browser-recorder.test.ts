@@ -2440,8 +2440,11 @@ test("clicking a page control waits for the opened overlay iframe to paint", asy
   });
   try {
     await recorder.start(`http://127.0.0.1:${address.port}/`, "overlay-page");
+    const began = Date.now();
     const opened: any = await recorder.control({ action: "click", selector: "#open-layer" });
+    assert.ok(Date.now() - began < 900, `click blocked the workbench: ${Date.now() - began}ms`);
     assert.equal(opened.stopped, undefined, JSON.stringify(opened));
+    await recorder.control({ action: "wait", ms: 550 });
     const snap: any = await recorder.control({ action: "snapshot" });
     const encoded = JSON.stringify(snap);
     assert.match(encoded, /\/pane/, encoded);
@@ -2453,7 +2456,10 @@ test("clicking a page control waits for the opened overlay iframe to paint", asy
     assert.ok(preview.length > 2000, `preview too small: ${preview.length}`);
 
     await recorder.control({ action: "goto", url: `http://127.0.0.1:${address.port}/` });
+    const manualBegan = Date.now();
     await recorder.manualControl({ action: "click", x: 90, y: 38 });
+    assert.ok(Date.now() - manualBegan < 900, `manual click blocked the workbench: ${Date.now() - manualBegan}ms`);
+    await recorder.control({ action: "wait", ms: 550 });
     const afterManual: any = await recorder.control({ action: "snapshot" });
     assert.match(JSON.stringify(afterManual), /图层内容已加载/, JSON.stringify(afterManual));
   } finally {

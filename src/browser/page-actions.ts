@@ -105,87 +105,21 @@ export class PageActions {
     await busy.first().waitFor({ state: "hidden", timeout }).catch(() => {});
   }
 
-  async inspectLayerPaint() {
-    const page = this.page();
-    const dom = await page.evaluate(() => {
-      const isVisible = (el: Element) => {
-        const style = getComputedStyle(el);
-        const rect = el.getBoundingClientRect();
-        return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) > 0.02 && rect.width >= 8 && rect.height >= 8;
-      };
-      const iframes = [...document.querySelectorAll("iframe")].filter(isVisible).map(el => {
-        const rect = el.getBoundingClientRect();
-        let kids = 0;
-        try { kids = el.contentDocument?.body?.childElementCount || 0; } catch { kids = -1; }
-        return { src: String(el.getAttribute("src") || el.src || ""), w: Math.round(rect.width), h: Math.round(rect.height), kids };
-      }).filter(item => item.w >= 40 && item.h >= 40);
-      const named = [...document.querySelectorAll("dialog, [role='dialog'], [role='alertdialog'], aside, [class*='drawer'], [class*='overlay'], [class*='popup'], [class*='modal']")];
-      const boxes = named.filter(isVisible).map(el => {
-        const rect = el.getBoundingClientRect();
-        return { el, area: rect.width * rect.height, w: rect.width, h: rect.height };
-      }).filter(item => item.w >= 180 && item.h >= 200).sort((left, right) => right.area - left.area);
-      const roots = [];
-      for (const item of boxes) {
-        if (roots.some(other => other.el.contains(item.el))) continue;
-        roots.push(item);
-        if (roots.length >= 8) break;
+  async nudgeOverlayFrames() {
+    await this.page().evaluate(() => {
+      for (const iframe of document.querySelectorAll("iframe")) {
+        const style = getComputedStyle(iframe);
+        if (style.display === "none" || style.visibility === "hidden") continue;
+        const box = iframe.getBoundingClientRect();
+        const parent = iframe.parentElement?.getBoundingClientRect();
+        if (!parent || parent.height < 160 || parent.width < 120 || box.height >= 48) continue;
+        iframe.style.boxSizing = "border-box";
+        iframe.style.width = "100%";
+        iframe.style.minHeight = "160px";
+        iframe.style.height = `${Math.floor(parent.height)}px`;
+        iframe.style.flex = "1 1 auto";
       }
-      const text = roots.map(item => String(item.el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 180)).join("|");
-      return {
-        iframeCount: iframes.length,
-        iframeSrc: iframes.map(item => item.src).sort().join(","),
-        pendingIframes: iframes.filter(item => (!item.src || /about:blank/i.test(item.src)) && item.kids === 0).length,
-        overlayCount: roots.length,
-        overlayTextLen: text.length
-      };
-    }).catch(() => ({ iframeCount: 0, iframeSrc: "", pendingIframes: 0, overlayCount: 0, overlayTextLen: 0 }));
-    const frameUrls = page.frames()
-      .map(frame => frame.url())
-      .filter(url => url && url !== "about:blank" && url !== "about:srcdoc")
-      .sort();
-    return {
-      ...dom,
-      frameUrls,
-      signature: `${dom.iframeCount}|${dom.iframeSrc}|${dom.pendingIframes}|${dom.overlayCount}|${dom.overlayTextLen}|${frameUrls.join(",")}`
-    };
-  }
-
-  async waitForOpenedLayer(before?: Awaited<ReturnType<PageActions["inspectLayerPaint"]>>, timeout = 1_800) {
-    const page = this.page();
-    const startPaint = before || await this.inspectLayerPaint();
-    const started = Date.now();
-    let last = startPaint;
-    let lastChange = started;
-    let sawChange = false;
-    let layerGrewAt = 0;
-    while (Date.now() - started < timeout) {
-      await page.waitForTimeout(50);
-      for (const frame of page.frames()) {
-        if (frame === page.mainFrame()) continue;
-        if (!startPaint.frameUrls.includes(frame.url()) || /about:blank|about:srcdoc/i.test(frame.url())) {
-          await frame.waitForLoadState("domcontentloaded").catch(() => {});
-        }
-      }
-      const now = await this.inspectLayerPaint();
-      if (now.signature !== last.signature) {
-        sawChange = true;
-        if (now.overlayCount > startPaint.overlayCount || now.iframeCount > startPaint.iframeCount || now.frameUrls.length > startPaint.frameUrls.length) {
-          if (!layerGrewAt) layerGrewAt = Date.now();
-        }
-        last = now;
-        lastChange = Date.now();
-        continue;
-      }
-      const layerFresh = Boolean(layerGrewAt && Date.now() - layerGrewAt < 800);
-      const pending = now.pendingIframes > 0 || page.frames().some(frame => {
-        if (frame === page.mainFrame()) return false;
-        const url = frame.url();
-        return !url || /about:blank|about:srcdoc/i.test(url);
-      });
-      if (pending || layerFresh) continue;
-      if (sawChange && Date.now() - lastChange >= 220) return;
-      if (!sawChange && Date.now() - started >= 180) return;
-    }
+    }).catch(() => {});
   }
 
   private async awaitFormRequest(timeout = 2_500, write = false) {

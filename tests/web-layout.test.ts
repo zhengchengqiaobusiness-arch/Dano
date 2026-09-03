@@ -134,8 +134,9 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
   assert.match(app, /if \(!state\.browserActive \|\| state\.frameLoading \|\| document\.hidden\) return;/);
   assert.match(app, /setInterval\(\(\) => \{ if \(!document\.hidden && state\.browserActive\) void refreshBrowserFrame\(\); \}, 240\)/);
   assert.match(app, /for \(const ms of \[160, 420, 900, 1500\]\)/);
-  assert.match(await readFile(path.join(root, "src", "browser", "recorder.ts"), "utf8"), /waitForOpenedLayer|inspectLayerPaint/);
-  assert.match(await readFile(path.join(root, "src", "browser", "page-actions.ts"), "utf8"), /waitForOpenedLayer/);
+  assert.match(await readFile(path.join(root, "src", "browser", "recorder.ts"), "utf8"), /watchLayerPaint|layerHotUntil|nudgeOverlayFrames/);
+  assert.match(await readFile(path.join(root, "src", "browser", "page-actions.ts"), "utf8"), /nudgeOverlayFrames/);
+  assert.doesNotMatch(await readFile(path.join(root, "src", "browser", "recorder.ts"), "utf8"), /waitForOpenedLayer|inspectLayerPaint/);
   assert.match(app, /setInterval\(\(\) => \{ if \(!document\.hidden\) void pollBrowserState\(\); \}, 2000\)/);
   assert.match(server, /Content-Type": "image\/jpeg"/);
   assert.doesNotMatch(app, /setInterval\(pollBrowser, 900\)/);

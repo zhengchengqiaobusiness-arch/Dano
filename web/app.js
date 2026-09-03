@@ -244,7 +244,7 @@ async function refreshBrowserFrame(force = false) {
   if (!force && Date.now() - state.lastFrameAt < 160) return;
   state.frameLoading = true;
   try {
-    const response = await fetch(`/api/browser/frame?t=${Date.now()}`, { cache: "no-store", signal: AbortSignal.timeout(2500) });
+    const response = await fetch(`/api/browser/frame?t=${Date.now()}`, { cache: "no-store", signal: AbortSignal.timeout(1200) });
     if (response.status === 204 || !response.ok) return;
     const blob = await response.blob();
     if (!blob || blob.size < 80) return;

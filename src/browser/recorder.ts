@@ -59,6 +59,9 @@ export class BrowserRecorder {
   private pageError?: string;
   private lastGoodUrl?: string;
   private lastTitle = { at: 0, value: "" };
+  private layerHotUntil = 0;
+  private layerWatch?: Promise<void>;
+  private inventoryTimer?: ReturnType<typeof setTimeout>;
   private readonly actions = new PageActions({
     page: () => this.currentPage(),
     writePageInventory: (page, snapshot) => this.writePageInventory(page, snapshot),
@@ -111,7 +114,8 @@ export class BrowserRecorder {
   }
 
   async preview(): Promise<Buffer> {
-    if (this.lastPreview && (this.actionBusy > 0 || Date.now() - this.lastPreview.at < 180)) {
+    const layerHot = this.layerHotUntil > Date.now();
+    if (this.lastPreview && !layerHot && (this.actionBusy > 0 || Date.now() - this.lastPreview.at < 180)) {
       return this.lastPreview.buffer;
     }
     if (this.previewInFlight) return this.previewInFlight;
@@ -129,11 +133,11 @@ export class BrowserRecorder {
     }
     const buffer = await this.withTimeout<Buffer | undefined>(page.screenshot({
       type: "jpeg",
-      quality: 52,
+      quality: 48,
       fullPage: false,
       animations: "allow",
       caret: "hide"
-    }), 2_500, undefined);
+    }), 900, undefined);
     if (!buffer || buffer.length < 800) return this.lastPreview?.buffer || EMPTY_JPEG;
     this.lastPreview = { at: Date.now(), buffer };
     this.lastGoodUrl = page.url();
@@ -189,7 +193,7 @@ export class BrowserRecorder {
       headless: this.config.headless,
       viewport: { width: 1440, height: 960 },
       deviceScaleFactor: 1,
-      args: ["--disable-features=TranslateUI", "--disable-background-timer-throttling", "--disable-site-isolation-trials"]
+      args: ["--disable-features=TranslateUI,IsolateOrigins,site-per-process", "--disable-background-timer-throttling", "--disable-site-isolation-trials"]
     };
     const context = await chromium.launchPersistentContext(this.config.profileDir, launchOptions).catch(error => {
       if (!/Executable doesn't exist/i.test(String(error))) throw error;
@@ -614,11 +618,39 @@ export class BrowserRecorder {
     };
   }
 
+  private watchLayerPaint() {
+    this.layerHotUntil = Date.now() + 2_800;
+    this.lastPreview = undefined;
+    if (this.layerWatch) return;
+    this.layerWatch = (async () => {
+      const started = Date.now();
+      while (Date.now() - started < 2_400 && this.isActive()) {
+        await this.actions.nudgeOverlayFrames();
+        const page = this.currentPage();
+        for (const frame of page.frames()) {
+          if (frame === page.mainFrame()) continue;
+          await frame.waitForLoadState("domcontentloaded").catch(() => {});
+        }
+        this.lastPreview = undefined;
+        await new Promise(resolve => setTimeout(resolve, 160));
+      }
+    })().catch(() => {}).finally(() => {
+      this.layerWatch = undefined;
+      this.lastPreview = undefined;
+    });
+  }
+
+  private scheduleInventory() {
+    clearTimeout(this.inventoryTimer);
+    this.inventoryTimer = setTimeout(() => {
+      void this.actions.recordFormInventory().catch(() => {});
+    }, 280);
+  }
+
   private async followAfterGesture(
     origin: Page,
     known: Set<Page>,
-    appeared: Page[] = [],
-    layersBefore?: Awaited<ReturnType<PageActions["inspectLayerPaint"]>>
+    appeared: Page[] = []
   ) {
     const beforeUrl = origin.isClosed() ? "" : origin.url();
     const newcomers = () => {
@@ -682,7 +714,7 @@ export class BrowserRecorder {
       }
       if (!origin.isClosed()) this.setFocused(origin);
     } finally {
-      if (!switched) await this.actions.waitForOpenedLayer(layersBefore);
+      if (!switched) await this.actions.nudgeOverlayFrames();
     }
   }
 
@@ -744,13 +776,10 @@ export class BrowserRecorder {
     | { action: "key"; key: string }
     | { action: "scroll"; deltaX?: number; deltaY?: number }
   ) {
-    return this.withAction(async () => {
+    const result = await this.withAction(async () => {
       const page = this.currentPage();
       const known = new Set(this.livePages());
       const watch = command.action === "click" || command.action === "key" ? this.watchNewPages() : undefined;
-      const layersBefore = command.action === "click" || command.action === "key"
-        ? await this.actions.inspectLayerPaint()
-        : undefined;
       if (command.action === "click") {
         const viewport = page.viewportSize();
         if (!viewport || !Number.isFinite(command.x) || !Number.isFinite(command.y)) throw new Error("manual click requires finite x and y coordinates");
@@ -775,10 +804,10 @@ export class BrowserRecorder {
       const observed = command.action === "scroll"
         ? undefined
         : await this.captureActiveControl(command.action === "text" ? "input" : command.action === "key" ? "change" : "click", page);
-      if (command.action !== "scroll") await this.actions.recordFormInventory().catch(() => {});
+      if (command.action !== "scroll") this.scheduleInventory();
       try {
         if (command.action === "click" || command.action === "key") {
-          await this.followAfterGesture(page, known, watch?.appeared || [], layersBefore);
+          await this.followAfterGesture(page, known, watch?.appeared || []);
         }
         const current = this.currentPage();
         return {
@@ -792,6 +821,8 @@ export class BrowserRecorder {
         watch?.stop();
       }
     });
+    if (command.action === "click" || command.action === "key") this.watchLayerPaint();
+    return result;
   }
 
   private actionKey(action: string, selector?: string) {
@@ -840,7 +871,7 @@ export class BrowserRecorder {
     key?: string;
     ms?: number;
   }): Promise<unknown> {
-    return this.withAction(async () => {
+    const result = await this.withAction(async () => {
       const page = this.currentPage();
       const known = new Set(this.livePages());
       const watch = command.action === "click" ? this.watchNewPages() : undefined;
@@ -865,9 +896,8 @@ export class BrowserRecorder {
           if (!command.selector) throw new Error("click requires selector");
           try {
             return await this.guardedPageAction("click", command.selector, async () => {
-              const layersBefore = await this.actions.inspectLayerPaint();
               const clicked = await this.actions.click(command.selector!);
-              await this.followAfterGesture(page, known, watch?.appeared || [], layersBefore);
+              await this.followAfterGesture(page, known, watch?.appeared || []);
               return { ...clicked, url: this.currentPage().url(), pageError: this.pageError };
             });
           } finally {
@@ -939,6 +969,8 @@ export class BrowserRecorder {
         }
       }
     });
+    if (command.action === "click") this.watchLayerPaint();
+    return result;
   }
 
   disposeImmediate() {
@@ -951,6 +983,8 @@ export class BrowserRecorder {
     this.lastPreview = undefined;
     this.previewInFlight = undefined;
     this.actionBusy = 0;
+    this.layerHotUntil = 0;
+    clearTimeout(this.inventoryTimer);
     if (!active) return;
     void active.context.close().catch(() => {});
     void active.browser?.close().catch(() => {});
@@ -967,6 +1001,8 @@ export class BrowserRecorder {
     this.lastPreview = undefined;
     this.previewInFlight = undefined;
     this.actionBusy = 0;
+    this.layerHotUntil = 0;
+    clearTimeout(this.inventoryTimer);
 
     await this.drainNetwork();
     active.session.stoppedAt = new Date().toISOString();
