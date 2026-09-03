@@ -506,39 +506,69 @@ async function loadSkills() {
   catch (error) { showToast(error.message); }
 }
 
+function skillExportedAt(value) {
+  if (!value) return "—";
+  const at = new Date(value);
+  if (Number.isNaN(at.getTime())) return "—";
+  return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(at);
+}
+
 function renderSkills() {
   elements.skillsList.innerHTML = "";
   if (!state.skills.length) {
-    const empty = document.createElement("div"); empty.className = "empty-skills"; empty.innerHTML = "<strong>还没有导出的 Skill</strong><span>先完成录制并由 Pi 产出后，再从上方导出。</span>"; elements.skillsList.append(empty); return;
+    const empty = document.createElement("tr");
+    empty.innerHTML = "<td class=\"skills-empty-cell\" colspan=\"5\"><div class=\"empty-skills\"><strong>还没有导出的 Skill</strong><span>先完成录制并由 Pi 产出后，再从上方导出。</span></div></td>";
+    elements.skillsList.append(empty);
+    return;
   }
   for (const skill of state.skills) {
-    const card = document.createElement("article"); card.className = "skill-card";
-    const heading = document.createElement("div"); const title = document.createElement("div");
-    const name = document.createElement("h2"); name.textContent = skill.displayName; const slug = document.createElement("code"); slug.textContent = skill.name; title.append(name, slug);
-    const status = document.createElement("span"); status.className = `skill-status ${skill.status}`; status.textContent = skill.status === "frozen" ? "已冻结" : "可用"; heading.append(title, status);
-    const facts = document.createElement("div"); facts.className = "skill-facts";
-    [["版本", `v${skill.version}`], ["主能力", skill.primaryCount ?? skill.primaryCapabilityIds?.length ?? skill.capabilityIds.length], ["字段候选", skill.lookupCount ?? skill.lookupCapabilityIds?.length ?? 0], ["成品文件", skill.fileCount ?? 0]].forEach(([label, value]) => {
-      const fact = document.createElement("span"); fact.innerHTML = `<small>${label}</small><strong>${value}</strong>`; facts.append(fact);
-    });
-    const location = document.createElement("div"); location.className = `skill-location ${skill.artifactStatus === "missing" ? "missing" : ""}`;
-    const locationLabel = document.createElement("small"); locationLabel.textContent = skill.artifactStatus === "missing" ? "成品目录异常" : "导出目录";
-    const directory = document.createElement("code"); directory.textContent = skill.directory;
-    const copyPath = document.createElement("button"); copyPath.type = "button"; copyPath.textContent = "复制路径";
+    const row = document.createElement("tr");
+    row.className = `skill-row ${skill.artifactStatus === "missing" ? "missing" : ""}`;
+    const nameCell = document.createElement("td");
+    nameCell.className = "col-skill";
+    const title = document.createElement("div");
+    title.className = "skill-title";
+    const name = document.createElement("strong");
+    name.textContent = skill.displayName;
+    const status = document.createElement("span");
+    status.className = `skill-status ${skill.status}`;
+    status.textContent = skill.status === "frozen" ? "已冻结" : "可用";
+    title.append(name, status);
+    const meta = document.createElement("div");
+    meta.className = "skill-meta";
+    const slug = document.createElement("code");
+    slug.textContent = `v${skill.version} · ${skill.name}`;
+    const copyPath = document.createElement("button");
+    copyPath.type = "button";
+    copyPath.textContent = "复制路径";
     copyPath.addEventListener("click", async () => {
       try { await navigator.clipboard.writeText(skill.directory); showToast("导出目录已复制"); }
       catch { showToast(skill.directory); }
     });
-    location.append(locationLabel, directory, copyPath);
-    const actions = document.createElement("div"); actions.className = "skill-actions";
-    const actionData = [
-      ["调用", "invoke", false], ["重新导出", "reexport", false], [skill.status === "frozen" ? "解除冻结" : "冻结", "freeze", false], ["删除", "delete", true]
-    ];
-    actionData.forEach(([label, action, danger]) => {
-      const button = document.createElement("button"); button.type = "button"; button.textContent = label; button.className = danger ? "text-danger" : "";
+    meta.append(slug, copyPath);
+    nameCell.append(title, meta);
+    const capability = document.createElement("td");
+    capability.className = "col-metric";
+    capability.textContent = String(skill.primaryCount ?? skill.primaryCapabilityIds?.length ?? skill.capabilityIds.length);
+    const requests = document.createElement("td");
+    requests.className = "col-metric";
+    requests.textContent = String(skill.lookupCount ?? skill.lookupCapabilityIds?.length ?? 0);
+    const produced = document.createElement("td");
+    produced.className = "col-time";
+    produced.textContent = skillExportedAt(skill.exportedAt);
+    const actions = document.createElement("td");
+    actions.className = "col-actions";
+    [["调用", "invoke", false], ["重新导出", "reexport", false], [skill.status === "frozen" ? "解除冻结" : "冻结", "freeze", false], ["删除", "delete", true]].forEach(([label, action, danger]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.className = danger ? "text-danger" : "";
       if (action === "reexport") button.title = "再导出一份新的唯一目录，不覆盖现有成品";
-      button.addEventListener("click", () => void skillAction(skill, action)); actions.append(button);
+      button.addEventListener("click", () => void skillAction(skill, action));
+      actions.append(button);
     });
-    card.append(heading, facts, location, actions); elements.skillsList.append(card);
+    row.append(nameCell, capability, requests, produced, actions);
+    elements.skillsList.append(row);
   }
 }
 
