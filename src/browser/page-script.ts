@@ -9,14 +9,14 @@ export const PAGE_HELPERS = String.raw`
   };
   const FORM_ITEM_SEL = '.el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [class*="form-item"]';
   const FORM_LABEL_SEL = 'label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label';
-  const DIALOG_SEL = '.el-dialog, .el-drawer, .el-overlay-dialog, .ant-modal, .ant-drawer, .arco-modal, .arco-drawer';
-  const PICKER_SEL = '.el-picker-panel, .el-select-dropdown, .el-cascader__dropdown, .el-picker__popper, .el-popper.el-date-picker, .ant-picker-dropdown, .ant-select-dropdown, .arco-picker-container, .arco-select-dropdown';
+  const DIALOG_SEL = '[role="dialog"], [role="alertdialog"], .el-dialog, .el-drawer, .el-overlay-dialog, .ant-modal, .ant-drawer, .arco-modal, .arco-drawer';
+  const PICKER_SEL = '.el-picker-panel, .el-select-dropdown, .el-cascader__dropdown, .el-picker__popper, .el-popper.el-date-picker, .ant-picker-dropdown, .ant-select-dropdown, .arco-picker-container, .arco-select-dropdown, [class*="picker-panel"], [class*="picker-dropdown"]';
   const OPTION_SEL = '[role="option"], [role="menuitem"], .el-select-dropdown__item, .el-cascader-node, .el-autocomplete-suggestion__list li, .ant-select-item-option, .arco-select-option, .n-base-select-option';
   const EMPTY_VALUE = /^(请选择|请输入|请填写|请挑选|select|please select|please enter|please choose|choose|yyyy-mm-dd|年\/月\/日)/i;
   const UPLOAD_LABEL = /上传|附件|文件|图片|image|upload|attachment|file/i;
 
   const formItemOf = (el) => el.closest(FORM_ITEM_SEL);
-  const FIELD_NAME_ATTRS = ["name", "data-field", "data-name", "data-prop", "prop", "data-key", "data-model"];
+  const FIELD_NAME_ATTRS = ["name", "data-field", "data-name", "data-key", "data-model"];
 
   const nameOf = (el) => {
     let node = el;
@@ -152,11 +152,12 @@ export const PAGE_HELPERS = String.raw`
   const widgetKind = (item, el, label) => {
     const type = (el.getAttribute("type") || el.tagName).toLowerCase();
     if (isUploadWidget(el, label) || type === "file") return "upload";
+    if (type === "date" || type === "datetime-local" || type === "time" || type === "month" || type === "week") return "date";
     const host = item || el.parentElement;
-    const blob = [type, host?.className || "", el.getAttribute("placeholder") || "", label, el.closest(".el-date-editor, .el-select")?.className || ""].join(" ");
+    const blob = [type, host?.className || "", el.getAttribute("placeholder") || "", label, el.closest(".el-date-editor, .el-select, [class*='picker']")?.className || ""].join(" ");
     if (type === "checkbox" || el.getAttribute("role") === "checkbox" || el.getAttribute("role") === "switch") return "checkbox";
     if (type === "radio" || el.getAttribute("role") === "radio") return "radio";
-    if (/date|time|picker|时间|日期/i.test(blob) || el.closest(".el-date-editor, .el-date-picker, .ant-picker, .arco-picker") || host?.querySelector?.(".el-date-editor, .el-date-picker, .ant-picker, .arco-picker")) return "date";
+    if (/date|time|picker|时间|日期/i.test(blob) || el.closest(".el-date-editor, .el-date-picker, .ant-picker, .arco-picker, [class*='date-editor'], [class*='picker-range']") || host?.querySelector?.(".el-date-editor, .el-date-picker, .ant-picker, .arco-picker, [class*='date-editor'], [class*='picker-range']")) return "date";
     if (el instanceof HTMLSelectElement || el.getAttribute("role") === "combobox" || el.closest(".el-select, .ant-select, .arco-select") || host?.querySelector?.(".el-select, .ant-select, .arco-select, [role=combobox], select")) return "select";
     if (isDisabledWidget(el)) return "readonly";
     if (type === "number" || el.getAttribute("inputmode") === "decimal" || el.getAttribute("inputmode") === "numeric") return "number";
@@ -206,15 +207,17 @@ export const PAGE_HELPERS = String.raw`
 
   const rangeInputsOf = (item) => {
     if (!(item instanceof Element)) return [];
-    const rangeHost = item.querySelector(".el-date-editor--daterange, .el-date-editor--datetimerange, .el-range-editor, .ant-picker-range, .arco-picker-range")
-      || (item.classList.contains("el-date-editor") && item.querySelectorAll(".el-range-input, input").length >= 2 ? item : null);
+    const rangeHost = item.querySelector(".el-date-editor--daterange, .el-date-editor--datetimerange, .el-range-editor, .ant-picker-range, .arco-picker-range, [class*='picker-range'], [class*='daterange']")
+      || ((item.classList.contains("el-date-editor") || /picker-range|daterange|date-editor/i.test(item.className)) && item.querySelectorAll(".el-range-input, input").length >= 2 ? item : null);
     const inputs = [...(rangeHost || item).querySelectorAll("input")].filter(isVisible);
     if (inputs.length >= 2 && widgetKind(item, inputs[0], labelOf(inputs[0])) === "date") return inputs.slice(0, 2);
     return [];
   };
 
+  const isPickerHost = (el) => Boolean(el.matches?.(PICKER_SEL) || el.closest(PICKER_SEL) || /picker-panel|picker-dropdown|datepicker/i.test(el.className || ""));
+
   const activeScope = () => {
-    const dialogs = [...document.querySelectorAll(DIALOG_SEL)].filter((el) => isVisible(el) && !el.closest(PICKER_SEL));
+    const dialogs = [...document.querySelectorAll(DIALOG_SEL)].filter((el) => isVisible(el) && !isPickerHost(el));
     return dialogs.at(-1) || document.body;
   };
 
@@ -254,7 +257,7 @@ export const PAGE_HELPERS = String.raw`
     const seen = new Set();
     const add = (field) => {
       if (!field) return;
-      const key = field.scope + "|" + field.label + "|" + (field.name || field.selector);
+      const key = field.scope + "|" + field.label + "|" + (field.name || field.selector) + "|" + String(field.rangeIndex ?? "");
       if (seen.has(key)) return;
       seen.add(key);
       fields.push(field);
@@ -284,9 +287,27 @@ export const PAGE_HELPERS = String.raw`
       if (!el || formItemOf(el)) continue;
       add(fieldFromControl(el, cell));
     }
+    const seenEls = new Set();
     for (const el of root.querySelectorAll("input, textarea, select, [role=combobox], [contenteditable=true]")) {
-      if (formItemOf(el) || el.closest("td, .el-table__cell, .ant-table-cell")) continue;
-      add(fieldFromControl(el, el.closest("label") || el.parentElement));
+      if (formItemOf(el) || el.closest("td, .el-table__cell, .ant-table-cell") || seenEls.has(el)) continue;
+      const host = el.closest("label") || el.parentElement;
+      const range = rangeInputsOf(host);
+      if (range.length >= 2) {
+        range.forEach((input, index) => {
+          seenEls.add(input);
+          const field = fieldFromControl(input, host);
+          if (!field) return;
+          add({
+            ...field,
+            name: field.name && !/\[\d+\]$/.test(field.name) ? field.name + "[" + index + "]" : field.name,
+            label: labelOf(input) || field.label,
+            rangeIndex: index
+          });
+        });
+        continue;
+      }
+      seenEls.add(el);
+      add(fieldFromControl(el, host));
     }
     return fields;
   };
@@ -305,7 +326,8 @@ export const PAGE_HELPERS = String.raw`
     disabled: isDisabledWidget(el),
     value: el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement ? String(el.value || "") : undefined,
     filled: !isEmptyValue(displayValue(el)),
-    text: clean(el.textContent || el.value || "").slice(0, 300)
+    text: clean(el.textContent || el.value || "").slice(0, 300),
+    scope: scopeName(el)
   }));
 
   const formSnapshot = (container) => {
@@ -323,7 +345,7 @@ export const PAGE_HELPERS = String.raw`
   };
 
   const collectErrors = () => [...new Set([...document.querySelectorAll(
-    ".el-form-item__error, .ant-form-item-explain-error, .arco-form-item-message, .n-form-item-feedback, .el-message--error, .el-notification--error, .ant-message-error, .ant-notification-notice-error"
+    ".el-form-item__error, .ant-form-item-explain-error, .arco-form-item-message, .n-form-item-feedback, .el-message--error, .el-notification--error, .ant-message-error, .ant-notification-notice-error, [class*='form-item__error'], [class*='form-item-error'], [class*='explain-error']"
   )].filter(isVisible).map((el) => clean(el.textContent)).filter(Boolean))].slice(0, 20);
 
   const buildSnapshot = () => {
@@ -335,7 +357,7 @@ export const PAGE_HELPERS = String.raw`
       url: location.href,
       text: clean(document.body.innerText),
       scope: scopeName(scope),
-      controls: collectControls(document),
+      controls: collectControls(scope),
       formFields,
       todoFields,
       todoCount: todoFields.length,

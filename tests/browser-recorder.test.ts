@@ -665,6 +665,173 @@ test("exercise-form keeps later dates after earlier ones and submit-form repairs
   }
 });
 
+test("native pages fill range dates, commit change events, and submit only in the active scope", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-generic-"));
+  const searched: unknown[] = [];
+  const created: unknown[] = [];
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/search" && request.method === "POST") {
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
+      request.on("end", () => {
+        searched.push(JSON.parse(body || "{}"));
+        response.setHeader("content-type", "application/json");
+        response.end('{"code":0,"data":[]}');
+      });
+      return;
+    }
+    if (request.url === "/api/create" && request.method === "POST") {
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
+      request.on("end", () => {
+        created.push(JSON.parse(body || "{}"));
+        response.setHeader("content-type", "application/json");
+        response.end('{"code":0,"data":{"id":1}}');
+      });
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>通用表单</title></head><body>
+      <form id="query">
+        <div class="form-item">
+          <label>客户</label>
+          <input id="customer" name="customer">
+        </div>
+        <div class="form-item">
+          <label>下单时间</label>
+          <div class="picker-range">
+            <input id="q-start" placeholder="开始日期">
+            <input id="q-end" placeholder="结束日期">
+          </div>
+        </div>
+        <div class="form-item" prop="ignoredVueProp">
+          <label>编码</label>
+          <input id="code" data-field="bizCode">
+        </div>
+        <button type="submit" id="search">搜索</button>
+      </form>
+      <button type="button" id="open">新增</button>
+      <div id="dlg" role="dialog" hidden style="position:fixed;inset:10px;background:#fff;z-index:20;padding:16px">
+        <form id="create">
+          <div class="form-item">
+            <label>名称</label>
+            <input id="title" name="title">
+          </div>
+          <div class="form-item">
+            <label>开始日期</label>
+            <input id="c-start" type="date" required>
+          </div>
+          <div class="form-item">
+            <label>结束日期</label>
+            <input id="c-end" type="date" required>
+          </div>
+          <div class="form-item is-required">
+            <label>数量</label>
+            <input id="qty" type="number" required value="0">
+          </div>
+          <button type="button" id="ok">确定</button>
+        </form>
+      </div>
+      <script>
+        window.__bound = {};
+        document.getElementById("customer").addEventListener("change", event => {
+          window.__bound.customer = event.target.value;
+        });
+        const recalc = () => {
+          const start = document.getElementById("c-start").value;
+          const end = document.getElementById("c-end").value;
+          if (!start || !end) return;
+          document.getElementById("qty").value = String(Math.max(0, (new Date(end) - new Date(start)) / 86400000));
+        };
+        document.getElementById("c-start").addEventListener("change", recalc);
+        document.getElementById("c-end").addEventListener("change", recalc);
+        document.getElementById("query").addEventListener("submit", event => {
+          event.preventDefault();
+          fetch("/api/search", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              customer: window.__bound.customer || "",
+              start: document.getElementById("q-start").value,
+              end: document.getElementById("q-end").value,
+              code: document.getElementById("code").value
+            })
+          });
+        });
+        document.getElementById("open").addEventListener("click", () => {
+          document.getElementById("dlg").hidden = false;
+        });
+        document.getElementById("ok").addEventListener("click", () => {
+          recalc();
+          fetch("/api/create", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              title: document.getElementById("title").value,
+              start: document.getElementById("c-start").value,
+              end: document.getElementById("c-end").value,
+              qty: Number(document.getElementById("qty").value)
+            })
+          });
+          document.getElementById("dlg").hidden = true;
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "generic-form");
+    const listed: any = await recorder.control({ action: "snapshot" });
+    assert.equal(listed.scope, "page");
+    assert.equal(listed.formFields.find((field: any) => field.label === "编码")?.name, "bizCode");
+    assert.notEqual(listed.formFields.find((field: any) => field.label === "编码")?.name, "ignoredVueProp");
+    const query: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(query.ok, true, JSON.stringify(query.failed || query.todoFields || query.formFields));
+    const start = String(query.formFields.find((field: any) => field.rangeIndex === 0 || field.label === "开始日期")?.value || "");
+    const end = String(query.formFields.find((field: any) => field.rangeIndex === 1 || field.label === "结束日期")?.value || "");
+    assert.ok(start && end && start !== end, JSON.stringify(query.formFields));
+    const searchedResult: any = await recorder.control({ action: "submit-form" });
+    assert.equal(searchedResult.ok, true, JSON.stringify(searchedResult));
+    assert.equal(searchedResult.submitted, "搜索");
+    assert.equal(searched.length, 1, JSON.stringify({ searched, searchedResult }));
+    const queryBody = searched[0] as { customer?: string; start?: string; end?: string };
+    assert.match(String(queryBody.customer || ""), /样例/);
+    assert.ok(queryBody.start && queryBody.end && queryBody.start !== queryBody.end, JSON.stringify(queryBody));
+    await recorder.control({ action: "click", selector: "text=新增" });
+    const opened: any = await recorder.control({ action: "snapshot" });
+    assert.equal(opened.scope, "dialog");
+    assert.equal(opened.controls.some((control: any) => /搜索/.test(String(control.text || ""))), false);
+    const dialog: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(dialog.ok, true, JSON.stringify(dialog.failed || dialog.todoFields || dialog.formFields));
+    const dialogStart = parseFieldInstant(dialog.formFields.find((field: any) => field.label === "开始日期")?.value);
+    const dialogEnd = parseFieldInstant(dialog.formFields.find((field: any) => field.label === "结束日期")?.value);
+    assert.ok(dialogStart && dialogEnd && dialogEnd > dialogStart, JSON.stringify(dialog.formFields));
+    const submitted: any = await recorder.control({ action: "submit-form" });
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    assert.equal(submitted.submitted, "确定");
+    assert.equal(created.length, 1, JSON.stringify({ created, submitted }));
+    const payload = created[0] as { qty?: number; start?: string; end?: string };
+    assert.ok(Number(payload.qty) > 0, JSON.stringify(payload));
+    assert.ok(new Date(String(payload.end)).getTime() > new Date(String(payload.start)).getTime(), JSON.stringify(payload));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 function parseFieldInstant(value?: string) {
   const text = String(value || "");
   const match = text.match(/(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}(?::\d{2})?))?/);

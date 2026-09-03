@@ -36,6 +36,7 @@ interface ActiveRecording {
 export class BrowserRecorder {
   private active?: ActiveRecording;
   private actionBusy = 0;
+  private readonly networkJobs = new Set<Promise<void>>();
   private previewInFlight?: Promise<Buffer>;
   private lastPreview?: { at: number; buffer: Buffer };
   private readonly actions = new PageActions({
@@ -195,12 +196,25 @@ export class BrowserRecorder {
     });
 
     context.on("requestfailed", request => {
-      void this.captureFailedRequest(request);
+      this.trackNetwork(this.captureFailedRequest(request));
     });
 
     context.on("response", response => {
-      void this.captureResponse(response);
+      this.trackNetwork(this.captureResponse(response));
     });
+  }
+
+  private trackNetwork(job: Promise<void>) {
+    const tracked = job.catch(() => {});
+    this.networkJobs.add(tracked);
+    void tracked.finally(() => this.networkJobs.delete(tracked));
+  }
+
+  private async drainNetwork(timeout = 1_500) {
+    const deadline = Date.now() + timeout;
+    while (this.networkJobs.size && Date.now() < deadline) {
+      await Promise.race([...this.networkJobs, new Promise(resolve => setTimeout(resolve, 40))]);
+    }
   }
 
   private shouldCapture(request: Request) {
@@ -229,7 +243,7 @@ export class BrowserRecorder {
 
   private async requestPart(request: Request) {
     const postData = request.postData();
-    const rawHeaders = await request.allHeaders();
+    const rawHeaders = await request.allHeaders().catch(() => ({} as Record<string, string>));
     const contentType = rawHeaders["content-type"] || "";
     let body: unknown;
     if (postData && /application\/x-www-form-urlencoded/i.test(contentType)) {
@@ -290,7 +304,7 @@ export class BrowserRecorder {
 
     let body: unknown;
     let truncated = false;
-    const headers = redactHeaders(await response.allHeaders());
+    const headers = redactHeaders(await response.allHeaders().catch(() => ({})));
     const contentType = headers["content-type"] || "";
     const contentLength = Number(headers["content-length"] || "0");
 
@@ -563,6 +577,7 @@ export class BrowserRecorder {
     this.previewInFlight = undefined;
     this.actionBusy = 0;
 
+    await this.drainNetwork();
     active.session.stoppedAt = new Date().toISOString();
     const dir = path.dirname(active.eventsFile);
     await writeJson(path.join(dir, "session.json"), active.session);

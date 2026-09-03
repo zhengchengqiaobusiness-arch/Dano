@@ -856,34 +856,36 @@ export function finalizeCallerFields(
   );
 }
 
-function asPromotedCaller(field: InputFormField): InputFormField {
-  return {
-    ...field,
-    source: "caller",
-    required: false,
-    requiredBasis: "not-observed",
-    systemHandled: false,
-    defaultRule: undefined,
-    sourceDetail: "请求中出现但未能唯一对应到页面控件，由调用方提供；不要使用录制样本作为默认值"
-  };
-}
-
 export function promoteUnboundFillable(
   fields: InputFormField[],
   observations: UiObservation[],
   sample: unknown
 ): InputFormField[] {
-  if (!leftoverEditable(fields, observations).length) return fields;
-  const callerLabels = leftoverCallerLabels(fields);
-  const leftoverObs = uniqueByLabel(observations.filter(item => item.label && !callerLabels.has(item.label)));
-  return fields.map(field => {
-    if (field.source === "caller" || PAGE_NAME.test(field.name) || isReadonlyBound(field)) return field;
+  const leftoverObs = leftoverEditable(fields, observations);
+  if (!leftoverObs.length) return fields;
+  const eligible = fields.filter(field =>
+    field.source !== "caller" && !PAGE_NAME.test(field.name) && !isReadonlyBound(field)
+  );
+  const matches = eligible.map(field => {
     const value = requestValueAt(sample, field.path);
     const matching = leftoverObs.filter(item =>
       sameValue(item.value, value) || Boolean(dateDay(value) && dateDay(item.value) === dateDay(value))
     );
-    if (matching.length && matching.every(looksReadonly)) return field;
-    return asPromotedCaller(field);
+    return { field, matching };
+  });
+  const labelUses = new Map<string, number>();
+  for (const item of matches) {
+    if (item.matching.length !== 1 || looksReadonly(item.matching[0])) continue;
+    const label = item.matching[0]!.label || "";
+    if (!label) continue;
+    labelUses.set(label, (labelUses.get(label) || 0) + 1);
+  }
+  return fields.map(field => {
+    const hit = matches.find(item => item.field.path === field.path);
+    if (!hit || hit.matching.length !== 1) return field;
+    const observation = hit.matching[0]!;
+    if (!observation.label || looksReadonly(observation) || (labelUses.get(observation.label) || 0) !== 1) return field;
+    return asCaller(field, observation, requestValueAt(sample, field.path), observations, []);
   });
 }
 

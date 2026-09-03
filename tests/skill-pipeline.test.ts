@@ -43,6 +43,36 @@ function verifiedCapability(id: string, operation: CapabilityContract["operation
   };
 }
 
+test("does not promote request fields that share a leftover UI value or have no UI match", () => {
+  const events: EvidenceEvent[] = [{
+    id: "ui-1", kind: "ui", sessionId: "session", at: "2026-09-01T00:00:00.000Z", pageUrl: "https://example.test/create",
+    eventType: "submit", form: [{ label: "数量", type: "number", value: "1" }]
+  }, {
+    id: "network-1", kind: "network", sessionId: "session", at: "2026-09-01T00:00:01.000Z", correlatedUiEvidenceId: "ui-1",
+    request: { method: "POST", url: "https://example.test/items/create", resourceType: "xhr", headers: {}, query: {}, body: { qty: 1, amount: 1, token: "xyz" } },
+    response: { status: 200, headers: {}, body: { success: true, data: { id: 1 } } }
+  }];
+  const capability = buildCapabilityCandidates(events)[0]!;
+  assert.equal(capability.inputForm.find(field => field.name === "qty")?.source, "system");
+  assert.equal(capability.inputForm.find(field => field.name === "amount")?.source, "system");
+  assert.equal(capability.inputForm.find(field => field.name === "token")?.source, "system");
+});
+
+test("binds a leftover request field only when its value uniquely matches leftover UI", () => {
+  const events: EvidenceEvent[] = [{
+    id: "ui-1", kind: "ui", sessionId: "session", at: "2026-09-01T00:00:00.000Z", pageUrl: "https://example.test/create",
+    eventType: "submit", form: [{ label: "备注", type: "textarea", value: "hello" }]
+  }, {
+    id: "network-1", kind: "network", sessionId: "session", at: "2026-09-01T00:00:01.000Z", correlatedUiEvidenceId: "ui-1",
+    request: { method: "POST", url: "https://example.test/items/create", resourceType: "xhr", headers: {}, query: {}, body: { remark: "hello", token: "xyz" } },
+    response: { status: 200, headers: {}, body: { success: true, data: { id: 1 } } }
+  }];
+  const capability = buildCapabilityCandidates(events)[0]!;
+  assert.equal(capability.inputForm.find(field => field.name === "remark")?.source, "caller");
+  assert.equal(capability.inputForm.find(field => field.name === "remark")?.label, "备注");
+  assert.equal(capability.inputForm.find(field => field.name === "token")?.source, "system");
+});
+
 test("distinguishes caller fields from unresolved system fields", () => {
   const events: EvidenceEvent[] = [{
     id: "ui-1", kind: "ui", sessionId: "session", at: "2026-09-01T00:00:00.000Z", pageUrl: "https://example.test/orders",

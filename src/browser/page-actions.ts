@@ -1,14 +1,14 @@
 import type { Frame, Locator, Page } from "playwright";
 import { SNAPSHOT_IN_PAGE } from "./page-script.js";
 
-export const FORM_ITEMS = ".el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field";
+export const FORM_ITEMS = ".el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [class*='form-item']";
 export const FORM_LABELS = "label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label";
-export const DIALOGS = ".el-dialog:visible, .el-drawer:visible, .ant-modal:visible, .ant-drawer-content:visible, .arco-modal:visible, .arco-drawer:visible";
+export const DIALOGS = "[role='dialog']:visible, [role='alertdialog']:visible, .el-dialog:visible, .el-drawer:visible, .ant-modal:visible, .ant-drawer-content:visible, .arco-modal:visible, .arco-drawer:visible";
 export const DROPDOWNS = ".el-select-dropdown:visible, .el-cascader__dropdown:visible, .el-autocomplete-suggestion:visible, .ant-select-dropdown:visible, .arco-select-dropdown:visible, [role='listbox']:visible";
-export const DATE_PANELS = ".el-picker-panel:visible, .el-popper.el-date-picker:visible, .ant-picker-dropdown:visible, .arco-picker-container:visible";
+export const DATE_PANELS = ".el-picker-panel:visible, .el-popper.el-date-picker:visible, .el-picker__popper:visible, .ant-picker-dropdown:visible, .arco-picker-container:visible, [class*='picker-dropdown']:visible, [class*='picker-panel']:visible";
 export const OPTION_ITEMS = "[role='option'], .el-select-dropdown__item, .el-cascader-node, .el-autocomplete-suggestion__list li, .ant-select-item-option, .arco-select-option, .n-base-select-option";
-export const WIDGET_SURFACES = "xpath=ancestor-or-self::*[contains(@class,'el-select__wrapper') or contains(@class,'el-input__wrapper') or contains(@class,'el-date-editor') or contains(@class,'ant-select-selector') or contains(@class,'ant-picker') or contains(@class,'arco-select-view') or contains(@class,'arco-picker')][1]";
-export const BUSY_SPINNERS = ".el-loading-mask:visible, .el-overlay.is-loading:visible, .nprogress-busy:visible, .ant-spin-spinning:visible, .arco-spin-loading:visible";
+export const WIDGET_SURFACES = "xpath=ancestor-or-self::*[contains(@class,'el-select__wrapper') or contains(@class,'el-input__wrapper') or contains(@class,'el-date-editor') or contains(@class,'ant-select-selector') or contains(@class,'ant-picker') or contains(@class,'arco-select-view') or contains(@class,'arco-picker') or contains(@class,'picker-range') or contains(@class,'date-editor')][1]";
+export const BUSY_SPINNERS = ".el-loading-mask:visible, .el-overlay.is-loading:visible, .nprogress-busy:visible, .ant-spin-spinning:visible, .arco-spin-loading:visible, [aria-busy='true']:visible";
 
 export interface FormField {
   label: string;
@@ -98,12 +98,30 @@ export class PageActions {
     await busy.first().waitFor({ state: "hidden", timeout }).catch(() => {});
   }
 
+  private async awaitFormRequest(timeout = 2_500) {
+    await this.page().waitForResponse(response => {
+      const type = response.request().resourceType();
+      return type === "xhr" || type === "fetch";
+    }, { timeout }).catch(() => {});
+  }
+
   async hasDatePanel() {
     return (await this.page().locator(DATE_PANELS).count()) > 0;
   }
 
   async hasDialog() {
-    return (await this.page().locator(DIALOGS).count()) > 0;
+    return Boolean(await this.lastFormDialog(this.page()));
+  }
+
+  private async lastFormDialog(root: Frame | Locator | Page) {
+    const all = root.locator(DIALOGS);
+    const count = await all.count();
+    for (let index = count - 1; index >= 0; index -= 1) {
+      const item = all.nth(index);
+      const formDialog = await item.evaluate(el => !/picker-panel|picker-dropdown|datepicker|date-picker/i.test(el.className || "")).catch(() => true);
+      if (formDialog) return item;
+    }
+    return undefined;
   }
 
   locatorIn(root: Frame | Locator, selector: string) {
@@ -163,12 +181,12 @@ export class PageActions {
           }
           continue;
         }
-        const dialog = frame.locator(DIALOGS).last();
+        const dialog = await this.lastFormDialog(frame);
         const dropdown = frame.locator(DROPDOWNS).last();
         const scopes: Array<Frame | Locator> = [];
         if (textOnly && await dropdown.count()) scopes.push(dropdown);
-        if (await dialog.count()) scopes.push(dialog);
-        if (!fieldOnly || !(await dialog.count())) scopes.push(frame);
+        if (dialog) scopes.push(dialog);
+        if (!fieldOnly || !dialog) scopes.push(frame);
         for (const scope of scopes) {
           const found = this.locatorIn(scope, selector).filter({ visible: true }).first();
           if (await found.count()) {
@@ -303,30 +321,35 @@ export class PageActions {
     const page = this.page();
     const panel = page.locator(DATE_PANELS).last();
     const day = String(Number(dayText));
-    const cell = panel.locator(".el-date-table-cell__text, .el-date-table-cell, td.available .cell, td.available, .ant-picker-cell-inner")
-      .filter({ hasText: exactText(day) }).last();
+    const cell = panel.getByRole("gridcell", { name: day, exact: true })
+      .or(panel.locator("[role='gridcell'], .el-date-table-cell__text, .el-date-table-cell, td.available .cell, td.available, .ant-picker-cell-inner")
+        .filter({ hasText: exactText(day) }))
+      .last();
     await this.clickSafely(cell, "option");
+  }
+
+  private async clickActiveFormLabel() {
+    const dialog = await this.lastFormDialog(this.page());
+    const root = dialog || this.page().locator("body");
+    const label = root.locator(FORM_LABELS).filter({ visible: true }).first();
+    if (await label.count()) await label.click({ timeout: 400 }).catch(() => {});
   }
 
   async dismissTransientOverlays() {
     const page = this.page();
     try {
-      if (await this.hasDatePanel()) {
+      if (await this.hasDatePanel() || await this.dropdownScope()) {
         await page.keyboard.press("Tab").catch(() => {});
-        await page.locator(DATE_PANELS).first().waitFor({ state: "hidden", timeout: 400 }).catch(() => {});
+        await page.locator(`${DATE_PANELS}, ${DROPDOWNS}`).first().waitFor({ state: "hidden", timeout: 400 }).catch(() => {});
       }
       if (await this.hasDatePanel()) {
-        const label = page.locator(`${DIALOGS} ${FORM_LABELS}, ${FORM_LABELS}`).filter({ visible: true }).first();
-        if (await label.count()) await label.click({ timeout: 400 }).catch(() => {});
+        await this.clickActiveFormLabel();
         await page.locator(DATE_PANELS).first().waitFor({ state: "hidden", timeout: 400 }).catch(() => {});
       }
       if (await this.dropdownScope()) {
-        const opener = page.locator(".el-select__wrapper.is-focused, .el-select.is-focused .el-select__wrapper, .ant-select-open .ant-select-selector").first();
+        const opener = page.locator("[aria-expanded='true'], .el-select__wrapper.is-focused, .el-select.is-focused .el-select__wrapper, .ant-select-open .ant-select-selector").first();
         if (await opener.count()) await this.clickSafely(opener, "field").catch(() => {});
-        else {
-          const label = page.locator(`${DIALOGS} ${FORM_LABELS}, ${FORM_LABELS}`).filter({ visible: true }).first();
-          if (await label.count()) await label.click({ timeout: 400 }).catch(() => {});
-        }
+        else await this.clickActiveFormLabel();
         await page.locator(DROPDOWNS).first().waitFor({ state: "hidden", timeout: 500 }).catch(() => {});
       }
     } catch {
@@ -388,8 +411,8 @@ export class PageActions {
       }
       if (currentYear === year && currentMonth === month) return;
       const forward = !currentYear || currentYear < year || (currentYear === year && (currentMonth || 0) < month);
-      const next = panel.locator(".el-date-picker__next-btn, .arrow-right, .ant-picker-header-next-btn, .arco-picker-header-next").filter({ visible: true }).last();
-      const prev = panel.locator(".el-date-picker__prev-btn, .arrow-left, .ant-picker-header-prev-btn, .arco-picker-header-prev").filter({ visible: true }).last();
+      const next = panel.locator(".el-date-picker__next-btn, .arrow-right, .ant-picker-header-next-btn, .arco-picker-header-next, [aria-label*='next' i], [aria-label*='下一']").filter({ visible: true }).last();
+      const prev = panel.locator(".el-date-picker__prev-btn, .arrow-left, .ant-picker-header-prev-btn, .arco-picker-header-prev, [aria-label*='prev' i], [aria-label*='上一']").filter({ visible: true }).last();
       const target = forward ? next : prev;
       if (!(await target.count())) return;
       await this.clickSafely(target, "option").catch(async () => target.click({ force: true, timeout: 400 }));
@@ -404,21 +427,75 @@ export class PageActions {
     return `${iso} ${time ? (time.length === 5 ? `${time}:00` : time) : "00:00:00"}`;
   }
 
-  async fillField(selector: string, value: string) {
+  private async commitValue(target: Locator, value: string) {
+    await target.evaluate((el, next) => {
+      const node = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement
+        ? el
+        : el.querySelector("input, textarea, select");
+      if (!(node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement || node instanceof HTMLSelectElement)) {
+        if (el instanceof HTMLElement && el.isContentEditable) {
+          el.focus();
+          el.textContent = next;
+          el.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, data: next }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        return;
+      }
+      node.focus();
+      const proto = node instanceof HTMLTextAreaElement
+        ? window.HTMLTextAreaElement.prototype
+        : node instanceof HTMLSelectElement
+          ? window.HTMLSelectElement.prototype
+          : window.HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(proto, "value")?.set?.call(node, next);
+      node.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true, composed: true, inputType: "insertReplacementText", data: next }));
+      node.dispatchEvent(new Event("change", { bubbles: true }));
+    }, value).catch(() => {});
+    await this.page().evaluate(() => {
+      const flush = (window as unknown as { __bssFlushUi?: (type: string, target: Element | null) => void }).__bssFlushUi;
+      flush?.("change", document.activeElement);
+    }).catch(() => {});
+  }
+
+  private async dateFieldTarget(locator: Locator, rangeIndex?: number) {
+    const wrap = locator.locator("xpath=ancestor-or-self::*[contains(@class,'el-date-editor') or contains(@class,'el-date-picker') or contains(@class,'ant-picker') or contains(@class,'arco-picker') or contains(@class,'date-editor') or contains(@class,'picker-range') or contains(@class,'daterange')][1]");
+    const group = locator.locator("xpath=ancestor-or-self::*[contains(@class,'form-item') or @role='group'][1]");
+    const host = (await wrap.count()) ? wrap.first() : ((await group.count()) ? group.first() : locator);
+    const nativeDate = await locator.evaluate(el => {
+      const node = el instanceof HTMLInputElement ? el : el.querySelector("input");
+      return Boolean(node && /^(date|datetime-local|time|month|week)$/i.test(node.getAttribute("type") || ""));
+    }).catch(() => false);
+    const looksDate = nativeDate || await host.evaluate(el => {
+      const inputs = [...el.querySelectorAll("input")];
+      return inputs.some(input => {
+        const type = (input.getAttribute("type") || "").toLowerCase();
+        const blob = [type, input.className, input.placeholder, el.className].join(" ");
+        return /^(date|datetime-local|time|month|week)$/.test(type) || /date|time|picker|日期|时间/i.test(blob);
+      });
+    }).catch(() => false);
+    if (!(await wrap.count()) && !looksDate) return undefined;
+    const inputs = host.locator("input");
+    const count = await inputs.count();
+    if (!count && !nativeDate) return undefined;
+    const index = rangeIndex ?? 0;
+    const target = count > 1 ? inputs.nth(Math.min(index, count - 1)) : (count ? inputs.first() : locator);
+    return { host, target };
+  }
+
+  async fillField(selector: string, value: string, options?: { rangeIndex?: number }) {
     const locator = await this.locate(selector);
-    const dateWrap = locator.locator("xpath=ancestor-or-self::*[contains(@class,'el-date-editor') or contains(@class,'el-date-picker') or contains(@class,'ant-picker')][1]");
-    if (await dateWrap.count()) {
-      const mode = await this.dateEditorMode(dateWrap);
+    const dateField = await this.dateFieldTarget(locator, options?.rangeIndex);
+    if (dateField) {
+      const mode = await this.dateEditorMode(dateField.host);
       const filled = this.formatDateValue(value, mode);
       await this.dismissTransientOverlays();
-      const input = dateWrap.locator("input").first();
-      const target = (await input.count()) ? input : locator;
-      await target.fill(filled, { timeout: 1_200 }).catch(async () => {
-        await target.fill(filled, { force: true, timeout: 800 });
+      await dateField.target.fill(filled, { timeout: 1_200 }).catch(async () => {
+        await dateField.target.fill(filled, { force: true, timeout: 800 });
       });
-      await target.press("Tab").catch(() => {});
+      await this.commitValue(dateField.target, filled);
+      await dateField.target.press("Tab").catch(() => {});
       await this.page().locator(DATE_PANELS).first().waitFor({ state: "hidden", timeout: 400 }).catch(() => {});
-      const current = await target.inputValue().catch(() => "");
+      const current = await dateField.target.inputValue().catch(() => "");
       if (current.includes(filled.slice(0, 10))) return;
       await this.clickSafely(await this.clickTarget(selector), "field");
       if (await this.hasDatePanel()) {
@@ -426,6 +503,7 @@ export class PageActions {
         await this.pickCalendarDay(String(Number(filled.slice(8, 10))));
         await this.page().locator(DATE_PANELS).first().waitFor({ state: "hidden", timeout: 600 }).catch(() => {});
       }
+      await this.commitValue(dateField.target, filled);
       return;
     }
     const input = locator.locator("input, textarea").first();
@@ -433,6 +511,7 @@ export class PageActions {
     await target.fill(value, { timeout: 1_200 }).catch(async () => {
       await target.fill(value, { force: true, timeout: 800 });
     });
+    await this.commitValue(target, value);
   }
 
   async chooseOption(selector: string, value: string | string[]) {
@@ -506,7 +585,7 @@ export class PageActions {
     const options = await this.dropdownOptions(scope);
     const value = await this.firstVisibleOption(scope);
     const fieldMeta = await target.evaluate(el => {
-      const attrs = ["name", "data-field", "data-name", "data-prop", "prop", "data-key", "data-model"];
+      const attrs = ["name", "data-field", "data-name", "data-key", "data-model"];
       const generated = /^(el-id-\d+|el-[a-z]+-\d+|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i;
       let name: string | undefined;
       let node: Element | null = el;
@@ -585,7 +664,7 @@ export class PageActions {
       return { label: field.label, selector, kind: field.kind, value: "true" };
     }
     const value = this.sampleValue(field, dateOffset);
-    await this.fillField(selector, value);
+    await this.fillField(selector, value, { rangeIndex: field.rangeIndex });
     return { label: field.label, selector, kind: field.kind, value };
   }
 
@@ -613,9 +692,10 @@ export class PageActions {
       if (!last) next.setDate(next.getDate() + index);
       const iso = `${next.getFullYear()}-${pad2(next.getMonth() + 1)}-${pad2(next.getDate())}`;
       const value = `${iso} ${index % 2 === 1 ? "23:59:59" : "00:00:00"}`;
-      await this.fillField(field.selector || `label=${field.label}`, value);
+      await this.fillField(field.selector || `label=${field.label}`, value, { rangeIndex: field.rangeIndex });
       last = parseFieldDate(value);
     }
+    await this.page().waitForTimeout(180);
     const afterDates = await this.captureSnapshot();
     for (const field of afterDates.formFields || []) {
       if (!this.requiredNumberInvalid(field) && !(field.invalid && field.kind === "number" && !field.disabled)) continue;
@@ -625,7 +705,8 @@ export class PageActions {
   }
 
   private submitControl(snapshot: PageSnapshot) {
-    const controls = snapshot.controls || [];
+    const scope = snapshot.scope;
+    const controls = (snapshot.controls || []).filter(control => !scope || !control.scope || control.scope === scope);
     const scored = controls.flatMap(control => {
       const text = String(control.text || control.label || "").replace(/\s+/g, "");
       if (!text || CANCEL_LABEL.test(text)) return [];
@@ -633,11 +714,12 @@ export class PageActions {
       if (!button) return [];
       if (!(control.type === "submit" || SUBMIT_LABEL.test(text))) return [];
       const draft = /草稿|draft/i.test(text);
-      const preferred = /^(提交|确定|搜索|查询|search|submit)$/i.test(text);
+      const write = /^(提交|确定|save|submit|ok|confirm|apply)/i.test(text) && !draft;
+      const search = /^(搜索|查询|search)$/i.test(text);
       return [{
         selector: String(control.selector || `text=${text}`),
         text,
-        rank: preferred ? 0 : control.type === "submit" && !draft ? 1 : draft ? 3 : 2
+        rank: write ? 0 : search ? 1 : control.type === "submit" && !draft ? 2 : draft ? 4 : 3
       }];
     });
     return scored.sort((left, right) => left.rank - right.rank)[0];
@@ -663,6 +745,7 @@ export class PageActions {
     };
     await run(before.todoFields || []);
     await this.dismissTransientOverlays();
+    await this.page().waitForTimeout(180);
     let after = await this.captureSnapshot();
     if ((after.todoFields || []).length) {
       await run(after.todoFields || []);
@@ -697,16 +780,16 @@ export class PageActions {
     await this.click(button.selector).catch(async () => {
       await this.click(`text=${button.text}`);
     });
+    await this.awaitFormRequest();
     await this.waitForPageQuiet();
-    await this.page().waitForTimeout(400);
     let after = await this.captureSnapshot();
     const stillOpen = after.scope === before.scope && this.page().url() === startUrl;
     const blocked = stillOpen && ((after.errors || []).length > 0 || !this.formReady(after, startUrl) || (after.formFields || []).some(field => field.invalid));
     if (blocked) {
       await this.repairFormValues(startUrl);
       await this.click(button.selector);
+      await this.awaitFormRequest();
       await this.waitForPageQuiet();
-      await this.page().waitForTimeout(400);
       after = await this.captureSnapshot();
     }
     const leftoverErrors = after.errors || [];

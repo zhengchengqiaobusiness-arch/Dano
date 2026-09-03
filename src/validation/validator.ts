@@ -133,14 +133,12 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
       : "存在没有可执行规则的系统必填字段"
   });
 
-  const hasOwningForm = uiRefs.some(event => Boolean(event.form?.length));
   const callerFieldsBacked = cap.inputForm
     .filter(field => field.source === "caller")
     .every(field =>
       fieldHasUiEvidence(field, uiRefs)
       || field.candidates?.type === "capability"
       || field.candidates?.type === "static"
-      || hasOwningForm
     );
   checks.push({
     name: "caller-fields-backed-by-ui",
