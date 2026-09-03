@@ -33,12 +33,20 @@ interface ActiveRecording {
   externalBrowser: boolean;
 }
 
+const EMPTY_JPEG = Buffer.from(
+  "/9j/4AAQSkZJRgABAQAAAQABAAD/2wAAAAF/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9k=",
+  "base64"
+);
+
 export class BrowserRecorder {
   private active?: ActiveRecording;
   private actionBusy = 0;
   private readonly networkJobs = new Set<Promise<void>>();
   private previewInFlight?: Promise<Buffer>;
   private lastPreview?: { at: number; buffer: Buffer };
+  private focused?: Page;
+  private pageError?: string;
+  private lastGoodUrl?: string;
   private readonly actions = new PageActions({
     page: () => this.currentPage(),
     writePageInventory: (page, snapshot) => this.writePageInventory(page, snapshot),
@@ -68,12 +76,18 @@ export class BrowserRecorder {
   async state() {
     if (!this.active) return { active: false as const };
     const page = this.currentPage();
+    const pages = this.livePages().map(item => ({
+      url: item.url(),
+      current: item === page
+    }));
     return {
       active: true as const,
       session: this.active.session,
       url: page.url(),
-      title: await page.title().catch(() => ""),
-      viewport: page.viewportSize()
+      title: await this.withTimeout(page.title(), 1_200, ""),
+      viewport: page.viewportSize(),
+      pageError: this.pageError,
+      pages
     };
   }
 
@@ -90,14 +104,20 @@ export class BrowserRecorder {
 
   private async capturePreview() {
     const page = this.currentPage();
-    const buffer = await page.screenshot({
+    if (this.isErrorUrl(page.url()) || await this.pageLooksFailed(page)) {
+      this.pageError = this.pageError || `页面打开失败：${page.url()}`;
+      return this.lastPreview?.buffer || EMPTY_JPEG;
+    }
+    const buffer = await this.withTimeout<Buffer | undefined>(page.screenshot({
       type: "jpeg",
       quality: 42,
       fullPage: false,
       animations: "disabled",
       caret: "hide"
-    });
+    }), 2_500, undefined);
+    if (!buffer?.length) return this.lastPreview?.buffer || EMPTY_JPEG;
     this.lastPreview = { at: Date.now(), buffer };
+    this.lastGoodUrl = page.url();
     return buffer;
   }
 
@@ -118,9 +138,18 @@ export class BrowserRecorder {
   async reload() {
     return this.withAction(async () => {
       const page = this.currentPage();
-      await page.reload({ waitUntil: "domcontentloaded" });
-      await this.waitForPageQuiet(page);
-      return { url: page.url(), title: await page.title() };
+      try {
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await this.waitForPageQuiet(page);
+        if (await this.pageLooksFailed(page)) this.pageError = `页面刷新失败：${page.url()}`;
+        else {
+          this.pageError = undefined;
+          this.lastGoodUrl = page.url();
+        }
+      } catch {
+        this.pageError = `页面刷新失败：${page.url()}`;
+      }
+      return { url: this.currentPage().url(), title: await this.withTimeout(this.currentPage().title(), 1_200, ""), pageError: this.pageError };
     });
   }
 
@@ -132,10 +161,14 @@ export class BrowserRecorder {
     await ensureDir(dir);
     await ensureDir(this.config.profileDir);
 
-    const context = await chromium.launchPersistentContext(this.config.profileDir, {
+    const launchOptions = {
       headless: this.config.headless,
       viewport: { width: 1440, height: 960 },
       args: ["--disable-features=TranslateUI"]
+    };
+    const context = await chromium.launchPersistentContext(this.config.profileDir, launchOptions).catch(error => {
+      if (!/Executable doesn't exist/i.test(String(error))) throw error;
+      return chromium.launchPersistentContext(this.config.profileDir, { ...launchOptions, channel: "chrome" });
     });
 
     const eventsFile = path.join(dir, "events.jsonl");
@@ -159,17 +192,37 @@ export class BrowserRecorder {
 
     await writeJson(path.join(dir, "session.json"), session);
     await this.instrument(context);
-    const armPage = (target: Page) => {
-      target.setDefaultTimeout(5_000);
-      target.setDefaultNavigationTimeout(15_000);
-    };
+    const armPage = (target: Page) => this.armPage(target);
     for (const existing of context.pages()) armPage(existing);
     context.on("page", armPage);
 
     const page = context.pages()[0] || await context.newPage();
-    await page.goto(startUrl, { waitUntil: "domcontentloaded" });
-    await this.waitForPageQuiet(page);
+    this.focused = page;
+    try {
+      await page.goto(startUrl, { waitUntil: "domcontentloaded" });
+      await this.waitForPageQuiet(page);
+      if (await this.pageLooksFailed(page)) {
+        this.pageError = `无法打开页面：${startUrl}`;
+      } else {
+        this.lastGoodUrl = page.url();
+        this.pageError = undefined;
+      }
+    } catch {
+      this.pageError = `无法打开页面：${startUrl}`;
+    }
     return session;
+  }
+
+  private armPage(target: Page) {
+    target.setDefaultTimeout(5_000);
+    target.setDefaultNavigationTimeout(15_000);
+    target.on("crash", () => {
+      if (this.focused === target) this.focused = undefined;
+      this.pageError = "页面已崩溃，已停在上一页";
+    });
+    target.on("close", () => {
+      if (this.focused === target) this.focused = undefined;
+    });
   }
 
   private async instrument(context: BrowserContext) {
@@ -415,8 +468,7 @@ export class BrowserRecorder {
     });
   }
 
-  private async captureActiveControl(eventType: UiEvidence["eventType"]) {
-    const page = this.currentPage();
+  private async captureActiveControl(eventType: UiEvidence["eventType"], page = this.currentPage()) {
     await page.evaluate(`(() => {
       const el = document.activeElement;
       if (!(el instanceof HTMLElement) || el === document.body) return;
@@ -435,11 +487,150 @@ export class BrowserRecorder {
     return Date.now() - Date.parse(ui.at) <= 30_000 ? ui : undefined;
   }
 
+  private livePages() {
+    return this.active?.context.pages().filter(page => !page.isClosed()) || [];
+  }
+
+  private isErrorUrl(url: string) {
+    return /^(chrome-error:|chrome:\/\/|about:neterror)/i.test(url) || /chromewebdata/i.test(url);
+  }
+
+  private isTransientUrl(url: string) {
+    return !url || url === "about:blank" || url === "about:srcdoc";
+  }
+
+  private async withTimeout<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("timeout")), ms);
+        })
+      ]);
+    } catch {
+      return fallback;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async pageLooksFailed(page: Page) {
+    if (page.isClosed()) return true;
+    if (this.isErrorUrl(page.url())) return true;
+    const info = await this.withTimeout(
+      page.evaluate(() => ({
+        href: location.href,
+        title: document.title,
+        body: (document.body?.innerText || "").slice(0, 240),
+        errorDom: Boolean(document.querySelector("#main-frame-error, .neterror, #crash-web-page"))
+      })),
+      1_200,
+      { href: page.url(), title: "", body: "", errorDom: false }
+    );
+    return this.isErrorUrl(info.href)
+      || info.errorDom
+      || /ERR_|无法访问此网站|This site can’t be reached|This page isn’t working|chrome-error|chromewebdata/i.test(`${info.title}\n${info.body}\n${info.href}`);
+  }
+
+  private async adoptIfReady(page: Page) {
+    if (page.isClosed()) return false;
+    await this.withTimeout(page.waitForLoadState("domcontentloaded"), 6_000, undefined);
+    if (this.isTransientUrl(page.url())) {
+      await this.withTimeout(page.waitForURL(url => !this.isTransientUrl(url), { timeout: 6_000 }), 6_000, undefined);
+      await this.withTimeout(page.waitForLoadState("domcontentloaded"), 6_000, undefined);
+    }
+    if (page.isClosed() || this.isTransientUrl(page.url()) || await this.pageLooksFailed(page)) {
+      this.pageError = `新页面打开失败${page.isClosed() || this.isTransientUrl(page.url()) ? "" : `：${page.url()}`}`;
+      if (this.livePages().length > 1) await page.close().catch(() => {});
+      return false;
+    }
+    this.focused = page;
+    this.lastGoodUrl = page.url();
+    this.pageError = undefined;
+    await page.bringToFront().catch(() => {});
+    return true;
+  }
+
+  private watchNewPages() {
+    const appeared: Page[] = [];
+    const onPage = (page: Page) => {
+      appeared.push(page);
+    };
+    this.active?.context.on("page", onPage);
+    return {
+      appeared,
+      stop: () => this.active?.context.off("page", onPage)
+    };
+  }
+
+  private async followAfterGesture(origin: Page, known: Set<Page>, appeared: Page[] = []) {
+    const beforeUrl = origin.isClosed() ? "" : origin.url();
+    const newcomers = () => {
+      const live = this.livePages().filter(page => page !== origin && !known.has(page));
+      return live.length ? live : appeared.filter(page => page !== origin && !known.has(page));
+    };
+    const settleOrigin = async () => {
+      if (origin.isClosed()) return;
+      if (await this.pageLooksFailed(origin)) {
+        this.pageError = `页面打开失败：${origin.url()}`;
+        this.focused = origin;
+        return;
+      }
+      this.focused = origin;
+      this.lastGoodUrl = origin.url();
+      this.pageError = undefined;
+      await this.waitForPageQuiet(origin, 600);
+    };
+    const takeNewPage = async (page: Page) => {
+      if (page.isClosed()) {
+        this.pageError = this.pageError || "新页面打开失败";
+        if (!origin.isClosed()) this.focused = origin;
+        return false;
+      }
+      if (await this.adoptIfReady(page)) return true;
+      if (!origin.isClosed()) this.focused = origin;
+      return false;
+    };
+
+    let waited = 0;
+    while (waited <= 800) {
+      if (!origin.isClosed() && origin.url() !== beforeUrl) {
+        await settleOrigin();
+        return;
+      }
+      const extra = newcomers();
+      if (extra.length) {
+        await takeNewPage(extra[extra.length - 1]!);
+        return;
+      }
+      if (waited >= 250) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      waited += 50;
+    }
+    if (appeared.some(page => page !== origin && (page.isClosed() || this.isErrorUrl(page.url())))) {
+      this.pageError = this.pageError || "新页面打开失败";
+    }
+    if (!origin.isClosed()) this.focused = origin;
+  }
+
   private currentPage(): Page {
     if (!this.active) throw new Error("No active recording/browser session");
-    const pages = this.active.context.pages().filter(p => !p.isClosed());
-    if (!pages.length) throw new Error("No active browser page");
-    return pages[pages.length - 1]!;
+    if (this.focused && !this.focused.isClosed() && !this.isErrorUrl(this.focused.url())) {
+      return this.focused;
+    }
+    const usable = this.livePages().filter(page => !this.isErrorUrl(page.url()) && !this.isTransientUrl(page.url()));
+    if (usable.length) {
+      this.focused = usable[usable.length - 1];
+      return this.focused!;
+    }
+    const alive = this.livePages().filter(page => !this.isErrorUrl(page.url()));
+    if (alive.length) {
+      this.focused = alive[alive.length - 1];
+      return this.focused!;
+    }
+    if (!this.livePages().length) throw new Error("No active browser page");
+    return this.livePages()[this.livePages().length - 1]!;
   }
 
   async inspectTarget(selector: string) {
@@ -467,6 +658,8 @@ export class BrowserRecorder {
   ) {
     return this.withAction(async () => {
       const page = this.currentPage();
+      const known = new Set(this.livePages());
+      const watch = command.action === "click" || command.action === "key" ? this.watchNewPages() : undefined;
       if (command.action === "click") {
         const viewport = page.viewportSize();
         if (!viewport || !Number.isFinite(command.x) || !Number.isFinite(command.y)) throw new Error("manual click requires finite x and y coordinates");
@@ -490,13 +683,22 @@ export class BrowserRecorder {
       }
       const observed = command.action === "scroll"
         ? undefined
-        : await this.captureActiveControl(command.action === "text" ? "input" : command.action === "key" ? "change" : "click");
-      return {
-        ok: true,
-        url: page.url(),
-        title: await page.title().catch(() => ""),
-        observed: observed ? { eventType: observed.eventType, label: observed.label, name: observed.name, value: observed.value, selector: observed.selector } : undefined
-      };
+        : await this.captureActiveControl(command.action === "text" ? "input" : command.action === "key" ? "change" : "click", page);
+      try {
+        if (command.action === "click" || command.action === "key") {
+          await this.followAfterGesture(page, known, watch?.appeared || []);
+        }
+        const current = this.currentPage();
+        return {
+          ok: true,
+          url: current.url(),
+          title: await this.withTimeout(current.title(), 1_200, ""),
+          pageError: this.pageError,
+          observed: observed ? { eventType: observed.eventType, label: observed.label, name: observed.name, value: observed.value, selector: observed.selector } : undefined
+        };
+      } finally {
+        watch?.stop();
+      }
     });
   }
 
@@ -510,15 +712,35 @@ export class BrowserRecorder {
   }): Promise<unknown> {
     return this.withAction(async () => {
       const page = this.currentPage();
+      const known = new Set(this.livePages());
+      const watch = command.action === "click" ? this.watchNewPages() : undefined;
       switch (command.action) {
         case "goto":
           if (!command.url) throw new Error("goto requires url");
-          await page.goto(command.url, { waitUntil: "domcontentloaded" });
-          await this.waitForPageQuiet(page);
-          return { url: page.url(), title: await page.title() };
-        case "click":
+          try {
+            await page.goto(command.url, { waitUntil: "domcontentloaded" });
+            await this.waitForPageQuiet(page);
+            if (await this.pageLooksFailed(page)) {
+              this.pageError = `无法打开页面：${command.url}`;
+            } else {
+              this.focused = page;
+              this.lastGoodUrl = page.url();
+              this.pageError = undefined;
+            }
+          } catch {
+            this.pageError = `无法打开页面：${command.url}`;
+          }
+          return { url: this.currentPage().url(), title: await this.withTimeout(this.currentPage().title(), 1_200, ""), pageError: this.pageError };
+        case "click": {
           if (!command.selector) throw new Error("click requires selector");
-          return this.actions.click(command.selector);
+          try {
+            const clicked = await this.actions.click(command.selector);
+            await this.followAfterGesture(page, known, watch?.appeared || []);
+            return { ...clicked, url: this.currentPage().url(), pageError: this.pageError };
+          } finally {
+            watch?.stop();
+          }
+        }
         case "fill":
           if (!command.selector || typeof command.value !== "string") throw new Error("fill requires selector and string value");
           await this.actions.fillField(command.selector, command.value);
@@ -561,6 +783,9 @@ export class BrowserRecorder {
   disposeImmediate() {
     const active = this.active;
     this.active = undefined;
+    this.focused = undefined;
+    this.pageError = undefined;
+    this.lastGoodUrl = undefined;
     this.lastPreview = undefined;
     this.previewInFlight = undefined;
     this.actionBusy = 0;
@@ -573,6 +798,9 @@ export class BrowserRecorder {
     if (!this.active) throw new Error("No active recording");
     const active = this.active;
     this.active = undefined;
+    this.focused = undefined;
+    this.pageError = undefined;
+    this.lastGoodUrl = undefined;
     this.lastPreview = undefined;
     this.previewInFlight = undefined;
     this.actionBusy = 0;

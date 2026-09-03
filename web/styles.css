@@ -36,6 +36,7 @@ button { color: inherit; }
 .model-pill { color: #cbe8dc; }
 .status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 10px var(--teal); margin-right: 7px; }
 .status-dot.muted { background: #65776f; box-shadow: none; }
+.status-dot.warn { background: #d97706; box-shadow: 0 0 10px #d97706; }
 
 .view[hidden] { display: none !important; }
 .recording-view { min-height: 0; overflow: hidden; display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(340px, .75fr); gap: 14px; padding: 14px; background: radial-gradient(circle at 34% 15%, rgba(42, 103, 85, .15), transparent 34%); }

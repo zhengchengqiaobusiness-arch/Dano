@@ -214,15 +214,18 @@ async function refreshBrowserFrame(force = false) {
   if (!force && Date.now() - state.lastFrameAt < 360) return;
   state.frameLoading = true;
   try {
-    const response = await fetch(`/api/browser/frame?t=${Date.now()}`, { cache: "no-store" });
+    const response = await fetch(`/api/browser/frame?t=${Date.now()}`, { cache: "no-store", signal: AbortSignal.timeout(4000) });
     if (response.status === 204 || !response.ok) return;
     const blob = await response.blob();
+    if (!blob || !blob.size) return;
     const url = URL.createObjectURL(blob);
     const previous = state.frameBlobUrl;
     state.frameBlobUrl = url;
     elements.browserFrame.src = url;
     if (previous) URL.revokeObjectURL(previous);
     state.lastFrameAt = Date.now();
+  } catch {
+    // Keep the last good frame so a failed or hung page does not blank the workbench.
   } finally {
     state.frameLoading = false;
   }
@@ -238,12 +241,15 @@ async function pollBrowser(forceFrame = false) {
     if (!state.browserActive) {
       clearBrowserFrame(); elements.browserStatus.innerHTML = '<i class="status-dot muted"></i> 浏览器空闲'; return;
     }
-    if (document.activeElement !== elements.browserUrl) elements.browserUrl.value = browser.url || "";
-    elements.browserStatus.innerHTML = ""; const dot = document.createElement("i"); dot.className = "status-dot";
-    elements.browserStatus.append(dot, document.createTextNode(` ${browser.title || "浏览器运行中"}`));
+    if (document.activeElement !== elements.browserUrl && !String(browser.url || "").startsWith("chrome-error:")) {
+      elements.browserUrl.value = browser.url || "";
+    }
+    elements.browserStatus.innerHTML = ""; const dot = document.createElement("i");
+    dot.className = browser.pageError ? "status-dot warn" : "status-dot";
+    elements.browserStatus.append(dot, document.createTextNode(` ${browser.pageError || browser.title || "浏览器运行中"}`));
     if (browser.viewport) elements.browserSize.textContent = `${browser.viewport.width} × ${browser.viewport.height}`;
     await refreshBrowserFrame(forceFrame);
-  } catch { elements.browserStatus.textContent = "浏览器不可用"; }
+  } catch { elements.browserStatus.textContent = "浏览器状态暂时不可用，可继续点击或刷新"; }
   finally { state.pollInFlight = false; }
 }
 

@@ -226,13 +226,17 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
       response.writeHead(204, { "Cache-Control": "no-store" }).end();
       return;
     }
-    const frame = await studio.recorder.preview();
-    response.writeHead(200, {
-      "Content-Type": "image/jpeg",
-      "Content-Length": String(frame.byteLength),
-      "Cache-Control": "no-store, max-age=0"
-    });
-    response.end(frame);
+    try {
+      const frame = await studio.recorder.preview();
+      response.writeHead(200, {
+        "Content-Type": "image/jpeg",
+        "Content-Length": String(frame.byteLength),
+        "Cache-Control": "no-store, max-age=0"
+      });
+      response.end(frame);
+    } catch {
+      response.writeHead(204, { "Cache-Control": "no-store" }).end();
+    }
     return;
   }
 

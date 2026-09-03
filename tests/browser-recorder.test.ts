@@ -2330,6 +2330,74 @@ test("timeline assigned avatar is filled and empty add-user button is the only p
   }
 });
 
+test("follows a new tab after a link click and stays on the old page if the tab dies", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-newpage-"));
+  const server = http.createServer((request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    if (request.url === "/next") {
+      response.end(`<!doctype html><html><head><title>新页面</title></head><body>
+        <h1>已打开新页面</h1>
+        <a id="open-dead" href="http://127.0.0.1:1/dead" target="_blank" style="position:fixed;left:20px;top:20px;width:160px;height:32px">打开坏页</a>
+        <input id="note" style="position:fixed;left:20px;top:70px;width:180px;height:30px">
+      </body></html>`);
+      return;
+    }
+    if (request.url === "/same") {
+      response.end("<!doctype html><html><head><title>同页跳转</title></head><body><p>同一标签打开</p></body></html>");
+      return;
+    }
+    response.end(`<!doctype html><html><head><title>首页</title></head><body>
+      <a id="open-ok" href="/next" target="_blank" style="position:fixed;left:20px;top:20px;width:160px;height:32px">打开新页</a>
+      <a id="go-same" href="/same" style="position:fixed;left:20px;top:70px;width:160px;height:32px">本页跳转</a>
+      <a id="go-hash" href="#/detail" style="position:fixed;left:20px;top:120px;width:160px;height:32px">hash跳转</a>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "new-page");
+    const opened: any = await recorder.control({ action: "click", selector: "#open-ok" });
+    const afterOpen = await recorder.state();
+    assert.match(String(afterOpen.url || opened.url || ""), /\/next/);
+    assert.equal((afterOpen as { pageError?: string }).pageError, undefined, JSON.stringify(afterOpen));
+    const nextSnap: any = await recorder.control({ action: "snapshot" });
+    assert.equal(nextSnap.title, "新页面", JSON.stringify({ url: afterOpen.url, title: nextSnap.title }));
+
+    const dead: any = await recorder.control({ action: "click", selector: "#open-dead" });
+    const afterDead = await recorder.state();
+    assert.doesNotMatch(String(afterDead.url || ""), /chrome-error|chromewebdata/i);
+    assert.match(String(afterDead.url || dead.url || ""), /\/next/);
+    assert.equal(Boolean((afterDead as { pageError?: string }).pageError), true, JSON.stringify(afterDead));
+    const stillNext: any = await recorder.control({ action: "snapshot" });
+    assert.equal(stillNext.title, "新页面", JSON.stringify(stillNext));
+    const preview = await recorder.preview();
+    assert.equal(preview[0], 0xff);
+    assert.equal(preview[1], 0xd8);
+
+    await recorder.control({ action: "goto", url: `http://127.0.0.1:${address.port}/` });
+    await recorder.control({ action: "click", selector: "#go-same" });
+    const afterSame = await recorder.state();
+    assert.match(String(afterSame.url || ""), /\/same/);
+    const sameSnap: any = await recorder.control({ action: "snapshot" });
+    assert.equal(sameSnap.title, "同页跳转", JSON.stringify(sameSnap));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 function parseFieldInstant(value?: string) {
   const text = String(value || "");
   const match = text.match(/(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}(?::\d{2})?))?/);

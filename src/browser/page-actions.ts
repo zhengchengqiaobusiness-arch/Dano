@@ -449,7 +449,7 @@ export class PageActions {
     }
     if (kind === "nav") throw new Error("Refusing to click navigation; that would leave the form and discard filled fields");
     try {
-      await locator.first().click({ timeout: 1_200 });
+      await locator.first().click({ timeout: 1_200, noWaitAfter: true });
     } catch {
       const allowForce = await locator.first().evaluate((el, clickIntent) => {
         const box = el.getBoundingClientRect();
@@ -460,7 +460,7 @@ export class PageActions {
           || el.matches("button, [role='button'], input, textarea, select, [type='submit'], [type='button']");
       }, intent).catch(() => intent !== "button");
       if (!allowForce) throw new Error("Click failed; not forcing a page click that can navigate away");
-      await locator.first().click({ force: true, timeout: 800 });
+      await locator.first().click({ force: true, timeout: 800, noWaitAfter: true });
     }
   }
 
