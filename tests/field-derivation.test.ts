@@ -117,3 +117,92 @@ test("the same value in two queries is not a unique from rule", () => {
   assert.equal(unit.defaultRule?.startsWith("from:") ?? false, false);
   assert.match(unit.sourceDetail || "", /不能把录制样本当成固定值/);
 });
+
+test("a shared display value across lookup rows still binds via the selected id", () => {
+  const recorded = events().map(event => {
+    if (event.id !== "net-product" || event.kind !== "network") return event;
+    return {
+      ...event,
+      response: {
+        ...event.response,
+        body: {
+          success: true,
+          data: [
+            { id: 9, name: "苹果", unitName: "盒" },
+            { id: 10, name: "梨", unitName: "盒" },
+            { id: 11, name: "桃", unitName: "盒" }
+          ]
+        }
+      }
+    };
+  });
+  const create = buildCapabilityCandidates(recorded).find(item => item.transport.pathTemplate.includes("/order/create"))!;
+  const unit = create.inputForm.find(field => field.name === "unitName")!;
+  assert.match(unit.defaultRule || "", /^from:.+\.unitName\|via:productId$/);
+});
+
+test("create does not bind brought-out fields from the page list of existing rows", () => {
+  const create = buildCapabilityCandidates(events([{
+    id: "net-page", kind: "network", sessionId: "s", at: "2026-09-02T00:00:00.700Z",
+    request: {
+      method: "GET",
+      url: "https://example.test/admin-api/order/page?pageNo=1&pageSize=10",
+      resourceType: "xhr",
+      headers: {},
+      query: { pageNo: 1, pageSize: 10 }
+    },
+    response: {
+      status: 200,
+      headers: {},
+      body: {
+        success: true,
+        data: {
+          list: [{
+            id: 1,
+            totalPrice: 20,
+            items: [{ id: 88, productId: 9, unitName: "盒", productPrice: 10 }]
+          }, {
+            id: 2,
+            totalPrice: 20,
+            items: [{ id: 87, productId: 9, unitName: "盒", productPrice: 10 }]
+          }],
+          total: 2
+        }
+      }
+    }
+  }])).find(item => item.transport.pathTemplate.includes("/order/create"))!;
+  const unit = create.inputForm.find(field => field.name === "unitName")!;
+  const amount = create.inputForm.find(field => field.name === "amount")!;
+  assert.match(unit.defaultRule || "", /^from:.+\.unitName\|via:productId$/);
+  assert.doesNotMatch(unit.defaultRule || "", /order\/page/);
+  assert.equal(amount.defaultRule, "computed:count * productPrice");
+  assert.doesNotMatch(amount.defaultRule || "", /from:/);
+});
+
+test("an overwritten editable number stays caller when no lookup uniquely explains it", () => {
+  const recorded = events().map(event => {
+    if (event.id === "ui-form" && event.kind === "ui") {
+      return {
+        ...event,
+        form: (event.form || []).filter(field => field.name !== "productPrice")
+      };
+    }
+    if (event.id !== "net-create" || event.kind !== "network") return event;
+    return {
+      ...event,
+      request: {
+        ...event.request,
+        body: {
+          ...(event.request.body as Record<string, unknown>),
+          productPrice: 1,
+          amount: 2
+        }
+      }
+    };
+  });
+  const create = buildCapabilityCandidates(recorded).find(item => item.transport.pathTemplate.includes("/order/create"))!;
+  const price = create.inputForm.find(field => field.name === "productPrice")!;
+  assert.equal(price.source, "caller");
+  assert.equal(price.defaultRule, undefined);
+  assert.match(price.sourceDetail || "", /调用方提供/);
+});

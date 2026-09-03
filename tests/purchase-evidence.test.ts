@@ -562,6 +562,125 @@ test("same-page recordings complete query date fields missing from the latest se
   assert.equal(search.inputForm.find(field => field.name === "orderTime[0]")?.label, "开始日期");
 });
 
+test("live product list plus echoed page rows still verify query and create", () => {
+  const item = {
+    id: 208,
+    productId: 3,
+    productUnitName: "台",
+    productBarCode: "0101010101",
+    productPrice: 1,
+    count: 1,
+    taxPercent: 1,
+    taxPrice: 0.01,
+    totalProductPrice: 1,
+    totalPrice: 1.01,
+    stockCount: null,
+    remark: "样例-备注"
+  };
+  const events = purchaseEvents().map(event => {
+    if (event.id === "net-product" && event.kind === "network") {
+      return {
+        ...event,
+        response: {
+          ...event.response,
+          body: {
+            success: true,
+            data: [
+              { id: 3, name: "华为matebook14", barCode: "0101010101", unitName: "台", purchasePrice: 5000 },
+              { id: 4, name: "联想thinkpad", barCode: "1231231", unitName: "台", purchasePrice: 4000 },
+              { id: 7, name: "苹果电脑", barCode: "123124213", unitName: "台", purchasePrice: null }
+            ]
+          }
+        }
+      };
+    }
+    if ((event.id === "net-search" || event.id === "net-search-empty") && event.kind === "network") {
+      return {
+        ...event,
+        response: {
+          ...event.response,
+          body: {
+            success: true,
+            data: {
+              list: [
+                { id: 161, no: "CGDD1", totalPrice: 1.01, items: [item] },
+                { id: 160, no: "CGDD2", totalPrice: 1.01, items: [{ ...item, id: 207 }] }
+              ],
+              total: 2
+            }
+          }
+        }
+      };
+    }
+    if (event.id === "ui-create-form" && event.kind === "ui") {
+      return {
+        ...event,
+        form: (event.form || []).map(field => {
+          if (field.name === "productPrice") return { name: "productPrice", type: "number", value: 1 };
+          if (field.name === "count") return { ...field, value: 1 };
+          if (field.name === "taxPercent") return { ...field, value: 1 };
+          return field;
+        })
+      };
+    }
+    if (event.id !== "net-create" || event.kind !== "network") return event;
+    return {
+      ...event,
+      request: {
+        ...event.request,
+        body: {
+          supplierId: 68,
+          accountId: 2,
+          orderTime: 1788364800000,
+          remark: "样例-备注",
+          discountPercent: 0,
+          discountPrice: 0,
+          totalPrice: 1.01,
+          depositPrice: 0,
+          items: [{
+            productId: 3,
+            productUnitName: "台",
+            productBarCode: "0101010101",
+            productPrice: 1,
+            stockCount: 925.5,
+            count: 1,
+            totalProductPrice: 1,
+            taxPercent: 1,
+            taxPrice: 0.01,
+            totalPrice: 1.01,
+            remark: "样例-备注"
+          }]
+        }
+      }
+    };
+  });
+  const verified = finalizeCapabilities(buildCapabilityCandidates(events), events);
+  const create = verified.find(item => item.transport.pathTemplate.includes("/purchase/order/create"))!;
+  const search = verified.find(item => item.transport.pathTemplate.includes("/purchase/order/page"))!;
+  assert.equal(search.validation.status, "verified");
+  assert.equal(
+    create.validation.status,
+    "verified",
+    JSON.stringify({
+      checks: create.validation.checks.filter(check => !check.ok),
+      fields: create.inputForm.map(field => `${field.name}:${field.source}:${field.defaultRule || field.sourceDetail || ""}`)
+    })
+  );
+  assert.match(create.inputForm.find(field => field.name === "productUnitName")?.defaultRule || "", /^from:.+\.unitName\|via:productId$/);
+  assert.match(create.inputForm.find(field => field.name === "productBarCode")?.defaultRule || "", /^from:.+\.barCode\|via:productId$/);
+  assert.doesNotMatch(create.inputForm.find(field => field.name === "productUnitName")?.defaultRule || "", /purchase\/order\/page/);
+  assert.ok(
+    ["caller", "computed"].includes(create.inputForm.find(field => field.name === "productPrice")?.source || ""),
+    create.inputForm.find(field => field.name === "productPrice")?.sourceDetail
+  );
+  assert.doesNotMatch(create.inputForm.find(field => field.name === "productPrice")?.defaultRule || "", /purchase\/order\/page/);
+  assert.match(create.inputForm.find(field => field.path === "$.totalPrice")?.defaultRule || "", /^computed:/);
+  assert.match(create.inputForm.find(field => field.path === "$.items[*].totalPrice")?.defaultRule || "", /^computed:/);
+  const review = reviewCatalog(verified, events);
+  assert.equal(review.status, "passed");
+  assert.equal(review.next, "export");
+});
+
 test("validate reseals write system fields from the recorded success request", () => {
   const events = purchaseEvents();
   const capabilities = buildCapabilityCandidates(events);

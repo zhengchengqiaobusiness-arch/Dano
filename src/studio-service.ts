@@ -13,7 +13,7 @@ import { applyPlanPolicy } from "./planner/policy.js";
 import { exportSkill } from "./export/skill-exporter.js";
 import { executeCapability } from "./execution/http-executor.js";
 import { reviewCatalog } from "./review/catalog-review.js";
-import { normalizeCatalog } from "./catalog/normalize.js";
+import { mergeCatalogByTransport, normalizeCatalog } from "./catalog/normalize.js";
 import { SkillLibrary } from "./catalog/skill-library.js";
 import { buildApprovedRoutes } from "./planner/routes.js";
 
@@ -138,6 +138,7 @@ export class StudioService {
       };
     });
 
+    candidates = mergeCatalogByTransport(candidates, existing);
     candidates = sealWriteCapabilities(candidates, events);
     await writeJson(this.catalogFile(), candidates);
     return candidates;

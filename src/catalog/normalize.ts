@@ -72,3 +72,12 @@ export function normalizeCapability(capability: CapabilityContract): CapabilityC
 export function normalizeCatalog(capabilities: CapabilityContract[]) {
   return capabilities.map(normalizeCapability);
 }
+
+export function catalogTransportKey(capability: CapabilityContract) {
+  return `${capability.transport.method}|${capability.transport.pathTemplate}`;
+}
+
+export function mergeCatalogByTransport(incoming: CapabilityContract[], existing: CapabilityContract[]) {
+  const incomingKeys = new Set(incoming.map(catalogTransportKey));
+  return [...incoming, ...existing.filter(item => !incomingKeys.has(catalogTransportKey(item)))];
+}

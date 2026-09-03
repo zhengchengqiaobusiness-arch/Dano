@@ -8,6 +8,42 @@ const QUERY = /query|search|find|list|page|detail|lookup|查询|搜索|列表|�
 const AUTHENTICATE = /(?:^|[\/_-])(login|logout|sign-in|signout|refresh-token|captcha)(?:[\/?_-]|$)|登录|登出|退出登录|验证码/i;
 const UPLOAD = /upload|import|上传|导入/i;
 const DOWNLOAD = /download|export|下载|导出/i;
+const PAGING_KEY = /^(pageNo|pageNum|page|pageSize|pageIndex|current|size|limit|offset)$/i;
+const SEARCH_KEY = /^(gjz|gjc|keyword|keyWord|keywords|search|searchKey|searchText|queryKey|q|query)$/i;
+const READ_LAST = /^(get|select|query|search|find|list|page|load|fetch)/i;
+const READ_SUFFIX = /(?:List|Page|Search|Query|Find)$/;
+
+function requestParams(event: NetworkEvidence) {
+  const query = event.request.query && typeof event.request.query === "object" ? event.request.query : {};
+  const body = event.request.body;
+  const fromBody = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
+  return { ...query, ...fromBody };
+}
+
+function looksCollectionBody(body: unknown): boolean {
+  if (Array.isArray(body)) return body.every(item => item == null || typeof item === "object") && body.some(item => item && typeof item === "object");
+  if (!body || typeof body !== "object") return false;
+  const record = body as Record<string, unknown>;
+  const data = "data" in record ? record.data : "result" in record ? record.result : record;
+  if (Array.isArray(data)) {
+    return data.length === 0 || data.some(item => item && typeof item === "object");
+  }
+  if (data && typeof data === "object") {
+    return ["list", "rows", "records", "items", "content"].some(key => Array.isArray((data as Record<string, unknown>)[key]));
+  }
+  return false;
+}
+
+export function looksRecordedQuery(event: NetworkEvidence) {
+  const last = new URL(event.request.url).pathname.split("/").filter(Boolean).pop() || "";
+  const keys = Object.keys(requestParams(event));
+  const paging = keys.some(key => PAGING_KEY.test(key));
+  const search = keys.some(key => SEARCH_KEY.test(key));
+  const readPath = READ_LAST.test(last) || READ_SUFFIX.test(last) || /(?:list|page|search|query|find)$/i.test(last);
+  const collection = looksCollectionBody(event.response?.body);
+  if (collection && (paging || search || readPath)) return true;
+  return paging && search;
+}
 
 export function normalizeUrl(rawUrl: string) {
   const url = new URL(rawUrl);
@@ -45,7 +81,7 @@ export function inferOperation(event: NetworkEvidence, ui?: UiEvidence): Operati
   if (method === "GET" || method === "HEAD") return "query";
   if (REVIEW.test(signal)) return "review";
   if (DELETE.test(signal)) return "delete";
-  if (QUERY.test(signal) && method === "POST") return "query";
+  if (method === "POST" && (QUERY.test(signal) || looksRecordedQuery(event))) return "query";
   if (method === "PATCH" || method === "PUT") return "update";
   if (CREATE.test(endpoint)) return "create";
   if (UPDATE.test(endpoint)) return "update";

@@ -23,13 +23,15 @@ This host is Windows. The bash tool is disabled. Page recording uses `business_s
    - Do not click the page title to close pickers and do not press Escape.
    - If `snapshot.recentUserActions` already contains the user's manual clicks or fills, keep those values; still fill remaining empty fields when complete coverage was requested. Manual clicks in Pi automatic mode, or typing in the headed page, must record the same field labels, final values, options and write request as `exercise-form`. A bare click without a form inventory is not enough to export a Skill.
    - When the user says 手动录制完毕, stop this session and analyze it. Do not start a new recording just because Chinese labels do not match request keys; bind by unique values, recorded lists, and page-context IDs from this session.
+   - If this session already has a successful write request and lookup queries (product/simple-list, get-count, dict, and similar), do not `record_start` again when review cannot uniquely bind a brought-out field. Analyze this session (or the session that contains the write) and bind `from:` with `via`. A second recording that only clicks a picker will overwrite the catalog and drop 新建.
    - Capture actual UI events, field choices, requests, responses, and statuses.
    - Call `business_skill_record_stop`.
 
 2. **Analyze**
    - Call `business_skill_analyze` with the `sessionId` returned by `business_skill_record_stop`. Do not analyze the entire recording history.
+   - Analyzing one session merges into the catalog by method+path. It must not delete 主能力 that another session already recorded.
    - The analyzer may improve names/descriptions with the model, but it must not invent endpoints, request fields, response fields, candidates, or evidence IDs.
-   - Report 主能力 and 字段候选 separately. 主能力 is only this page's 查询/新建/修改/审核/删除. User/product pickers, stock lookups, IM, and login are not 主能力.
+   - Report 主能力 and 字段候选 separately. 主能力 is only this page's 查询/新建/修改/审核/删除. A recorded search/filter that returns a paged or listed result is 查询, even when the path is `getXxx`/`selectXxx`/`fetchXxx` and does not end in `/list`/`/search`/`/query`. User/product pickers, stock lookups, IM, and login are not 主能力. Do not start a new recording just because the search API name is unfamiliar.
    - For each write field the caller will not type, test origin hypotheses against the recording. Write a rule only when exactly one hypothesis uniquely explains the value. Never freeze a recorded business sample.
 
 3. **Review**
@@ -37,7 +39,7 @@ This host is Windows. The bash tool is disabled. Page recording uses `business_s
    - **Pass** only when the tool returns `审核通过`: every 主能力 is `verified`; every write non-caller field has a unique origin rule; computed formulas do not use IDs, enums, or timestamps as operands; picker/user-select fields expose a recorded query instead of a frozen page enum; every key in the successful write request has a field or an assemble rule; and every lookup used by `from:` / candidates is usable. Then export is allowed.
    - **Fail** when it returns `审核未通过`. Do not export. Do not treat “some checks passed” as passed. A write Skill that freezes a user picker as a static enum, uses `computed:day - type`, or drops `startUserSelectAssignees` is not passed.
    - Read the **entire** findings list first. Group by stage. Do not bounce back after the first failure.
-     - One pass only: collect every `回到页面补录` item and fix them together (or follow `manual-steps.md` / ask the user to record manually), then `record_stop`.
+     - One pass only: collect every `回到页面补录` item. If the write request and its lookup queries are already in this session, do not collect them as 补录 and do not `record_start`. Analyze the session that contains the write.
      - Then `analyze` once.
      - Then `validate` once. Do not re-validate after each single finding.
      - `需要人工改目录或平台后再验证`：platform limitation or catalog edit. Stop and tell the user what is blocked.

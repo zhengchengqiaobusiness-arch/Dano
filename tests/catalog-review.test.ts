@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { CapabilityContract } from "../src/domain.js";
 import { isPrimaryCapability, summarizeCatalog } from "../src/inference/export-scope.js";
 import { reviewCatalog } from "../src/review/catalog-review.js";
+import { mergeCatalogByTransport } from "../src/catalog/normalize.js";
 
 function cap(partial: Partial<CapabilityContract> & Pick<CapabilityContract, "id" | "operation" | "transport">): CapabilityContract {
   return {
@@ -142,4 +143,20 @@ test("missing successful write evidence asks to re-record", () => {
   assert.equal(review.status, "blocked");
   assert.equal(review.next, "re-record");
   assert.match(review.summary, /回到页面补录/);
+});
+
+test("analyze merge keeps create when a later session only saw the page query", () => {
+  const existing = [
+    cap({ id: "query-order", operation: "query", transport: { method: "GET", urlTemplate: "https://x/erp/purchase-order/page", origin: "https://x", pathTemplate: "/erp/purchase-order/page" } }),
+    cap({ id: "create-order", operation: "create", transport: { method: "POST", urlTemplate: "https://x/erp/purchase-order/create", origin: "https://x", pathTemplate: "/erp/purchase-order/create" } }),
+    cap({ id: "query-product", operation: "query", transport: { method: "GET", urlTemplate: "https://x/erp/product/simple-list", origin: "https://x", pathTemplate: "/erp/product/simple-list" } })
+  ];
+  const incoming = [
+    cap({ id: "query-order-again", operation: "query", transport: { method: "GET", urlTemplate: "https://x/erp/purchase-order/page", origin: "https://x", pathTemplate: "/erp/purchase-order/page" } }),
+    cap({ id: "query-product-again", operation: "query", transport: { method: "GET", urlTemplate: "https://x/erp/product/simple-list", origin: "https://x", pathTemplate: "/erp/product/simple-list" } })
+  ];
+  const merged = mergeCatalogByTransport(incoming, existing);
+  assert.equal(merged.some(item => item.operation === "create" && item.transport.pathTemplate.includes("/purchase-order/create")), true);
+  assert.equal(merged.filter(item => item.transport.pathTemplate.includes("/purchase-order/page")).length, 1);
+  assert.equal(merged.find(item => item.transport.pathTemplate.includes("/purchase-order/page"))?.id, "query-order-again");
 });

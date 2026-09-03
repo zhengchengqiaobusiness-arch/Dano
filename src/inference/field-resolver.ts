@@ -157,6 +157,7 @@ const SYNONYM_GROUPS = [
   /ssbmmc|所属部门|部门名称/i,
   /yyxtid|yyxtmc|ssxts|所属系统|应用系统/i,
   /ywsxmc|职能清单/i,
+  /gjz|gjc|keyword|keyWord|keywords|searchKey|searchText|queryKey|(?:^|[^a-z])q(?:$|[^a-z])|(?:^|[^a-z])query(?:$|[^a-z])|(?:^|[^a-z])search(?:$|[^a-z])|关键字|关键词|搜索/i,
   /code|编码/i,
   /name|名称/i
 ];

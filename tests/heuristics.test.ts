@@ -44,4 +44,8 @@ test("classifies common methods", () => {
     text: "重算",
     pageUrl: "https://x.test/orders"
   } as any), "action");
+  const search = event("POST", "https://x.test/portal/public/getAllZy");
+  search.request.body = { gjz: "123", pageNo: 1, pageSize: 10 };
+  search.response = { status: 200, headers: {}, body: { data: { list: [{ id: "1", title: "a" }] } } };
+  assert.equal(inferOperation(search), "query");
 });

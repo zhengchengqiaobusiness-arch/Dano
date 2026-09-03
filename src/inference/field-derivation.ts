@@ -2,7 +2,7 @@ import type { CapabilityContract, DataBinding, EvidenceEvent, InputFormField, Ne
 import { id } from "../utils.js";
 import { flattenRequestValues, requestValueAt, sameValue } from "./field-resolver.js";
 import { normalizeUrl } from "./heuristics.js";
-import { isNoiseCapability } from "./export-scope.js";
+import { isNoiseCapability, isPageResultQuery, isPrimaryCapability } from "./export-scope.js";
 
 const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload", "action"]);
 const PAGE_NAME = /^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i;
@@ -183,6 +183,15 @@ function capabilityForEvent(event: NetworkEvidence, catalog: CapabilityContract[
   );
 }
 
+function lastPathName(path: string) {
+  return (path.split(".").pop() || "").replace(/\[\*\]/g, "");
+}
+
+function isPrimaryListEcho(capability: CapabilityContract, catalog: CapabilityContract[], fieldName: string, fromPath: string) {
+  if (!isPageResultQuery(capability) || !isPrimaryCapability(capability, catalog)) return false;
+  return lastPathName(fromPath).toLowerCase() === fieldName.toLowerCase();
+}
+
 function responseHits(body: unknown, prefix = "$", row?: Record<string, unknown>): Array<{ path: string; value: unknown; row?: Record<string, unknown> }> {
   if (body === undefined) return [];
   if (Array.isArray(body)) {
@@ -219,14 +228,28 @@ function isEnvelopePath(path: string, fieldName: string) {
   return ENVELOPE_LEAF.test(path) || /(^|\.)code$/.test(path);
 }
 
+function isJoinFieldName(name: string) {
+  return IDENTIFIER_NAME.test(name) && !QUANTITY_NAME.test(name);
+}
+
 function pickVia(field: InputFormField, joins: ReturnType<typeof requestJoins>, row: Record<string, unknown> | undefined) {
+  const usable = joins.filter(item => item.name !== field.name && isJoinFieldName(item.name));
   if (!row) {
-    return joins.find(item => item.name !== field.name && fieldScope(field.path) === item.scope) || joins.find(item => item.name !== field.name);
+    return usable.find(item => fieldScope(field.path) === item.scope) || usable[0];
   }
   const identity = rowIdentity(row);
-  const matched = joins.filter(item => item.name !== field.name && sameValue(item.value, identity));
+  const matched = usable.filter(item => sameValue(item.value, identity));
   if (!matched.length) return undefined;
   return matched.find(item => fieldScope(item.path) === fieldScope(field.path)) || matched[0];
+}
+
+function requestContainsValue(event: NetworkEvidence, value: unknown) {
+  const body = event.request.body;
+  const params = {
+    ...(event.request.query || {}),
+    ...(body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {})
+  };
+  return Object.values(params).some(item => sameValue(item, value));
 }
 
 function lookupEvents(events: EvidenceEvent[]) {
@@ -252,6 +275,10 @@ function fromApiMatch(
     for (const leaf of responseHits(event.response?.body)) {
       if (isEnvelopePath(leaf.path, field.name)) continue;
       if (!sameDerivedValue(leaf.value, value)) continue;
+      // The page's own result list often repeats the field we just wrote.
+      // Only keep it when that value was also a filter/selection on the list request.
+      if (isPageResultQuery(capability) && isPrimaryCapability(capability, catalog) && !requestContainsValue(event, value)) continue;
+      if (isPrimaryListEcho(capability, catalog, field.name, leaf.path) && !requestContainsValue(event, value)) continue;
       const query = event.request.query || {};
       const queryJoin = joins.find(item =>
         Object.entries(query).some(([key, queryValue]) => key === item.name && sameValue(queryValue, item.value))
@@ -272,8 +299,10 @@ function fromApiMatch(
     }
   }
   const unique = [...new Map(hits.map(item => [`${item.capabilityId}|${item.fromPath}|${item.via || ""}`, item])).values()];
-  if (unique.length !== 1) return undefined;
-  return unique[0];
+  const viaHits = unique.filter(item => item.via);
+  const chosen = viaHits.length ? viaHits : unique;
+  if (chosen.length !== 1) return undefined;
+  return chosen[0];
 }
 
 function emptyDefault(field: InputFormField, value: unknown) {
@@ -532,6 +561,17 @@ function unexplained(field: InputFormField): InputFormField {
   };
 }
 
+function asUnresolved(field: InputFormField): InputFormField {
+  if (field.sourceDetail?.includes("只读")) return unexplained(field);
+  if (/price|单价|售价/i.test(`${field.name} ${field.label}`)) {
+    return {
+      ...asCallerInput(field),
+      sourceDetail: "可改单价未能唯一对应带出或公式，由调用方提供，不要冻成录制样本"
+    };
+  }
+  return unexplained(field);
+}
+
 export function attachDerivationRules(
   fields: InputFormField[],
   sample: unknown,
@@ -596,7 +636,7 @@ export function attachDerivationRules(
     }
     const rule = emptyDefault(field, value);
     if (rule) return asDefault(field, rule, `系统默认空值 ${rule.slice("literal:".length)}，调用方未提供时使用，不是某次录制的业务样本`);
-    return unexplained(field);
+    return asUnresolved(field);
   });
 
   return { fields: next, bindings };
