@@ -703,6 +703,21 @@ export const PAGE_HELPERS = String.raw`
     return shared || ph || "";
   };
 
+  const groupLabels = (controls, fallbacks) => {
+    if (controls.length <= 1) return fallbacks.map((label, index) => label || identityPlaceholder(controls[index]) || "");
+    const placeholders = controls.map((el) => identityPlaceholder(el));
+    const usable = placeholders.filter(Boolean);
+    if (usable.length === controls.length && new Set(usable).size === controls.length) return placeholders;
+    const bases = controls.map((el, index) => fallbacks[index] || placeholders[index] || "");
+    const counts = new Map();
+    for (const base of bases) counts.set(base, (counts.get(base) || 0) + 1);
+    return bases.map((base, index) => {
+      if (placeholders[index] && placeholders[index] !== base) return placeholders[index];
+      if (counts.get(base) > 1 && base) return clean(base) + "-" + (index + 1);
+      return base;
+    });
+  };
+
   const itemControls = (item) => {
     const range = rangeInputsOf(item);
     if (range.length >= 2) return range;
@@ -777,6 +792,7 @@ export const PAGE_HELPERS = String.raw`
   const collectFormFields = (root) => {
     const fields = [];
     const seen = new Set();
+    const seenEls = new Set();
     const phCounts = placeholderUses(root);
     const add = (field) => {
       if (!field) return;
@@ -792,14 +808,18 @@ export const PAGE_HELPERS = String.raw`
       const range = rangeInputsOf(item);
       const controls = itemControls(item);
       const prop = range.length >= 2 ? nameOf(range[0]) : undefined;
+      const drafted = controls.map((el) => isPickerSlot(el) ? null : fieldFromControl(el, item));
+      const labels = groupLabels(controls, drafted.map((field) => field?.label || ""));
       controls.forEach((el, index) => {
         if (isPickerSlot(el)) {
+          seenEls.add(el);
           add(fieldFromPicker(el));
           return;
         }
-        const field = fieldFromControl(el, item);
+        const field = drafted[index];
         if (!field) return;
-        const label = distinctLabel(el, field.label, index, controls.length);
+        seenEls.add(el);
+        const label = labels[index] || field.label;
         const identity = identityPlaceholder(el);
         add({
           ...field,
@@ -813,12 +833,12 @@ export const PAGE_HELPERS = String.raw`
     }
     for (const cell of queryDeep(root, "tbody td, .el-table__body td, .el-table__body .el-table__cell, .ant-table-tbody .ant-table-cell")) {
       const el = cell.querySelector("input, textarea, select, [role=combobox], [contenteditable=true]");
-      if (!el || formItemOf(el)) continue;
+      if (!el || formItemOf(el) || seenEls.has(el)) continue;
+      seenEls.add(el);
       const field = fieldFromControl(el, cell);
       if (!field) continue;
       add({ ...field, selector: fieldSelector(el, field.label, identityPlaceholder(el), phCounts) });
     }
-    const seenEls = new Set();
     for (const el of queryDeep(root, "input, textarea, select, [role=combobox], [contenteditable=true], [role=textbox]")) {
       if (formItemOf(el) || isChooserFilter(el) || el.closest("td, th, thead, .el-table__header, .el-table__header-wrapper, .el-table__cell, .ant-table-cell, .ant-table-thead") || seenEls.has(el)) continue;
       const host = el.closest("label") || el.parentElement;

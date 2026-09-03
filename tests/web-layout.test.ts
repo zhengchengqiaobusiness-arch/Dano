@@ -199,6 +199,8 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.match(bridge, /审核通过|re-record|re-analyze/);
   assert.match(extension, /本次识别主能力|本次录制主能力|已导出主能力/);
   assert.match(extension, /审核通过|审核未通过/);
+  assert.match(await readFile(path.join(root, "src", "studio-service.ts"), "utf8"), /sessionCatalogSlice|reviewSession/);
+  assert.doesNotMatch(extension, /details:\s*\{\s*review,\s*capabilities\s*\}/);
 });
 
 test("Windows Pi host uses powershell instead of bash", async () => {

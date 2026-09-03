@@ -221,3 +221,28 @@ export function capabilitiesForSession(
   });
   return scoped.length ? scoped : catalog;
 }
+
+function referencedCapabilityIds(capabilities: CapabilityContract[]) {
+  const ids = new Set<string>();
+  for (const capability of capabilities) {
+    ids.add(capability.id);
+    for (const field of capability.inputForm) {
+      const from = /^from:([^:]+):/.exec(field.defaultRule || "");
+      if (from?.[1]) ids.add(from[1]);
+      if (field.candidates?.type === "capability") ids.add(field.candidates.capabilityId);
+    }
+    for (const binding of capability.bindings) ids.add(binding.fromCapabilityId);
+  }
+  return ids;
+}
+
+export function sessionCatalogSlice(
+  catalog: CapabilityContract[],
+  allEvents: EvidenceEvent[],
+  sessionEvents: EvidenceEvent[]
+) {
+  const scoped = capabilitiesForSession(catalog, allEvents, sessionEvents);
+  const ids = referencedCapabilityIds(scoped);
+  const slice = catalog.filter(capability => ids.has(capability.id));
+  return slice.length ? slice : scoped;
+}

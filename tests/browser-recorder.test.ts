@@ -1649,11 +1649,15 @@ test("exercise-form fills a search bar with selects and a leftover range calenda
     const before: any = await recorder.control({ action: "snapshot" });
     assert.equal(before.scope, "page", JSON.stringify({ scope: before.scope, text: String(before.text || "").slice(0, 80) }));
     const labels = (before.todoFields || []).map((field: any) => String(field.label || ""));
+    const dateFields = (before.formFields || []).filter((field: any) => field.kind === "date" || /开始日期|结束日期|申请时间/.test(String(field.label || "")));
     assert.equal(labels.some((label: string) => /类型/.test(label)), true, JSON.stringify(before.todoFields));
     assert.equal(labels.some((label: string) => /开始日期|申请时间/.test(label)), true, JSON.stringify(before.todoFields));
     assert.equal(labels.some((label: string) => /结束日期|申请时间/.test(label)), true, JSON.stringify(before.todoFields));
     assert.equal(labels.some((label: string) => /结果/.test(label)), true, JSON.stringify(before.todoFields));
     assert.equal(labels.some((label: string) => /原因/.test(label)), true, JSON.stringify(before.todoFields));
+    assert.equal(dateFields.length, 2, JSON.stringify(before.formFields));
+    assert.equal(dateFields.some((field: any) => /-\d+$/.test(String(field.label || ""))), false, JSON.stringify(before.formFields));
+    assert.equal(before.todoCount, 5, JSON.stringify(before.todoFields));
     const result: any = await recorder.control({ action: "exercise-form" });
     assert.equal(result.ok, true, JSON.stringify(result.failed || result.todoFields || result.formFields));
     assert.equal(result.todoCount, 0, JSON.stringify(result.todoFields));

@@ -141,7 +141,11 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
           type: "text",
           text: review.summary
         }],
-        details: { review, capabilities }
+        details: {
+          review,
+          capabilityIds: capabilities.map(item => item.id),
+          titles: capabilities.map(item => item.title)
+        }
       };
     }
   });

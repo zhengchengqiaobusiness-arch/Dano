@@ -1,5 +1,6 @@
 import type { InputFormField, NetworkEvidence, UiEvidence } from "../domain.js";
 import { ASK_KEY } from "./heuristics.js";
+import { clockFromEpoch, dateDay, recordedClock } from "./date-format.js";
 
 const GENERATED_NAME = /^(el-id-\d+|el-[a-z]+-\d+|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i;
 const PAGE_NAME = /^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i;
@@ -70,10 +71,6 @@ export function flattenRequestValues(value: unknown, prefix = "$"): Array<{ path
   return Object.entries(value as Record<string, unknown>).flatMap(([key, child]) =>
     flattenRequestValues(child, `${prefix}.${key}`)
   );
-}
-
-function padDatePart(value: number) {
-  return String(value).padStart(2, "0");
 }
 
 export function sameValue(left: unknown, right: unknown) {
@@ -246,24 +243,6 @@ function looksReadonly(item: Pick<UiObservation, "type">) {
   return /readonly|disabled/i.test(item.type || "");
 }
 
-function clockFromEpoch(value: unknown) {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 10_000_000_000) return undefined;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return undefined;
-  return `${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}:${padDatePart(date.getSeconds())}`;
-}
-
-function dateDay(value: unknown) {
-  const match = String(value ?? "").match(/^(\d{4}-\d{2}-\d{2})/);
-  if (match) return match[1];
-  if (typeof value === "number" && Number.isFinite(value) && value > 10_000_000_000) {
-    const date = new Date(value);
-    if (!Number.isNaN(date.getTime())) {
-      return `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())}`;
-    }
-  }
-  return undefined;
-}
 
 function looksIdentityToken(value?: string) {
   const text = String(value || "").trim();
@@ -583,10 +562,6 @@ export function attachObservedDefaults(
   });
 }
 
-function recordedClock(value: unknown) {
-  const match = String(value ?? "").match(/^\d{4}-\d{2}-\d{2}[ T](\d{2}:\d{2}:\d{2})/);
-  return match?.[1];
-}
 
 function formatHint(field: InputFormField, requestValue?: unknown) {
   if (/time|date|start|end/i.test(`${field.name} ${field.label}`)) {

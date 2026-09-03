@@ -12,9 +12,9 @@ import { fallbackPlan } from "./planner/fallback.js";
 import { applyPlanPolicy } from "./planner/policy.js";
 import { exportSkill } from "./export/skill-exporter.js";
 import { executeCapability } from "./execution/http-executor.js";
-import { reviewCatalog } from "./review/catalog-review.js";
-import { capabilitiesForSession } from "./inference/export-scope.js";
+import { capabilitiesForSession, sessionCatalogSlice } from "./inference/export-scope.js";
 import { mergeCatalogByTransport, normalizeCatalog } from "./catalog/normalize.js";
+import { reviewSession } from "./review/catalog-review.js";
 import { SkillLibrary } from "./catalog/skill-library.js";
 import { buildApprovedRoutes } from "./planner/routes.js";
 
@@ -147,20 +147,19 @@ export class StudioService {
   }
 
   async validate() {
-    const events = await this.allEvents();
-    const caps = await this.capabilities();
-    const validated = finalizeCapabilities(caps, events);
-    await writeJson(this.catalogFile(), validated);
-    return validated;
+    const { capabilities } = await this.review();
+    return capabilities;
   }
 
   async review() {
     const history = await this.allEvents();
     const latest = (await this.listSessions())[0]?.id;
     const scopeEvents = latest ? await this.sessionEvents(latest) : history;
-    const capabilities = await this.validate();
-    const scoped = capabilitiesForSession(capabilities, history, scopeEvents);
-    return { capabilities, review: reviewCatalog(scoped, history) };
+    const existing = await this.capabilities();
+    const slice = sessionCatalogSlice(existing, history, scopeEvents);
+    const validated = finalizeCapabilities(slice, history);
+    await writeJson(this.catalogFile(), mergeCatalogByTransport(validated, existing));
+    return reviewSession(validated, history, scopeEvents);
   }
 
   async sealWrites() {

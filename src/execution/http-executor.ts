@@ -1,6 +1,7 @@
-import type { CapabilityContract } from "../domain.js";
+import type { CapabilityContract, InputFormField } from "../domain.js";
 import { randomUUID } from "node:crypto";
 import { getByPath, setByPath } from "../utils.js";
+import { dateToMillis, isDateInput, normalizeDateString } from "../inference/date-format.js";
 
 function fieldValue(cap: CapabilityContract, input: Record<string, unknown>, name: string) {
   const field = cap.inputForm.find(item => item.name === name);
@@ -89,6 +90,58 @@ function resolveFieldRule(field: CapabilityContract["inputForm"][number], prepar
   return undefined;
 }
 
+function literalKey(jsonPath: string) {
+  if (jsonPath === "$") return undefined;
+  const literal = jsonPath.replace(/^\$\./, "");
+  return literal && !literal.includes(".") ? literal : undefined;
+}
+
+function applyCandidate(field: InputFormField, value: unknown) {
+  const rule = field.candidates;
+  if (!rule || rule.type !== "static" || value === undefined || value === null) return value;
+  for (const option of rule.values) {
+    if (option.value === value || String(option.label) === String(value)) return option.value;
+  }
+  return value;
+}
+
+function coerceFieldValue(value: unknown, field: InputFormField) {
+  if (value === undefined || value === null) return value;
+  let next = applyCandidate(field, value);
+  if (typeof next === "string" && isDateInput(next.trim())) {
+    if (field.valueType === "integer" || field.valueType === "number") return dateToMillis(next);
+    if (field.valueType === "string") return normalizeDateString(next, field.dateClock);
+  }
+  if (field.valueType === "string") return typeof next === "string" ? next : String(next);
+  if (field.valueType === "integer") {
+    if (typeof next === "boolean") return next;
+    if (typeof next === "number" && Number.isInteger(next)) return next;
+    if (typeof next === "string" && /^[-+]?\d+$/.test(next.trim())) return Number.parseInt(next, 10);
+  }
+  if (field.valueType === "number" && typeof next === "string" && /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(next.trim())) {
+    return Number(next);
+  }
+  if (field.valueType === "boolean" && typeof next === "string" && /^(true|false)$/i.test(next)) {
+    return next.toLowerCase() === "true";
+  }
+  if (field.valueType === "array" && !Array.isArray(next)) return [next];
+  return next;
+}
+
+function hoistNamedFields(cap: CapabilityContract, supplied: Record<string, unknown>) {
+  const prepared = structuredClone(supplied);
+  const itemNames = new Set(cap.inputForm.filter(field => field.path.includes("[*]")).map(field => field.name));
+  for (const field of cap.inputForm) {
+    if (!field.name || field.path.includes("[*]") || itemNames.has(field.name) || !Object.prototype.hasOwnProperty.call(prepared, field.name)) continue;
+    if (getByPath(prepared, field.path) !== undefined) continue;
+    if (literalKey(field.path) === field.name) continue;
+    const value = prepared[field.name];
+    delete prepared[field.name];
+    setByPath(prepared, field.path, value);
+  }
+  return prepared;
+}
+
 function nestLineItems(cap: CapabilityContract, supplied: Record<string, unknown>) {
   const prepared = structuredClone(supplied);
   const itemFields = cap.inputForm.filter(field => field.path.includes("[*]"));
@@ -110,8 +163,48 @@ function nestLineItems(cap: CapabilityContract, supplied: Record<string, unknown
   return prepared;
 }
 
+function coercePresentFields(cap: CapabilityContract, prepared: Record<string, unknown>, requireMissing: boolean) {
+  for (const field of cap.inputForm) {
+    if (field.path.includes("[*]")) {
+      const [prefix, suffix] = field.path.split("[*].");
+      const items = getByPath(prepared, prefix || "");
+      if (!Array.isArray(items)) {
+        if (requireMissing && field.required && field.source === "caller") {
+          throw new Error(`Missing caller field: ${field.label} (${field.path})`);
+        }
+        continue;
+      }
+      const name = (suffix || "").split(".").pop() || field.name;
+      for (const row of items) {
+        if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+        const current = row as Record<string, unknown>;
+        const value = current[name];
+        if (value === undefined) {
+          if (requireMissing && field.required && field.source === "caller") {
+            throw new Error(`Missing caller field: ${field.label} (${field.path})`);
+          }
+          continue;
+        }
+        current[name] = coerceFieldValue(value, field);
+      }
+      continue;
+    }
+    const value = getByPath(prepared, field.path);
+    if (value === undefined) {
+      if (!requireMissing) continue;
+      if (field.required) {
+        if (field.source === "caller") throw new Error(`Missing caller field: ${field.label} (${field.path})`);
+        throw new Error(`Required system field is unresolved: ${field.label} (${field.path})`);
+      }
+      continue;
+    }
+    setByPath(prepared, field.path, coerceFieldValue(value, field));
+  }
+}
+
 function prepareInput(cap: CapabilityContract, input: Record<string, unknown>) {
-  const prepared = nestLineItems(cap, input);
+  const prepared = hoistNamedFields(cap, nestLineItems(cap, input));
+  coercePresentFields(cap, prepared, false);
   let changed = true;
   while (changed) {
     changed = false;
@@ -129,7 +222,7 @@ function prepareInput(cap: CapabilityContract, input: Record<string, unknown>) {
           try {
             const value = resolveFieldRule(field, prepared, current);
             if (value !== undefined) {
-              current[name] = value;
+              current[name] = coerceFieldValue(value, field);
               changed = true;
             }
           } catch {
@@ -142,7 +235,7 @@ function prepareInput(cap: CapabilityContract, input: Record<string, unknown>) {
       try {
         const value = resolveFieldRule(field, prepared);
         if (value !== undefined) {
-          setByPath(prepared, field.path, value);
+          setByPath(prepared, field.path, coerceFieldValue(value, field));
           changed = true;
         }
       } catch {
@@ -150,32 +243,7 @@ function prepareInput(cap: CapabilityContract, input: Record<string, unknown>) {
       }
     }
   }
-  for (const field of cap.inputForm) {
-    if (field.path.includes("[*]")) {
-      const [prefix, suffix] = field.path.split("[*].");
-      const items = getByPath(prepared, prefix || "");
-      if (!Array.isArray(items)) {
-        if (field.required && field.source === "caller") {
-          throw new Error(`Missing caller field: ${field.label} (${field.path})`);
-        }
-        continue;
-      }
-      const name = (suffix || "").split(".").pop() || field.name;
-      for (const row of items) {
-        if (!row || typeof row !== "object" || Array.isArray(row)) continue;
-        const value = (row as Record<string, unknown>)[name];
-        if (value === undefined && field.required && field.source === "caller") {
-          throw new Error(`Missing caller field: ${field.label} (${field.path})`);
-        }
-      }
-      continue;
-    }
-    const value = getByPath(prepared, field.path);
-    if (value === undefined && field.required) {
-      if (field.source === "caller") throw new Error(`Missing caller field: ${field.label} (${field.path})`);
-      throw new Error(`Required system field is unresolved: ${field.label} (${field.path})`);
-    }
-  }
+  coercePresentFields(cap, prepared, true);
   return prepared;
 }
 
@@ -195,6 +263,30 @@ function authHeaders() {
   return parsed as Record<string, string>;
 }
 
+export function materializeHttpRequest(cap: CapabilityContract, input: Record<string, unknown>) {
+  const prepared = prepareInput(cap, input);
+  const { url, consumed } = expandUrl(cap, prepared);
+  const method = cap.transport.method.toUpperCase();
+  if (!["GET", "HEAD"].includes(method)) {
+    const body = structuredClone(prepared);
+    for (const fieldPath of consumed) deleteByPath(body, fieldPath);
+    return { method, url: url.toString(), query: undefined as Record<string, string> | undefined, body, prepared };
+  }
+  for (const field of cap.inputForm) {
+    const value = getByPath(prepared, field.path);
+    if (!consumed.has(field.path) && value !== undefined && typeof value !== "object") {
+      url.searchParams.set(field.name, String(value));
+    }
+  }
+  return {
+    method,
+    url: url.toString(),
+    query: Object.fromEntries(url.searchParams.entries()),
+    body: undefined as Record<string, unknown> | undefined,
+    prepared
+  };
+}
+
 export async function executeCapability(
   cap: CapabilityContract,
   input: Record<string, unknown>,
@@ -205,9 +297,9 @@ export async function executeCapability(
     throw new Error(`Capability ${cap.id} requires explicit write confirmation`);
   }
 
-  const prepared = prepareInput(cap, input);
-  const { url, consumed } = expandUrl(cap, prepared);
-  const method = cap.transport.method.toUpperCase();
+  const materialized = materializeHttpRequest(cap, input);
+  const url = new URL(materialized.url);
+  const method = materialized.method;
   const headers: Record<string, string> = {
     accept: "application/json",
     ...authHeaders()
@@ -215,17 +307,8 @@ export async function executeCapability(
 
   const init: RequestInit = { method, headers };
   if (!["GET", "HEAD"].includes(method)) {
-    const body = structuredClone(prepared);
-    for (const fieldPath of consumed) deleteByPath(body, fieldPath);
     headers["content-type"] = "application/json";
-    init.body = JSON.stringify(body);
-  } else {
-    for (const field of cap.inputForm) {
-      const value = getByPath(prepared, field.path);
-      if (!consumed.has(field.path) && value !== undefined && typeof value !== "object") {
-        url.searchParams.set(field.name, String(value));
-      }
-    }
+    init.body = JSON.stringify(materialized.body);
   }
 
   const response = await fetch(url, init);

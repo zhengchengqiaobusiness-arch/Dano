@@ -326,6 +326,38 @@ def hoist_named_fields(capability: dict[str, Any], supplied: dict[str, Any]) -> 
     return prepared
 
 
+def coerce_present_fields(capability: dict[str, Any], prepared: dict[str, Any], require_missing: bool) -> None:
+    for field in capability.get("inputForm", []):
+        if "[*]" in field["path"]:
+            prefix, suffix = field["path"].split("[*].", 1)
+            items = get_by_path(prepared, prefix)
+            if not isinstance(items, list):
+                if require_missing and field.get("required") and field.get("source") == "caller":
+                    raise ValueError(f"缺少调用方必填字段：{field['label']} ({field['path']})")
+                continue
+            name = suffix.split(".")[-1]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                value = item.get(name)
+                if value is None:
+                    if require_missing and field.get("required") and field.get("source") == "caller":
+                        raise ValueError(f"缺少调用方必填字段：{field['label']} ({field['path']})")
+                    continue
+                item[name] = coerce(value, field.get("valueType", "unknown"), field["path"], field)
+            continue
+        value = get_by_path(prepared, field["path"])
+        if value is None:
+            if not require_missing:
+                continue
+            if field.get("required"):
+                if field.get("source") == "caller":
+                    raise ValueError(f"缺少调用方必填字段：{field['label']} ({field['path']})")
+                raise ValueError(f"系统必填字段没有可执行的处理结果：{field['label']} ({field['path']})")
+            continue
+        set_by_path(prepared, field["path"], coerce(value, field.get("valueType", "unknown"), field["path"], field))
+
+
 def prepare_input(
     capability: dict[str, Any],
     supplied: dict[str, Any],
@@ -333,6 +365,7 @@ def prepare_input(
     resolve_lookups: bool = True,
 ) -> dict[str, Any]:
     prepared = hoist_named_fields(capability, nest_line_items(capability, supplied))
+    coerce_present_fields(capability, prepared, False)
     changed = True
     while changed:
         changed = False
@@ -366,31 +399,7 @@ def prepare_input(
             if value is not None:
                 set_by_path(prepared, field["path"], coerce(value, field.get("valueType", "unknown"), field["path"], field))
                 changed = True
-    for field in capability.get("inputForm", []):
-        if "[*]" in field["path"]:
-            prefix, suffix = field["path"].split("[*].", 1)
-            items = get_by_path(prepared, prefix)
-            if not isinstance(items, list):
-                if field.get("required") and field.get("source") == "caller":
-                    raise ValueError(f"缺少调用方必填字段：{field['label']} ({field['path']})")
-                continue
-            name = suffix.split(".")[-1]
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                value = item.get(name)
-                if value is None and field.get("required") and field.get("source") == "caller":
-                    raise ValueError(f"缺少调用方必填字段：{field['label']} ({field['path']})")
-                if value is not None:
-                    item[name] = coerce(value, field.get("valueType", "unknown"), field["path"], field)
-            continue
-        value = get_by_path(prepared, field["path"])
-        if value is None and field.get("required"):
-            if field.get("source") == "caller":
-                raise ValueError(f"缺少调用方必填字段：{field['label']} ({field['path']})")
-            raise ValueError(f"系统必填字段没有可执行的处理结果：{field['label']} ({field['path']})")
-        if value is not None:
-            set_by_path(prepared, field["path"], coerce(value, field.get("valueType", "unknown"), field["path"], field))
+    coerce_present_fields(capability, prepared, True)
     return prepared
 
 
