@@ -192,10 +192,11 @@ export function reviewCatalog(capabilities: CapabilityContract[], events: Eviden
   const lines = [
     status === "passed"
       ? `审核通过，可以导出。通过标准：本页主能力均已验证，写字段均有唯一来源规则，公式不用编号/枚举/时间戳做运算，选人暴露已录制查询，请求键均有着落，用到的候选查询可用。`
-      : `审核未通过，不能导出。下一步：${NEXT_LABEL[next]}。`,
+      : `审核未通过，不能导出。下一步：${NEXT_LABEL[next]}。先收齐下面全部失败项，按阶段归堆后只补录一次、只分析一次、只验证一次；禁止发现一条就回头重验。`,
     `主能力 ${primary.length} 项${primaryTitles.length ? `（${primaryTitles.join("、")}）` : ""}；字段候选 ${neededLookups.length} 个${lookupTitles.length ? `（${lookupTitles.join("、")}）` : ""}。下拉、用户分页、IM、登录不是主能力。`
   ];
   if (findings.length) {
+    lines.push("处理顺序：先一次性处理全部补录项，再一次性重新分析，最后只验证一次。");
     lines.push(...findings.map(item => `- ${item.capabilityTitle || item.code}：${item.message}`));
   }
   return {

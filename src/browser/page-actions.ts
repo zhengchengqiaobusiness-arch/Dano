@@ -49,6 +49,7 @@ export interface PageActionHost {
   writePageInventory(page: Page, snapshot: PageSnapshot): Promise<void>;
   recentUserActions(): unknown[];
   recordedManualSteps?(): unknown[];
+  followManualSteps?(): boolean;
   recordSelectObservation?(info: {
     label?: string;
     name?: string;
@@ -945,7 +946,8 @@ export class PageActions {
       todoFields,
       todoCount: todoFields.length,
       recentUserActions: this.host.recentUserActions(),
-      recordedManualSteps: this.host.recordedManualSteps?.() || []
+      recordedManualSteps: this.host.recordedManualSteps?.() || [],
+      followManualSteps: Boolean(this.host.followManualSteps?.())
     };
     await this.host.writePageInventory(page, snapshot);
     return snapshot;

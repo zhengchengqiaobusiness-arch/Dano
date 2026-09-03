@@ -57,6 +57,7 @@ test("unexplained write field blocks export and asks for re-analyze", () => {
   assert.equal(review.status, "blocked");
   assert.equal(review.next, "re-analyze");
   assert.match(review.summary, /审核未通过/);
+  assert.match(review.summary, /只验证一次|禁止发现一条/);
   assert.match(review.summary, /单位/);
 });
 

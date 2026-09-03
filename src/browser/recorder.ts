@@ -24,6 +24,13 @@ const INSPECT_TARGET_IN_PAGE = new Function("el", String.raw`
   };
 `) as (element: Element) => unknown;
 
+interface ActionGuard {
+  exerciseFormCount: number;
+  submitFormCount: number;
+  failedKeys: string[];
+  followManualSteps: boolean;
+}
+
 interface ActiveRecording {
   session: RecordingSession;
   browser?: Browser;
@@ -34,6 +41,7 @@ interface ActiveRecording {
   recentUi: UiEvidence[];
   manualEvents: UiEvidence[];
   externalBrowser: boolean;
+  guard: ActionGuard;
 }
 
 const EMPTY_JPEG = Buffer.from(
@@ -55,6 +63,7 @@ export class BrowserRecorder {
     writePageInventory: (page, snapshot) => this.writePageInventory(page, snapshot),
     recentUserActions: () => this.recentUserActions(),
     recordedManualSteps: () => this.recordedManualSteps(),
+    followManualSteps: () => Boolean(this.active?.guard.followManualSteps),
     recordSelectObservation: info => this.writeUiEvent(this.currentPage(), {
       eventType: "change",
       label: info.label,
@@ -192,7 +201,8 @@ export class BrowserRecorder {
       lastUiByPage: new WeakMap(),
       recentUi: [],
       manualEvents: [],
-      externalBrowser: false
+      externalBrowser: false,
+      guard: { exerciseFormCount: 0, submitFormCount: 0, failedKeys: [], followManualSteps: false }
     };
 
     await writeJson(path.join(dir, "session.json"), session);
@@ -724,6 +734,44 @@ export class BrowserRecorder {
     });
   }
 
+  private actionKey(action: string, selector?: string) {
+    return `${action}:${selector || ""}`;
+  }
+
+  private stopBecauseStuck(reason: string) {
+    if (this.active) this.active.guard.followManualSteps = true;
+    return {
+      ok: false,
+      stopped: true,
+      followManualSteps: true,
+      reason,
+      recordedManualSteps: this.recordedManualSteps()
+    };
+  }
+
+  private rememberFailure(action: string, selector?: string) {
+    if (!this.active) return;
+    this.active.guard.followManualSteps = true;
+    const key = this.actionKey(action, selector);
+    if (!this.active.guard.failedKeys.includes(key)) this.active.guard.failedKeys.push(key);
+  }
+
+  private alreadyFailed(action: string, selector?: string) {
+    return Boolean(this.active?.guard.failedKeys.includes(this.actionKey(action, selector)));
+  }
+
+  private async guardedPageAction<T>(action: string, selector: string | undefined, work: () => Promise<T>): Promise<T | ReturnType<BrowserRecorder["stopBecauseStuck"]>> {
+    if (this.alreadyFailed(action, selector)) {
+      return this.stopBecauseStuck(`同一${action}已失败，禁止重试：${selector || ""}。有 recordedManualSteps 就按步骤走，否则请用户切到手动录制。`);
+    }
+    try {
+      return await work();
+    } catch (error) {
+      this.rememberFailure(action, selector);
+      throw error;
+    }
+  }
+
   async control(command: {
     action: "goto" | "snapshot" | "click" | "fill" | "select" | "choose" | "press" | "wait" | "screenshot" | "exercise-form" | "submit-form";
     selector?: string;
@@ -756,32 +804,40 @@ export class BrowserRecorder {
         case "click": {
           if (!command.selector) throw new Error("click requires selector");
           try {
-            const clicked = await this.actions.click(command.selector);
-            await this.followAfterGesture(page, known, watch?.appeared || []);
-            return { ...clicked, url: this.currentPage().url(), pageError: this.pageError };
+            return await this.guardedPageAction("click", command.selector, async () => {
+              const clicked = await this.actions.click(command.selector!);
+              await this.followAfterGesture(page, known, watch?.appeared || []);
+              return { ...clicked, url: this.currentPage().url(), pageError: this.pageError };
+            });
           } finally {
             watch?.stop();
           }
         }
         case "fill":
           if (!command.selector || typeof command.value !== "string") throw new Error("fill requires selector and string value");
-          await this.actions.fillField(command.selector, command.value);
-          return { ok: true };
+          return this.guardedPageAction("fill", command.selector, async () => {
+            await this.actions.fillField(command.selector!, command.value as string);
+            return { ok: true };
+          });
         case "choose":
           if (!command.selector || command.value === undefined) throw new Error("choose requires selector and value");
-          return this.actions.chooseOption(command.selector, command.value);
+          return this.guardedPageAction("choose", command.selector, () => this.actions.chooseOption(command.selector!, command.value!));
         case "select":
           if (!command.selector || command.value === undefined) throw new Error("select requires selector and value");
-          try {
-            await (await this.actions.locate(command.selector)).selectOption(command.value, { timeout: 1_500 });
-            return { ok: true };
-          } catch {
-            return this.actions.chooseOption(command.selector, command.value);
-          }
+          return this.guardedPageAction("select", command.selector, async () => {
+            try {
+              await (await this.actions.locate(command.selector!)).selectOption(command.value!, { timeout: 1_500 });
+              return { ok: true };
+            } catch {
+              return this.actions.chooseOption(command.selector!, command.value!);
+            }
+          });
         case "press":
           if (!command.selector || !command.key) throw new Error("press requires selector and key");
-          await (await this.actions.locate(command.selector)).press(command.key, { timeout: 4_000 });
-          return { ok: true };
+          return this.guardedPageAction("press", command.selector, async () => {
+            await (await this.actions.locate(command.selector!)).press(command.key!, { timeout: 4_000 });
+            return { ok: true };
+          });
         case "wait":
           await page.waitForTimeout(Math.max(0, Math.min(command.ms || 500, 8_000)));
           return { ok: true };
@@ -794,10 +850,24 @@ export class BrowserRecorder {
         }
         case "snapshot":
           return this.actions.captureSnapshot();
-        case "exercise-form":
-          return this.actions.exerciseForm();
-        case "submit-form":
-          return this.actions.submitForm();
+        case "exercise-form": {
+          if ((this.active?.guard.exerciseFormCount || 0) >= 2) {
+            return this.stopBecauseStuck("exercise-form 已用满 2 次，禁止再循环填表。按 recordedManualSteps 或 manual-steps.md 操作，点不动就请用户切到手动录制。");
+          }
+          if (this.active) this.active.guard.exerciseFormCount += 1;
+          const result = await this.actions.exerciseForm() as { ok?: boolean };
+          if (!result.ok && this.active) this.active.guard.followManualSteps = true;
+          return result;
+        }
+        case "submit-form": {
+          if ((this.active?.guard.submitFormCount || 0) >= 2) {
+            return this.stopBecauseStuck("submit-form 已用满 2 次，禁止再循环提交。按 recordedManualSteps 操作，或请用户切到手动录制。");
+          }
+          if (this.active) this.active.guard.submitFormCount += 1;
+          const result = await this.actions.submitForm() as { ok?: boolean };
+          if (!result.ok && this.active) this.active.guard.followManualSteps = true;
+          return result;
+        }
       }
     });
   }

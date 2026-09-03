@@ -2404,6 +2404,48 @@ test("follows a new tab after a link click and stays on the old page if the tab 
   }
 });
 
+test("failed click is not retried and exercise-form stops after two calls", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-noloop-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>防卡死</title></head><body>
+      <button id="ok">确定</button>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "noloop");
+    await assert.rejects(() => recorder.control({ action: "click", selector: "text=不存在的按钮" }));
+    const retry: any = await recorder.control({ action: "click", selector: "text=不存在的按钮" });
+    assert.equal(retry.stopped, true, JSON.stringify(retry));
+    assert.equal(retry.followManualSteps, true);
+    assert.match(String(retry.reason || ""), /禁止重试/);
+    await recorder.control({ action: "exercise-form" });
+    await recorder.control({ action: "exercise-form" });
+    const third: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(third.stopped, true, JSON.stringify(third));
+    assert.match(String(third.reason || ""), /exercise-form/);
+    const snap: any = await recorder.control({ action: "snapshot" });
+    assert.equal(snap.followManualSteps, true);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 function parseFieldInstant(value?: string) {
   const text = String(value || "");
   const match = text.match(/(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}(?::\d{2})?))?/);
