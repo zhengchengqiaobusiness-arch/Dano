@@ -2500,6 +2500,81 @@ test("failed click is not retried and exercise-form stops after two calls", asyn
   }
 });
 
+test("Arco form keeps official labels after typing and records a full form on manual intervention", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-arco-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>三定职能</title></head><body>
+      <form class="arco-form">
+        <div class="arco-form-item" style="position:fixed;left:20px;top:40px;width:360px;height:70px">
+          <label class="arco-form-item-label">职能描述</label>
+          <textarea class="arco-textarea" style="width:300px;height:36px">办公室</textarea>
+        </div>
+        <div class="arco-form-item" style="position:fixed;left:20px;top:130px;width:360px;height:50px">
+          <label class="arco-form-item-label">一级内设机构</label>
+          <div class="arco-select-view-single" id="org-host" style="width:300px;height:36px;border:1px solid #999">
+            <input class="arco-select-view-input" style="width:1px;height:1px;opacity:0.2">
+            <span class="arco-select-view-value">请选择</span>
+          </div>
+        </div>
+        <div class="arco-form-item" style="position:fixed;left:20px;top:200px;width:360px;height:70px">
+          <label class="arco-form-item-label">联系人</label>
+          <input class="arco-input" style="position:fixed;left:20px;top:230px;width:300px;height:30px">
+        </div>
+      </form>
+      <script>
+        document.getElementById("org-host").addEventListener("click", () => {
+          document.getElementById("org-host").dataset.opened = "1";
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    const session = await recorder.start(`http://127.0.0.1:${address.port}/`, "arco-manual");
+    const before: any = await recorder.control({ action: "snapshot" });
+    assert.equal((before.formFields || []).some((field: any) => field.label === "职能描述" && field.value === "办公室"), true, JSON.stringify(before.formFields));
+    assert.equal((before.formFields || []).some((field: any) => field.label === "一级内设机构"), true, JSON.stringify(before.formFields));
+    await recorder.manualControl({ action: "click", x: 80, y: 245 });
+    await recorder.manualControl({ action: "text", value: "张三" });
+    const afterType: any = await recorder.control({ action: "snapshot" });
+    assert.equal((afterType.formFields || []).some((field: any) => field.label === "职能描述"), true, JSON.stringify(afterType.formFields));
+    assert.equal((afterType.formFields || []).some((field: any) => field.label === "办公室"), false, JSON.stringify(afterType.formFields));
+    assert.equal((afterType.formFields || []).some((field: any) => field.label === "联系人" && String(field.value).includes("张三")), true, JSON.stringify(afterType.formFields));
+    const chosen: any = await recorder.control({ action: "click", selector: "label=一级内设机构" });
+    assert.equal(chosen.stopped, undefined, JSON.stringify(chosen));
+    await recorder.stop();
+    const events = await readJsonl<EvidenceEvent>(session.eventsFile);
+    const inventory = [...events].reverse().find(event => event.kind === "ui" && event.form?.some(field => field.label === "联系人"));
+    assert.equal(inventory?.kind, "ui");
+    if (inventory?.kind === "ui") {
+      assert.equal(inventory.form?.some(field => field.label === "职能描述"), true, JSON.stringify(inventory.form));
+      assert.equal(inventory.form?.some(field => field.label === "一级内设机构"), true, JSON.stringify(inventory.form));
+      assert.equal(inventory.form?.some(field => field.label === "联系人" && String(field.value).includes("张三")), true, JSON.stringify(inventory.form));
+    }
+    const guide = await readFile(session.manualStepsFile!, "utf8");
+    assert.match(guide, /联系人/);
+    assert.match(guide, /张三/);
+    assert.match(guide, /提交时页面字段|职能描述/);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 function parseFieldInstant(value?: string) {
   const text = String(value || "");
   const match = text.match(/(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}(?::\d{2})?))?/);

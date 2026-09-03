@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { EvidenceEvent } from "../src/domain.js";
+import type { EvidenceEvent, UiEvidence } from "../src/domain.js";
 import { buildManualSteps, describeManualStep, renderManualStepsMarkdown } from "../src/record/manual-steps.js";
 
 function ui(partial: Partial<EvidenceEvent> & Pick<Extract<EvidenceEvent, { kind: "ui" }>, "eventType">): EvidenceEvent {
@@ -17,7 +17,8 @@ function ui(partial: Partial<EvidenceEvent> & Pick<Extract<EvidenceEvent, { kind
     text: (partial as { text?: string }).text,
     value: (partial as { value?: unknown }).value,
     inputType: (partial as { inputType?: string }).inputType,
-    scope: (partial as { scope?: "page" | "dialog" }).scope
+    scope: (partial as { scope?: "page" | "dialog" }).scope,
+    form: (partial as { form?: UiEvidence["form"] }).form
   } as EvidenceEvent;
 }
 
@@ -38,13 +39,40 @@ test("manual steps keep click, fill, choose and submit, and skip snapshots", () 
   assert.match(markdown, /请假天数/);
 });
 
-test("consecutive identical fills collapse into one step", () => {
+test("consecutive fills on the same control keep the last value", () => {
   const steps = buildManualSteps([
     ui({ id: "a", eventType: "input", label: "备注", value: "甲" }),
     ui({ id: "b", eventType: "input", label: "备注", value: "甲", at: "2026-09-03T00:00:01.000Z" }),
     ui({ id: "c", eventType: "input", label: "备注", value: "乙" })
   ]);
-  assert.equal(steps.length, 2);
-  assert.equal(steps[0]!.value, "甲");
-  assert.equal(steps[1]!.value, "乙");
+  assert.equal(steps.length, 1);
+  assert.equal(steps[0]!.value, "乙");
+});
+
+test("css-only clicks are dropped and form labels beat typed values", () => {
+  const steps = buildManualSteps([
+    ui({
+      id: "a",
+      eventType: "input",
+      label: "办公室",
+      value: "办公室",
+      selector: "div.arco-form-item-content-wrapper > textarea.arco-textarea",
+      form: [{ label: "职能描述", type: "textarea", value: "办公室" }]
+    } as EvidenceEvent & { form: Array<{ label: string; type: string; value: string }> }),
+    ui({
+      id: "b",
+      eventType: "click",
+      selector: "div.arco-input-wrapper.arco-input-focus > input.arco-input"
+    })
+  ]);
+  assert.equal(steps.length, 1);
+  assert.equal(steps[0]!.action, "fill");
+  assert.equal(steps[0]!.label, "职能描述");
+  const markdown = renderManualStepsMarkdown(steps, {
+    sessionId: "rec-1",
+    startUrl: "https://example.test/leave",
+    form: [{ label: "职能描述", type: "textarea", value: "办公室" }]
+  });
+  assert.match(markdown, /提交时页面字段/);
+  assert.match(markdown, /职能描述：办公室/);
 });

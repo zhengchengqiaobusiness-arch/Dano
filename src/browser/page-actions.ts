@@ -349,11 +349,11 @@ export class PageActions {
   }
 
   async tableControl(root: Frame | Locator, name: string) {
-    const tables = root.locator(".el-table, .ant-table, table");
+    const tables = root.locator(".el-table, .ant-table, .arco-table, table");
     const tableCount = await tables.count();
     for (let tableIndex = 0; tableIndex < tableCount; tableIndex += 1) {
       const table = tables.nth(tableIndex);
-      const headers = table.locator(".el-table__header th, .el-table__header-wrapper th, thead th, .ant-table-thead th, .el-table__header .el-table__cell");
+      const headers = table.locator(".el-table__header th, .el-table__header-wrapper th, thead th, .ant-table-thead th, .el-table__header .el-table__cell, .arco-table-th");
       const headerCount = await headers.count();
       for (let index = 0; index < headerCount; index += 1) {
         const text = ((await headers.nth(index).innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
@@ -384,6 +384,7 @@ export class PageActions {
       const isChooserHost = (node: Element) => {
         const cls = String(node.className || "");
         if (node.getAttribute("role") === "combobox" && !node.matches("input, textarea")) return true;
+        if (/(?:^|\s)(el-select__wrapper|ant-select-selector|arco-select-view)/.test(cls)) return true;
         return /(?:^|\s)(el-select|ant-select|arco-select|n-select|el-cascader|el-date-editor|ant-picker|arco-picker)(?:\s|$)/.test(cls);
       };
       let best = el;
@@ -614,7 +615,10 @@ export class PageActions {
     await this.completeChooserDialog();
     await this.dismissTransientOverlays();
     const surface = target.locator(WIDGET_SURFACES);
-    const clickable = (await surface.count()) ? surface.first() : target;
+    const nested = target.locator(".el-select__wrapper, .el-input__wrapper, .ant-select-selector, .arco-select-view, [class*='arco-select-view']");
+    const clickable = (await surface.count())
+      ? surface.first()
+      : (await nested.count()) ? nested.first() : target;
     const opened = async (before: { dialogs: number; drops: string; dates: string }) => {
       if (!(await this.chooserOpened(before))) return undefined;
       return this.dropdownScope();
@@ -918,6 +922,12 @@ export class PageActions {
       todoFields: (snap.formFields || []).filter(field => !field.skip && !field.disabled && !field.filled),
       todoCount: (snap.formFields || []).filter(field => !field.skip && !field.disabled && !field.filled).length
     };
+  }
+
+  async recordFormInventory() {
+    const snapshot = await this.captureFields();
+    await this.host.writePageInventory(this.page(), snapshot);
+    return snapshot;
   }
 
   async captureSnapshot(): Promise<PageSnapshot> {

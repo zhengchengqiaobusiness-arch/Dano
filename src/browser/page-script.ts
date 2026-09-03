@@ -54,7 +54,7 @@ export const PAGE_HELPERS = String.raw`
   const SLOT_HOST_SEL = "[class*='process-node'], [class*='workflow-node'], [class*='user-select'], [class*='assignee'], [class*='approver'], [class*='approval-node'], [class*='flow-node'], [class*='activity'], .el-timeline-item, [class*='timeline-item'], [id*='activity-task']";
   const WIDE_SEL = DIALOG_SEL + ", form, [role='form'], body, main, header, nav, aside, footer, .el-overlay, .ant-modal-wrap, [class*='overlay']";
   const FIELD_GROUP_SEL = FORM_ITEM_SEL + ", label, dt, dd, li, [class*='form-field'], [class*='field-item'], [class*='form-row'], [class*='field-row']";
-  const FIELD_CONTROL_SEL = "input, textarea, select, [role='combobox'], [role='textbox'], [contenteditable='true'], button, [role='button'], [aria-haspopup]";
+  const FIELD_CONTROL_SEL = "input, textarea, select, [role='combobox'], [role='textbox'], [contenteditable='true'], button, [role='button'], [aria-haspopup], .arco-select-view, [class*='arco-select-view']:not(input):not(textarea):not([class*='input']):not([class*='value']):not([class*='suffix']):not([class*='arrow']), .el-select__wrapper, .ant-select-selector";
 
   const isWide = (el) => {
     if (!(el instanceof Element)) return true;
@@ -89,39 +89,55 @@ export const PAGE_HELPERS = String.raw`
     if (!cell || !row) return "";
     const cells = [...row.children].filter((node) => node.matches("td, th, .el-table__cell, .ant-table-cell"));
     const index = cells.indexOf(cell);
-    const host = el.closest(".el-table, .ant-table") || el.closest("table");
-    const headerRow = host?.querySelector(".el-table__header tr, .el-table__header-wrapper tr, .ant-table-thead tr, thead tr");
+    const host = el.closest(".el-table, .ant-table, .arco-table") || el.closest("table");
+    const headerRow = host?.querySelector(".el-table__header tr, .el-table__header-wrapper tr, .ant-table-thead tr, .arco-table-tr, thead tr");
     const headers = headerRow
-      ? [...headerRow.children].filter((node) => node.matches("th, td, .el-table__cell, .ant-table-cell"))
-      : [...(host?.querySelectorAll("th, .el-table__header .el-table__cell, .ant-table-thead th") || [])];
+      ? [...headerRow.children].filter((node) => node.matches("th, td, .el-table__cell, .ant-table-cell, .arco-table-th"))
+      : [...(host?.querySelectorAll("th, .el-table__header .el-table__cell, .ant-table-thead th, .arco-table-th") || [])];
     return index >= 0 ? clean(headers[index]?.textContent || "") : "";
   };
 
+  const stripControls = (node) => {
+    const clone = node.cloneNode(true);
+    clone.querySelectorAll(FIELD_CONTROL_SEL + ", .el-select, .ant-select, .arco-select, .arco-input-wrapper, .arco-textarea-wrapper, .arco-select-view, svg, i, .arco-form-item-tooltip").forEach((item) => item.remove());
+    return clean(clone.textContent).replace(/[:：*]\s*$/g, "");
+  };
+
+  const formItemLabel = (item) => {
+    if (!(item instanceof Element)) return "";
+    const official = item.querySelector(".el-form-item__label, .ant-form-item-label > label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label");
+    if (official) return stripControls(official);
+    const any = item.querySelector(FORM_LABEL_SEL);
+    return any ? stripControls(any) : "";
+  };
+
   const labelOf = (el) => {
-    if (el.labels?.length) return clean([...el.labels].map((item) => item.textContent).join(" "));
+    const item = formItemOf(el);
+    const official = formItemLabel(item);
+    if (official) return official;
+    if (el.labels?.length) {
+      const text = clean([...el.labels].map((lab) => stripControls(lab)).join(" "));
+      const value = displayValue(el);
+      if (text && text !== value && !/^(字段|输入|文本|内容)$/.test(text)) return text;
+    }
     const aria = el.getAttribute("aria-label");
-    if (aria && !EMPTY_VALUE.test(aria) && !generatedName(aria)) return clean(aria);
+    if (aria && !EMPTY_VALUE.test(aria) && !generatedName(aria) && aria !== displayValue(el)) return clean(aria);
     const labelled = el.getAttribute("aria-labelledby");
     if (labelled) {
       const named = clean(labelled.split(/\s+/).map((id) => document.getElementById(id)?.textContent || "").join(" "));
-      if (named) return named;
+      if (named && named !== displayValue(el)) return named;
     }
     const parentLabel = el.closest("label");
     if (parentLabel) {
-      const clone = parentLabel.cloneNode(true);
-      clone.querySelectorAll("input,select,textarea,.el-select,.ant-select").forEach((node) => node.remove());
-      const text = clean(clone.textContent);
-      if (text) return text;
+      const text = stripControls(parentLabel);
+      if (text && text !== displayValue(el)) return text;
     }
-    const item = formItemOf(el);
-    const itemLabel = item?.querySelector(FORM_LABEL_SEL);
-    if (itemLabel?.textContent) return clean(itemLabel.textContent);
     const header = tableHeaderOf(el);
     if (header) return header;
     const placeholder = el.getAttribute("placeholder") || "";
-    if (placeholder && !EMPTY_VALUE.test(placeholder)) return clean(placeholder);
+    if (placeholder && !EMPTY_VALUE.test(placeholder) && !PROMPT_ONLY.test(placeholder)) return clean(placeholder);
     const nearby = nearbyLabel(el);
-    if (nearby) return nearby;
+    if (nearby && nearby !== displayValue(el)) return nearby;
     return "";
   };
 
@@ -205,8 +221,9 @@ export const PAGE_HELPERS = String.raw`
       if (isWide(node) || node.matches(FORM_ITEM_SEL)) break;
       const cls = String(node.className || "");
       const role = node.getAttribute("role") || "";
-      if (/input-wrapper|suffix|caret|search|selection-item/i.test(cls)) continue;
+      if (/input-wrapper|suffix|caret|search|selection-item|selected-item|placeholder|(?:^|\s)el-select__selection(?:\s|$)/i.test(cls)) continue;
       if (role === "combobox" && !node.matches("input, textarea")) return node;
+      if (/(?:^|\s)(el-select__wrapper|ant-select-selector|arco-select-view)/.test(cls)) return node;
       if (/(?:^|\s)(el-select|ant-select|arco-select|n-select|el-cascader|el-date-editor|ant-picker|arco-picker)(?:\s|$)/.test(cls)) return node;
       if (/(?:^|\s|_|-)(select|picker|cascader|date-editor)(?:\s|$|_)/i.test(cls) && !/dropdown|panel|item|option/i.test(cls)) return node;
     }
@@ -225,7 +242,7 @@ export const PAGE_HELPERS = String.raw`
   const isChooserFilter = (el) => {
     if (!(el instanceof HTMLInputElement)) return false;
     if (el.getAttribute("role") === "combobox") return false;
-    if (/select__input|selection-search|search-input|filter/i.test(String(el.className || ""))) return true;
+    if (/select__input|selection-search|search-input|filter|select-view-input/i.test(String(el.className || ""))) return true;
     return Boolean(el.getAttribute("aria-autocomplete") && chooserHostOf(el));
   };
 
@@ -278,7 +295,7 @@ export const PAGE_HELPERS = String.raw`
     if (/^(date|datetime-local|time|month|week)$/.test(type) || /日期|时间|(^|[^a-z])date|time/i.test(blob)) return "date";
     if (el.closest(".el-date-editor, .el-date-picker, .ant-picker, .arco-picker")) return "date";
     if (/dialog/i.test(popup)) return "picker";
-    if (el.closest(".el-select, .ant-select, .arco-select, .n-select, .el-cascader")) return "select";
+    if (el.closest(".el-select, .ant-select, .arco-select, .n-select, .el-cascader") || /(?:^|\s)(el-select|ant-select|arco-select|n-select)/.test(String(el.className || ""))) return "select";
     if (el instanceof HTMLSelectElement || role === "combobox" || /listbox|menu/i.test(popup) || el.closest("[role='combobox']")) return "select";
     if (el.hasAttribute("readonly") && !isDisabledWidget(el) && (EMPTY_VALUE.test(placeholder) || /请选择|please select/i.test(blob))) return "picker";
     if (isDisabledWidget(el)) return "readonly";
@@ -455,6 +472,7 @@ export const PAGE_HELPERS = String.raw`
   const isPickerSlot = (el) => {
     if (!(el instanceof HTMLElement) || !isVisible(el)) return false;
     if (el.matches("input, textarea, select, [role=combobox]")) return false;
+    if (chooserHostOf(el) || el.matches(".el-select__wrapper, .ant-select-selector, .arco-select-view, [class*='arco-select-view']") || el.closest(".el-select, .ant-select, .arco-select, .n-select, .el-cascader")) return false;
     if (el.closest(PICKER_SEL + ", " + CHROME_SEL)) return false;
     if (el.closest(".el-timeline-item__dot, [class*='timeline-item__dot']")) return false;
     if (el.closest("tbody, .el-table__body, .ant-table-tbody, thead, .el-table__header")) return false;
@@ -512,13 +530,21 @@ export const PAGE_HELPERS = String.raw`
   const uniqueControls = (els) => {
     const out = [];
     const seen = new Set();
-    const ranked = [...els].sort((left, right) => Number(isChooserFilter(left)) - Number(isChooserFilter(right)));
+    const kitRootOf = (el) => el.closest?.(".el-select, .ant-select, .arco-select, .n-select, .el-cascader, .el-date-editor, .ant-picker, .arco-picker") || chooserHostOf(el);
+    const rank = (el) => {
+      if (isChooserFilter(el)) return 2;
+      if (el.matches?.("input, textarea, select, [role='combobox']")) return 0;
+      return 1;
+    };
+    const ranked = [...els].sort((left, right) => rank(left) - rank(right));
     for (const el of ranked) {
       if (!el || seen.has(el)) continue;
       const host = chooserHostOf(el);
-      if (host && seen.has(host)) continue;
+      const kit = kitRootOf(el);
+      if ((host && seen.has(host)) || (kit && seen.has(kit))) continue;
       seen.add(el);
       if (host) seen.add(host);
+      if (kit) seen.add(kit);
       out.push(el);
     }
     return out;
@@ -541,6 +567,15 @@ export const PAGE_HELPERS = String.raw`
       if (numbered) return controls[index] || null;
       return controls.length === 1 ? controls[0] : null;
     };
+    const officialHits = [];
+    for (const item of queryDeep(root, FORM_ITEM_SEL)) {
+      if (!isVisible(item)) continue;
+      const official = formItemLabel(item);
+      if (official !== want && official !== base) continue;
+      officialHits.push(...itemControls(item).filter((el) => !isChooserFilter(el)));
+    }
+    const officialPicked = pickFrom(uniqueControls(officialHits));
+    if (officialPicked) return officialPicked;
     const afterLabel = (lab) => {
       const id = lab.getAttribute && lab.getAttribute("for");
       const doc = lab.getRootNode ? lab.getRootNode() : document;
@@ -663,8 +698,14 @@ export const PAGE_HELPERS = String.raw`
   const itemControls = (item) => {
     const range = rangeInputsOf(item);
     if (range.length >= 2) return range;
-    const fields = uniqueControls([...item.querySelectorAll("input, textarea, select, [role=combobox], [contenteditable=true]")]
-      .filter((el) => !el.closest(PICKER_SEL) && isFieldControl(el)));
+    const promoted = [...item.querySelectorAll(FIELD_CONTROL_SEL)].flatMap((el) => {
+      if (isChooserFilter(el)) {
+        const host = chooserHostOf(el);
+        return host ? [host] : [];
+      }
+      return [el];
+    });
+    const fields = uniqueControls(promoted.filter((el) => !el.closest(PICKER_SEL) && isFieldControl(el) && !isChooserFilter(el)));
     const slots = [...item.querySelectorAll("button, [role=button], [class*='add-user'], [class*='user-select'], [class*='plus'], [class*='avatar']")].filter(isPickerSlot);
     return [...fields, ...slots];
   };
@@ -676,7 +717,9 @@ export const PAGE_HELPERS = String.raw`
     if (el.closest(PICKER_SEL + ", .el-pagination, .ant-pagination, .arco-pagination, thead, .el-table__header, .el-table__header-wrapper, .ant-table-thead")) return null;
     const type = (el.getAttribute("type") || "").toLowerCase();
     if (/hidden|submit|button|reset|image/.test(type)) return null;
-    const label = distinctLabel(el, labelOf(el) || clean(item?.querySelector?.(FORM_LABEL_SEL)?.textContent || "") || nearbyLabel(el) || nameOf(el) || "字段", 0, 1);
+    const official = formItemLabel(item) || labelOf(el) || nearbyLabel(el) || tableHeaderOf(el) || nameOf(el) || "";
+    const label = distinctLabel(el, official, 0, 1);
+    if (!label) return null;
     const kind = widgetKind(item, el, label);
     const value = displayValue(el);
     const required = Boolean(item?.classList?.contains("is-required") || el.hasAttribute("required") || el.getAttribute("aria-required") === "true" || el.closest(".is-required"));
@@ -912,10 +955,10 @@ export const UI_RECORDER_SCRIPT = `(() => {
   const send = (eventType, rawTarget) => {
     const el = rawTarget instanceof HTMLElement ? rawTarget : rawTarget?.parentElement;
     if (!(el instanceof HTMLElement)) return;
-    const control = el.matches('input,select,textarea,button,[contenteditable="true"],[role="button"],[role="combobox"],[role="checkbox"],[role="switch"],[role="radio"],[role="option"]')
+    const control = el.matches('input,select,textarea,button,[contenteditable="true"],[role="button"],[role="combobox"],[role="checkbox"],[role="switch"],[role="radio"],[role="option"],.arco-select-view,[class*="arco-select-view"],.el-select__wrapper,.ant-select-selector')
       ? el
-      : el.closest('input,select,textarea,button,[contenteditable="true"],[role="button"],[role="combobox"],[role="checkbox"],[role="switch"],[role="radio"],[role="option"],a') || el;
-    const formContainer = control.closest('form, [role="form"], .el-form, .ant-form, .arco-form, [data-form], [role="dialog"], .el-dialog, .el-overlay-dialog, .ant-modal, .arco-modal');
+      : el.closest('input,select,textarea,button,[contenteditable="true"],[role="button"],[role="combobox"],[role="checkbox"],[role="switch"],[role="radio"],[role="option"],.arco-select-view,[class*="arco-select-view"],.el-select__wrapper,.ant-select-selector,a') || el;
+    const formContainer = control.closest('form, [role="form"], .el-form, .ant-form, .arco-form, [data-form], [role="dialog"], [role="alertdialog"], .el-dialog, .el-drawer, .el-overlay-dialog, .ant-modal, .ant-drawer, .arco-modal, .arco-drawer') || activeScope();
     const payload = {
       eventType,
       pageUrl: location.href,
@@ -934,7 +977,7 @@ export const UI_RECORDER_SCRIPT = `(() => {
       options: eventType === "change" || eventType === "submit" ? (optionsOf(control) || collectOptionRecords()) : optionsOf(control),
       visibleOptions: eventType === "change" || eventType === "submit" ? collectVisibleOptions(document) : [],
       scope: scopeName(formContainer || control),
-      form: eventType === "click" ? undefined : formSnapshot(formContainer)
+      form: formSnapshot(formContainer)
     };
     Promise.resolve(window.__bssRecordUi?.(payload)).catch(() => {});
   };
