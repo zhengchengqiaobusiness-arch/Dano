@@ -1,11 +1,12 @@
 import type { Frame, Locator, Page } from "playwright";
-import { MARK_LABELED_CONTROL, SNAPSHOT_IN_PAGE } from "./page-script.js";
+import { MARK_LABELED_CONTROL, SNAPSHOT_FIELDS_IN_PAGE, SNAPSHOT_IN_PAGE } from "./page-script.js";
 
 export const FORM_ITEMS = ".el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [class*='form-item']";
 export const FORM_LABELS = "label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label";
 export const DIALOGS = "[role='dialog']:visible, [role='alertdialog']:visible, .el-dialog:visible, .el-drawer:visible, .ant-modal:visible, .ant-drawer-content:visible, .arco-modal:visible, .arco-drawer:visible";
-export const DROPDOWNS = ".el-select-dropdown:visible, .el-cascader__dropdown:visible, .el-autocomplete-suggestion:visible, .ant-select-dropdown:visible, .arco-select-dropdown:visible, [role='listbox']:visible";
-export const DATE_PANELS = ".el-picker-panel:visible, .el-popper.el-date-picker:visible, .el-picker__popper:visible, .ant-picker-dropdown:visible, .arco-picker-container:visible, [class*='picker-dropdown']:visible, [class*='picker-panel']:visible";
+export const DROPDOWNS = ".el-select-dropdown:visible, .el-select__popper:visible, .el-popper.el-select__popper:visible, .el-cascader__dropdown:visible, .el-autocomplete-suggestion:visible, .ant-select-dropdown:visible, .arco-select-dropdown:visible, [role='listbox']:visible";
+export const DATE_PANELS = ".el-picker-panel:visible, .el-popper.el-date-picker:visible, .el-picker__popper:visible, .el-date-range-picker:visible, .el-time-panel:visible, .ant-picker-dropdown:visible, .arco-picker-container:visible, [class*='picker-dropdown']:visible, [class*='picker-panel']:visible";
+const PICKER_DIALOG = /picker-panel|picker-dropdown|picker__popper|el-date-picker|el-date-range-picker|el-time-panel|el-time-picker|ant-picker-dropdown|arco-picker-container|datepicker/i;
 export const OPTION_ITEMS = "[role='option'], [role='treeitem'], .el-select-dropdown__item, .el-cascader-node, .el-autocomplete-suggestion__list li, .ant-select-item-option, .arco-select-option, .n-base-select-option";
 export const DIALOG_CHOICES = "[role='option'], [role='treeitem'], [role='listitem'], [role='row'], tbody tr, .el-table__body .el-table__row, .el-tree-node__content, .el-cascader-node, [role='radio'], .el-checkbox";
 export const WIDGET_SURFACES = "xpath=ancestor-or-self::*[contains(@class,'el-select__wrapper') or contains(@class,'el-input__wrapper') or contains(@class,'el-date-editor') or contains(@class,'ant-select-selector') or contains(@class,'ant-picker') or contains(@class,'arco-select-view') or contains(@class,'arco-picker') or contains(@class,'picker-range') or contains(@class,'date-editor')][1]";
@@ -123,8 +124,32 @@ export class PageActions {
     return Boolean(await this.lastFormDialog(this.page()));
   }
 
+  private async isChooserDialog(item: Locator) {
+    return item.evaluate(el => {
+      const title = String((el.querySelector(".el-dialog__title, .el-dialog__header, .ant-modal-title, .arco-modal-title, .el-drawer__title, [class*='dialog__title'], [class*='dialog-header'], [class*='modal-title']") || {}).textContent || "").replace(/\s+/g, " ").trim();
+      const formItems = el.querySelectorAll(".el-form-item, .ant-form-item, .arco-form-item").length;
+      const rows = el.querySelectorAll("tbody tr, .el-table__row, .el-tree-node").length;
+      const confirm = [...el.querySelectorAll("button, [role='button']")].some(btn => /^(确定|确认|选择|ok|confirm)$/i.test(String(btn.textContent || "").replace(/\s+/g, "")));
+      if (/选择(用户|人员|员工|审批|部门|项目|角色|岗位|成员|产品|供应商|商品|客户|物料|仓库|账户)|选人|选部门|(用户|人员|产品|供应商)选择/.test(title) && formItems <= 8) return true;
+      const tree = el.querySelectorAll(".el-tree, [role='tree'], .el-tree-node").length;
+      if (tree >= 1 && confirm && formItems <= 8) return true;
+      return rows >= 1 && formItems <= 3 && confirm;
+    }).catch(() => false);
+  }
+
   private async isFormDialog(item: Locator) {
-    return item.evaluate(el => !/picker-panel|picker-dropdown|datepicker|date-picker/i.test(el.className || "")).catch(() => true);
+    if (await this.isChooserDialog(item)) return false;
+    return item.evaluate((el, pattern) => !new RegExp(pattern, "i").test(String(el.className || "")), PICKER_DIALOG.source).catch(() => true);
+  }
+
+  private async lastChooserDialog(root?: Frame | Locator | Page) {
+    const all = (root || this.page()).locator(DIALOGS);
+    const count = await all.count();
+    for (let index = count - 1; index >= 0; index -= 1) {
+      const item = all.nth(index);
+      if (await this.isChooserDialog(item)) return item;
+    }
+    return undefined;
   }
 
   private async lastFormDialog(root: Frame | Locator | Page) {
@@ -185,6 +210,32 @@ export class PageActions {
     return undefined;
   }
 
+  private async uniquePlaceholder(found: Locator, selector: string) {
+    const placeholder = selector.match(/^placeholder=(.+)$/s)?.[1] || "";
+    const count = await found.count();
+    const scored: Array<{ item: Locator; textarea: boolean; inTable: boolean; inForm: boolean }> = [];
+    for (let index = 0; index < count; index += 1) {
+      const item = found.nth(index);
+      const meta = await item.evaluate(el => ({
+        textarea: el.tagName === "TEXTAREA",
+        inTable: Boolean(el.closest("tbody, .el-table__body, .ant-table-tbody, td, .el-table__cell")),
+        inForm: Boolean(el.closest(".el-form-item, .ant-form-item, .arco-form-item"))
+      })).catch(() => undefined);
+      if (meta) scored.push({ item, ...meta });
+    }
+    const formOnly = scored.filter(item => item.inForm && !item.inTable);
+    if (formOnly.length === 1) return formOnly[0]!.item;
+    const textarea = formOnly.filter(item => item.textarea);
+    if (textarea.length === 1) return textarea[0]!.item;
+    if (!placeholder) return undefined;
+    const name = placeholder.replace(/^(请输入|请选择|请填写|please enter|please select|please choose)\s*/i, "");
+    if (name && name !== placeholder) {
+      const labeled = await this.labeledControl(this.page(), name);
+      if (labeled) return labeled;
+    }
+    return undefined;
+  }
+
   private async labeledControl(root: Frame | Locator, name: string) {
     const mark = `bss-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const scope = this.scopeRoot(root);
@@ -212,7 +263,7 @@ export class PageActions {
   }
 
   isFieldSelector(selector: string) {
-    return /^(label|placeholder)=/i.test(selector);
+    return /^(label|placeholder|column)=/i.test(selector);
   }
 
   async locate(selector: string) {
@@ -238,8 +289,13 @@ export class PageActions {
         const scopes: Array<Frame | Locator> = [];
         if (textOnly && await dropdown.count()) scopes.push(dropdown);
         if (dialog) scopes.push(dialog);
-        if (!fieldOnly || !dialog) scopes.push(frame);
+        scopes.push(frame);
         for (const scope of scopes) {
+          if (fieldOnly && /^column=/i.test(selector)) {
+            const table = await this.tableControl(scope, selector.replace(/^column=/i, ""));
+            if (table) return table;
+            continue;
+          }
           if (fieldOnly && /^label=/i.test(selector)) {
             const name = selector.replace(/^label=/i, "");
             const labeled = await this.labeledControl(scope, name);
@@ -257,7 +313,11 @@ export class PageActions {
             if (textOnly && await this.isNavigationTarget(item)) continue;
             return item;
           }
-          if (count > 1 && fieldOnly) continue;
+          if (count > 1 && fieldOnly) {
+            const resolved = await this.uniquePlaceholder(found, selector);
+            if (resolved) return resolved;
+            continue;
+          }
           if (count > 1 && textOnly && ((dialog && scope === dialog) || (await dropdown.count() && scope === dropdown))) {
             const item = found.first();
             if (!(await this.isNavigationTarget(item))) return item;
@@ -346,11 +406,19 @@ export class PageActions {
       if (!(el instanceof Element)) return;
       const host = el.closest(".el-select, .ant-select, .arco-select, .n-select, .el-cascader, .el-date-editor, .ant-picker, .arco-picker")
         || (el instanceof HTMLElement ? el : el.parentElement);
-      if (host instanceof HTMLElement) host.click();
+      const surface = host instanceof Element
+        ? host.querySelector(".el-select__wrapper, .el-input__wrapper, .ant-select-selector, .arco-select-view, .el-select__selected-item, .el-input, .ant-picker-input")
+        : null;
+      const target = (surface instanceof HTMLElement ? surface : host instanceof HTMLElement ? host : null);
+      if (!target) return;
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
+        target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+      }
+      target.click();
     });
   }
 
-  async clickSafely(locator: Locator, intent: "field" | "option" | "button" = "button") {
+  async clickSafely(locator: Locator, intent: "field" | "option" | "button" = "button", retried = false) {
     const kind = await locator.first().evaluate((el, clickIntent) => {
       const box = el.getBoundingClientRect();
       const overlayChrome = ".el-dialog,.el-drawer,.el-picker-panel,.el-select-dropdown,.el-popper,.el-date-picker,.el-select,.el-date-editor,.ant-modal,.ant-select-dropdown,.arco-modal,[role='dialog'],[role='listbox'],[role='option']";
@@ -373,7 +441,12 @@ export class PageActions {
       return "ok";
     }, intent).catch(() => "ok");
     if (kind === "mask") throw new Error("Refusing to click the modal mask; that would close the dialog");
-    if (kind === "occluded") throw new Error("Target is behind an open dialog; click a control inside the dialog or picker");
+    if (kind === "occluded") {
+      if (!retried && intent === "field" && await this.completeChooserDialog()) {
+        return this.clickSafely(locator, intent, true);
+      }
+      throw new Error("Target is behind an open dialog; click a control inside the dialog or picker");
+    }
     if (kind === "nav") throw new Error("Refusing to click navigation; that would leave the form and discard filled fields");
     try {
       await locator.first().click({ timeout: 1_200 });
@@ -393,8 +466,12 @@ export class PageActions {
 
   private async dropdownScope() {
     const page = this.page();
-    const dropdown = page.locator(DROPDOWNS).last();
-    if (await dropdown.count()) return dropdown;
+    const dropdowns = page.locator(DROPDOWNS);
+    const count = await dropdowns.count();
+    for (let index = count - 1; index >= 0; index -= 1) {
+      const dropdown = dropdowns.nth(index);
+      if (await dropdown.locator(OPTION_ITEMS).filter({ visible: true }).count()) return dropdown;
+    }
     const loose = page.locator("ul:visible, [role='listbox']:visible").filter({
       has: page.locator(OPTION_ITEMS)
     }).last();
@@ -415,35 +492,41 @@ export class PageActions {
     const page = this.page();
     const panel = page.locator(DATE_PANELS).last();
     const day = String(Number(dayText));
-    const cell = panel.getByRole("gridcell", { name: day, exact: true })
+    const exact = panel.getByRole("gridcell", { name: day, exact: true })
       .or(panel.locator("[role='gridcell'], .el-date-table-cell__text, .el-date-table-cell, td.available .cell, td.available, .ant-picker-cell-inner")
         .filter({ hasText: exactText(day) }))
       .last();
-    await this.clickSafely(cell, "option");
+    if (await exact.count()) {
+      await this.clickSafely(exact, "option");
+      return;
+    }
+    const any = panel.locator(".el-date-table-cell__text, td.available .cell, .ant-picker-cell-inner, [role='gridcell']").filter({ visible: true }).first();
+    if (!(await any.count())) throw new Error("Date panel has no selectable day");
+    await this.clickSafely(any, "option");
   }
 
-  private async clickActiveFormLabel() {
-    const dialog = await this.lastFormDialog(this.page());
-    const root = dialog || this.page().locator("body");
-    const label = root.locator(FORM_LABELS).filter({ visible: true }).first();
-    if (await label.count()) await label.click({ timeout: 400 }).catch(() => {});
+  private datePanel() {
+    return this.page().locator(DATE_PANELS);
+  }
+
+  private async closeDatePanel() {
+    const panel = this.datePanel();
+    if (!(await panel.count())) return;
+    const current = panel.last();
+    const confirm = current.locator("button, [role='button']").filter({ hasText: /^(确定|确认|ok|apply)$/i }).first();
+    if (await confirm.count()) await this.clickSafely(confirm, "button").catch(() => {});
+    else await this.page().keyboard.press("Tab").catch(() => {});
+    await current.waitFor({ state: "hidden", timeout: 500 }).catch(() => {});
   }
 
   async dismissTransientOverlays() {
     const page = this.page();
     try {
-      if (await this.hasDatePanel() || await this.dropdownScope()) {
-        await page.keyboard.press("Tab").catch(() => {});
-        await page.locator(`${DATE_PANELS}, ${DROPDOWNS}`).first().waitFor({ state: "hidden", timeout: 400 }).catch(() => {});
-      }
-      if (await this.hasDatePanel()) {
-        await this.clickActiveFormLabel();
-        await page.locator(DATE_PANELS).first().waitFor({ state: "hidden", timeout: 400 }).catch(() => {});
-      }
+      await this.closeDatePanel();
       if (await this.dropdownScope()) {
-        const opener = page.locator("[aria-expanded='true'], .el-select__wrapper.is-focused, .el-select.is-focused .el-select__wrapper, .ant-select-open .ant-select-selector").first();
+        const opener = page.locator("[aria-expanded='true'], .el-select__wrapper.is-focused, .el-select.is-focused .el-select__wrapper, .el-input__wrapper.is-focus, .ant-select-open .ant-select-selector").first();
         if (await opener.count()) await this.clickSafely(opener, "field").catch(() => {});
-        else await this.clickActiveFormLabel();
+        else await page.keyboard.press("Tab").catch(() => {});
         await page.locator(DROPDOWNS).first().waitFor({ state: "hidden", timeout: 500 }).catch(() => {});
       }
     } catch {
@@ -474,11 +557,11 @@ export class PageActions {
         return [el.className, Math.round(box.top), Math.round(box.left), String(el.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 48)].join("|");
       };
       const dialogs = vis("[role='dialog'], [role='alertdialog'], .el-dialog, .el-drawer, .ant-modal, .arco-modal")
-        .filter((el) => !/picker-panel|picker-dropdown|datepicker|date-picker/i.test(String(el.className || "")));
-      const kitDrops = vis(".el-select-dropdown, .el-cascader__dropdown, .el-autocomplete-suggestion, .ant-select-dropdown, .arco-select-dropdown, [role='listbox']");
+        .filter((el) => !/picker-panel|picker-dropdown|picker__popper|el-date-picker|el-date-range-picker|el-time-panel|el-time-picker|ant-picker-dropdown|arco-picker-container|datepicker/i.test(String(el.className || "")));
+      const kitDrops = vis(".el-select-dropdown, .el-select__popper, .el-cascader__dropdown, .el-autocomplete-suggestion, .ant-select-dropdown, .arco-select-dropdown, [role='listbox']");
       const looseDrops = vis("ul").filter((el) => el.querySelector("[role='option'], .el-select-dropdown__item, .ant-select-item-option"));
       const drops = [...new Set([...kitDrops, ...looseDrops])];
-      const dates = vis(".el-picker-panel, .el-popper.el-date-picker, .el-picker__popper, .ant-picker-dropdown, .arco-picker-container, [class*='picker-panel'], [class*='picker-dropdown']");
+      const dates = vis(".el-picker-panel, .el-popper.el-date-picker, .el-picker__popper, .el-date-range-picker, .el-time-panel, .ant-picker-dropdown, .arco-picker-container, [class*='picker-panel'], [class*='picker-dropdown']");
       return {
         dialogs: dialogs.length,
         drops: drops.map(keyOf).sort().join("||"),
@@ -492,20 +575,27 @@ export class PageActions {
   }
 
   private async chooserOpened(before: { dialogs: number; drops: string; dates: string }) {
-    const deadline = Date.now() + 1_200;
+    const deadline = Date.now() + 1_600;
     while (Date.now() < deadline) {
       if (this.overlayOpened(before, await this.overlayState())) return true;
       if (await this.dropdownScope()) return true;
-      await this.page().waitForTimeout(50);
+      await this.page().waitForTimeout(80);
     }
     return this.overlayOpened(before, await this.overlayState()) || Boolean(await this.dropdownScope());
   }
 
   private async activateChooser(selector: string) {
+    await this.completeChooserDialog();
     await this.dismissTransientOverlays();
+    const target = await this.clickTarget(selector);
+    const well = target.locator("button, [role='button'], [class*='avatar'], [class*='plus'], [class*='add']").first();
+    const clickable = (await well.count()) ? well : target;
     const before = await this.overlayState();
-    await this.hostClick(await this.clickTarget(selector));
-    return { before, opened: await this.chooserOpened(before) };
+    await this.clickSafely(clickable, "field").catch(() => this.hostClick(clickable));
+    if (await this.chooserOpened(before)) return { before, opened: true };
+    const retry = await this.overlayState();
+    await this.hostClick(clickable);
+    return { before: retry, opened: await this.chooserOpened(retry) };
   }
 
   private async nativeSelect(target: Locator) {
@@ -517,20 +607,32 @@ export class PageActions {
 
   async openSelect(target: Locator) {
     if (await this.nativeSelect(target)) return target;
+    await this.completeChooserDialog();
     await this.dismissTransientOverlays();
-    const before = await this.overlayState();
+    const surface = target.locator(WIDGET_SURFACES);
+    const clickable = (await surface.count()) ? surface.first() : target;
+    const opened = async (before: { dialogs: number; drops: string; dates: string }) => {
+      if (!(await this.chooserOpened(before))) return undefined;
+      return this.dropdownScope();
+    };
+    const beforeClick = await this.overlayState();
+    await this.clickSafely(clickable, "field").catch(() => this.hostClick(clickable));
+    const fromClick = await opened(beforeClick);
+    if (fromClick) return fromClick;
+    const beforeHost = await this.overlayState();
     await this.hostClick(target);
-    if (await this.chooserOpened(before)) {
-      const scope = await this.dropdownScope();
-      if (scope) return scope;
-    }
+    const fromHost = await opened(beforeHost);
+    if (fromHost) return fromHost;
     throw new Error("Select dropdown did not open");
   }
 
   private async dateEditorMode(dateWrap: Locator) {
     return dateWrap.evaluate(el => {
-      const blob = `${el.className} ${el.querySelector("input")?.placeholder || ""}`;
-      return /datetime|datetimerange|time|时/i.test(blob) ? "datetime" : "date";
+      const input = el instanceof HTMLInputElement ? el : el.querySelector("input");
+      const type = input?.getAttribute("type") || "";
+      const blob = `${el.className} ${input?.placeholder || ""}`;
+      if (/datetime-local|^time$|^month$/i.test(type) || /datetimerange|--datetime|--time(?:\s|$)|时分|时间选择/i.test(blob)) return "datetime";
+      return "date";
     }).catch(() => "date" as const);
   }
 
@@ -632,22 +734,33 @@ export class PageActions {
     if (dateField) {
       const mode = await this.dateEditorMode(dateField.host);
       const filled = this.formatDateValue(value, mode);
-      await this.dismissTransientOverlays();
-      await dateField.target.fill(filled, { timeout: 1_200 }).catch(async () => {
-        await dateField.target.fill(filled, { force: true, timeout: 800 });
-      });
-      await this.commitValue(dateField.target, filled);
-      await dateField.target.press("Tab").catch(() => {});
-      await this.page().locator(DATE_PANELS).first().waitFor({ state: "hidden", timeout: 400 }).catch(() => {});
-      const current = await dateField.target.inputValue().catch(() => "");
-      if (current.includes(filled.slice(0, 10))) return;
-      await this.clickSafely(await this.clickTarget(selector), "field");
-      if (await this.hasDatePanel()) {
-        await this.alignDatePanel(filled.slice(0, 10));
-        await this.pickCalendarDay(String(Number(filled.slice(8, 10))));
-        await this.page().locator(DATE_PANELS).first().waitFor({ state: "hidden", timeout: 600 }).catch(() => {});
+      const readonly = await dateField.target.evaluate(el => (
+        el instanceof HTMLInputElement && (el.readOnly || el.hasAttribute("readonly"))
+      )).catch(() => false);
+      if (!readonly) {
+        await dateField.target.fill(filled, { timeout: 800 }).catch(async () => {
+          await dateField.target.fill(filled, { force: true, timeout: 600 });
+        });
       }
       await this.commitValue(dateField.target, filled);
+      let current = await dateField.target.inputValue().catch(() => "");
+      if (!current.includes(filled.slice(0, 10))) {
+        await this.clickSafely(await this.clickTarget(selector), "field");
+        if (await this.hasDatePanel()) {
+          await this.alignDatePanel(filled.slice(0, 10));
+          await this.pickCalendarDay(String(Number(filled.slice(8, 10))));
+        }
+        current = await dateField.target.inputValue().catch(() => "");
+        if (!current.includes(filled.slice(0, 10))) await this.commitValue(dateField.target, filled);
+      }
+      const rangeCount = await dateField.host.locator("input").count();
+      if (rangeCount <= 1) await this.closeDatePanel();
+      else {
+        const values = await dateField.host.locator("input").evaluateAll(els => els.map(el => String((el as HTMLInputElement).value || "")));
+        if (values.filter(item => /\d{4}-\d{2}-\d{2}/.test(item)).length >= Math.min(2, rangeCount)) {
+          await this.closeDatePanel();
+        }
+      }
       return;
     }
     const chooser = await locator.evaluate(el => {
@@ -687,7 +800,7 @@ export class PageActions {
       const option = this.optionLocator(label, scope).filter({ visible: true }).first();
       await option.waitFor({ state: "visible", timeout: 1_200 });
       if (await this.isNavigationTarget(option)) throw new Error("Refusing to click navigation; that would leave the form and discard filled fields");
-      await this.clickSafely(option, "option");
+      await this.clickOption(option);
     }
     if (page.url() !== startUrl) throw new Error("Dropdown click navigated away and would discard filled fields");
     await page.locator(DROPDOWNS).first().waitFor({ state: "hidden", timeout: 400 }).catch(() => {});
@@ -702,6 +815,21 @@ export class PageActions {
       const raw = el.getAttribute("value") || el.getAttribute("data-value") || el.getAttribute("data-id");
       return { label, value: raw !== undefined && raw !== "" ? raw : label };
     })).then(items => items.filter(item => item.label));
+  }
+
+  private async clickOption(locator: Locator) {
+    const clicked = await locator.evaluate(el => {
+      const target = el instanceof HTMLElement
+        ? (el.closest("[role='option'], [role='treeitem'], .el-select-dropdown__item, .ant-select-item-option, .arco-select-option") || el)
+        : null;
+      if (!(target instanceof HTMLElement)) return false;
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
+        target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+      }
+      target.click();
+      return true;
+    }).catch(() => false);
+    if (!clicked) await locator.click({ force: true, timeout: 800 });
   }
 
   async firstVisibleOption(scope?: Locator) {
@@ -728,7 +856,7 @@ export class PageActions {
     const item = scope.locator(OPTION_ITEMS).filter({ visible: true }).first();
     await item.waitFor({ state: "visible", timeout: 2_000 });
     const options = await this.dropdownOptions(scope);
-    const value = await this.firstVisibleOption(scope);
+    const value = ((await item.innerText()) || "").replace(/\s+/g, " ").trim() || await this.firstVisibleOption(scope);
     const fieldMeta = await target.evaluate(el => {
       const attrs = ["name", "data-field", "data-name", "data-key", "data-model"];
       const generated = /^(el-id-\d+|el-[a-z]+-\d+|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i;
@@ -765,18 +893,27 @@ export class PageActions {
       value,
       options
     });
-    await this.clickSafely(this.optionLocator(value, scope).filter({ visible: true }).first(), "option");
+    await this.clickOption(item);
     await this.page().locator(DROPDOWNS).first().waitFor({ state: "hidden", timeout: 250 }).catch(() => {});
     for (let level = 0; level < 3 && await this.dropdownScope(); level += 1) {
       const nextScope = await this.dropdownScope();
       if (!nextScope) break;
       const next = nextScope.locator(OPTION_ITEMS).filter({ visible: true }).first();
       if (!(await next.count())) break;
-      await this.clickSafely(next, "option");
+      await this.clickOption(next);
       await this.page().waitForTimeout(80);
     }
     await this.page().locator(DROPDOWNS).first().waitFor({ state: "hidden", timeout: 600 }).catch(() => {});
     return value;
+  }
+
+  private async captureFields(): Promise<PageSnapshot> {
+    const snap = await this.page().locator("body").evaluate(SNAPSHOT_FIELDS_IN_PAGE) as PageSnapshot;
+    return {
+      ...snap,
+      todoFields: (snap.formFields || []).filter(field => !field.skip && !field.disabled && !field.filled),
+      todoCount: (snap.formFields || []).filter(field => !field.skip && !field.disabled && !field.filled).length
+    };
   }
 
   async captureSnapshot(): Promise<PageSnapshot> {
@@ -831,27 +968,72 @@ export class PageActions {
     return undefined;
   }
 
+  private async pickChooserRow(dialog: Locator) {
+    const checkbox = dialog.locator("tbody .el-checkbox, .el-table__body .el-checkbox, tbody [role='checkbox'], tbody input[type='checkbox'], .el-table__row .el-checkbox, .el-table__body .el-checkbox__input").first();
+    if (await checkbox.count()) {
+      await checkbox.click({ force: true, timeout: 800 }).catch(() => this.clickSafely(checkbox, "option"));
+      return;
+    }
+    const people = () => dialog.locator("tbody tr, .el-table__body .el-table__row, .el-table__body tr")
+      .filter({ visible: true })
+      .filter({ hasNotText: /暂无数据|没有数据|no data/i })
+      .filter({ hasText: /\S/ })
+      .first();
+    if (await people().count()) {
+      await this.clickSafely(people(), "option");
+      return;
+    }
+    const tree = dialog.locator(".el-tree-node__content, [role='treeitem']").filter({ visible: true }).first();
+    if (await tree.count()) {
+      await this.clickSafely(tree, "option");
+      await this.page().waitForTimeout(400);
+      if (await people().count()) {
+        await this.clickSafely(people(), "option");
+        return;
+      }
+    }
+    const row = dialog.locator(DIALOG_CHOICES).filter({ visible: true }).first();
+    if (!(await row.count())) throw new Error("Picker dialog has no selectable row");
+    await this.clickSafely(row, "option");
+    const nested = people();
+    if (await nested.count()) await this.clickSafely(nested, "option").catch(() => {});
+  }
+
+  private async completeChooserDialog() {
+    const dialog = await this.lastChooserDialog();
+    if (!dialog) return false;
+    await this.pickChooserRow(dialog).catch(() => {});
+    const confirm = () => dialog.locator("button, [role='button']").filter({ hasText: /^\s*(确\s*定|确\s*认|选\s*择|ok|confirm)\s*$/i }).first();
+    let ok = confirm();
+    if (await ok.count()) await this.clickSafely(ok, "button").catch(() => {});
+    await dialog.waitFor({ state: "hidden", timeout: 700 }).catch(() => {});
+    if (await this.lastChooserDialog()) {
+      await this.pickChooserRow(dialog).catch(() => {});
+      ok = confirm();
+      if (await ok.count()) await this.clickSafely(ok, "button").catch(() => {});
+      await dialog.waitFor({ state: "hidden", timeout: 600 }).catch(() => {});
+    }
+    await this.waitForPageQuiet(400);
+    return !(await this.lastChooserDialog());
+  }
+
   private async pickFirstChoice(selector: string) {
+    await this.completeChooserDialog();
     const { before } = await this.activateChooser(selector);
     const after = await this.overlayState();
-    if (after.dialogs <= before.dialogs) {
+    let dialog = await this.lastChooserDialog() || (after.dialogs > before.dialogs ? await this.waitForFormDialog() : undefined);
+    if (!dialog) {
       if (after.drops !== before.drops || await this.dropdownScope()) {
         const opened = await this.dropdownScope();
         if (opened) return this.chooseFirstOption(selector, opened);
       }
       throw new Error("Picker did not open a dialog or list");
     }
-    const dialog = await this.waitForFormDialog();
-    if (!dialog) throw new Error("Picker did not open a dialog or list");
-    const row = dialog.locator(DIALOG_CHOICES).filter({ visible: true }).first();
-    if (!(await row.count())) throw new Error("Picker dialog has no selectable row");
-    await this.clickSafely(row, "option");
-    const nested = dialog.locator(DIALOG_CHOICES).filter({ visible: true }).nth(1);
-    if (await this.hasDialog() && await nested.count()) await this.clickSafely(nested, "option").catch(() => {});
-    const ok = dialog.locator("button, [role='button']").filter({ hasText: /^(确定|确认|选择|ok|confirm)$/i }).first();
+    await this.pickChooserRow(dialog);
+    const ok = dialog.locator("button, [role='button']").filter({ hasText: /^\s*(确\s*定|确\s*认|选\s*择|ok|confirm)\s*$/i }).first();
     if (await ok.count()) await this.clickSafely(ok, "button");
-    await this.waitForPageQuiet(800);
-    const snapshot = await this.captureSnapshot();
+    await this.waitForPageQuiet(600);
+    const snapshot = await this.captureFields();
     const field = (snapshot.formFields || []).find(item => item.selector === selector || item.label === selector.replace(/^label=/i, ""));
     return field?.value || "selected";
   }
@@ -872,6 +1054,7 @@ export class PageActions {
 
   private strategiesFor(field: FormField, dateOffset: number) {
     const selector = field.selector || `label=${field.label}`;
+    const placeholder = String(field.selector || "").match(/^placeholder=(.+)$/s)?.[1] || "";
     const type = async () => {
       const value = this.sampleValue(field, dateOffset);
       await this.fillField(selector, value, { rangeIndex: field.rangeIndex });
@@ -885,24 +1068,52 @@ export class PageActions {
     };
     if (field.kind === "select") return [choose];
     if (field.kind === "picker") return [pick];
+    if (field.kind === "text" && /请输入.+(编码|名称|code|name)$/i.test(placeholder || String(field.label || ""))) {
+      return [choose, pick, type];
+    }
     if (field.kind === "checkbox" || field.kind === "radio") return [toggle];
     return [type];
+  }
+
+  private async liveDateValue(field: FormField) {
+    const selector = field.selector || `label=${field.label}`;
+    try {
+      const dateField = await this.dateFieldTarget(await this.locate(selector), field.rangeIndex);
+      const live = await dateField?.target.inputValue().catch(() => "") || "";
+      return /\d{4}-\d{2}-\d{2}/.test(live) ? live : "";
+    } catch {
+      return "";
+    }
   }
 
   private async fillOneField(field: FormField, startUrl: string, dateOffset = 0) {
     const selector = field.selector || `label=${field.label}`;
     if (this.page().url() !== startUrl) throw new Error("Page navigated; stopping so filled fields are not overwritten");
     if (field.kind === "upload" || field.skip) return { label: field.label, selector, kind: field.kind, skipped: true };
-    const [attempt] = this.strategiesFor(field, dateOffset);
-    if (!attempt) throw new Error(`Could not fill ${field.label}`);
-    await this.dismissTransientOverlays();
-    const value = String((await attempt()) || "");
-    const after = this.matchField(await this.captureSnapshot(), field);
+    const attempts = this.strategiesFor(field, dateOffset);
+    if (!attempts.length) throw new Error(`Could not fill ${field.label}`);
     const chooser = field.kind === "select" || field.kind === "picker";
-    if (!after?.filled || (chooser && this.isSampleValue(String(after.value || value), field))) {
-      throw new Error(`Could not fill ${field.label}`);
+    let lastError: unknown;
+    for (const attempt of attempts) {
+      for (let tryIndex = 0; tryIndex < 2; tryIndex += 1) {
+        try {
+          if (field.kind === "select" || field.kind === "picker" || tryIndex === 0) {
+            if (field.kind !== "picker") await this.completeChooserDialog();
+            await this.dismissTransientOverlays();
+          }
+          const value = String((await attempt()) || "");
+          const after = this.matchField(await this.captureFields(), field);
+          const liveDate = field.kind === "date" && !after?.filled ? await this.liveDateValue(field) : "";
+          if ((!after?.filled && !liveDate) || (chooser && this.isSampleValue(String(after?.value || value), field))) {
+            throw new Error(`Could not fill ${field.label}`);
+          }
+          return { label: field.label, selector, kind: field.kind, value: after?.value || liveDate || value };
+        } catch (error) {
+          lastError = error;
+        }
+      }
     }
-    return { label: field.label, selector, kind: field.kind, value: after.value || value };
+    throw lastError || new Error(`Could not fill ${field.label}`);
   }
 
   private requiredNumberInvalid(field: FormField) {
@@ -916,7 +1127,7 @@ export class PageActions {
   }
 
   private async repairFormValues(startUrl: string) {
-    const snapshot = await this.captureSnapshot();
+    const snapshot = await this.captureFields();
     const dates = (snapshot.formFields || []).filter(field => field.kind === "date" && !field.skip && !field.disabled);
     let last: Date | undefined;
     for (const [index, field] of dates.entries()) {
@@ -933,7 +1144,7 @@ export class PageActions {
       last = parseFieldDate(value);
     }
     await this.page().waitForTimeout(180);
-    const afterDates = await this.captureSnapshot();
+    const afterDates = await this.captureFields();
     for (const field of afterDates.formFields || []) {
       if (!this.requiredNumberInvalid(field) && !(field.invalid && field.kind === "number" && !field.disabled)) continue;
       await this.fillField(field.selector || `label=${field.label}`, "1");
@@ -979,6 +1190,7 @@ export class PageActions {
 
   async exerciseForm() {
     await this.dismissTransientOverlays();
+    await this.completeChooserDialog();
     const filled: Array<Record<string, unknown>> = [];
     const failed: Array<Record<string, unknown>> = [];
     const startUrl = this.page().url();
@@ -999,27 +1211,34 @@ export class PageActions {
       const leftover = (after.todoFields || []).filter(field => !field.skip && !field.disabled);
       if (!leftover.length) {
         if (await this.revealHiddenSections()) {
-          after = await this.captureSnapshot();
+          after = await this.captureFields();
           continue;
         }
         break;
       }
-      await run(leftover.filter(field => field.kind !== "picker"));
+      await run(leftover.filter(field => field.kind === "select"));
+      await run(leftover.filter(field => field.kind === "date"));
+      await this.closeDatePanel();
+      await run(leftover.filter(field => field.kind !== "select" && field.kind !== "date" && field.kind !== "picker"));
       await run(leftover.filter(field => field.kind === "picker"));
+      await this.completeChooserDialog();
       await this.dismissTransientOverlays();
-      after = await this.captureSnapshot();
+      after = await this.captureFields();
     }
     if (!this.formReady(after, startUrl)) {
       if (await this.revealHiddenSections()) {
-        after = await this.captureSnapshot();
+        after = await this.captureFields();
         await run((after.todoFields || []).filter(field => !field.skip && !field.disabled));
-        after = await this.captureSnapshot();
+        after = await this.captureFields();
       }
     }
     await this.repairFormValues(startUrl);
     after = await this.captureSnapshot();
+    const leftoverFailed = failed.filter(item =>
+      (after.formFields || []).some(field => field.label === item.label && !field.filled && !field.skip && !field.disabled)
+    );
     return {
-      ok: this.formReady(after, startUrl),
+      ok: this.formReady(after, startUrl) && leftoverFailed.length === 0,
       scope: after.scope,
       filled,
       failed,
@@ -1031,6 +1250,7 @@ export class PageActions {
   }
 
   async submitForm() {
+    await this.completeChooserDialog();
     await this.dismissTransientOverlays();
     let before = await this.captureSnapshot();
     const startUrl = this.page().url();
@@ -1057,7 +1277,7 @@ export class PageActions {
       };
     }
     const write = /^(提交|确定|save|submit|ok|confirm|apply)/i.test(button.text) && !/搜索|查询|search/i.test(button.text);
-    const pending = this.awaitFormRequest(3_000, write);
+    const pending = this.awaitFormRequest(write ? 6_000 : 3_000, write);
     await this.click(button.selector);
     const sawRequest = await pending;
     await this.waitForPageQuiet();
@@ -1067,7 +1287,9 @@ export class PageActions {
     const invalid = (after.formFields || []).some(field => field.invalid || this.requiredNumberInvalid(field));
     const leftoverTodos = (after.todoFields || []).filter(field => !field.skip && !field.disabled);
     return {
-      ok: closed || Boolean(sawRequest && leftoverErrors.length === 0 && !invalid && leftoverTodos.length === 0),
+      ok: write
+        ? Boolean(sawRequest && leftoverErrors.length === 0 && (closed || (!invalid && leftoverTodos.length === 0)))
+        : closed || Boolean(sawRequest && leftoverErrors.length === 0 && !invalid && leftoverTodos.length === 0),
       submitted: button.text,
       repaired,
       sawRequest,

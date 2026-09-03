@@ -3,26 +3,46 @@ export const PAGE_HELPERS = String.raw`
   const generatedName = (value) => /^(el-id-\d+|el-[a-z]+-\d+|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i.test(String(value || ""));
   const isVisible = (el) => {
     if (!(el instanceof Element)) return false;
-    if (el.closest("[hidden], [aria-hidden='true']")) return false;
+    if (el.hidden || el.getAttribute("aria-hidden") === "true") return false;
+    if (el.closest("[hidden]")) return false;
     const style = getComputedStyle(el);
     const rect = el.getBoundingClientRect();
     return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
   };
+  const shadowRootsOf = () => {
+    if (window.__bssShadowScan) return window.__bssShadowRoots || [];
+    const roots = [];
+    try {
+      const all = document.getElementsByTagName("*");
+      for (let i = 0; i < all.length; i++) {
+        if (all[i].shadowRoot) roots.push(all[i].shadowRoot);
+      }
+    } catch { /* ignore */ }
+    window.__bssShadowRoots = roots;
+    if (roots.length || document.readyState === "complete") window.__bssShadowScan = 1;
+    return roots;
+  };
   const queryDeep = (root, selector) => {
     const found = [];
-    const visit = (node) => {
-      if (!node || found.length > 800) return;
+    const take = (node) => {
+      if (!node || !node.querySelectorAll || found.length > 800) return;
       try { found.push(...node.querySelectorAll(selector)); } catch { /* ignore */ }
-      const all = node.querySelectorAll ? node.querySelectorAll("*") : [];
-      for (const kid of all) if (kid.shadowRoot) visit(kid.shadowRoot);
     };
-    visit(root);
-    return found;
+    take(root);
+    if (root === document || root === document.body || root === document.documentElement) {
+      for (const shadow of shadowRootsOf()) take(shadow);
+    } else {
+      try {
+        for (const kid of root.querySelectorAll("*")) if (kid.shadowRoot) take(kid.shadowRoot);
+      } catch { /* ignore */ }
+    }
+    return found.slice(0, 800);
   };
   const FORM_ITEM_SEL = '.el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [class*="form-item"]';
   const FORM_LABEL_SEL = 'label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label';
   const DIALOG_SEL = '[role="dialog"], [role="alertdialog"], .el-dialog, .el-drawer, .el-overlay-dialog, .ant-modal, .ant-drawer, .arco-modal, .arco-drawer';
-  const PICKER_SEL = '.el-picker-panel, .el-select-dropdown, .el-cascader__dropdown, .el-picker__popper, .el-popper.el-date-picker, .ant-picker-dropdown, .ant-select-dropdown, .arco-picker-container, .arco-select-dropdown, [class*="picker-panel"], [class*="picker-dropdown"]';
+  const PICKER_SEL = '.el-picker-panel, .el-select-dropdown, .el-cascader__dropdown, .el-picker__popper, .el-popper.el-date-picker, .el-date-range-picker, .el-time-panel, .ant-picker-dropdown, .ant-select-dropdown, .arco-picker-container, .arco-select-dropdown, [class*="picker-panel"], [class*="picker-dropdown"]';
+  const CHOOSER_TITLE = /选择(用户|人员|员工|审批|部门|项目|角色|岗位|成员|产品|供应商|商品|客户|物料|仓库|账户)|选人|选部门|(用户|人员|产品|供应商)选择/;
   const OPTION_SEL = '[role="option"], [role="menuitem"], .el-select-dropdown__item, .el-cascader-node, .el-autocomplete-suggestion__list li, .ant-select-item-option, .arco-select-option, .n-base-select-option';
   const EMPTY_VALUE = /^(请选择|请输入|请填写|请挑选|select|please select|please enter|please choose|choose|yyyy-mm-dd|年\/月\/日)/i;
   const PROMPT_ONLY = /^(请选择|请输入|请填写|请挑选|select|please select|please enter|please choose|choose)[.…]?$/i;
@@ -31,7 +51,7 @@ export const PAGE_HELPERS = String.raw`
   const PLUS_ONLY = /^(＋|\+|添加|选择)$/;
   const ACTION_ONLY = /^(新增|添加一行|添加明细|创建|导入|导出|删除|搜索|查询|重置|提交|确定|取消|关闭|保存|返回)$/;
   const CHROME_SEL = "nav, header, .el-menu, .ant-menu, .el-pagination, .ant-pagination, [class*='toolbar'], [class*='header-bar']";
-  const SLOT_HOST_SEL = "[class*='process-node'], [class*='workflow-node'], [class*='user-select'], [class*='assignee'], [class*='approver'], [class*='card'], [class*='node'], [class*='step'], [class*='activity']";
+  const SLOT_HOST_SEL = "[class*='process-node'], [class*='workflow-node'], [class*='user-select'], [class*='assignee'], [class*='approver'], [class*='approval-node'], [class*='flow-node'], [class*='activity'], .el-timeline-item, [class*='timeline-item'], [id*='activity-task']";
   const WIDE_SEL = DIALOG_SEL + ", form, [role='form'], body, main, header, nav, aside, footer, .el-overlay, .ant-modal-wrap, [class*='overlay']";
   const FIELD_GROUP_SEL = FORM_ITEM_SEL + ", label, dt, dd, li, [class*='form-field'], [class*='field-item'], [class*='form-row'], [class*='field-row']";
   const FIELD_CONTROL_SEL = "input, textarea, select, [role='combobox'], [role='textbox'], [contenteditable='true'], button, [role='button'], [aria-haspopup]";
@@ -204,6 +224,7 @@ export const PAGE_HELPERS = String.raw`
 
   const isChooserFilter = (el) => {
     if (!(el instanceof HTMLInputElement)) return false;
+    if (el.getAttribute("role") === "combobox") return false;
     if (/select__input|selection-search|search-input|filter/i.test(String(el.className || ""))) return true;
     return Boolean(el.getAttribute("aria-autocomplete") && chooserHostOf(el));
   };
@@ -213,14 +234,14 @@ export const PAGE_HELPERS = String.raw`
     if (el instanceof HTMLSelectElement) {
       return [...el.selectedOptions].map((item) => clean(item.textContent || item.value)).filter(Boolean).join(",");
     }
+    if ((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && !isChooserFilter(el)) {
+      const own = clean(el.value);
+      if (own && !EMPTY_VALUE.test(own)) return own;
+    }
     const host = chooserHostOf(el);
     const shown = hostDisplay(host);
     if (shown) return shown;
     if (isChooserFilter(el)) return "";
-    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-      const own = clean(el.value);
-      if (own && !EMPTY_VALUE.test(own)) return own;
-    }
     if (el.isContentEditable) return clean(el.textContent);
     return "";
   };
@@ -255,7 +276,9 @@ export const PAGE_HELPERS = String.raw`
     if (type === "checkbox" || role === "checkbox" || role === "switch") return "checkbox";
     if (type === "radio" || role === "radio") return "radio";
     if (/^(date|datetime-local|time|month|week)$/.test(type) || /日期|时间|(^|[^a-z])date|time/i.test(blob)) return "date";
+    if (el.closest(".el-date-editor, .el-date-picker, .ant-picker, .arco-picker")) return "date";
     if (/dialog/i.test(popup)) return "picker";
+    if (el.closest(".el-select, .ant-select, .arco-select, .n-select, .el-cascader")) return "select";
     if (el instanceof HTMLSelectElement || role === "combobox" || /listbox|menu/i.test(popup) || el.closest("[role='combobox']")) return "select";
     if (el.hasAttribute("readonly") && !isDisabledWidget(el) && (EMPTY_VALUE.test(placeholder) || /请选择|please select/i.test(blob))) return "picker";
     if (isDisabledWidget(el)) return "readonly";
@@ -313,11 +336,30 @@ export const PAGE_HELPERS = String.raw`
     return [];
   };
 
-  const isPickerHost = (el) => Boolean(el.matches?.(PICKER_SEL) || el.closest(PICKER_SEL) || /picker-panel|picker-dropdown|datepicker/i.test(el.className || ""));
+  const isPickerHost = (el) => Boolean(el.matches?.(PICKER_SEL) || el.closest(PICKER_SEL));
+
+  const isChooserDialog = (el) => {
+    if (!(el instanceof Element) || isPickerHost(el)) return false;
+    const title = clean((el.querySelector(".el-dialog__title, .el-dialog__header, .ant-modal-title, .arco-modal-title, .el-drawer__title, [class*='dialog__title'], [class*='dialog-header'], [class*='modal-title']") || {}).textContent || "");
+    const formItems = el.querySelectorAll(".el-form-item, .ant-form-item, .arco-form-item").length;
+    const rows = el.querySelectorAll("tbody tr, .el-table__row, .el-tree-node").length;
+    const confirm = [...el.querySelectorAll("button, [role='button']")].some((btn) => /^(确定|确认|选择|ok|confirm)$/i.test(String(btn.textContent || "").replace(/\s+/g, "")));
+    if (CHOOSER_TITLE.test(title) && formItems <= 8) return true;
+    const tree = el.querySelectorAll(".el-tree, [role='tree']").length;
+    if (tree >= 1 && confirm && formItems <= 8) return true;
+    return Boolean(rows >= 1 && formItems <= 3 && confirm);
+  };
+
+  const scopeHasFields = (el) => Boolean(
+    el.querySelector(".el-form-item, .ant-form-item, .arco-form-item, input, textarea, select, [role='combobox'], .el-timeline-item, [class*='timeline-item'], [id*='activity-task']")
+  );
 
   const activeScope = () => {
-    const dialogs = [...document.querySelectorAll(DIALOG_SEL)].filter((el) => isVisible(el) && !isPickerHost(el));
-    return dialogs.at(-1) || document.body;
+    const dialogs = [...document.querySelectorAll(DIALOG_SEL)].filter((el) => isVisible(el) && !isPickerHost(el) && !isChooserDialog(el));
+    for (let i = dialogs.length - 1; i >= 0; i -= 1) {
+      if (scopeHasFields(dialogs[i])) return dialogs[i];
+    }
+    return document.body;
   };
 
   const scopeName = (root) => root && root !== document.body && root.closest(DIALOG_SEL) ? "dialog" : "page";
@@ -354,29 +396,49 @@ export const PAGE_HELPERS = String.raw`
 
   const headingOf = (host) => {
     if (!(host instanceof Element)) return null;
-    return host.querySelector("h1, h2, h3, h4, [class*='title'], [class*='name'], [class*='head'], [class*='label']");
+    const named = host.querySelector("h1, h2, h3, h4, [class*='title'], [class*='name'], [class*='head'], [class*='label']");
+    if (named) return named;
+    if (host.matches(".el-timeline-item, [class*='timeline-item'], [id*='activity-task']") || host.querySelector(".el-timeline-item, [id*='activity-task']")) {
+      return host.querySelector(".font-bold, [class*='font-bold']");
+    }
+    return null;
   };
 
   const headingTextOf = (host) => clean(headingOf(host)?.textContent || "").replace(/[:：*]\s*$/g, "");
+
+  const assigneeName = (host) => {
+    if (!(host instanceof Element)) return "";
+    const title = headingTextOf(host);
+    const wrap = host.querySelector("[class*='flex-wrap'], [class*='items-center']") || host;
+    const clone = wrap.cloneNode(true);
+    clone.querySelectorAll("button, [class*='avatar'], [class*='plus'], [class*='icon'], img, svg, .font-bold, [class*='font-bold'], h1, h2, h3, h4, [class*='title'], [class*='name'], [class*='head'], [class*='label']").forEach((node) => node.remove());
+    const text = clean(clone.textContent);
+    if (text && text !== title && !PLUS_ONLY.test(text) && !isEmptyValue(text) && text.length <= 40) return text;
+    return "";
+  };
 
   const personChip = (host) => {
     if (!(host instanceof Element)) return "";
     const title = headingTextOf(host);
     const heading = headingOf(host);
-    return [...host.querySelectorAll("[class*='tag'], [class*='user'], [class*='nickname'], [class*='selected'], span, strong")]
+    const named = [...host.querySelectorAll("[class*='tag'], [class*='user'], [class*='nickname'], [class*='selected'], span, strong, div")]
       .filter((node) => node !== heading && !(heading && heading.contains(node)) && !node.matches("button, [role='button'], [class*='avatar'], [class*='plus'], [class*='icon']"))
       .map((node) => clean(node.textContent))
-      .find((text) => text && text !== title && !PLUS_ONLY.test(text) && !isEmptyValue(text) && text.length <= 40) || "";
+      .find((text) => text && text !== title && !text.includes(title) && !PLUS_ONLY.test(text) && !isEmptyValue(text) && text.length <= 40);
+    return named || assigneeName(host);
   };
 
   const isEmptyWell = (el) => {
     if (!(el instanceof HTMLElement) || !isVisible(el) || isWide(el)) return false;
     if (el.matches("input, textarea, select, a, [role='tab']")) return false;
+    if (el.closest(".el-timeline-item__dot, [class*='timeline-item__dot']")) return false;
     const box = el.getBoundingClientRect();
     if (box.width < 8 || box.height < 8 || box.width > 96 || box.height > 96) return false;
     const text = clean(el.textContent || el.getAttribute("aria-label") || "");
     if (ACTION_ONLY.test(text.replace(/\s+/g, ""))) return false;
     if (text && !PLUS_ONLY.test(text.replace(/\s+/g, "")) && !isEmptyValue(text) && text.length > 2) return false;
+    const host = slotHost(el);
+    if (host && personChip(host)) return false;
     return true;
   };
 
@@ -394,12 +456,15 @@ export const PAGE_HELPERS = String.raw`
     if (!(el instanceof HTMLElement) || !isVisible(el)) return false;
     if (el.matches("input, textarea, select, [role=combobox]")) return false;
     if (el.closest(PICKER_SEL + ", " + CHROME_SEL)) return false;
+    if (el.closest(".el-timeline-item__dot, [class*='timeline-item__dot']")) return false;
+    if (el.closest("tbody, .el-table__body, .ant-table-tbody, thead, .el-table__header")) return false;
     if (isUploadWidget(el, labelOf(el))) return false;
+    const host = slotHost(el);
+    if (host && personChip(host)) return false;
     const text = clean(el.textContent || el.getAttribute("aria-label") || "");
     if (ACTION_ONLY.test(text.replace(/\s+/g, ""))) return false;
     if (/dialog/i.test(el.getAttribute("aria-haspopup") || "") && (isPlusControl(el) || isEmptyValue(text) || PLUS_ONLY.test(text.replace(/\s+/g, "")))) return true;
     if (isPlusControl(el) && !el.closest("thead, .el-table__header, [class*='toolbar']")) return true;
-    const host = slotHost(el);
     const empty = !text || isEmptyValue(text) || PLUS_ONLY.test(text.replace(/\s+/g, ""));
     if (host && compactStep(host) && !personChip(host) && (isPlusControl(el) || isEmptyWell(el) || empty)) {
       if (!el.closest("thead, .el-table__header, [class*='toolbar'], nav, header")) return true;
@@ -606,8 +671,9 @@ export const PAGE_HELPERS = String.raw`
 
   const fieldFromControl = (el, item) => {
     if (!(el instanceof HTMLElement)) return null;
+    if (isChooserFilter(el)) return null;
     if (!isVisible(el) && !(chooserHostOf(el) && isVisible(chooserHostOf(el)))) return null;
-    if (el.closest(PICKER_SEL + ", .el-pagination, .ant-pagination, .arco-pagination")) return null;
+    if (el.closest(PICKER_SEL + ", .el-pagination, .ant-pagination, .arco-pagination, thead, .el-table__header, .el-table__header-wrapper, .ant-table-thead")) return null;
     const type = (el.getAttribute("type") || "").toLowerCase();
     if (/hidden|submit|button|reset|image/.test(type)) return null;
     const label = distinctLabel(el, labelOf(el) || clean(item?.querySelector?.(FORM_LABEL_SEL)?.textContent || "") || nearbyLabel(el) || nameOf(el) || "字段", 0, 1);
@@ -633,13 +699,33 @@ export const PAGE_HELPERS = String.raw`
     };
   };
 
+  const placeholderUses = (scope) => {
+    const counts = new Map();
+    for (const el of queryDeep(scope, "input, textarea")) {
+      const ph = identityPlaceholder(el);
+      if (!ph) continue;
+      counts.set(ph, (counts.get(ph) || 0) + 1);
+    }
+    return counts;
+  };
+
+  const fieldSelector = (el, label, identity, phCounts) => {
+    const header = tableHeaderOf(el);
+    if (header && el.closest("td, th, .el-table__cell, .ant-table-cell")) return "column=" + header;
+    if (identity && (phCounts.get(identity) || 0) === 1) return "placeholder=" + identity;
+    if (label) return "label=" + label;
+    return selectorOf(el);
+  };
+
   const collectFormFields = (root) => {
     const fields = [];
     const seen = new Set();
+    const phCounts = placeholderUses(root);
     const add = (field) => {
       if (!field) return;
       const radioKey = field.kind === "radio" && field.name ? field.scope + "|radio|" + field.name : "";
-      const key = radioKey || (field.scope + "|" + field.label + "|" + (field.name || field.selector) + "|" + String(field.rangeIndex ?? ""));
+      const pickerKey = field.kind === "picker" ? field.scope + "|picker|" + field.label : "";
+      const key = radioKey || pickerKey || (field.scope + "|" + field.label + "|" + field.kind + "|" + (field.name || field.selector) + "|" + String(field.rangeIndex ?? field.groupIndex ?? ""));
       if (seen.has(key)) return;
       seen.add(key);
       fields.push(field);
@@ -662,7 +748,7 @@ export const PAGE_HELPERS = String.raw`
           ...field,
           name: prop ? prop + "[" + index + "]" : field.name,
           label,
-          selector: identity ? "placeholder=" + identity : (controls.length > 1 ? "label=" + label : field.selector),
+          selector: fieldSelector(el, label, identity, phCounts),
           rangeIndex: range.length >= 2 ? index : field.rangeIndex,
           groupIndex: controls.length > 1 ? index : field.rangeIndex
         });
@@ -671,11 +757,13 @@ export const PAGE_HELPERS = String.raw`
     for (const cell of queryDeep(root, "tbody td, .el-table__body td, .el-table__body .el-table__cell, .ant-table-tbody .ant-table-cell")) {
       const el = cell.querySelector("input, textarea, select, [role=combobox], [contenteditable=true]");
       if (!el || formItemOf(el)) continue;
-      add(fieldFromControl(el, cell));
+      const field = fieldFromControl(el, cell);
+      if (!field) continue;
+      add({ ...field, selector: fieldSelector(el, field.label, identityPlaceholder(el), phCounts) });
     }
     const seenEls = new Set();
     for (const el of queryDeep(root, "input, textarea, select, [role=combobox], [contenteditable=true], [role=textbox]")) {
-      if (formItemOf(el) || isChooserFilter(el) || el.closest("td, .el-table__cell, .ant-table-cell") || seenEls.has(el)) continue;
+      if (formItemOf(el) || isChooserFilter(el) || el.closest("td, th, thead, .el-table__header, .el-table__header-wrapper, .el-table__cell, .ant-table-cell, .ant-table-thead") || seenEls.has(el)) continue;
       const host = el.closest("label") || el.parentElement;
       const range = rangeInputsOf(host);
       if (range.length >= 2) {
@@ -700,12 +788,30 @@ export const PAGE_HELPERS = String.raw`
       add(fieldFromPicker(el));
     }
     for (const host of queryDeep(root, SLOT_HOST_SEL)) {
-      if (!isVisible(host) || !compactStep(host) || formItemOf(host) || host.closest(PICKER_SEL + ", " + CHROME_SEL)) continue;
+      if (!isVisible(host) || !compactStep(host) || formItemOf(host) || host.closest(PICKER_SEL + ", " + CHROME_SEL + ", tbody, .el-table__body, .ant-table-tbody")) continue;
       const well = emptyWellOf(host);
       if (well) add(fieldFromPicker(well));
+      const chip = personChip(host);
+      const title = headingTextOf(host);
+      const assigneeHost = host.matches(".el-timeline-item, [class*='timeline-item'], [id*='activity-task'], [class*='process-node'], [class*='workflow-node'], [class*='approval-node'], [class*='user-select']");
+      if (assigneeHost && chip && title && title.length <= 16 && !/不限|天数|类型/.test(title)) {
+        add({
+          label: title,
+          name: nameOf(host),
+          selector: "label=" + title,
+          kind: "picker",
+          filled: true,
+          skip: false,
+          disabled: false,
+          required: false,
+          invalid: false,
+          value: chip,
+          scope: scopeName(host)
+        });
+      }
     }
     for (const el of queryDeep(root, "[class*='user-tag'], [class*='el-tag'], [class*='selected-tag']")) {
-      if (!isVisible(el) || !el.closest("[class*='process'], [class*='workflow'], [class*='node'], [class*='card']")) continue;
+      if (!isVisible(el) || !el.closest("[class*='process'], [class*='workflow'], [class*='timeline'], [id*='activity-task'], [class*='user-select']")) continue;
       const value = clean(el.textContent);
       if (!value || PLUS_ONLY.test(value) || EMPTY_VALUE.test(value)) continue;
       add({ ...fieldFromPicker(el), filled: true, required: false, value, kind: "picker" });
@@ -749,6 +855,18 @@ export const PAGE_HELPERS = String.raw`
     ".el-form-item__error, .ant-form-item-explain-error, .arco-form-item-message, .n-form-item-feedback, .el-message--error, .el-notification--error, .ant-message-error, .ant-notification-notice-error, [class*='form-item__error'], [class*='form-item-error'], [class*='explain-error']"
   )].filter(isVisible).map((el) => clean(el.textContent)).filter(Boolean))].slice(0, 20);
 
+  const pageText = (scope, formFields) => {
+    const labels = (formFields || []).map((field) => field.label).filter(Boolean);
+    const buttons = [];
+    for (const el of (scope || document.body).querySelectorAll("button, [role='button'], [type='submit']")) {
+      if (!isVisible(el) || isPickerHost(el) || el.closest(PICKER_SEL)) continue;
+      const text = clean(el.textContent);
+      if (text && text.length <= 24 && !buttons.includes(text)) buttons.push(text);
+      if (buttons.length >= 12) break;
+    }
+    return clean([document.title, ...labels, ...buttons].join("\n")).slice(0, 4000);
+  };
+
   const buildSnapshot = () => {
     const scope = activeScope();
     const formFields = collectFormFields(scope);
@@ -756,7 +874,7 @@ export const PAGE_HELPERS = String.raw`
     return {
       title: document.title,
       url: location.href,
-      text: clean(document.body.innerText),
+      text: pageText(scope, formFields),
       scope: scopeName(scope),
       controls: collectControls(scope),
       formFields,
@@ -768,6 +886,16 @@ export const PAGE_HELPERS = String.raw`
 `;
 
 export const SNAPSHOT_IN_PAGE = new Function(`${PAGE_HELPERS}\nreturn buildSnapshot();`) as () => unknown;
+
+export const SNAPSHOT_FIELDS_IN_PAGE = new Function(`${PAGE_HELPERS}
+  const scope = activeScope();
+  const formFields = collectFormFields(scope);
+  return {
+    scope: scopeName(scope),
+    formFields,
+    todoFields: formFields.filter((field) => !field.skip && !field.disabled && !field.filled)
+  };
+`) as () => unknown;
 
 export const MARK_LABELED_CONTROL = new Function(
   "root",
@@ -803,10 +931,10 @@ export const UI_RECORDER_SCRIPT = `(() => {
         if (/password|passwd|pwd|secret|token|credential|current-password|new-password/i.test(key)) return "[REDACTED]";
         return displayValue(control);
       })(),
-      options: optionsOf(control) || collectOptionRecords(),
-      visibleOptions: collectVisibleOptions(document),
+      options: eventType === "change" || eventType === "submit" ? (optionsOf(control) || collectOptionRecords()) : optionsOf(control),
+      visibleOptions: eventType === "change" || eventType === "submit" ? collectVisibleOptions(document) : [],
       scope: scopeName(formContainer || control),
-      form: formSnapshot(formContainer)
+      form: eventType === "click" ? undefined : formSnapshot(formContainer)
     };
     Promise.resolve(window.__bssRecordUi?.(payload)).catch(() => {});
   };

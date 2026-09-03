@@ -5,6 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
 import { BrowserRecorder } from "../src/browser/recorder.js";
+import { SNAPSHOT_IN_PAGE } from "../src/browser/page-script.js";
 import { readJsonl } from "../src/utils.js";
 import type { EvidenceEvent } from "../src/domain.js";
 
@@ -1510,6 +1511,818 @@ test("snapshot sees empty avatar wells in a process rail and exercise-form can o
     assert.equal(submitted.ok, true, JSON.stringify(submitted));
     assert.equal(created.length, 1, JSON.stringify({ created, submitted }));
     assert.equal((created[0] as { assignee?: string }).assignee, "乙");
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exercise-form fills a search bar with selects and a leftover range calendar in one pass", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-search-"));
+  const searched: unknown[] = [];
+  const server = http.createServer((request, response) => {
+    if ((request.url || "").startsWith("/api/search") && request.method === "GET") {
+      searched.push(new URL(request.url, "http://127.0.0.1").search);
+      response.setHeader("content-type", "application/json");
+      response.end('{"code":0,"rows":[]}');
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>查询栏</title></head><body>
+      <form class="el-form" id="search">
+        <div class="el-form-item">
+          <label class="el-form-item__label">类型</label>
+          <div class="el-select">
+            <div class="el-select__wrapper">
+              <span class="el-select__placeholder">请选择类型</span>
+              <input role="combobox" readonly placeholder="请选择类型">
+            </div>
+          </div>
+        </div>
+        <div class="el-form-item">
+          <label class="el-form-item__label">申请时间</label>
+          <div class="el-date-editor el-date-editor--daterange">
+            <input class="el-range-input" readonly placeholder="开始日期">
+            <input class="el-range-input" readonly placeholder="结束日期">
+          </div>
+        </div>
+        <div class="el-form-item">
+          <label class="el-form-item__label">结果</label>
+          <div class="el-select">
+            <div class="el-select__wrapper">
+              <span class="el-select__placeholder">请选择结果</span>
+              <input role="combobox" readonly placeholder="请选择结果">
+            </div>
+          </div>
+        </div>
+        <div class="el-form-item">
+          <label class="el-form-item__label">原因</label>
+          <input id="reason" placeholder="请输入原因">
+        </div>
+        <button type="submit" id="query">搜索</button>
+      </form>
+      <ul id="type-options" class="el-select-dropdown" hidden>
+        <li role="option">事假</li><li role="option">病假</li>
+      </ul>
+      <ul id="result-options" class="el-select-dropdown" hidden>
+        <li role="option">已通过</li><li role="option">未提交</li>
+      </ul>
+      <div id="range" class="el-popper is-pure el-picker__popper el-date-range-picker" role="dialog" style="position:fixed;inset:40px;background:#fff;z-index:40;padding:12px">
+        <span class="el-date-table-cell__text">3</span>
+        <span class="el-date-table-cell__text">4</span>
+        <button type="button" id="range-ok">确定</button>
+      </div>
+      <script>
+        const bound = { type: "", start: "", end: "", result: "", reason: "" };
+        const typeBox = document.querySelectorAll(".el-select")[0];
+        const resultBox = document.querySelectorAll(".el-select")[1];
+        typeBox.addEventListener("click", () => { document.getElementById("type-options").hidden = false; });
+        resultBox.addEventListener("click", () => { document.getElementById("result-options").hidden = false; });
+        document.getElementById("type-options").addEventListener("click", event => {
+          const option = event.target.closest("[role=option]");
+          if (!option) return;
+          bound.type = option.textContent;
+          typeBox.querySelector(".el-select__placeholder").textContent = option.textContent;
+          typeBox.querySelector("input").value = option.textContent;
+          document.getElementById("type-options").hidden = true;
+        });
+        document.getElementById("result-options").addEventListener("click", event => {
+          const option = event.target.closest("[role=option]");
+          if (!option) return;
+          bound.result = option.textContent;
+          resultBox.querySelector(".el-select__placeholder").textContent = option.textContent;
+          resultBox.querySelector("input").value = option.textContent;
+          document.getElementById("result-options").hidden = true;
+        });
+        const start = document.querySelectorAll(".el-range-input")[0];
+        const end = document.querySelectorAll(".el-range-input")[1];
+        const panel = document.getElementById("range");
+        const openRange = () => { panel.hidden = false; };
+        document.querySelector(".el-date-editor").addEventListener("click", openRange);
+        start.addEventListener("focus", openRange);
+        end.addEventListener("focus", openRange);
+        start.addEventListener("input", () => { if (!/^\\d{4}-\\d{2}-\\d{2}/.test(start.value)) start.value = ""; });
+        end.addEventListener("input", () => { if (!/^\\d{4}-\\d{2}-\\d{2}/.test(end.value)) end.value = ""; });
+        panel.addEventListener("click", event => {
+          if (!event.target.classList.contains("el-date-table-cell__text")) return;
+          const day = event.target.textContent.padStart(2, "0");
+          if (!bound.start) {
+            bound.start = "2026-09-" + day;
+            start.value = bound.start;
+          } else {
+            bound.end = "2026-09-" + day;
+            end.value = bound.end;
+          }
+        });
+        document.getElementById("range-ok").onclick = () => { panel.hidden = true; };
+        document.getElementById("reason").addEventListener("input", event => { bound.reason = event.target.value; });
+        document.getElementById("search").addEventListener("submit", event => {
+          event.preventDefault();
+          bound.reason = bound.reason || document.getElementById("reason").value;
+          fetch("/api/search?type=" + encodeURIComponent(bound.type) + "&start=" + bound.start + "&end=" + bound.end);
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "search-bar");
+    const before: any = await recorder.control({ action: "snapshot" });
+    assert.equal(before.scope, "page", JSON.stringify({ scope: before.scope, text: String(before.text || "").slice(0, 80) }));
+    const labels = (before.todoFields || []).map((field: any) => String(field.label || ""));
+    assert.equal(labels.some((label: string) => /类型/.test(label)), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.some((label: string) => /开始日期|申请时间/.test(label)), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.some((label: string) => /结束日期|申请时间/.test(label)), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.some((label: string) => /结果/.test(label)), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.some((label: string) => /原因/.test(label)), true, JSON.stringify(before.todoFields));
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.ok, true, JSON.stringify(result.failed || result.todoFields || result.formFields));
+    assert.equal(result.todoCount, 0, JSON.stringify(result.todoFields));
+    assert.equal((result.failed || []).length, 0, JSON.stringify(result.failed));
+    const type = String((result.formFields || []).find((field: any) => /类型/.test(String(field.label || "")))?.value || "");
+    const reason = String((result.formFields || []).find((field: any) => /原因/.test(String(field.label || "")))?.value || "");
+    const start = String((result.formFields || []).find((field: any) => field.rangeIndex === 0 || /开始日期/.test(String(field.label || "")))?.value || "");
+    const end = String((result.formFields || []).find((field: any) => field.rangeIndex === 1 || /结束日期/.test(String(field.label || "")))?.value || "");
+    assert.match(type, /假/);
+    assert.equal(/^样例-/.test(type), false, type);
+    assert.match(reason, /样例/);
+    assert.match(start, /\d{4}-\d{2}-\d{2}/);
+    assert.match(end, /\d{4}-\d{2}-\d{2}/);
+    const after: any = await recorder.control({ action: "snapshot" });
+    assert.equal(Boolean(after.text && /确定/.test(after.text) && after.scope === "dialog"), false, JSON.stringify({ scope: after.scope, text: after.text }));
+    const submitted: any = await recorder.control({ action: "submit-form" });
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exercise-form opens a kit select from the wrapper surface, not the outer host", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-wrapper-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>外壳下拉</title></head><body>
+      <form class="el-form">
+        <div class="el-form-item">
+          <label class="el-form-item__label">请假类型</label>
+          <div class="el-select">
+            <div class="el-select__wrapper">
+              <span class="el-select__placeholder">请选择请假类型</span>
+              <input role="combobox" readonly placeholder="请选择请假类型">
+            </div>
+          </div>
+        </div>
+        <button type="submit">搜索</button>
+      </form>
+      <ul id="opts" class="el-select-dropdown" hidden>
+        <li role="option">事假</li><li role="option">病假</li>
+      </ul>
+      <script>
+        document.querySelector(".el-select").addEventListener("click", event => event.stopPropagation());
+        document.querySelector(".el-select__wrapper").addEventListener("mousedown", () => {
+          document.getElementById("opts").hidden = false;
+        });
+        document.getElementById("opts").addEventListener("click", event => {
+          const option = event.target.closest("[role=option]");
+          if (!option) return;
+          document.querySelector(".el-select__placeholder").textContent = option.textContent;
+          document.querySelector("[role=combobox]").value = option.textContent;
+          document.getElementById("opts").hidden = true;
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "wrapper-select");
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.ok, true, JSON.stringify(result.failed || result.todoFields));
+    assert.match(String((result.formFields || []).find((field: any) => /类型/.test(String(field.label || "")))?.value || ""), /假/);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("chooser dialogs do not steal the form and exercise-form picks a person row", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-chooser-"));
+  const created: unknown[] = [];
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/create" && request.method === "POST") {
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
+      request.on("end", () => {
+        created.push(JSON.parse(body || "{}"));
+        response.setHeader("content-type", "application/json");
+        response.end('{"code":0}');
+      });
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>发起请假</title></head><body>
+      <form class="el-form" id="create">
+        <div class="el-form-item">
+          <label class="el-form-item__label">请假类型</label>
+          <div class="el-select">
+            <div class="el-select__wrapper">
+              <span class="el-select__placeholder">请选择请假类型</span>
+              <input role="combobox" readonly placeholder="请选择请假类型">
+            </div>
+          </div>
+        </div>
+        <button type="submit">提交</button>
+      </form>
+      <aside class="approval-rail">
+        <div class="process-node">
+          <div class="node-name">人力审批</div>
+          <div class="el-avatar el-avatar--circle" style="width:36px;height:36px">+</div>
+        </div>
+      </aside>
+      <ul id="opts" class="el-select-dropdown" hidden>
+        <li role="option">事假</li>
+      </ul>
+      <div id="user" class="el-dialog" role="dialog" style="position:fixed;inset:20px;background:#fff;z-index:40;padding:16px">
+        <span class="el-dialog__title">选择用户</span>
+        <div class="el-tree"><div class="el-tree-node" role="treeitem">科技信息</div></div>
+        <table><tbody><tr data-user="duanya"><td>duanya</td></tr></tbody></table>
+        <button type="button" id="ok">确定</button>
+      </div>
+      <script>
+        const bound = { type: "", user: "" };
+        document.querySelector(".el-select__wrapper").addEventListener("mousedown", () => {
+          document.getElementById("opts").hidden = false;
+        });
+        document.getElementById("opts").addEventListener("click", event => {
+          const option = event.target.closest("[role=option]");
+          if (!option) return;
+          bound.type = option.textContent;
+          document.querySelector(".el-select__placeholder").textContent = option.textContent;
+          document.querySelector("[role=combobox]").value = option.textContent;
+          document.getElementById("opts").hidden = true;
+        });
+        document.querySelector(".el-avatar").addEventListener("click", () => {
+          document.getElementById("user").hidden = false;
+        });
+        document.querySelector("#user table").addEventListener("click", event => {
+          const row = event.target.closest("tr");
+          if (row) bound.user = row.getAttribute("data-user");
+        });
+        document.getElementById("ok").onclick = () => {
+          if (!bound.user) return;
+          const node = document.querySelector(".process-node");
+          const tag = document.createElement("span");
+          tag.className = "selected-tag";
+          tag.textContent = bound.user;
+          node.querySelector(".el-avatar")?.remove();
+          node.appendChild(tag);
+          document.getElementById("user").hidden = true;
+        };
+        document.getElementById("create").addEventListener("submit", event => {
+          event.preventDefault();
+          if (!bound.type || !bound.user) return;
+          fetch("/api/create", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(bound) });
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "chooser-dialog");
+    const before: any = await recorder.control({ action: "snapshot" });
+    assert.equal(before.scope, "page", JSON.stringify({ scope: before.scope, text: String(before.text || "").slice(0, 80) }));
+    assert.equal((before.todoFields || []).some((field: any) => /类型/.test(String(field.label || ""))), true, JSON.stringify(before.todoFields));
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.ok, true, JSON.stringify(result.failed || result.todoFields || result.formFields));
+    assert.match(String((result.formFields || []).find((field: any) => /类型/.test(String(field.label || "")))?.value || ""), /假/);
+    assert.match(String((result.formFields || []).find((field: any) => /人力/.test(String(field.label || "")))?.value || ""), /duanya/);
+    const submitted: any = await recorder.control({ action: "submit-form" });
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    assert.equal((created[0] as { user?: string })?.user, "duanya", JSON.stringify(created));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exercise-form clicks the visible option node and ignores table-header filters", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-option-"));
+  const searched: unknown[] = [];
+  const server = http.createServer((request, response) => {
+    if ((request.url || "").startsWith("/api/search") && request.method === "GET") {
+      searched.push(new URL(request.url, "http://127.0.0.1").search);
+      response.setHeader("content-type", "application/json");
+      response.end('{"code":0}');
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>选项与表头</title></head><body>
+      <form class="el-form" id="search">
+        <div class="el-form-item">
+          <label class="el-form-item__label">请假类型</label>
+          <div class="el-select">
+            <div class="el-select__wrapper"><input role="combobox" readonly placeholder="请选择请假类型"></div>
+          </div>
+        </div>
+        <div class="el-form-item">
+          <label class="el-form-item__label">所属项目</label>
+          <div class="el-select">
+            <div class="el-select__wrapper">
+              <input role="combobox" readonly placeholder="请选择项目">
+              <input class="el-select__input" placeholder="请输入项目名称">
+            </div>
+          </div>
+        </div>
+        <button type="submit">搜索</button>
+      </form>
+      <table class="el-table">
+        <thead class="el-table__header"><tr>
+          <th class="el-table__cell">入库数量
+            <div class="el-select"><input role="combobox" placeholder="入库数量"></div>
+          </th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <ul id="opts" class="el-select-dropdown" hidden>
+        <li class="el-select-dropdown__item"><span>事假</span><i>x</i></li>
+      </ul>
+      <ul id="proj" class="el-select-dropdown" hidden>
+        <li class="el-select-dropdown__item">内部项目</li>
+      </ul>
+      <script>
+        const bound = { type: "", project: "" };
+        const selects = document.querySelectorAll(".el-form .el-select__wrapper");
+        selects[0].addEventListener("mousedown", event => {
+          if (!event.isTrusted) return;
+          document.getElementById("opts").hidden = false;
+        });
+        selects[1].addEventListener("mousedown", event => {
+          if (!event.isTrusted) return;
+          document.getElementById("proj").hidden = false;
+        });
+        document.getElementById("opts").addEventListener("click", event => {
+          const option = event.target.closest(".el-select-dropdown__item");
+          if (!option) return;
+          bound.type = "事假";
+          selects[0].querySelector("[role=combobox]").value = "事假";
+          document.getElementById("opts").hidden = true;
+        });
+        document.getElementById("proj").addEventListener("click", event => {
+          const option = event.target.closest(".el-select-dropdown__item");
+          if (!option) return;
+          bound.project = option.textContent;
+          selects[1].querySelector("[role=combobox]").value = option.textContent;
+          document.getElementById("proj").hidden = true;
+        });
+        document.getElementById("search").addEventListener("submit", event => {
+          event.preventDefault();
+          fetch("/api/search?type=" + encodeURIComponent(bound.type));
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "option-header");
+    const before: any = await recorder.control({ action: "snapshot" });
+    const labels = (before.todoFields || []).map((field: any) => String(field.label || ""));
+    assert.equal(labels.some((label: string) => /类型/.test(label)), true, JSON.stringify(before.todoFields));
+    assert.equal(labels.some((label: string) => /项目名称/.test(label)), false, JSON.stringify(before.todoFields));
+    assert.equal(labels.some((label: string) => /入库数量/.test(label)), false, JSON.stringify(before.todoFields));
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.ok, true, JSON.stringify(result.failed || result.todoFields));
+    assert.match(String((result.formFields || []).find((field: any) => /类型/.test(String(field.label || "")))?.value || ""), /假/);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("page snapshot does not force a full-document innerText read", () => {
+  const source = Function.prototype.toString.call(SNAPSHOT_IN_PAGE);
+  assert.equal(/document\.body\.innerText/.test(source), false, source.slice(0, 200));
+});
+
+test("exercise-form opens a trusted-only select from the input wrapper", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-trusted-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>可信下拉</title></head><body>
+      <form class="el-form">
+        <div class="el-form-item">
+          <label class="el-form-item__label">审批结果</label>
+          <div class="el-select">
+            <div class="el-input">
+              <div class="el-input__wrapper">
+                <input readonly placeholder="请选择审批结果">
+              </div>
+            </div>
+          </div>
+        </div>
+        <button type="submit">搜索</button>
+      </form>
+      <ul id="opts" class="el-select-dropdown" hidden>
+        <li role="option">审批中</li><li role="option">已通过</li>
+      </ul>
+      <script>
+        document.querySelector(".el-input__wrapper").addEventListener("mousedown", event => {
+          if (!event.isTrusted) return;
+          document.getElementById("opts").hidden = false;
+        });
+        document.getElementById("opts").addEventListener("click", event => {
+          const option = event.target.closest("[role=option]");
+          if (!option) return;
+          document.querySelector("[placeholder='请选择审批结果']").value = option.textContent;
+          document.getElementById("opts").hidden = true;
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "trusted-select");
+    const before: any = await recorder.control({ action: "snapshot" });
+    const field = (before.todoFields || []).find((item: any) => /审批结果/.test(String(item.label || "")));
+    assert.equal(field?.kind, "select", JSON.stringify(before.todoFields));
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.ok, true, JSON.stringify(result.failed || result.todoFields));
+    assert.match(String((result.formFields || []).find((item: any) => /审批结果/.test(String(item.label || "")))?.value || ""), /审批中|已通过/);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("leftover chooser needs a checkbox and does not block later selects", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-check-"));
+  const created: unknown[] = [];
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/create" && request.method === "POST") {
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
+      request.on("end", () => {
+        created.push(JSON.parse(body || "{}"));
+        response.setHeader("content-type", "application/json");
+        response.end('{"code":0}');
+      });
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>选人复选</title></head><body>
+      <form class="el-form" id="create">
+        <div class="el-form-item">
+          <label class="el-form-item__label">请假类型</label>
+          <div class="el-select">
+            <div class="el-select__wrapper">
+              <input role="combobox" readonly placeholder="请选择请假类型">
+            </div>
+          </div>
+        </div>
+        <button type="submit">提交</button>
+      </form>
+      <aside class="approval-rail">
+        <div class="process-node">
+          <div class="node-name">人力审批</div>
+          <div class="el-avatar el-avatar--circle" style="width:36px;height:36px">+</div>
+        </div>
+      </aside>
+      <ul id="opts" class="el-select-dropdown" hidden>
+        <li role="option">事假</li>
+      </ul>
+      <div id="user" class="el-dialog" role="dialog" style="position:fixed;inset:20px;background:#fff;z-index:40;padding:16px">
+        <span class="el-dialog__title">选择用户</span>
+        <div class="el-tree"><div class="el-tree-node" role="treeitem">科技信息</div></div>
+        <table><tbody><tr><td><span class="el-checkbox" id="cb" style="display:inline-block;width:16px;height:16px;border:1px solid #333"></span></td><td>duanya</td></tr></tbody></table>
+        <button type="button" id="ok">确定</button>
+      </div>
+      <script>
+        const bound = { type: "", user: "" };
+        document.querySelector(".el-select__wrapper").addEventListener("mousedown", event => {
+          if (!event.isTrusted) return;
+          document.getElementById("opts").hidden = false;
+        });
+        document.getElementById("opts").addEventListener("click", event => {
+          const option = event.target.closest("[role=option]");
+          if (!option) return;
+          bound.type = option.textContent;
+          document.querySelector("[role=combobox]").value = option.textContent;
+          document.getElementById("opts").hidden = true;
+        });
+        document.querySelector("tbody tr").addEventListener("click", () => {});
+        document.getElementById("cb").addEventListener("click", event => {
+          event.stopPropagation();
+          bound.user = "duanya";
+        });
+        document.getElementById("ok").onclick = () => {
+          if (!bound.user) return;
+          const node = document.querySelector(".process-node");
+          const tag = document.createElement("span");
+          tag.className = "selected-tag";
+          tag.textContent = bound.user;
+          node.querySelector(".el-avatar")?.remove();
+          node.appendChild(tag);
+          document.getElementById("user").hidden = true;
+        };
+        document.getElementById("create").addEventListener("submit", event => {
+          event.preventDefault();
+          if (!bound.type || !bound.user) return;
+          fetch("/api/create", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(bound) });
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "checkbox-chooser");
+    const before: any = await recorder.control({ action: "snapshot" });
+    assert.equal(before.scope, "page", JSON.stringify({ scope: before.scope, text: String(before.text || "").slice(0, 80) }));
+    assert.equal((before.todoFields || []).some((field: any) => /类型/.test(String(field.label || ""))), true, JSON.stringify(before.todoFields));
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.ok, true, JSON.stringify(result.failed || result.todoFields || result.formFields));
+    assert.match(String((result.formFields || []).find((field: any) => /类型/.test(String(field.label || "")))?.value || ""), /假/);
+    assert.match(String((result.formFields || []).find((field: any) => /人力/.test(String(field.label || "")))?.value || ""), /duanya/);
+    const submitted: any = await recorder.control({ action: "submit-form" });
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    assert.equal((created[0] as { user?: string })?.user, "duanya", JSON.stringify(created));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exercise-form fills a form remark and a table remark when placeholders repeat", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-remark-"));
+  const created: unknown[] = [];
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/create" && request.method === "POST") {
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
+      request.on("end", () => {
+        created.push(JSON.parse(body || "{}"));
+        response.setHeader("content-type", "application/json");
+        response.end('{"code":0}');
+      });
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>重复备注</title></head><body>
+      <form class="el-form" id="search" style="opacity:.4">
+        <div class="el-form-item"><label class="el-form-item__label">备注</label><input placeholder="请输入备注"></div>
+        <button type="submit">搜索</button>
+      </form>
+      <div class="el-overlay-dialog" role="dialog">
+        <div class="el-dialog">
+          <span class="el-dialog__title">新增订单</span>
+          <form class="el-form" id="create">
+            <div class="el-form-item"><label class="el-form-item__label">订单时间</label><input id="when" placeholder="选择订单时间"></div>
+            <div class="el-form-item"><label class="el-form-item__label">供应商</label><input id="supplier"></div>
+            <div class="el-form-item"><label class="el-form-item__label">结算账户</label><input id="account"></div>
+            <div class="el-form-item"><label class="el-form-item__label">备注</label><textarea id="memo" placeholder="请输入备注"></textarea></div>
+            <table class="el-table">
+              <thead class="el-table__header"><tr><th class="el-table__cell">备注</th></tr></thead>
+              <tbody><tr class="el-table__row"><td class="el-table__cell">
+                <div class="el-form-item"><input id="line-memo" placeholder="请输入备注"></div>
+              </td></tr></tbody>
+            </table>
+            <button type="submit">确定</button>
+          </form>
+        </div>
+      </div>
+      <script>
+        document.getElementById("create").addEventListener("submit", event => {
+          event.preventDefault();
+          fetch("/api/create", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              supplier: document.getElementById("supplier").value,
+              memo: document.getElementById("memo").value,
+              line: document.getElementById("line-memo").value
+            })
+          });
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "repeat-remark");
+    const before: any = await recorder.control({ action: "snapshot" });
+    const remarks = (before.formFields || []).filter((field: any) => String(field.label || "").includes("备注"));
+    assert.equal(remarks.some((field: any) => field.kind === "textarea" && /^label=/.test(String(field.selector || ""))), true, JSON.stringify(remarks));
+    assert.equal(remarks.some((field: any) => String(field.selector || "").startsWith("column=")), true, JSON.stringify(remarks));
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.ok, true, JSON.stringify(result.failed || result.todoFields || result.formFields));
+    const submitted: any = await recorder.control({ action: "submit-form" });
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    assert.equal(created.length, 1, JSON.stringify({ created, submitted }));
+    const row = created[0] as { memo?: string; line?: string; supplier?: string };
+    assert.match(String(row.memo || ""), /备注/);
+    assert.match(String(row.line || ""), /备注/);
+    assert.match(String(row.supplier || ""), /供应商|样例/);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("timeline assigned avatar is filled and empty add-user button is the only picker todo", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-timeline-"));
+  const created: unknown[] = [];
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/create" && request.method === "POST") {
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
+      request.on("end", () => {
+        created.push(JSON.parse(body || "{}"));
+        response.setHeader("content-type", "application/json");
+        response.end('{"code":0}');
+      });
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>流程时间轴</title></head><body>
+      <form class="el-form" id="create">
+        <div class="el-form-item"><label class="el-form-item__label">原因</label><textarea id="reason" placeholder="请输入请假原因"></textarea></div>
+        <button type="submit">确定</button>
+      </form>
+      <div class="el-card__body">
+        <ul class="el-timeline">
+          <li class="el-timeline-item">
+            <div class="el-timeline-item__dot"><div class="rounded-full"><img alt=""></div></div>
+            <div class="el-timeline-item__content">
+              <div class="flex flex-col" id="activity-task-leader">
+                <div class="font-bold">领导审批</div>
+                <div class="flex items-center flex-wrap mt-1 gap2">
+                  <span class="el-avatar el-avatar--circle"><img alt="user"></span>
+                  管理员
+                </div>
+              </div>
+            </div>
+          </li>
+          <li class="el-timeline-item">
+            <div class="el-timeline-item__dot"><div class="rounded-full"><img alt=""></div></div>
+            <div class="el-timeline-item__content">
+              <div class="flex flex-col" id="activity-task-hr">
+                <div class="font-bold">人力审批</div>
+                <div class="flex flex-wrap gap2 items-center">
+                  <button type="button" class="el-button el-tooltip__trigger" id="add-hr"><span><img class="w-18px" alt=""></span></button>
+                </div>
+              </div>
+            </div>
+          </li>
+        </ul>
+      </div>
+      <div id="picker" class="el-dialog" role="dialog" hidden style="position:fixed;inset:20px;background:#fff;z-index:40;padding:16px">
+        <span class="el-dialog__title">选择用户</span>
+        <table><tbody><tr data-user="duanya"><td>duanya</td></tr></tbody></table>
+        <button type="button" id="ok"> 确 定 </button>
+      </div>
+      <script>
+        const bound = { reason: "", hr: "" };
+        document.getElementById("reason").addEventListener("input", event => { bound.reason = event.target.value; });
+        document.getElementById("add-hr").addEventListener("click", () => {
+          document.getElementById("picker").hidden = false;
+        });
+        document.querySelector("#picker table").addEventListener("click", event => {
+          const row = event.target.closest("tr");
+          if (row) bound.hr = row.getAttribute("data-user");
+        });
+        document.getElementById("ok").onclick = () => {
+          if (!bound.hr) return;
+          const wrap = document.querySelector("#activity-task-hr .flex-wrap");
+          wrap.innerHTML = '<span class="el-avatar el-avatar--circle"></span> ' + bound.hr;
+          document.getElementById("picker").hidden = true;
+        };
+        document.getElementById("create").addEventListener("submit", event => {
+          event.preventDefault();
+          bound.reason = bound.reason || document.getElementById("reason").value;
+          if (!bound.hr) return;
+          fetch("/api/create", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(bound) });
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "timeline-slot");
+    const before: any = await recorder.control({ action: "snapshot" });
+    const leader = (before.formFields || []).find((field: any) => String(field.label || "").includes("领导审批"));
+    const hr = (before.todoFields || []).find((field: any) => String(field.label || "").includes("人力审批"));
+    assert.equal(leader?.filled, true, JSON.stringify(leader));
+    assert.match(String(leader?.value || ""), /管理员/);
+    assert.equal(Boolean(hr), true, JSON.stringify(before.todoFields));
+    assert.equal(hr?.filled, false, JSON.stringify(hr));
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.ok, true, JSON.stringify(result.failed || result.todoFields || result.formFields));
+    assert.match(String((result.formFields || []).find((field: any) => /人力/.test(String(field.label || "")))?.value || ""), /duanya/);
+    const submitted: any = await recorder.control({ action: "submit-form" });
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    assert.equal((created[0] as { hr?: string })?.hr, "duanya", JSON.stringify(created));
   } finally {
     if (recorder.isActive()) await recorder.stop().catch(() => {});
     await new Promise<void>(resolve => server.close(() => resolve()));
