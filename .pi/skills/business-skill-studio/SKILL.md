@@ -26,27 +26,28 @@ This host is Windows. The bash tool is disabled. Page recording uses `business_s
 2. **Analyze**
    - Call `business_skill_analyze` with the `sessionId` returned by `business_skill_record_stop`. Do not analyze the entire recording history.
    - The analyzer may improve names/descriptions with the model, but it must not invent endpoints, request fields, response fields, candidates, or evidence IDs.
+   - Report 主能力 and 字段候选 separately. 主能力 is only this page's 查询/新建/修改/审核/删除. User/product pickers, stock lookups, IM, and login are not 主能力.
+   - For each write field the caller will not type, test origin hypotheses against the recording. Write a rule only when exactly one hypothesis uniquely explains the value. Never freeze a recorded business sample.
 
-3. **Validate**
-   - Call `business_skill_validate`.
-   - Only evidence-backed capabilities may become `verified`.
-   - Write capabilities require correlated UI evidence plus a successful observed network response.
+3. **Review**
+   - Call `business_skill_validate`. This is the gate. Inference is not assumed correct.
+   - **Pass** only when the tool returns `审核通过`: every 主能力 is `verified`, every write non-caller field has a unique origin rule, and every lookup used by `from:` / candidates is usable. Then export is allowed.
+   - **Fail** when it returns `审核未通过`. Do not export. Do not treat “some checks passed” as passed.
+   - Read `下一步` and go back to that stage:
+     - `回到页面补录`：missing request, failed submit, missing UI fill, or no page operation. Resume recording, fix the page, `record_stop`, then analyze and validate again.
+     - `补证据后重新分析再验证`：a field/query/formula was not uniquely explained. Record the missing lookup or calculation if needed, then `analyze` the same session and validate again. Do not freeze the sample.
+     - `需要人工改目录或平台后再验证`：platform limitation or catalog edit. Stop and tell the user what is blocked.
+   - The catalog is still editable at `.business-skill-studio/catalog/capabilities.json`. Preserve manual descriptions. Approve cross-capability flow only with `business_skill_approve_binding`. Set dynamic candidates only with `business_skill_set_dynamic_candidates`.
 
-4. **Review**
-   - The generated catalog is intentionally editable:
-     `.business-skill-studio/catalog/capabilities.json`
-   - Preserve manual business descriptions.
-   - Approve automatic cross-capability data flow only with `business_skill_approve_binding`.
-   - Configure dynamic form candidates only with `business_skill_set_dynamic_candidates`, using a verified query capability as the source.
-
-5. **Plan**
+4. **Plan**
    - Call `business_skill_plan` for a natural-language goal.
    - Route to a single verified atomic capability when possible.
    - Chain capabilities only through `approved: true` bindings.
    - If multiple targets match, required inputs are missing, a binding is absent, or a result is ambiguous, ask the user.
    - Execute planned operations immediately. Do not ask the user to confirm page actions or writes.
 
-6. **Export**
+5. **Export**
+   - Export only after Review returned `审核通过`. If it did not, go back; do not export a blocked catalog.
    - Call `business_skill_export` with the page's Chinese business name, such as `采购订单`.
    - The package has two layers: primary recorded operations (查询/新增/修改/审核/删除) and lookup APIs used only to pick field values. Report them separately. Do not tell the user that lookup APIs, IM, login, or unrecorded edit/delete are exported business capabilities.
    - The exported package is a handbook, not a business spec: `SKILL.md` (router + composition rules) + `references/CAPABILITIES.md` + `references/INPUT_FORMS.md` + `references/OPTIONS.md` + `references/PLAYBOOK.md` + `references/CONTRACT.json` + `scripts/execute.py`. Do not invent endpoints.
@@ -56,4 +57,4 @@ This host is Windows. The bash tool is disabled. Page recording uses `business_s
 
 ## Completion rule
 
-A workflow is complete only when every planned step satisfies its contract completion criteria. Do not infer success from prose alone. If the user asked for 新增/修改 and the catalog has no verified create/update, go back to the page, fix the form, and record a successful submit before export. Do not hand that gap back as a finished Skill.
+A workflow is complete only when Review returned `审核通过` and every planned step satisfies its contract completion criteria. Do not infer success from prose alone. If Review is blocked, follow `下一步` before export. If the user asked for 新增/修改 and the catalog has no verified create/update, go back to the page, fix the form, and record a successful submit before export. Do not hand that gap back as a finished Skill.

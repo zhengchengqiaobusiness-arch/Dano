@@ -63,8 +63,15 @@ async function main() {
       break;
     }
     case "validate": {
-      const caps = await studio.validate();
-      console.log(JSON.stringify(caps.map(c => ({ id: c.id, status: c.validation.status, checks: c.validation.checks })), null, 2));
+      const { capabilities, review } = await studio.review();
+      console.log(JSON.stringify({
+        status: review.status,
+        next: review.next,
+        summary: review.summary,
+        findings: review.findings,
+        capabilities: capabilities.map(item => ({ id: item.id, title: item.title, status: item.validation.status, checks: item.validation.checks }))
+      }, null, 2));
+      if (review.status !== "passed") process.exitCode = 2;
       break;
     }
     case "bind": {
@@ -127,7 +134,7 @@ Commands:
   record   --url <url> [--name <name>]
   sessions
   analyze  [--session <id>] [--no-llm]
-  validate
+  validate              # 审核门禁：通过才能导出；未通过会给出回溯阶段
   bind     --from <cap> --from-path <jsonpath> --to <cap> --to-path <jsonpath> --approve
   candidate-source --target <cap> --field <path> --source <query-cap> --value-path <path> --label-path <path> --approve
   plan     <natural language goal>

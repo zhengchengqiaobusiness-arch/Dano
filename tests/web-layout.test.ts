@@ -153,7 +153,9 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.match(bridge, /Windows|Never use bash|WSL/);
   assert.match(bridge, /exclude-tools[\s\S]*bash|The bash tool is disabled/);
   assert.match(bridge, /sessionId from record_stop|主能力 and 字段候选接口/);
-  assert.match(extension, /本次录制主能力|已导出主能力/);
+  assert.match(bridge, /审核通过|re-record|re-analyze/);
+  assert.match(extension, /本次识别主能力|本次录制主能力|已导出主能力/);
+  assert.match(extension, /审核通过|审核未通过/);
 });
 
 test("Windows Pi host uses powershell instead of bash", async () => {
@@ -178,6 +180,7 @@ test("skill catalog distinguishes handbook export from business spec dump", asyn
     readFile(path.join(root, "web", "styles.css"), "utf8")
   ]);
   assert.match(html, /执行手册，不是业务说明书/);
+  assert.match(html, /只有审核通过才能导出/);
   assert.match(html, /dist\/skills/);
   assert.match(html, /独立目录，不会覆盖上一份/);
   assert.match(html, /SKILL.md 路由手册/);

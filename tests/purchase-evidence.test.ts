@@ -10,7 +10,8 @@ import type { EvidenceEvent } from "../src/domain.js";
 const execFileAsync = promisify(execFile);
 import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
 import { finalizeCapabilities } from "../src/inference/finalize-capabilities.js";
-import { exportableCapabilities } from "../src/inference/export-scope.js";
+import { exportableCapabilities, isPrimaryCapability, summarizeCatalog } from "../src/inference/export-scope.js";
+import { reviewCatalog } from "../src/review/catalog-review.js";
 import { relatedEvidence } from "../src/inference/related-evidence.js";
 import { normalizeCatalog } from "../src/catalog/normalize.js";
 import { exportSkill } from "../src/export/skill-exporter.js";
@@ -174,6 +175,13 @@ function purchaseEvents(): EvidenceEvent[] {
     },
     response: { status: 200, headers: {}, body: { success: true, data: 88 } }
   }, {
+    id: "net-user-page", kind: "network", sessionId: "rec-1", at: "2026-09-02T03:18:01.650Z",
+    request: {
+      method: "GET", url: "http://admin.dianshixinxi.com:90/admin-api/system/user/page?pageNo=1&pageSize=10",
+      resourceType: "xhr", headers: {}, query: { pageNo: 1, pageSize: 10 }
+    },
+    response: { status: 200, headers: {}, body: { success: true, data: { list: [{ id: 1, nickname: "管理员" }], total: 1 } } }
+  }, {
     id: "net-im", kind: "network", sessionId: "rec-1", at: "2026-09-02T03:18:04.000Z",
     request: {
       method: "GET", url: "http://admin.dianshixinxi.com:90/admin-api/im/conversation/list",
@@ -278,6 +286,15 @@ test("search and create purchase order verify from mixed manual and recorded evi
   assert.equal(exported.filter(item => ["query", "create"].includes(item.operation) && item.transport.pathTemplate.includes("/purchase/order")).length, 2);
   assert.equal(exported.some(item => item.id === im.id || item.transport.pathTemplate.includes("/im/conversation")), false);
   assert.equal(exported.some(item => item.transport.pathTemplate.includes("/auth/login")), false);
+  const users = verified.find(item => item.transport.pathTemplate.includes("/user/page"));
+  assert.equal(Boolean(users), true);
+  assert.equal(isPrimaryCapability(users!, verified), false);
+  assert.equal(summarizeCatalog(verified).primary.length, 2);
+  const review = reviewCatalog(verified);
+  assert.equal(review.status, "passed");
+  assert.equal(review.next, "export");
+  assert.equal(review.primaryCount, 2);
+  assert.match(review.summary, /审核通过/);
 });
 
 test("nameless forms bind only uniquely evidenced fields", () => {
@@ -590,7 +607,7 @@ test("export refuses write system fields that appeared in the request but have n
   try {
     await assert.rejects(
       () => exportSkill(temporary, "采购订单管理", broken),
-      /写操作的系统字段缺少录制成功请求中的写入值/
+      /审核未通过|无法唯一推断|write-field-origins/
     );
   } finally {
     await rm(temporary, { recursive: true, force: true });

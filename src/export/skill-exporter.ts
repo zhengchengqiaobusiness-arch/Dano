@@ -6,6 +6,7 @@ import { normalizeCatalog } from "../catalog/normalize.js";
 import { buildApprovedRoutes } from "../planner/routes.js";
 import { id, writeJson } from "../utils.js";
 import { exportableCapabilities, isPrimaryCapability } from "../inference/export-scope.js";
+import { assertExportable } from "../review/catalog-review.js";
 import {
   buildCapabilities,
   buildInputForms,
@@ -32,8 +33,9 @@ export function resourceSlugFromPath(pathTemplate: string) {
 export function normalizeSkillName(value: string, capabilities: CapabilityContract[] = []) {
   const ascii = value.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
   if (ascii) return ascii;
-  const primary = capabilities.filter(isPrimaryCapability);
-  const fromPath = resourceSlugFromPath((primary[0] || capabilities[0])?.transport.pathTemplate || "");
+  const primary = capabilities.filter(item => isPrimaryCapability(item, capabilities));
+  const named = primary.find(item => ["create", "update", "review", "delete", "upload"].includes(item.operation)) || primary[0] || capabilities[0];
+  const fromPath = resourceSlugFromPath(named?.transport.pathTemplate || "");
   return fromPath || `business-skill-${createHash("sha256").update(value).digest("hex").slice(0, 8)}`;
 }
 
@@ -46,7 +48,7 @@ function exportedTitle(capability: CapabilityContract, displayName: string, capa
   if (/[\u4e00-\u9fff]/.test(capability.title) && !/[a-z]{3,}/i.test(capability.title)) {
     return capability.title;
   }
-  if (isPrimaryCapability(capability) && displayName) {
+  if (isPrimaryCapability(capability, capabilities) && displayName) {
     return `${operationNames[capability.operation]}${displayName.replace(/管理$/, "")}`;
   }
   const usedBy = capabilities.flatMap(item => item.inputForm).find(field =>
@@ -58,7 +60,7 @@ function exportedTitle(capability: CapabilityContract, displayName: string, capa
 
 function exportedDescription(capability: CapabilityContract, displayName: string, capabilities: CapabilityContract[]) {
   if (capability.editing?.description === "manual") return capability.description;
-  if (isPrimaryCapability(capability) && displayName) {
+  if (isPrimaryCapability(capability, capabilities) && displayName) {
     return `对「${displayName}」执行${operationNames[capability.operation]}。只使用合同里的接口和调用方字段。`;
   }
   const usedBy = capabilities.flatMap(item => item.inputForm).find(field =>
@@ -107,7 +109,7 @@ function exportedCapability(capability: CapabilityContract, capabilities: Capabi
   return {
     id: capability.id,
     kind: "atomic",
-    role: isPrimaryCapability(capability) ? "primary" : "lookup",
+    role: isPrimaryCapability(capability, capabilities) ? "primary" : "lookup",
     title: capability.title,
     description: capability.description,
     operation: capability.operation,
@@ -139,27 +141,10 @@ export async function exportSkill(
   allCapabilities: CapabilityContract[],
   match: string[] = []
 ) {
-  const selected = exportableCapabilities(normalizeCatalog(allCapabilities), match);
-  if (!selected.length) throw new Error("没有可导出的已验证能力");
-  const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload", "action"]);
-  const unresolved = selected.flatMap(capability => capability.inputForm.filter(field =>
-    field.required && field.source !== "caller" && field.source !== "binding" && !field.defaultRule
-  ).map(field => `${capability.id}:${field.path}`));
-  if (unresolved.length) throw new Error(`存在没有处理规则的系统必填字段：${unresolved.join("、")}`);
-  const unsealed = selected.flatMap(capability => {
-    if (!WRITE_OPERATIONS.has(capability.operation)) return [];
-    return capability.inputForm
-      .filter(field =>
-        field.source !== "caller"
-        && field.source !== "binding"
-        && !field.defaultRule
-        && /请求中出现|页面只读展示/.test(field.sourceDetail || "")
-      )
-      .map(field => `${capability.id}:${field.path}`);
-  });
-  if (unsealed.length) {
-    throw new Error(`写操作的系统字段缺少录制成功请求中的写入值：${unsealed.join("、")}`);
-  }
+  const catalog = normalizeCatalog(allCapabilities);
+  assertExportable(catalog);
+  const selected = exportableCapabilities(catalog, match);
+  if (!selected.length) throw new Error("没有可导出的已验证主能力。下拉和用户分页不是主能力。");
 
   const displayName = requestedName.trim() || normalizeSkillName(requestedName, selected);
   const capabilities = withExportTitles(selected, displayName);

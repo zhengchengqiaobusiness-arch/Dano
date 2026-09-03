@@ -12,6 +12,7 @@ import { fallbackPlan } from "./planner/fallback.js";
 import { applyPlanPolicy } from "./planner/policy.js";
 import { exportSkill } from "./export/skill-exporter.js";
 import { executeCapability } from "./execution/http-executor.js";
+import { reviewCatalog } from "./review/catalog-review.js";
 import { normalizeCatalog } from "./catalog/normalize.js";
 import { SkillLibrary } from "./catalog/skill-library.js";
 import { buildApprovedRoutes } from "./planner/routes.js";
@@ -148,6 +149,11 @@ export class StudioService {
     const validated = finalizeCapabilities(caps, events);
     await writeJson(this.catalogFile(), validated);
     return validated;
+  }
+
+  async review() {
+    const capabilities = await this.validate();
+    return { capabilities, review: reviewCatalog(capabilities) };
   }
 
   async sealWrites() {
@@ -334,9 +340,10 @@ export class StudioService {
   }
 
   async execute(capabilityId: string, input: Record<string, unknown>, confirmWrite = false) {
-    const cap = (await this.capabilities()).find(c => c.id === capabilityId);
+    const caps = await this.capabilities();
+    const cap = caps.find(c => c.id === capabilityId);
     if (!cap) throw new Error(`Unknown capability: ${capabilityId}`);
-    return executeCapability(cap, input, confirmWrite);
+    return executeCapability(cap, input, confirmWrite, caps);
   }
 
   async export(name: string, outputRoot = path.join(this.config.rootDir, "dist", "skills"), match: string[] = []) {

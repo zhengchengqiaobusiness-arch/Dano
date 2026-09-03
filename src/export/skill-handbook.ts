@@ -41,11 +41,11 @@ export function inputType(field: InputFormField) {
 }
 
 export function classifyExported(capabilities: CapabilityContract[]) {
-  const primary = capabilities.filter(isPrimaryCapability);
+  const primary = capabilities.filter(item => isPrimaryCapability(item, capabilities));
   const lookups = capabilities.filter(capability =>
     !primary.includes(capability) && isCandidateSourceCapability(capability, capabilities)
   );
-  return { primary: primary.length ? primary : capabilities, lookups };
+  return { primary, lookups };
 }
 
 function defaultStrategy(field: InputFormField) {

@@ -77,7 +77,7 @@ export class PiRpcBridge {
         "If an action fails because the page is still loading, wait 400-800ms once and retry choose; do not retry the same blocked click and do not take extra snapshots.",
         "Only click, fill, select, choose, press, or navigate when the interface is in Pi automatic click mode; manual recording mode is controlled by the user.",
         "Execute browser actions and business operations immediately. Do not ask the user to confirm clicks, fills, submits, logins, or other page operations.",
-        "When analyzing, pass the sessionId from record_stop. When exporting, report 主能力 and 字段候选接口 separately; do not claim 编辑/删除 unless those writes were recorded and verified."
+        "When analyzing, pass the sessionId from record_stop. After analyze, call validate. Export only when validate returns 审核通过. If it returns 审核未通过, follow 下一步: re-record or re-analyze; never freeze a recorded sample. Report 主能力 and 字段候选接口 separately; user/product pickers are not 主能力. Do not claim 编辑/删除 unless those writes were recorded and verified."
       ].join(" ")
     );
 

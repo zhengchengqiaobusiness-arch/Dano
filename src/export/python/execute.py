@@ -279,8 +279,15 @@ def coerce(value: Any, value_type: str, field_path: str, field: dict[str, Any] |
             return normalize_date_string(value, (field or {}).get("dateClock"))
     if value_type == "string":
         return value if isinstance(value, str) else str(value)
-    if value_type == "integer" and isinstance(value, str) and re.fullmatch(r"[-+]?\d+", value.strip()):
-        return int(value)
+    if value_type == "integer":
+        if isinstance(value, bool):
+            pass
+        elif isinstance(value, int):
+            return value
+        elif isinstance(value, float) and value.is_integer():
+            return int(value)
+        elif isinstance(value, str) and re.fullmatch(r"[-+]?\d+", value.strip()):
+            return int(value)
     if value_type == "number" and isinstance(value, str) and re.fullmatch(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", value.strip()):
         return float(value)
     if value_type == "boolean" and isinstance(value, str) and value.lower() in {"true", "false"}:

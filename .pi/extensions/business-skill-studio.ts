@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StudioService } from "../../src/studio-service.js";
-import { isNoiseCapability, isPrimaryCapability, summarizeCatalog } from "../../src/inference/export-scope.js";
+import { summarizeCatalog } from "../../src/inference/export-scope.js";
+import { reviewCatalog } from "../../src/review/catalog-review.js";
 import { getByPath, setByPath } from "../../src/utils.js";
 
 const parameters = (properties: Record<string, unknown>, required: string[] = []) => ({
@@ -119,7 +120,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       return {
         content: [{
           type: "text",
-          text: `本次录制主能力 ${summary.primary.length} 项：${primaryTitles}。字段候选接口 ${summary.lookups.length} 个，后台轮询 ${summary.noise.length} 项不会进入 Skill。`
+          text: `本次识别主能力 ${summary.primary.length} 项：${primaryTitles}。字段候选接口 ${summary.lookups.length} 个，后台轮询 ${summary.noise.length} 项不会进入 Skill。主能力只统计本页查询/新建/修改/审核/删除；用户分页、产品下拉、库存带出不是主能力。分析后必须验证，验证未通过不能导出。`
         }],
         details: caps
       };
@@ -129,19 +130,16 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_validate",
     label: "Validate business capabilities",
-    description: "Apply the evidence gate. Only capabilities with real successful evidence and required write/UI correlation become verified.",
+    description: "Review inferred capabilities against evidence. Returns 审核通过 or 审核未通过. Export is allowed only when the review passes.",
     parameters: parameters({}),
     async execute() {
-      const caps = await studio.validate();
-      const verified = caps.filter(item => item.validation.status === "verified");
-      const primary = verified.filter(isPrimaryCapability);
-      const noise = caps.filter(isNoiseCapability).length;
+      const { capabilities, review } = await studio.review();
       return {
         content: [{
           type: "text",
-          text: `验证完成：主能力 ${primary.filter(item => item.validation.status === "verified").length} 项已通过（${primary.map(item => item.title).join("、") || "无"}）。后台轮询 ${noise} 项不会导出。`
+          text: review.summary
         }],
-        details: caps
+        details: { review, capabilities }
       };
     }
   });

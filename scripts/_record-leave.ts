@@ -167,9 +167,9 @@ async function main() {
     const validated = await studio.validate();
     const verified = validated.filter(item => item.validation.status === "verified");
     log("验证完成", verified.map(item => ({
-      id: item.id, title: item.title, operation: item.operation, path: item.transport.pathTemplate, primary: isPrimaryCapability(item)
+      id: item.id, title: item.title, operation: item.operation, path: item.transport.pathTemplate, primary: isPrimaryCapability(item, validated)
     })));
-    const primary = verified.filter(isPrimaryCapability);
+    const primary = verified.filter(item => isPrimaryCapability(item, validated));
     if (!primary.some(item => item.operation === "create")) {
       throw new Error("录制后仍没有已验证的新增能力");
     }

@@ -1,6 +1,8 @@
 import type { CapabilityContract, EvidenceEvent, NetworkEvidence, UiEvidence } from "../domain.js";
 import { getByPath } from "../utils.js";
 import { fieldHasUiEvidence, staticCandidatesHaveUiEvidence } from "../inference/field-resolver.js";
+import { isExecutableRule } from "../inference/field-derivation.js";
+import { unresolvedWriteFields } from "../review/catalog-review.js";
 
 function schemaHasPath(schema: CapabilityContract["inputSchema"], jsonPath: string) {
   const parts = jsonPath.replace(/^\$\.?/, "").split(".").filter(Boolean);
@@ -123,7 +125,7 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
   const systemFieldsResolvable = cap.inputForm.every(field => {
     if (!field.required || field.source === "caller" || field.source === "computed") return true;
     if (field.source === "binding") return cap.bindings.some(binding => binding.approved && binding.toPath === field.path);
-    return Boolean(field.defaultRule && /^(literal:.+|env:[A-Za-z_][A-Za-z0-9_]*|uuid|now:iso|from:[^|]+(?:\|via:[A-Za-z_][A-Za-z0-9_]*)?|computed:.+|copy:[A-Za-z_][A-Za-z0-9_]*)$/.test(field.defaultRule));
+    return Boolean(field.defaultRule && isExecutableRule(field.defaultRule));
   });
   checks.push({
     name: "system-required-fields-resolvable",
@@ -132,6 +134,17 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
       ? "所有系统必填字段都有可执行处理规则或已确认绑定"
       : "存在没有可执行规则的系统必填字段"
   });
+
+  if (["create", "update", "review", "delete", "upload", "action"].includes(cap.operation)) {
+    const unresolved = unresolvedWriteFields(cap);
+    checks.push({
+      name: "write-field-origins-resolved",
+      ok: unresolved.length === 0,
+      detail: unresolved.length === 0
+        ? "写操作非调用方字段均有唯一来源规则"
+        : `无法唯一推断来源：${unresolved.map(field => field.name).join("、")}。不要冻录制样本`
+    });
+  }
 
   const callerFieldsBacked = cap.inputForm
     .filter(field => field.source === "caller")

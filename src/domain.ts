@@ -256,3 +256,30 @@ export interface RecordingSession {
   startUrl: string;
   eventsFile: string;
 }
+
+export type ReviewStage = "record" | "analyze" | "validate" | "export";
+export type ReviewNext = "re-record" | "re-analyze" | "manual" | "export";
+export type ReviewSeverity = "block" | "info";
+
+export interface ReviewFinding {
+  code: string;
+  severity: ReviewSeverity;
+  stage: ReviewStage;
+  next: ReviewNext;
+  capabilityId?: string;
+  capabilityTitle?: string;
+  fieldPath?: string;
+  message: string;
+}
+
+export interface ReviewReport {
+  status: "passed" | "blocked";
+  next: ReviewNext;
+  primaryCount: number;
+  lookupCount: number;
+  verifiedPrimaryCount: number;
+  primaryTitles: string[];
+  lookupTitles: string[];
+  findings: ReviewFinding[];
+  summary: string;
+}

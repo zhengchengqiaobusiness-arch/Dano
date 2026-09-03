@@ -12,16 +12,74 @@ export function hasBusinessCallerField(capability: CapabilityContract) {
   return capability.inputForm.some(field => field.source === "caller" && !isPaginationField(field.name));
 }
 
-const LIST_QUERY = /\/page$|\/list$|\/search$|\/query$|simple-list/i;
+const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload"]);
+const LOOKUP_QUERY = /simple-list|dict-data|\/enum(?:\/|$)|get-count|get-current/i;
+const PICKER_PAGE = /\/(?:user|dept|department|role|post|tenant|dict)\/(?:page|list)$/i;
+const PAGE_QUERY = /\/page$/i;
+const LIST_QUERY = /\/(?:list|search|query)$/i;
 
-export function isPrimaryCapability(capability: CapabilityContract) {
+export function resourcePrefix(pathTemplate: string) {
+  const parts = (pathTemplate || "").split("/").filter(Boolean);
+  if (parts.length < 2) return "";
+  return `/${parts.slice(0, -1).join("/")}`;
+}
+
+export function isLookupQueryPath(pathTemplate: string) {
+  return LOOKUP_QUERY.test(pathTemplate || "");
+}
+
+function isWriteCapability(capability: CapabilityContract) {
+  return WRITE_OPERATIONS.has(capability.operation) && !isNoiseCapability(capability);
+}
+
+function pageQueries(catalog: CapabilityContract[]) {
+  return catalog.filter(item =>
+    item.operation === "query"
+    && !isNoiseCapability(item)
+    && !isLookupQueryPath(item.transport.pathTemplate || "")
+    && PAGE_QUERY.test(item.transport.pathTemplate || "")
+  );
+}
+
+function sameResource(left: string, right: string) {
+  const prefix = resourcePrefix(left);
+  return Boolean(prefix) && prefix === resourcePrefix(right);
+}
+
+export function isPrimaryCapability(capability: CapabilityContract, catalog: CapabilityContract[] = []) {
   if (isNoiseCapability(capability)) return false;
-  if (["create", "update", "review", "delete", "upload"].includes(capability.operation)) return true;
+  if (isWriteCapability(capability)) return true;
   if (capability.operation !== "query") return false;
   const path = capability.transport.pathTemplate || capability.transport.urlTemplate || "";
-  if (/\/page$/i.test(path)) return true;
-  if (!hasBusinessCallerField(capability)) return false;
-  return LIST_QUERY.test(path);
+  if (isLookupQueryPath(path)) return false;
+  const writes = catalog.filter(isWriteCapability);
+  if (writes.length) {
+    if (writes.some(item => sameResource(item.transport.pathTemplate, path))) return true;
+    const shared = catalog.filter(item =>
+      item.operation === "query"
+      && !isLookupQueryPath(item.transport.pathTemplate || "")
+      && writes.some(write => sameResource(write.transport.pathTemplate, item.transport.pathTemplate))
+    );
+    if (shared.length) return false;
+  }
+  if (PAGE_QUERY.test(path) && hasBusinessCallerField(capability)) {
+    const pages = pageQueries(catalog);
+    if (pages.length > 1 && PICKER_PAGE.test(path) && pages.some(item => !PICKER_PAGE.test(item.transport.pathTemplate || ""))) {
+      return false;
+    }
+    return true;
+  }
+  if (writes.length) {
+    const businessQueries = catalog.filter(item =>
+      item.operation === "query" && !isNoiseCapability(item) && !isLookupQueryPath(item.transport.pathTemplate || "")
+    );
+    return businessQueries.length === 1 || hasBusinessCallerField(capability);
+  }
+  if (hasBusinessCallerField(capability) && LIST_QUERY.test(path)) return true;
+  const businessQueries = catalog.filter(item =>
+    item.operation === "query" && !isNoiseCapability(item) && !isLookupQueryPath(item.transport.pathTemplate || "")
+  );
+  return businessQueries.length === 1;
 }
 
 export function isCandidateSourceCapability(capability: CapabilityContract, catalog: CapabilityContract[]) {
@@ -42,7 +100,7 @@ export function matchesExportFilter(capability: CapabilityContract, match: strin
 
 export function exportableCapabilities(capabilities: CapabilityContract[], match: string[] = []) {
   const verified = capabilities.filter(capability => capability.validation.status === "verified");
-  const primary = verified.filter(capability => isPrimaryCapability(capability) && matchesExportFilter(capability, match));
+  const primary = verified.filter(capability => isPrimaryCapability(capability, capabilities) && matchesExportFilter(capability, match));
   const needed = new Set(primary.map(capability => capability.id));
   for (const capability of primary) {
     for (const field of capability.inputForm) {
@@ -59,7 +117,7 @@ export function exportableCapabilities(capabilities: CapabilityContract[], match
 }
 
 export function summarizeCatalog(capabilities: CapabilityContract[]) {
-  const primary = capabilities.filter(capability => isPrimaryCapability(capability));
+  const primary = capabilities.filter(capability => isPrimaryCapability(capability, capabilities));
   const lookups = capabilities.filter(capability =>
     !primary.includes(capability) && isCandidateSourceCapability(capability, capabilities)
   );

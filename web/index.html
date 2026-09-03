@@ -92,7 +92,7 @@
 
       <main class="view management-view" data-view-panel="skills" hidden aria-label="Skill 目录">
         <section class="export-panel">
-          <div><h2>导出自包含 Python Skill</h2><p>导出的是执行手册，不是业务说明书。只包含已验证主能力；字段候选只给选值。每次导出写入 <code>dist/skills</code> 下的独立目录，不会覆盖上一份。</p></div>
+          <div><h2>导出自包含 Python Skill</h2><p>导出的是执行手册，不是业务说明书。只有审核通过才能导出：本页主能力均已验证，写字段均有唯一来源规则。用户分页和产品下拉不是主能力。字段候选只给选值。每次导出写入 <code>dist/skills</code> 下的独立目录，不会覆盖上一份。</p></div>
           <form id="export-form"><label class="sr-only" for="skill-name">Skill 名称</label><input id="skill-name" placeholder="例如 采购订单" required /><button class="primary-button" type="submit">导出 Skill</button></form>
         </section>
         <section class="skills-grid" id="skills-list"></section>
