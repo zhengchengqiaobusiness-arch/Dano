@@ -20,6 +20,7 @@ test("recording workspace stays on one page with an internal session scroller", 
   assert.match(html, /id="browser-ime"/);
   assert.match(html, /class="browser-toolbar"[\s\S]*class="address-form"[\s\S]*class="mode-switch"[\s\S]*class="recording-session-controls"[\s\S]*id="reload-browser"/);
   assert.match(html, /id="stop-recording"[^>]*>结束录制</);
+  assert.doesNotMatch(html, /browser-footer|id="browser-status"|id="browser-size"|1440 × 960/);
   assert.doesNotMatch(html, /等待会话|停止录制|id="finish-recording"|id="recording-state"|id="agent-status"|class="statusbar"|Business Skill Studio/);
   assert.match(html, /<strong>Skill Studio<\/strong>/);
   assert.doesNotMatch(css, /\.statusbar|\.recording-state/);
@@ -119,6 +120,10 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
   assert.match(piControlRoute, /当前是手动录制模式；Pi 只能读取页面/);
   assert.match(app, /classList\.toggle\("interactive", state\.browserActive\)/);
   assert.match(css, /\.browser-viewport\.interactive/);
+  assert.doesNotMatch(css, /\.browser-viewport\.interactive\s*\{[^}]*outline/);
+  assert.match(css, /\.browser-frame\s*\{[^}]*object-fit:\s*fill/);
+  assert.match(css, /\.browser-panel\s*\{[^}]*grid-template-rows:\s*40px minmax\(0,\s*1fr\)/);
+  assert.doesNotMatch(css, /\.browser-footer/);
   assert.doesNotMatch(css, /\.browser-frame\s*\{[^}]*contain:\s*strict/);
   assert.doesNotMatch(await readFile(path.join(root, "src", "browser", "recorder.ts"), "utf8"), /startScreencast|screencastFrame|attachScreencast/);
   assert.match(app, /if \(state\.pollInFlight\) return;/);
@@ -196,7 +201,7 @@ test("skill catalog distinguishes handbook export from business spec dump", asyn
   assert.match(html, /例如 采购订单/);
   assert.doesNotMatch(html, /PYTHON AGENT SKILLS|class="management-header"|<h1>Skill 目录<\/h1>/);
   assert.match(css, /\.management-view\s*\{[^}]*padding:\s*14px/s);
-  assert.match(css, /\.recording-view\s*\{[^}]*padding:\s*14px/s);
+  assert.match(css, /\.recording-view\s*\{[^}]*padding:\s*0/s);
   assert.doesNotMatch(css, /\.management-header/);
   assert.match(app, /\["主能力"/);
   assert.match(app, /\["字段候选"/);

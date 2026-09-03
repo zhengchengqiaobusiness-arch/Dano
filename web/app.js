@@ -59,6 +59,7 @@ function scrollSessionIfPinned() {
 function setBrowserStatus(text, warn = false) {
   if (state.lastStatusText === text) return;
   state.lastStatusText = text;
+  if (!elements.browserStatus) return;
   elements.browserStatus.innerHTML = "";
   const dot = document.createElement("i");
   dot.className = warn ? "status-dot warn" : /空闲/.test(text) ? "status-dot muted" : "status-dot";
@@ -274,7 +275,7 @@ async function pollBrowserState() {
     }
     if (browser.viewport) {
       state.viewport = browser.viewport;
-      elements.browserSize.textContent = `${browser.viewport.width} × ${browser.viewport.height}`;
+      if (elements.browserSize) elements.browserSize.textContent = `${browser.viewport.width} × ${browser.viewport.height}`;
     }
     setBrowserStatus(browser.pageError || browser.title || "浏览器运行中", Boolean(browser.pageError));
   } catch {
@@ -334,17 +335,12 @@ function browserCoordinates(event) {
   const sourceWidth = elements.browserFrame.naturalWidth;
   const sourceHeight = elements.browserFrame.naturalHeight;
   if (!sourceWidth || !sourceHeight || !rect.width || !rect.height) return null;
-  const scale = Math.min(rect.width / sourceWidth, rect.height / sourceHeight);
-  const renderedWidth = sourceWidth * scale;
-  const renderedHeight = sourceHeight * scale;
-  const left = rect.left + (rect.width - renderedWidth) / 2;
-  const top = rect.top + (rect.height - renderedHeight) / 2;
-  if (event.clientX < left || event.clientX > left + renderedWidth || event.clientY < top || event.clientY > top + renderedHeight) return null;
+  if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) return null;
   const viewW = state.viewport?.width || sourceWidth;
   const viewH = state.viewport?.height || sourceHeight;
   return {
-    x: Math.round((event.clientX - left) / scale * (viewW / sourceWidth)),
-    y: Math.round((event.clientY - top) / scale * (viewH / sourceHeight))
+    x: Math.round((event.clientX - rect.left) / rect.width * viewW),
+    y: Math.round((event.clientY - rect.top) / rect.height * viewH)
   };
 }
 
