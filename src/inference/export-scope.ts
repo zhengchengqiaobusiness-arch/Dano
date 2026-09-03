@@ -13,7 +13,7 @@ export function hasBusinessCallerField(capability: CapabilityContract) {
   return capability.inputForm.some(field => field.source === "caller" && !isPaginationField(field.name));
 }
 
-const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload"]);
+const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload", "action"]);
 const LOOKUP_QUERY = /simple-list|dict-data|\/enum(?:\/|$)|get-count|get-current|getappid|get-app-id|getAppId|save_[\w-]*chat/i;
 const PICKER_PAGE = /\/(?:user|dept|department|role|post|tenant|dict)\/(?:page|list)$/i;
 const PAGE_QUERY = /\/page$/i;
@@ -94,6 +94,24 @@ function sameResource(left: string, right: string) {
   return Boolean(prefix) && prefix === resourcePrefix(right);
 }
 
+export function reviewSessionIds(
+  sessions: Array<{ id: string; startUrl?: string }>,
+  currentId: string,
+  sessionEvents: EvidenceEvent[] = []
+) {
+  const pages = new Set<string>();
+  const current = sessions.find(item => item.id === currentId);
+  if (current?.startUrl) pages.add(evidencePageKey(current.startUrl));
+  for (const event of sessionEvents) {
+    if (event.pageUrl) pages.add(evidencePageKey(event.pageUrl));
+  }
+  const ids = new Set<string>(currentId ? [currentId] : []);
+  for (const session of sessions) {
+    if (session.startUrl && pages.has(evidencePageKey(session.startUrl))) ids.add(session.id);
+  }
+  return ids;
+}
+
 export function isPrimaryCapability(capability: CapabilityContract, catalog: CapabilityContract[] = []) {
   if (isNoiseCapability(capability)) return false;
   if (isWriteCapability(capability)) return true;
@@ -139,6 +157,7 @@ export function isPrimaryCapability(capability: CapabilityContract, catalog: Cap
     return businessQueries.length === 1 || hasBusinessCallerField(capability);
   }
   if (hasBusinessCallerField(capability) && (LIST_QUERY.test(path) || isPageResultQuery(capability))) return true;
+  if (PICKER_PAGE.test(path)) return false;
   const businessQueries = catalog.filter(item =>
     item.operation === "query" && !isNoiseCapability(item) && !isLookupQueryPath(item.transport.pathTemplate || "")
   );
@@ -163,7 +182,14 @@ export function matchesExportFilter(capability: CapabilityContract, match: strin
 
 export function exportableCapabilities(capabilities: CapabilityContract[], match: string[] = []) {
   const verified = capabilities.filter(capability => capability.validation.status === "verified");
-  const primary = verified.filter(capability => isPrimaryCapability(capability, capabilities) && matchesExportFilter(capability, match));
+  let primary = verified.filter(capability => isPrimaryCapability(capability, capabilities) && matchesExportFilter(capability, match));
+  const writes = primary.filter(isWriteCapability);
+  if (writes.length) {
+    primary = primary.filter(capability =>
+      isWriteCapability(capability)
+      || writes.some(write => sameResource(write.transport.pathTemplate, capability.transport.pathTemplate))
+    );
+  }
   const needed = new Set(primary.map(capability => capability.id));
   for (const capability of primary) {
     for (const field of capability.inputForm) {
@@ -174,9 +200,7 @@ export function exportableCapabilities(capabilities: CapabilityContract[], match
     for (const binding of capability.bindings.filter(item => item.approved)) needed.add(binding.fromCapabilityId);
   }
   const selected = verified.filter(capability => needed.has(capability.id) && !isNoiseCapability(capability));
-  if (selected.length) return selected;
-  if (match.length) return [];
-  return verified.filter(capability => !isNoiseCapability(capability));
+  return selected;
 }
 
 export function summarizeCatalog(capabilities: CapabilityContract[]) {
@@ -212,6 +236,7 @@ export function capabilitiesForSession(
       .map(event => [event.id, evidencePageKey(event.pageUrl)])
   );
   const scoped = catalog.filter(capability => {
+    if (isNoiseCapability(capability)) return false;
     if (capability.evidence.some(ref => sessionIds.has(ref.eventId))) return true;
     if (!WRITE_OPERATIONS.has(capability.operation)) return false;
     return capability.evidence.some(ref => {
@@ -219,7 +244,7 @@ export function capabilitiesForSession(
       return Boolean(page && pages.has(page));
     });
   });
-  return scoped.length ? scoped : catalog;
+  return scoped;
 }
 
 function referencedCapabilityIds(capabilities: CapabilityContract[]) {

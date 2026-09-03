@@ -243,7 +243,25 @@ function pickVia(field: InputFormField, joins: ReturnType<typeof requestJoins>, 
   return matched.find(item => fieldScope(item.path) === fieldScope(field.path)) || matched[0];
 }
 
-function requestContainsValue(event: NetworkEvidence, value: unknown) {
+function requestContainsFieldValue(event: NetworkEvidence, fieldName: string, value: unknown) {
+  const body = event.request.body;
+  const params = {
+    ...(event.request.query || {}),
+    ...(body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {})
+  };
+  return Object.entries(params).some(([key, item]) => key === fieldName && sameValue(item, value));
+}
+
+function isDistinctiveJoinValue(value: unknown) {
+  if (typeof value === "string") return value.trim().length >= 8;
+  if (typeof value === "number" && Number.isFinite(value)) return Math.abs(value) >= 1_000_000;
+  return false;
+}
+
+function requestSelectsValue(event: NetworkEvidence, fieldName: string, value: unknown) {
+  if (requestContainsFieldValue(event, fieldName, value)) return true;
+  // Ambiguous values like 0/1 must share the field name; long ids may appear under a join key.
+  if (!isDistinctiveJoinValue(value)) return false;
   const body = event.request.body;
   const params = {
     ...(event.request.query || {}),
@@ -276,9 +294,9 @@ function fromApiMatch(
       if (isEnvelopePath(leaf.path, field.name)) continue;
       if (!sameDerivedValue(leaf.value, value)) continue;
       // The page's own result list often repeats the field we just wrote.
-      // Only keep it when that value was also a filter/selection on the list request.
-      if (isPageResultQuery(capability) && isPrimaryCapability(capability, catalog) && !requestContainsValue(event, value)) continue;
-      if (isPrimaryListEcho(capability, catalog, field.name, leaf.path) && !requestContainsValue(event, value)) continue;
+      // Only keep it when that value was also a same-named filter on the list request.
+      if (isPageResultQuery(capability) && isPrimaryCapability(capability, catalog) && !requestSelectsValue(event, field.name, value)) continue;
+      if (isPrimaryListEcho(capability, catalog, field.name, leaf.path) && !requestSelectsValue(event, field.name, value)) continue;
       const query = event.request.query || {};
       const queryJoin = joins.find(item =>
         Object.entries(query).some(([key, queryValue]) => key === item.name && sameValue(queryValue, item.value))

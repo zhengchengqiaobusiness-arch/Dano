@@ -72,29 +72,28 @@ export function normalizeUrl(rawUrl: string) {
 
 export function inferOperation(event: NetworkEvidence, ui?: UiEvidence): OperationKind {
   const method = event.request.method.toUpperCase();
-  const signal = [
+  const endpoint = new URL(event.request.url).pathname;
+  const actionSignal = [
     event.request.url,
-    event.pageUrl,
-    ui?.pageUrl,
     ui?.text,
     ui?.label,
     ui?.name
   ].filter(Boolean).join(" ");
-  const endpoint = new URL(event.request.url).pathname;
+  const pageSignal = [event.pageUrl, ui?.pageUrl].filter(Boolean).join(" ");
 
   if (method === "DELETE") return "delete";
   if (AUTHENTICATE.test(endpoint)) return "authenticate";
   if (UPLOAD.test(endpoint)) return "upload";
   if (DOWNLOAD.test(endpoint)) return "download";
   if (method === "GET" || method === "HEAD") return "query";
-  if (REVIEW.test(signal)) return "review";
-  if (DELETE.test(signal)) return "delete";
-  if (method === "POST" && (QUERY.test(signal) || looksRecordedQuery(event))) return "query";
+  if (CREATE.test(endpoint) || /submit-process|start-process|startProcess/i.test(endpoint)) return "create";
+  if (CREATE.test(actionSignal)) return "create";
+  if (REVIEW.test(actionSignal) || (REVIEW.test(pageSignal) && REVIEW.test(actionSignal))) return "review";
+  if (DELETE.test(actionSignal)) return "delete";
+  if (method === "POST" && (QUERY.test(actionSignal) || looksRecordedQuery(event))) return "query";
   if (method === "PATCH" || method === "PUT") return "update";
-  if (CREATE.test(endpoint)) return "create";
   if (UPDATE.test(endpoint)) return "update";
-  if (UPDATE.test(signal)) return "update";
-  if (CREATE.test(signal) || /submit-process|start-process|startProcess/i.test(endpoint)) return "create";
+  if (UPDATE.test(actionSignal)) return "update";
   if (method === "POST") return "action";
   return "unknown";
 }

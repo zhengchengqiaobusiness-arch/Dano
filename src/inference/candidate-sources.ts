@@ -17,7 +17,7 @@ function schemaNode(schema: any, jsonPath: string): any {
 function listPaths(schema: CapabilityContract["outputSchema"]): { valuePath: string; labelPath: string } | undefined {
   const arrays = ["$.data[*]", "$.data.list[*]", "$.data.rows[*]", "$.data.records[*]", "$.list[*]", "$.rows[*]"];
   const valueKeys = ["id", "value", "code"];
-  const labelKeys = ["name", "label", "nickname", "title", "xtmc", "yymc", "bmmc", "ssbmmc", "yyxtmc", "mc", "csmc"];
+  const labelKeys = ["name", "label", "nickname", "username", "title", "xtmc", "yymc", "bmmc", "ssbmmc", "yyxtmc", "mc", "csmc"];
   for (const prefix of arrays) {
     const item = schemaNode(schema, prefix);
     const properties = item?.properties || {};
@@ -64,8 +64,19 @@ function displayNamesOf(capability: CapabilityContract, events: EvidenceEvent[])
   const ids = new Set(capability.evidence.filter(item => item.kind === "network").map(item => item.eventId));
   return new Set(
     recordedLists(events.filter(event => ids.has(event.id)))
-      .flatMap(list => list.rows.map(row => row.name ?? row.label ?? row.title ?? row.nickname ?? row.xtmc ?? row.yymc ?? row.bmmc ?? row.ssbmmc ?? row.yyxtmc ?? row.mc ?? row.csmc))
-      .map(value => value === undefined || value === null || value === "" ? "" : String(value))
+      .flatMap(list => list.rows.flatMap(row => {
+        const names: string[] = [];
+        for (const key of ["name", "label", "title", "nickname", "username", "userName", "xtmc", "yymc", "bmmc", "ssbmmc", "yyxtmc", "mc", "csmc"]) {
+          const value = row[key];
+          if (value !== undefined && value !== null && value !== "") names.push(String(value));
+        }
+        const username = row.username ?? row.userName;
+        const nickname = row.nickname;
+        if (username && nickname) {
+          names.push(`${username} ${nickname}`, `${nickname} ${username}`);
+        }
+        return names;
+      }))
       .filter(Boolean)
   );
 }
@@ -89,7 +100,6 @@ function selectedDisplays(field: InputFormField, events: EvidenceEvent[]) {
 function lookupFor(field: InputFormField, catalog: CapabilityContract[], events: EvidenceEvent[] = []) {
   const lists = catalog.filter(item =>
     item.operation === "query"
-    && item.validation.status === "verified"
     && Boolean(listPaths(item.outputSchema))
   );
   const byTrigger = events.length
@@ -117,8 +127,11 @@ function lookupFor(field: InputFormField, catalog: CapabilityContract[], events:
     && field.candidates.values.length >= 2
     && field.candidates.values.length <= 20
     && !looksPickerField(field);
+  const byPicker = looksPickerField(field)
+    ? lists.filter(item => /\/(?:user|dept|department|role|post)\/(?:page|list)$/i.test(item.transport.pathTemplate || ""))
+    : [];
   if (closedEnum) return pickUnique(byTrigger) || pickUnique(byPath);
-  return pickUnique(byTrigger) || pickUnique(byPath) || pickUnique(byOptions) || pickUnique(bySelected);
+  return pickUnique(byTrigger) || pickUnique(byPath) || pickUnique(byOptions) || pickUnique(bySelected) || pickUnique(byPicker);
 }
 
 export function queryCandidateForField(field: InputFormField, catalog: CapabilityContract[], events: EvidenceEvent[] = []) {

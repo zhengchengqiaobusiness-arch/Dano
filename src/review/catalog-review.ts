@@ -2,7 +2,7 @@ import type { CapabilityContract, EvidenceEvent, ReviewFinding, ReviewNext, Revi
 import { evidenceSample, isAssembledObjectField, isExecutableRule, parseComputedRule, unsoundComputedOperands } from "../inference/field-derivation.js";
 import { queryCandidateForField } from "../inference/candidate-sources.js";
 import { flattenRequestValues, isPaginationField, looksPickerField } from "../inference/field-resolver.js";
-import { capabilitiesForSession, isCandidateSourceCapability, isNoiseCapability, summarizeCatalog } from "../inference/export-scope.js";
+import { capabilitiesForSession, isCandidateSourceCapability, isNoiseCapability, sessionCatalogSlice, summarizeCatalog } from "../inference/export-scope.js";
 
 const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload", "action"]);
 const NEXT_RANK: Record<ReviewNext, number> = { "re-record": 0, "re-analyze": 1, manual: 2, export: 3 };
@@ -221,7 +221,7 @@ export function reviewSession(
   allEvents: EvidenceEvent[],
   sessionEvents: EvidenceEvent[]
 ) {
-  const scoped = capabilitiesForSession(catalog, allEvents, sessionEvents);
+  const scoped = sessionCatalogSlice(catalog, allEvents, sessionEvents);
   return {
     capabilities: scoped,
     review: reviewCatalog(scoped, allEvents)

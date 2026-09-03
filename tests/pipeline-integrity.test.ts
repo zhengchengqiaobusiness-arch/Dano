@@ -1,0 +1,307 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import type { CapabilityContract, EvidenceEvent, InputFormField } from "../src/domain.js";
+import { inferOperation } from "../src/inference/heuristics.js";
+import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
+import { finalizeCapabilities } from "../src/inference/finalize-capabilities.js";
+import {
+  bindLeftoverFields,
+  findObservation,
+  type UiObservation
+} from "../src/inference/field-resolver.js";
+import {
+  capabilitiesForSession,
+  exportableCapabilities,
+  isPrimaryCapability,
+  sessionCatalogSlice,
+  summarizeCatalog
+} from "../src/inference/export-scope.js";
+import { reviewCatalog, reviewSession } from "../src/review/catalog-review.js";
+
+function field(partial: Partial<InputFormField> & Pick<InputFormField, "name">): InputFormField {
+  return {
+    path: partial.path || `$.${partial.name}`,
+    label: partial.label || partial.name,
+    valueType: partial.valueType || "string",
+    source: partial.source || "system",
+    required: partial.required ?? false,
+    requiredBasis: partial.requiredBasis || "not-observed",
+    systemHandled: partial.systemHandled ?? true,
+    sourceDetail: partial.sourceDetail || "未推断",
+    widget: partial.widget || "text",
+    ...partial
+  };
+}
+
+function cap(partial: Partial<CapabilityContract> & Pick<CapabilityContract, "id" | "operation" | "transport">): CapabilityContract {
+  return {
+    kind: "atomic",
+    title: partial.title || partial.id,
+    description: partial.id,
+    confidence: 1,
+    inputSchema: { type: "object", properties: {} },
+    outputSchema: { type: "object", properties: {} },
+    inputForm: [],
+    evidence: [],
+    sideEffect: ["create", "update", "review", "delete", "upload", "action"].includes(partial.operation),
+    confirmation: { required: ["create", "update", "review", "delete", "upload", "action"].includes(partial.operation) },
+    completion: { acceptedHttpStatuses: [200] },
+    bindings: [],
+    validation: { version: 2, status: "verified", checks: [] },
+    generated: { source: "heuristic", generatedAt: "2026-09-03T00:00:00.000Z" },
+    ...partial
+  };
+}
+
+function network(method: string, url: string, extra: Partial<EvidenceEvent> = {}): EvidenceEvent {
+  return {
+    id: "n1",
+    kind: "network",
+    sessionId: "s1",
+    at: "2026-09-03T00:00:00.000Z",
+    request: { method, url, resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: {} },
+    ...extra
+  } as EvidenceEvent;
+}
+
+test("review keeps referenced lookup from another session on the same page", () => {
+  const write = cap({
+    id: "create-leave",
+    operation: "create",
+    title: "发起请假",
+    transport: { method: "POST", urlTemplate: "https://x/oa/duty-leave/submit-process", origin: "https://x", pathTemplate: "/oa/duty-leave/submit-process" },
+    evidence: [{ eventId: "net-create", sessionId: "now", kind: "network", at: "2026-09-03T00:00:00.000Z", status: 200 }],
+    inputForm: [field({
+      name: "leaveBalance", path: "$.leaveBalance", label: "假期余额", valueType: "integer",
+      source: "binding", defaultRule: "from:query-balance:$.data.leaveBalance|via:type",
+      widget: "number"
+    })]
+  });
+  const lookup = cap({
+    id: "query-balance",
+    operation: "query",
+    title: "查询余额",
+    validation: { version: 2, status: "candidate", checks: [{ name: "not-verified", ok: false, detail: "尚未验证" }] },
+    transport: { method: "GET", urlTemplate: "https://x/oa/duty-leave/leave-balance/my", origin: "https://x", pathTemplate: "/oa/duty-leave/leave-balance/my" },
+    evidence: [{ eventId: "net-balance", sessionId: "old", kind: "network", at: "2026-09-02T00:00:00.000Z", status: 200 }]
+  });
+  const events: EvidenceEvent[] = [
+    network("POST", "https://x/oa/duty-leave/submit-process", { id: "net-create", sessionId: "now", pageUrl: "https://x/oa/duty/leave" }),
+    network("GET", "https://x/oa/duty-leave/leave-balance/my", { id: "net-balance", sessionId: "old", pageUrl: "https://x/oa/duty/leave" })
+  ];
+  const now = events.filter(item => item.sessionId === "now");
+  const { capabilities, review } = reviewSession([write, lookup], events, now);
+  assert.equal(capabilities.some(item => item.id === "query-balance"), true);
+  assert.equal(review.status, "blocked", review.summary);
+  assert.match(review.summary, /余额|尚未|验证/);
+});
+
+test("submit-style POST is a primary write even when the path is not CRUD", () => {
+  const complete = inferOperation(
+    network("POST", "https://x/bpm/task/complete") as any,
+    { text: "提交", pageUrl: "https://x/oa/approval" } as any
+  );
+  assert.equal(["create", "action"].includes(complete), true);
+  const saveNew = inferOperation(
+    network("POST", "https://x/erp/order/save") as any,
+    { text: "新增", pageUrl: "https://x/erp/order" } as any
+  );
+  assert.equal(saveNew, "create");
+  const createOnApprovalPage = inferOperation(
+    network("POST", "https://x/oa/duty-leave/create") as any,
+    { text: "提交", pageUrl: "https://x/oa/approval/leave", label: "人力审批" } as any
+  );
+  assert.equal(createOnApprovalPage, "create");
+  const action = cap({
+    id: "enable-user",
+    operation: "action",
+    title: "启用用户",
+    transport: { method: "POST", urlTemplate: "https://x/system/user/update-status", origin: "https://x", pathTemplate: "/system/user/update-status" }
+  });
+  assert.equal(isPrimaryCapability(action, [action]), true);
+  const review = reviewCatalog([action]);
+  assert.equal(review.primaryCount, 1);
+});
+
+test("lookup-named API is primary only when it is the page's own query", () => {
+  const balance = cap({
+    id: "query-balance",
+    operation: "query",
+    title: "查询余额",
+    transport: { method: "GET", urlTemplate: "https://x/oa/leave-balance/my", origin: "https://x", pathTemplate: "/oa/leave-balance/my" },
+    inputForm: [field({ name: "type", label: "请假类型", source: "caller", systemHandled: false })]
+  });
+  assert.equal(isPrimaryCapability(balance, [balance]), true);
+  const page = cap({
+    id: "query-leave",
+    operation: "query",
+    title: "查询请假",
+    transport: { method: "GET", urlTemplate: "https://x/oa/duty-leave/page", origin: "https://x", pathTemplate: "/oa/duty-leave/page" },
+    inputForm: [field({ name: "type", label: "请假类型", source: "caller", systemHandled: false })]
+  });
+  assert.equal(isPrimaryCapability(balance, [page, balance]), false);
+  assert.equal(isPrimaryCapability(page, [page, balance]), true);
+});
+
+test("export does not dump every verified lookup when no primary exists", () => {
+  const lookup = cap({
+    id: "query-user",
+    operation: "query",
+    title: "查询用户",
+    transport: { method: "GET", urlTemplate: "https://x/system/user/page", origin: "https://x", pathTemplate: "/system/user/page" }
+  });
+  assert.deepEqual(exportableCapabilities([lookup]).map(item => item.id), []);
+});
+
+test("session scope does not fall back to another page when nothing matches", () => {
+  const other = cap({
+    id: "create-order",
+    operation: "create",
+    title: "新建采购",
+    transport: { method: "POST", urlTemplate: "https://x/erp/order/create", origin: "https://x", pathTemplate: "/erp/order/create" },
+    evidence: [{ eventId: "purchase-net", sessionId: "p", kind: "network", at: "2026-09-01T00:00:00.000Z", status: 200 }]
+  });
+  const session: EvidenceEvent[] = [
+    network("GET", "https://x/oa/duty-leave/page", { id: "leave-net", sessionId: "leave", pageUrl: "https://x/oa/duty/leave" })
+  ];
+  const all: EvidenceEvent[] = [
+    ...session,
+    network("POST", "https://x/erp/order/create", { id: "purchase-net", sessionId: "p", pageUrl: "https://x/erp/order" })
+  ];
+  assert.deepEqual(capabilitiesForSession([other], all, session).map(item => item.id), []);
+  assert.deepEqual(sessionCatalogSlice([other], all, session).map(item => item.id), []);
+});
+
+test("leftover one-to-one does not bind a hidden token to an unrelated remark", () => {
+  const fields = [
+    field({ name: "token", path: "$.token", source: "system", sourceDetail: "请求中出现但未能唯一对应" })
+  ];
+  const observations: UiObservation[] = [{ name: "remark", label: "备注", type: "textarea", value: "说明文字" }];
+  const bound = bindLeftoverFields(fields, observations, { token: "hidden-token" });
+  assert.notEqual(bound[0]?.source, "caller");
+  assert.notEqual(bound[0]?.label, "备注");
+});
+
+test("a single start-date observation does not claim the end-date request field", () => {
+  const end = field({
+    name: "endTime", path: "$.endTime", label: "endTime", valueType: "integer",
+    source: "system", widget: "date"
+  });
+  const observations: UiObservation[] = [
+    { name: "startTime", label: "开始时间", type: "date", value: "2026-09-01" }
+  ];
+  assert.equal(findObservation(end, 1789920000000, observations), undefined);
+  const leftover = bindLeftoverFields(
+    [end, field({ name: "startTime", path: "$.startTime", label: "开始时间", source: "caller", widget: "date" })],
+    observations,
+    { startTime: 1789401600000, endTime: 1789920000000 }
+  );
+  assert.notEqual(leftover.find(item => item.name === "endTime")?.label, "开始时间");
+});
+
+test("zero quantity does not bind to another field named stock via productId", () => {
+  const events: EvidenceEvent[] = [{
+    id: "ui-form", kind: "ui", sessionId: "s", at: "2026-09-03T00:00:00.000Z",
+    pageUrl: "https://x/erp/stock", eventType: "input",
+    form: [
+      { name: "productId", label: "产品", type: "select", required: true, value: "苹果" },
+      { name: "qty", label: "数量", type: "number", required: true, value: 0 }
+    ]
+  }, {
+    id: "ui-submit", kind: "ui", sessionId: "s", at: "2026-09-03T00:00:01.000Z",
+    pageUrl: "https://x/erp/stock", eventType: "click", text: "提交"
+  }, {
+    id: "net-product", kind: "network", sessionId: "s", at: "2026-09-03T00:00:00.500Z",
+    request: { method: "GET", url: "https://x/erp/product/simple-list", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { success: true, data: [{ id: 3, name: "苹果", stock: 0 }] } }
+  }, {
+    id: "net-create", kind: "network", sessionId: "s", at: "2026-09-03T00:00:02.000Z",
+    correlatedUiEvidenceId: "ui-submit",
+    request: {
+      method: "POST", url: "https://x/erp/stock/create", resourceType: "xhr", headers: {}, query: {},
+      body: { productId: 3, qty: 0 }
+    },
+    response: { status: 200, headers: {}, body: { success: true, data: 1 } }
+  }];
+  const create = finalizeCapabilities(buildCapabilityCandidates(events), events)
+    .find(item => item.transport.pathTemplate.includes("/stock/create"))!;
+  const qty = create.inputForm.find(item => item.name === "qty")!;
+  assert.doesNotMatch(qty.defaultRule || "", /stock/);
+  assert.notEqual(qty.source, "binding");
+});
+
+test("frozen picker still blocks when the user query is not yet verified", () => {
+  const catalog = [
+    cap({
+      id: "create-leave",
+      operation: "create",
+      title: "发起请假",
+      transport: { method: "POST", urlTemplate: "https://x/oa/duty-leave/submit-process", origin: "https://x", pathTemplate: "/oa/duty-leave/submit-process" },
+      inputForm: [field({
+        name: "Activity_0ag2wyz", path: "$.startUserSelectAssignees.Activity_0ag2wyz",
+        label: "人力审批", valueType: "array", source: "caller", required: true,
+        requiredBasis: "ui-required", systemHandled: false, widget: "select",
+        candidates: { type: "static", values: [{ value: 1, label: "管理员" }, { value: 174, label: "LS部门" }] }
+      })]
+    }),
+    cap({
+      id: "query-user",
+      operation: "query",
+      title: "查询用户",
+      validation: { version: 2, status: "candidate", checks: [] },
+      transport: { method: "GET", urlTemplate: "https://x/system/user/page", origin: "https://x", pathTemplate: "/system/user/page" },
+      outputSchema: { type: "object", properties: { data: { type: "object", properties: { list: { type: "array", items: { type: "object", properties: { id: { type: "integer" }, username: { type: "string" } } } } } } } },
+      evidence: [{ eventId: "net-users", sessionId: "s", kind: "network", at: "2026-09-03T00:00:00.000Z", status: 200 }]
+    })
+  ];
+  const events: EvidenceEvent[] = [{
+    id: "net-users", kind: "network", sessionId: "s", at: "2026-09-03T00:00:00.000Z",
+    request: { method: "GET", url: "https://x/system/user/page", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { data: { list: [{ id: 1, username: "admin" }, { id: 174, username: "ls" }] } } }
+  }];
+  const review = reviewCatalog(catalog, events);
+  assert.equal(review.status, "blocked");
+  assert.match(review.summary, /选人|弹窗|验证/);
+});
+
+test("username-only user lists can still be a picker candidate source", () => {
+  const catalog = [
+    cap({
+      id: "create-leave",
+      operation: "create",
+      title: "发起请假",
+      transport: { method: "POST", urlTemplate: "https://x/oa/duty-leave/submit-process", origin: "https://x", pathTemplate: "/oa/duty-leave/submit-process" },
+      inputForm: [field({
+        name: "Activity_0ag2wyz", path: "$.startUserSelectAssignees.Activity_0ag2wyz",
+        label: "人力审批", valueType: "array", source: "caller", required: true,
+        requiredBasis: "ui-required", systemHandled: false, widget: "select"
+      })]
+    }),
+    cap({
+      id: "query-user",
+      operation: "query",
+      title: "查询用户",
+      transport: { method: "GET", urlTemplate: "https://x/system/user/page", origin: "https://x", pathTemplate: "/system/user/page" },
+      outputSchema: { type: "object", properties: { data: { type: "object", properties: { list: { type: "array", items: { type: "object", properties: { id: { type: "integer" }, username: { type: "string" } } } } } } } }
+    })
+  ];
+  const finalized = finalizeCapabilities(catalog, []);
+  const picker = finalized[0]!.inputForm.find(item => item.name === "Activity_0ag2wyz")!;
+  assert.equal(picker.candidates?.type, "capability");
+  assert.equal(picker.candidates && picker.candidates.type === "capability" && picker.candidates.labelPath.endsWith(".username"), true);
+});
+
+test("recalculate stays action and is still exportable as a primary", () => {
+  assert.equal(inferOperation(network("POST", "https://x/orders/recalculate") as any), "action");
+  const catalog = [
+    cap({
+      id: "recalculate",
+      operation: "action",
+      title: "重算订单",
+      transport: { method: "POST", urlTemplate: "https://x/orders/recalculate", origin: "https://x", pathTemplate: "/orders/recalculate" }
+    })
+  ];
+  assert.deepEqual(summarizeCatalog(catalog).primary.map(item => item.id), ["recalculate"]);
+  assert.deepEqual(exportableCapabilities(catalog).map(item => item.id), ["recalculate"]);
+});

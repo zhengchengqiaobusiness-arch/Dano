@@ -133,9 +133,11 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
     name: "business_skill_validate",
     label: "Validate business capabilities",
     description: "Review inferred capabilities against evidence. Returns 审核通过 or 审核未通过. Export is allowed only when the review passes.",
-    parameters: parameters({}),
-    async execute() {
-      const { capabilities, review } = await studio.review();
+    parameters: parameters({
+      sessionId: { type: "string" }
+    }),
+    async execute(_id, params: any) {
+      const { capabilities, review } = await studio.review(params.sessionId);
       return {
         content: [{
           type: "text",

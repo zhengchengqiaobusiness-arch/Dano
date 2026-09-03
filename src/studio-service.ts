@@ -12,8 +12,9 @@ import { fallbackPlan } from "./planner/fallback.js";
 import { applyPlanPolicy } from "./planner/policy.js";
 import { exportSkill } from "./export/skill-exporter.js";
 import { executeCapability } from "./execution/http-executor.js";
-import { capabilitiesForSession, sessionCatalogSlice } from "./inference/export-scope.js";
+import { capabilitiesForSession, reviewSessionIds, sessionCatalogSlice } from "./inference/export-scope.js";
 import { mergeCatalogByTransport, normalizeCatalog } from "./catalog/normalize.js";
+import { reanalyzeIncoming } from "./inference/reanalyze.js";
 import { reviewSession } from "./review/catalog-review.js";
 import { SkillLibrary } from "./catalog/skill-library.js";
 import { buildApprovedRoutes } from "./planner/routes.js";
@@ -36,6 +37,7 @@ export class StudioService {
   readonly recorder: BrowserRecorder;
   readonly reasoner: OpenAIReasoner;
   readonly skillLibrary: SkillLibrary;
+  private lastAnalyzedSessionId?: string;
 
   constructor(config = loadConfig()) {
     this.config = config;
@@ -83,90 +85,70 @@ export class StudioService {
     return chunks.flat();
   }
 
+  private async scopedEvidence(sessionId?: string) {
+    const sessions = await this.listSessions();
+    const current = sessionId || this.lastAnalyzedSessionId || sessions[0]?.id;
+    const scopeEvents = current ? await this.sessionEvents(current) : [];
+    const ids = current ? reviewSessionIds(sessions, current, scopeEvents) : new Set<string>();
+    const events = (await Promise.all([...ids].map(id => this.sessionEvents(id)))).flat();
+    return { current, scopeEvents, events };
+  }
+
   async capabilities(): Promise<CapabilityContract[]> {
     return normalizeCatalog(await readJson<CapabilityContract[]>(this.catalogFile(), []));
   }
 
   async analyze(sessionId?: string, useLlm = true) {
     const latest = sessionId || (await this.listSessions())[0]?.id;
+    this.lastAnalyzedSessionId = latest;
     const events = latest ? await this.sessionEvents(latest) : [];
     const existing = await this.capabilities();
-    const existingByTransport = new Map(existing.map(c => [
-      `${c.transport.method}|${c.transport.pathTemplate}`,
-      c
-    ]));
 
     let candidates = buildCapabilityCandidates(events);
     if (useLlm && this.reasoner.available()) {
       candidates = await Promise.all(candidates.map(c => this.reasoner.refineCapability(c)));
     }
 
-    // Preserve explicit human edits and approvals, but require validation again after evidence analysis.
-    candidates = candidates.map(candidate => {
-      const old = existingByTransport.get(`${candidate.transport.method}|${candidate.transport.pathTemplate}`);
-      if (!old) return candidate;
-      const operation = old.editing?.operation === "manual" ? old.operation : candidate.operation;
-      const sideEffect = ["create", "update", "review", "delete", "upload", "action"].includes(operation);
-      const manualPaths = new Set(old.editing?.fieldPaths || []);
-      const inputForm = candidate.inputForm.map(field => {
-        const previous = old.inputForm.find(item => item.path === field.path);
-        return previous && manualPaths.has(field.path) ? { ...previous } : { ...field };
-      });
-      for (const binding of old.bindings.filter(item => item.approved)) {
-        const field = inputForm.find(item => item.path === binding.toPath);
-        if (field) {
-          field.source = "binding";
-          field.systemHandled = true;
-          field.sourceDetail = `由已确认绑定从 ${binding.fromCapabilityId}${binding.fromPath} 提供`;
-          field.defaultRule = undefined;
-        }
-      }
-      return {
-        ...candidate,
-        id: old.editing?.operation === "manual" ? old.id : candidate.id,
-        title: old.editing?.title === "manual" ? old.title : candidate.title,
-        description: old.editing?.description === "manual" ? old.description : candidate.description,
-        operation,
-        sideEffect,
-        confirmation: {
-          required: sideEffect,
-          reason: sideEffect ? "该操作会改变业务或文件数据" : undefined
-        },
-        inputForm,
-        bindings: old.bindings || [],
-        validation: { version: 2, status: "candidate", checks: [{ name: "reanalyze", ok: false, detail: "录制证据已重新分析，需要再次验证" }] },
-        editing: old.editing || candidate.editing
-      };
-    });
-
-    candidates = mergeCatalogByTransport(candidates, existing);
+    candidates = reanalyzeIncoming(candidates, existing);
     candidates = sealWriteCapabilities(candidates, events);
+    candidates = mergeCatalogByTransport(candidates, existing);
     await writeJson(this.catalogFile(), candidates);
-    const history = await this.allEvents();
-    return capabilitiesForSession(candidates, history, events);
+    return capabilitiesForSession(candidates, events, events);
   }
 
-  async validate() {
-    const { capabilities } = await this.review();
+  async validate(sessionId?: string) {
+    const { capabilities } = await this.review(sessionId);
     return capabilities;
   }
 
-  async review() {
-    const history = await this.allEvents();
-    const latest = (await this.listSessions())[0]?.id;
-    const scopeEvents = latest ? await this.sessionEvents(latest) : history;
+  async review(sessionId?: string) {
+    const { current, scopeEvents, events } = await this.scopedEvidence(sessionId);
+    if (current) this.lastAnalyzedSessionId = current;
     const existing = await this.capabilities();
-    const slice = sessionCatalogSlice(existing, history, scopeEvents);
-    const validated = finalizeCapabilities(slice, history);
+    const slice = sessionCatalogSlice(existing, events, scopeEvents);
+    const validated = finalizeCapabilities(slice, events);
     await writeJson(this.catalogFile(), mergeCatalogByTransport(validated, existing));
-    return reviewSession(validated, history, scopeEvents);
+    return reviewSession(validated, events, scopeEvents);
   }
 
   async sealWrites() {
-    const events = await this.allEvents();
-    const sealed = sealWriteCapabilities(await this.capabilities(), events);
+    const { scopeEvents, events } = await this.scopedEvidence();
+    const existing = await this.capabilities();
+    const slice = sessionCatalogSlice(existing, events, scopeEvents);
+    const sealedSlice = sealWriteCapabilities(slice, events);
+    const sealed = mergeCatalogByTransport(sealedSlice, existing);
     await writeJson(this.catalogFile(), sealed);
     return sealed;
+  }
+
+  private async exportCatalog() {
+    const { scopeEvents, events } = await this.scopedEvidence();
+    const existing = await this.capabilities();
+    const slice = sessionCatalogSlice(existing, events, scopeEvents);
+    return {
+      catalog: sealWriteCapabilities(slice, events),
+      events
+    };
   }
 
   async routes() {
@@ -353,7 +335,8 @@ export class StudioService {
   }
 
   async export(name: string, outputRoot = path.join(this.config.rootDir, "dist", "skills"), match: string[] = []) {
-    return exportSkill(outputRoot, name, await this.sealWrites(), match, await this.allEvents());
+    const { catalog, events } = await this.exportCatalog();
+    return exportSkill(outputRoot, name, catalog, match, events);
   }
 
   async listSkills() {
@@ -361,7 +344,8 @@ export class StudioService {
   }
 
   async exportManaged(name: string, confirmed: boolean) {
-    return this.skillLibrary.export(name, await this.sealWrites(), confirmed);
+    const { catalog } = await this.exportCatalog();
+    return this.skillLibrary.export(name, catalog, confirmed);
   }
 
   async setSkillFrozen(name: string, frozen: boolean, confirmed: boolean) {

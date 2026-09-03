@@ -67,21 +67,24 @@ function recommendedDefault(field: InputFormField, capability: CapabilityContrac
   }
   if (field.defaultRule?.startsWith("computed:")) return `按 ${field.defaultRule.slice("computed:".length)} 计算`;
   if (field.defaultRule?.startsWith("copy:")) return `拷贝 ${field.defaultRule.slice("copy:".length)}`;
-  if (field.defaultRule?.startsWith("from:")) return "从已录制查询带出";
+  if (field.defaultRule?.startsWith("from:")) {
+    return field.sourceDetail
+      ? `${field.sourceDetail}（${field.defaultRule}）`
+      : field.defaultRule;
+  }
   if (field.defaultRule?.startsWith("literal:")) return `${field.defaultRule.slice("literal:".length)}（系统默认，不是录制样本）`;
   return "按用户本次意图填写";
 }
 
 function exportHandling(field: InputFormField) {
-  return describeFieldHandling(field)
+  const handling = describeFieldHandling(field);
+  const rule = field.defaultRule && !handling.includes(field.defaultRule) ? `；规则 ${field.defaultRule}` : "";
+  return `${handling}${rule}`
     .replaceAll("由执行器按默认值补齐", "由系统按安全默认值补齐")
     .replaceAll("执行器按录制默认补齐", "系统按安全默认值补齐")
-    .replaceAll("执行器转成当天 00:00 的毫秒时间戳", "按当天开始时间提交")
     .replaceAll("执行器", "系统")
     .replaceAll("不要改成录制样本", "不要编造未见过的值")
-    .replaceAll("不要写死录制样本", "不要编造未见过的值")
-    .replaceAll("按录制默认", "按安全默认值")
-    .replaceAll("已录制查询接口", "已验证查询接口");
+    .replaceAll("不要写死录制样本", "不要编造未见过的值");
 }
 
 export function resultPathOf(valuePath: string) {
@@ -553,6 +556,9 @@ ${fields.map(field => {
       candidate = field.dateClock
         ? `dateFormat: YYYY-MM-DD，请求补 ${field.dateClock}`
         : "dateFormat: YYYY-MM-DD";
+      if (field.sourceDetail && /毫秒|时间戳|dateClock|YYYY-MM-DD/.test(field.sourceDetail)) {
+        candidate = `${candidate}；${field.sourceDetail.replaceAll("执行器", "系统")}`;
+      }
     } else if (field.widget === "select" || field.widget === "multiselect") {
       candidate = "无固定候选";
     }

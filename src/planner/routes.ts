@@ -6,18 +6,18 @@ export function buildApprovedRoutes(capabilities: CapabilityContract[]): Capabil
   const byId = new Map(verified.map(capability => [capability.id, capability]));
   const targets = verified.filter(capability => capability.bindings.some(binding => binding.approved));
 
-  return targets.map(target => {
+  return targets.flatMap(target => {
     const ordered: CapabilityContract[] = [];
     const visiting = new Set<string>();
     const visited = new Set<string>();
 
     const visit = (capability: CapabilityContract) => {
-      if (visiting.has(capability.id)) throw new Error(`已确认绑定形成循环，无法导出路线：${capability.id}`);
+      if (visiting.has(capability.id)) throw new Error(`cycle:${capability.id}`);
       if (visited.has(capability.id)) return;
       visiting.add(capability.id);
       for (const binding of capability.bindings.filter(item => item.approved)) {
         const source = byId.get(binding.fromCapabilityId);
-        if (!source) throw new Error(`绑定 ${binding.id} 引用了未验证或不存在的来源能力`);
+        if (!source) throw new Error(`missing:${binding.id}`);
         visit(source);
       }
       visiting.delete(capability.id);
@@ -25,9 +25,13 @@ export function buildApprovedRoutes(capabilities: CapabilityContract[]): Capabil
       ordered.push(capability);
     };
 
-    visit(target);
+    try {
+      visit(target);
+    } catch {
+      return [];
+    }
     const bindingIds = ordered.flatMap(capability => capability.bindings.filter(binding => binding.approved).map(binding => binding.id));
-    return {
+    return [{
       id: slugify(`route-${target.id}`),
       title: `${ordered.map(capability => capability.title).join(" → ")}`,
       targetCapabilityId: target.id,
@@ -45,6 +49,6 @@ export function buildApprovedRoutes(capabilities: CapabilityContract[]): Capabil
         "执行结果不满足合同完成条件时停止，不猜测、不重试写操作"
       ],
       completion: `最后一步 ${target.id} 必须满足其合同中的完成条件`
-    };
+    }];
   });
 }

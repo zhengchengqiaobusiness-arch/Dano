@@ -236,6 +236,9 @@ test("caller page values rematerialize the recorded query string and create body
   });
   assert.deepEqual(queryRequest.query, RECORDED_QUERY);
 
+  const from = /^from:([^:]+):/.exec(fieldByName(create, "leaveBalance")?.defaultRule || "");
+  const lookupId = from?.[1];
+  assert.ok(lookupId, "leaveBalance must bind to a recorded query");
   const createRequest = materializeHttpRequest(create, {
     type: "事假",
     reason: "123123",
@@ -246,8 +249,9 @@ test("caller page values rematerialize the recorded query string and create body
     actualDay: 123,
     projectCode: "12312",
     projectName: "123",
-    Activity_0ag2wyz: 173,
-    leaveBalance: 0
+    Activity_0ag2wyz: 173
+  }, {
+    lookupBodies: { [lookupId]: { data: { leaveBalance: 0 } } }
   });
   assert.deepEqual(createRequest.body, RECORDED_CREATE);
 });

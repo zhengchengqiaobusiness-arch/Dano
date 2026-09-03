@@ -2,6 +2,56 @@ import type { CapabilityContract, InputFormField } from "../domain.js";
 import { randomUUID } from "node:crypto";
 import { getByPath, setByPath } from "../utils.js";
 import { dateToMillis, isDateInput, normalizeDateString } from "../inference/date-format.js";
+import { parseFromRule } from "../inference/field-derivation.js";
+
+export type MaterializeOptions = {
+  catalog?: CapabilityContract[];
+  lookupBodies?: Record<string, unknown>;
+};
+
+function sameJoin(left: unknown, right: unknown) {
+  if (left == null || right == null || left === "") return false;
+  return left === right || String(left) === String(right);
+}
+
+function extractJoined(body: unknown, jsonPath: string, viaValue?: unknown) {
+  if (jsonPath.includes("[*].")) {
+    const [prefix, suffix] = jsonPath.split("[*].");
+    const rows = getByPath(body, prefix || "$");
+    if (!Array.isArray(rows)) return undefined;
+    const name = (suffix || "").split(".").pop() || "";
+    const matched = rows.flatMap(row => {
+      if (!row || typeof row !== "object" || Array.isArray(row)) return [];
+      const record = row as Record<string, unknown>;
+      if (viaValue !== undefined && viaValue !== null && viaValue !== ""
+        && !sameJoin(record.id, viaValue) && !sameJoin(record.value, viaValue) && !sameJoin(record.code, viaValue)) {
+        return [];
+      }
+      const value = record[name];
+      return value === undefined ? [] : [value];
+    });
+    if (matched.length === 1) return matched[0];
+    if (viaValue === undefined && matched.length && new Set(matched.map(item => String(item))).size === 1) return matched[0];
+    return undefined;
+  }
+  return getByPath(body, jsonPath);
+}
+
+function resolveFrom(
+  rule: string,
+  prepared: Record<string, unknown>,
+  item: Record<string, unknown> | undefined,
+  options?: MaterializeOptions
+) {
+  const parsed = parseFromRule(rule);
+  if (!parsed) return undefined;
+  const body = options?.lookupBodies?.[parsed.capabilityId];
+  if (body === undefined) return undefined;
+  let viaValue: unknown = parsed.via ? item?.[parsed.via] : undefined;
+  if (parsed.via && viaValue === undefined) viaValue = prepared[parsed.via];
+  if (parsed.via && viaValue === undefined) return undefined;
+  return extractJoined(body, parsed.fromPath, viaValue);
+}
 
 function fieldValue(cap: CapabilityContract, input: Record<string, unknown>, name: string) {
   const field = cap.inputForm.find(item => item.name === name);
@@ -77,7 +127,12 @@ function evalComputed(expr: string, prepared: Record<string, unknown>, item?: Re
   return Function(`"use strict"; return (${text})`)();
 }
 
-function resolveFieldRule(field: CapabilityContract["inputForm"][number], prepared: Record<string, unknown>, item?: Record<string, unknown>) {
+function resolveFieldRule(
+  field: CapabilityContract["inputForm"][number],
+  prepared: Record<string, unknown>,
+  item: Record<string, unknown> | undefined,
+  options?: MaterializeOptions
+) {
   const rule = field.defaultRule || "";
   if (rule.startsWith("copy:")) {
     const name = rule.slice("copy:".length);
@@ -85,7 +140,7 @@ function resolveFieldRule(field: CapabilityContract["inputForm"][number], prepar
     return prepared[name];
   }
   if (rule.startsWith("computed:")) return evalComputed(rule.slice("computed:".length), prepared, item);
-  if (rule.startsWith("from:")) return undefined;
+  if (rule.startsWith("from:")) return resolveFrom(rule, prepared, item, options);
   if (rule) return resolveRule(rule);
   return undefined;
 }
@@ -202,7 +257,7 @@ function coercePresentFields(cap: CapabilityContract, prepared: Record<string, u
   }
 }
 
-function prepareInput(cap: CapabilityContract, input: Record<string, unknown>) {
+function prepareInput(cap: CapabilityContract, input: Record<string, unknown>, options?: MaterializeOptions) {
   const prepared = hoistNamedFields(cap, nestLineItems(cap, input));
   coercePresentFields(cap, prepared, false);
   let changed = true;
@@ -220,7 +275,7 @@ function prepareInput(cap: CapabilityContract, input: Record<string, unknown>) {
           const current = row as Record<string, unknown>;
           if (current[name] !== undefined) continue;
           try {
-            const value = resolveFieldRule(field, prepared, current);
+            const value = resolveFieldRule(field, prepared, current, options);
             if (value !== undefined) {
               current[name] = coerceFieldValue(value, field);
               changed = true;
@@ -233,7 +288,7 @@ function prepareInput(cap: CapabilityContract, input: Record<string, unknown>) {
       }
       if (getByPath(prepared, field.path) !== undefined) continue;
       try {
-        const value = resolveFieldRule(field, prepared);
+        const value = resolveFieldRule(field, prepared, undefined, options);
         if (value !== undefined) {
           setByPath(prepared, field.path, coerceFieldValue(value, field));
           changed = true;
@@ -263,8 +318,12 @@ function authHeaders() {
   return parsed as Record<string, string>;
 }
 
-export function materializeHttpRequest(cap: CapabilityContract, input: Record<string, unknown>) {
-  const prepared = prepareInput(cap, input);
+export function materializeHttpRequest(
+  cap: CapabilityContract,
+  input: Record<string, unknown>,
+  options?: MaterializeOptions
+) {
+  const prepared = prepareInput(cap, input, options);
   const { url, consumed } = expandUrl(cap, prepared);
   const method = cap.transport.method.toUpperCase();
   if (!["GET", "HEAD"].includes(method)) {
@@ -287,17 +346,41 @@ export function materializeHttpRequest(cap: CapabilityContract, input: Record<st
   };
 }
 
+async function lookupBodiesFor(
+  cap: CapabilityContract,
+  input: Record<string, unknown>,
+  catalog: CapabilityContract[],
+  visiting = new Set<string>()
+): Promise<Record<string, unknown>> {
+  const bodies: Record<string, unknown> = {};
+  if (visiting.has(cap.id)) return bodies;
+  visiting.add(cap.id);
+  for (const field of cap.inputForm) {
+    const parsed = parseFromRule(field.defaultRule || "");
+    if (!parsed || bodies[parsed.capabilityId] !== undefined) continue;
+    const source = catalog.find(item => item.id === parsed.capabilityId);
+    if (!source) continue;
+    const viaInput = parsed.via && input[parsed.via] !== undefined ? { [parsed.via]: input[parsed.via] } : {};
+    const result = await executeCapability(source, viaInput, false, catalog, visiting);
+    bodies[parsed.capabilityId] = result.body;
+  }
+  return bodies;
+}
+
 export async function executeCapability(
   cap: CapabilityContract,
   input: Record<string, unknown>,
-  confirmWrite = false
+  confirmWrite = false,
+  catalog: CapabilityContract[] = [],
+  visiting = new Set<string>()
 ) {
   if (cap.validation.status !== "verified") throw new Error(`Capability ${cap.id} is not verified`);
   if (cap.confirmation.required && !confirmWrite) {
     throw new Error(`Capability ${cap.id} requires explicit write confirmation`);
   }
 
-  const materialized = materializeHttpRequest(cap, input);
+  const lookupBodies = catalog.length ? await lookupBodiesFor(cap, input, catalog, visiting) : {};
+  const materialized = materializeHttpRequest(cap, input, { catalog, lookupBodies });
   const url = new URL(materialized.url);
   const method = materialized.method;
   const headers: Record<string, string> = {

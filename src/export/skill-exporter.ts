@@ -91,6 +91,7 @@ function exportedField(field: InputFormField) {
   };
   if (field.defaultRule) exported.defaultRule = field.defaultRule;
   if (field.dateClock) exported.dateClock = field.dateClock;
+  if (field.sourceDetail) exported.sourceDetail = field.sourceDetail;
   if (field.candidates) exported.candidates = field.candidates;
   return exported;
 }
@@ -143,9 +144,9 @@ export async function exportSkill(
   events: EvidenceEvent[] = []
 ) {
   const catalog = normalizeCatalog(allCapabilities);
-  assertExportable(catalog, events);
   const selected = exportableCapabilities(catalog, match);
   if (!selected.length) throw new Error("没有可导出的已验证主能力。下拉和用户分页不是主能力。");
+  assertExportable(selected, events);
 
   const displayName = requestedName.trim() || normalizeSkillName(requestedName, selected);
   const capabilities = withExportTitles(selected, displayName);

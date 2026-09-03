@@ -188,6 +188,9 @@ export function looksPickerField(
   field: Pick<InputFormField, "name" | "label" | "widget">,
   observation?: Pick<UiObservation, "type">
 ) {
+  if (/审批结果|审批状态|processStatus|approveStatus|auditStatus|approvalStatus/i.test(`${field.name || ""} ${field.label || ""}`)) {
+    return false;
+  }
   if (/picker/i.test(`${observation?.type || ""} ${field.widget || ""}`)) return true;
   return /人员|审批|创建人|选人|assignee|approver|creator|Activity_|userId|userIds|UserSelect/i.test(`${field.name || ""} ${field.label || ""}`);
 }
@@ -331,6 +334,21 @@ function rowDisplay(row: Record<string, unknown>) {
   return undefined;
 }
 
+function rowDisplayCandidates(row: Record<string, unknown>) {
+  const values = new Set<string>();
+  const primary = rowDisplay(row);
+  if (primary !== undefined && primary !== null && primary !== "") values.add(String(primary));
+  const username = row.username ?? row.userName;
+  const nickname = row.nickname;
+  if (username !== undefined && username !== null && username !== "") values.add(String(username));
+  if (nickname !== undefined && nickname !== null && nickname !== "") values.add(String(nickname));
+  if (username && nickname) {
+    values.add(`${username} ${nickname}`);
+    values.add(`${nickname} ${username}`);
+  }
+  return [...values];
+}
+
 function listLabelFor(row: Record<string, unknown>, requestValue: unknown) {
   if (!sameValue(rowIdentity(row), requestValue)) return undefined;
   return rowDisplay(row);
@@ -362,18 +380,13 @@ function uniqueLists(lists: RecordedList[]) {
 }
 
 function namesOf(list: RecordedList) {
-  return new Set(
-    list.rows
-      .map(rowDisplay)
-      .filter((name): name is string => name !== undefined)
-      .map(name => String(name))
-  );
+  return new Set(list.rows.flatMap(row => rowDisplayCandidates(row)));
 }
 
 function listsMatchingIdentity(lists: RecordedList[], display: string, requestValue: unknown) {
   if (requestValue === undefined || requestValue === null || requestValue === "") return [];
   return lists.filter(list => list.rows.some(row =>
-    sameValue(rowIdentity(row), requestValue) && sameValue(rowDisplay(row), display)
+    sameValue(rowIdentity(row), requestValue) && rowDisplayCandidates(row).some(item => sameValue(item, display))
   ));
 }
 
@@ -478,7 +491,7 @@ export function findObservation(
     const hits = observations.filter(item => {
       const list = listForObservation(item, lists, requestValue);
       return Boolean(list && list.rows.some(row =>
-        sameValue(rowIdentity(row), requestValue) && sameValue(rowDisplay(row), item.value)
+        sameValue(rowIdentity(row), requestValue) && rowDisplayCandidates(row).some(display => sameValue(display, item.value))
       ));
     });
     const unique = [...new Map(hits.map(item => [item.label || item.name || "", item])).values()];
@@ -493,9 +506,6 @@ export function findObservation(
     if (byDay.length > 1 && dayLabels.size === 1) return expandObservation(byDay[0], observations);
   }
 
-  const dateFields = observations.filter(looksDateControl);
-  const dateLabels = new Set(dateFields.map(item => item.label).filter(Boolean));
-  if (dateLabels.size === 1 && looksDateControl(field)) return expandObservation(dateFields[0], observations);
   return undefined;
 }
 
@@ -746,7 +756,7 @@ function observationMatchesValue(item: UiObservation, value: unknown, lists: Rec
   const list = listForObservation(item, lists, value);
   return Boolean(list && list.rows.some(row =>
     sameValue(rowIdentity(row), value)
-    && (item.value === undefined || item.value === "" || sameValue(rowDisplay(row), item.value))
+    && (item.value === undefined || item.value === "" || rowDisplayCandidates(row).some(display => sameValue(display, item.value)))
   ));
 }
 
@@ -868,11 +878,15 @@ export function bindLeftoverFields(
   const leftoverFields = fields.filter(field => field.source !== "caller" && !PAGE_NAME.test(field.name) && !isReadonlyBound(field));
   if (leftoverObs.length === 1 && leftoverFields.length === 1) {
     const field = leftoverFields[0]!;
-    return fields.map(item =>
-      item.path === field.path
-        ? asCaller(item, leftoverObs[0], requestValueAt(sample, item.path), observations, lists)
-        : item
-    );
+    const observation = leftoverObs[0]!;
+    const value = requestValueAt(sample, field.path);
+    if (observationCompatible(field, observation, value, lists)) {
+      return fields.map(item =>
+        item.path === field.path
+          ? asCaller(item, observation, value, observations, lists)
+          : item
+      );
+    }
   }
   const dateObs = leftoverObs.filter(looksDateControl);
   const dateFields = leftoverFields.filter(looksDateControl);
@@ -912,6 +926,29 @@ export function assignUniqueRemaining(
       && observationCompatible(other, observation, requestValueAt(sample, other.path), lists)
     );
     if (competitors.length) continue;
+    bound.set(observation.label || field.path, bindObservation(field, observation, value, observations, lists));
+    boundPaths.add(field.path);
+  }
+  for (const field of leftoverFields) {
+    if (boundPaths.has(field.path) || !looksPickerField(field)) continue;
+    const value = requestValueAt(sample, field.path);
+    if (value === undefined || value === null || value === "") continue;
+    const pickerObs = leftoverObs.filter(item =>
+      !bound.has(item.label || "")
+      && /picker|select|combobox/i.test(item.type || "")
+    );
+    const required = pickerObs.filter(item => item.required);
+    const pool = required.length ? required : pickerObs;
+    if (pool.length !== 1) continue;
+    const observation = pool[0]!;
+    const otherPickers = leftoverFields.filter(other =>
+      other.path !== field.path
+      && !boundPaths.has(other.path)
+      && looksPickerField(other)
+      && other.valueType !== "object"
+      && !other.path.endsWith("SelectAssignees")
+    );
+    if (otherPickers.length) continue;
     bound.set(observation.label || field.path, bindObservation(field, observation, value, observations, lists));
     boundPaths.add(field.path);
   }

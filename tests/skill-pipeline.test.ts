@@ -265,7 +265,7 @@ test("exports a progressively disclosed Python Skill package", async () => {
     const reviewContract = contract.capabilities.find((item: any) => item.id === "review-order");
     assert.equal(reviewContract.inputQuestions[0].id, "comment");
     assert.match(reviewContract.inputQuestions[0].defaultStrategy, /未见过的值/);
-    assert.equal(reviewContract.inputForm[0].sourceDetail, undefined);
+    assert.equal(reviewContract.inputForm[0].sourceDetail, "来自已确认的查询结果");
     assert.equal(reviewContract.inputForm[0].requiredBasis, undefined);
     assert.equal(reviewContract.completion.note, undefined);
   } finally {
