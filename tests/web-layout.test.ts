@@ -251,7 +251,7 @@ test("skill catalog distinguishes handbook export from business spec dump", asyn
   assert.match(html, /id="skills-sort-time"/);
   assert.match(html, /id="skills-pager"/);
   assert.match(html, /<th class="col-actions">操作</);
-  assert.match(css, /grid-template-columns:\s*280px 52px 52px 128px max-content/);
+  assert.match(css, /grid-template-columns:\s*minmax\(0, 2\.2fr\) minmax\(72px, \.7fr\) minmax\(72px, \.7fr\) minmax\(140px, 1fr\) minmax\(220px, 1\.4fr\)/);
   assert.match(app, /function renderSkills\(\)/);
   assert.match(app, /function pagedSkills\(\)/);
   assert.match(app, /skillsPageSize: 8/);

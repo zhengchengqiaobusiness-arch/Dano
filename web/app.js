@@ -13,6 +13,8 @@ const elements = {
   browserIme: $("#browser-ime"),
   exportForm: $("#export-form"),
   skillName: $("#skill-name"), skillsList: $("#skills-list"),
+  skillsPager: $("#skills-pager"), skillsPageInfo: $("#skills-page-info"),
+  skillsPrev: $("#skills-prev"), skillsNext: $("#skills-next"), skillsSortTime: $("#skills-sort-time"),
   confirmationModal: $("#confirmation-modal"), confirmationTitle: $("#confirmation-title"),
   confirmationMessage: $("#confirmation-message"), confirmationOptions: $("#confirmation-options"),
   confirmationInput: $("#confirmation-input"), confirmationEditor: $("#confirmation-editor"),
@@ -49,7 +51,8 @@ function pageHeaders(extra = {}) {
 const state = {
   view: "recording", browserActive: false, browserMode: "automatic", agentReady: false, agentStreaming: false, agentAborting: false,
   currentUiRequest: null, localConfirmation: null, invokeSkill: null,
-  sessionNodes: new Map(), toastTimer: null, skills: [], sessionFollow: false, sessionLive: true, sessionEpoch: 0,
+  sessionNodes: new Map(), toastTimer: null, skills: [], skillsPage: 1, skillsPageSize: 8, skillsSort: "desc",
+  sessionFollow: false, sessionLive: true, sessionEpoch: 0,
   manualQueue: Promise.resolve(), manualRefreshTimers: [], recordingAction: null, clearingSession: false,
   pollInFlight: false, frameLoading: false, frameBlobUrl: null, lastFrameAt: 0, frameEpoch: 0,
   lastStatusText: "", viewport: { width: 1440, height: 960 },
@@ -528,15 +531,54 @@ function skillExportedAt(value) {
   return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(at);
 }
 
+function skillTimeValue(skill) {
+  const value = Date.parse(skill.exportedAt || skill.updatedAt || "");
+  return Number.isFinite(value) ? value : 0;
+}
+
+function sortedSkills() {
+  const items = [...state.skills];
+  items.sort((left, right) => state.skillsSort === "asc" ? skillTimeValue(left) - skillTimeValue(right) : skillTimeValue(right) - skillTimeValue(left));
+  return items;
+}
+
+function pagedSkills() {
+  const items = sortedSkills();
+  const size = state.skillsPageSize;
+  const pages = Math.max(1, Math.ceil(items.length / size));
+  if (state.skillsPage > pages) state.skillsPage = pages;
+  if (state.skillsPage < 1) state.skillsPage = 1;
+  const start = (state.skillsPage - 1) * size;
+  return { items: items.slice(start, start + size), total: items.length, pages, page: state.skillsPage };
+}
+
+function renderSkillsPager(total, pages, page) {
+  if (!elements.skillsPager) return;
+  const many = total > state.skillsPageSize;
+  elements.skillsPager.hidden = !many;
+  if (elements.skillsPageInfo) elements.skillsPageInfo.textContent = many ? `第 ${page} / ${pages} 页 · ${total} 条` : "";
+  if (elements.skillsPrev) elements.skillsPrev.disabled = page <= 1;
+  if (elements.skillsNext) elements.skillsNext.disabled = page >= pages;
+}
+
 function renderSkills() {
   elements.skillsList.innerHTML = "";
+  if (elements.skillsSortTime) {
+    elements.skillsSortTime.dataset.sort = state.skillsSort;
+    elements.skillsSortTime.setAttribute("aria-pressed", state.skillsSort === "desc" ? "true" : "false");
+    elements.skillsSortTime.textContent = state.skillsSort === "asc" ? "产出时间 ↑" : "产出时间 ↓";
+    elements.skillsSortTime.closest("th")?.setAttribute("aria-sort", state.skillsSort === "asc" ? "ascending" : "descending");
+  }
   if (!state.skills.length) {
     const empty = document.createElement("tr");
     empty.innerHTML = "<td class=\"skills-empty-cell\" colspan=\"5\"><div class=\"empty-skills\"><strong>还没有导出的 Skill</strong><span>先完成录制并由 Pi 产出后，再从上方导出。</span></div></td>";
     elements.skillsList.append(empty);
+    renderSkillsPager(0, 1, 1);
     return;
   }
-  for (const skill of state.skills) {
+  const { items, total, pages, page } = pagedSkills();
+  renderSkillsPager(total, pages, page);
+  for (const skill of items) {
     const row = document.createElement("tr");
     row.className = `skill-row ${skill.artifactStatus === "missing" ? "missing" : ""}`;
     const nameCell = document.createElement("td");
@@ -553,14 +595,7 @@ function renderSkills() {
     meta.className = "skill-meta";
     const slug = document.createElement("code");
     slug.textContent = `v${skill.version} · ${skill.name}`;
-    const copyPath = document.createElement("button");
-    copyPath.type = "button";
-    copyPath.textContent = "复制路径";
-    copyPath.addEventListener("click", async () => {
-      try { await navigator.clipboard.writeText(skill.directory); showToast("导出目录已复制"); }
-      catch { showToast(skill.directory); }
-    });
-    meta.append(slug, copyPath);
+    meta.append(slug);
     nameCell.append(title, meta);
     const capability = document.createElement("td");
     capability.className = "col-metric";
@@ -663,6 +698,20 @@ elements.prompt.addEventListener("keydown", event => { if (event.key === "Enter"
 document.querySelectorAll("[data-prompt]").forEach(button => button.addEventListener("click", () => void submitPrompt(button.dataset.prompt || "")));
 elements.confirmationCancel.addEventListener("click", () => void closeConfirmation(false)); elements.confirmationApprove.addEventListener("click", () => void closeConfirmation(true));
 elements.exportForm.addEventListener("submit", event => { event.preventDefault(); void exportSkill(elements.skillName.value.trim()).catch(error => showToast(error.message)); });
+elements.skillsSortTime?.addEventListener("click", () => {
+  state.skillsSort = state.skillsSort === "desc" ? "asc" : "desc";
+  state.skillsPage = 1;
+  renderSkills();
+});
+elements.skillsPrev?.addEventListener("click", () => {
+  if (state.skillsPage <= 1) return;
+  state.skillsPage -= 1;
+  renderSkills();
+});
+elements.skillsNext?.addEventListener("click", () => {
+  state.skillsPage += 1;
+  renderSkills();
+});
 elements.invokeCancel.addEventListener("click", () => { elements.invokeModal.hidden = true; state.invokeSkill = null; });
 elements.invokeSubmit.addEventListener("click", async () => {
   if (!state.invokeSkill || !elements.invokeGoal.value.trim()) return showToast("请先描述业务目标");
