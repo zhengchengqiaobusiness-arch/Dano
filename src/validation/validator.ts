@@ -123,7 +123,7 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
   const systemFieldsResolvable = cap.inputForm.every(field => {
     if (!field.required || field.source === "caller" || field.source === "computed") return true;
     if (field.source === "binding") return cap.bindings.some(binding => binding.approved && binding.toPath === field.path);
-    return Boolean(field.defaultRule && /^(literal:.+|env:[A-Za-z_][A-Za-z0-9_]*|uuid|now:iso)$/.test(field.defaultRule));
+    return Boolean(field.defaultRule && /^(literal:.+|env:[A-Za-z_][A-Za-z0-9_]*|uuid|now:iso|from:[^|]+(?:\|via:[A-Za-z_][A-Za-z0-9_]*)?|computed:.+|copy:[A-Za-z_][A-Za-z0-9_]*)$/.test(field.defaultRule));
   });
   checks.push({
     name: "system-required-fields-resolvable",

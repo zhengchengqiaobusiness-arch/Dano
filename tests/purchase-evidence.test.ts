@@ -106,7 +106,7 @@ function purchaseEvents(): EvidenceEvent[] {
       method: "GET", url: "http://admin.dianshixinxi.com:90/admin-api/erp/product/simple-list",
       resourceType: "xhr", headers: {}, query: {}
     },
-    response: { status: 200, headers: {}, body: { success: true, data: [{ id: 3, name: "苹果电脑" }] } }
+    response: { status: 200, headers: {}, body: { success: true, data: [{ id: 3, name: "苹果电脑", barCode: "0101010101", unitName: "台", purchasePrice: 5000 }] } }
   }, {
     id: "net-supplier", kind: "network", sessionId: "rec-1", at: "2026-09-02T03:18:01.600Z",
     request: {
@@ -121,6 +121,13 @@ function purchaseEvents(): EvidenceEvent[] {
       resourceType: "xhr", headers: {}, query: {}
     },
     response: { status: 200, headers: {}, body: { success: true, data: [{ id: 2, name: "公司基本户" }] } }
+  }, {
+    id: "net-stock", kind: "network", sessionId: "rec-1", at: "2026-09-02T03:19:11.100Z",
+    request: {
+      method: "GET", url: "http://admin.dianshixinxi.com:90/admin-api/erp/stock/get-count?productId=3",
+      resourceType: "xhr", headers: {}, query: { productId: 3 }
+    },
+    response: { status: 200, headers: {}, body: { success: true, data: 925.5 } }
   }, {
     id: "ui-create-form", kind: "ui", sessionId: "rec-1", at: "2026-09-02T03:19:10.000Z",
     pageUrl: "http://admin.dianshixinxi.com:90/erp/purchase/order", eventType: "input",
@@ -224,16 +231,29 @@ test("search and create purchase order verify from mixed manual and recorded evi
   assert.equal(create.inputForm.find(field => field.name === "productPrice")?.label, "产品单价");
   assert.notEqual(create.inputForm.find(field => field.name === "count")?.label, "入库数量");
   assert.notEqual(create.inputForm.find(field => field.name === "productPrice")?.candidates?.type, "capability");
-  assert.equal(create.inputForm.find(field => field.name === "amount")?.source, "system");
-  assert.equal(create.inputForm.find(field => field.name === "totalPrice")?.source, "system");
-  assert.equal(create.inputForm.find(field => field.name === "productUnitName")?.source, "system");
-  assert.equal(create.inputForm.find(field => field.name === "productBarCode")?.source, "system");
-  assert.equal(create.inputForm.find(field => field.name === "stockCount")?.source, "system");
+  assert.equal(create.inputForm.find(field => field.name === "amount")?.source, "computed");
+  assert.equal(create.inputForm.find(field => field.name === "totalPrice")?.source, "computed");
+  assert.equal(create.inputForm.find(field => field.name === "productUnitName")?.source, "binding");
+  assert.equal(create.inputForm.find(field => field.name === "productBarCode")?.source, "binding");
+  assert.equal(create.inputForm.find(field => field.name === "stockCount")?.source, "binding");
   assert.equal(create.inputForm.find(field => field.name === "productId")?.defaultRule, undefined);
   for (const field of [...search.inputForm, ...create.inputForm]) {
     if (/^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i.test(field.name)) continue;
-    assert.equal(field.defaultRule, undefined, `${field.name} must not freeze a recorded sample`);
+    if (field.source === "caller") {
+      assert.equal(field.defaultRule, undefined, `${field.name} must not freeze a recorded sample`);
+    }
+    if (field.defaultRule?.startsWith("literal:") && !/^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i.test(field.name)) {
+      assert.match(field.sourceDetail || "", /系统默认|系统常量/, `${field.name} literal must be a default, not a recorded sample`);
+    }
   }
+  assert.match(create.inputForm.find(field => field.name === "productUnitName")?.defaultRule || "", /^from:.+\.unitName\|via:productId$/);
+  assert.match(create.inputForm.find(field => field.name === "productBarCode")?.defaultRule || "", /^from:.+\.barCode\|via:productId$/);
+  assert.match(create.inputForm.find(field => field.name === "stockCount")?.defaultRule || "", /^from:.+stock.*\|via:productId$|^from:query-get-stock-get-count:\$\.data\|via:productId$/);
+  assert.match(create.inputForm.find(field => field.name === "discountPrice")?.defaultRule || "", /^computed:/);
+  assert.match(create.inputForm.find(field => field.path === "$.totalPrice")?.defaultRule || "", /^computed:/);
+  assert.match(create.inputForm.find(field => field.path === "$.items[*].totalPrice")?.defaultRule || "", /^computed:/);
+  assert.match(create.inputForm.find(field => field.name === "productUnitName")?.sourceDetail || "", /带出/);
+  assert.notEqual(create.inputForm.find(field => field.name === "productPrice")?.source, "binding");
   const verified = finalizeCapabilities(capabilities, events);
   const verifiedSearch = verified.find(item => item.transport.pathTemplate.includes("/purchase/order/page"))!;
   const verifiedCreate = verified.find(item => item.transport.pathTemplate.includes("/purchase/order/create"))!;
@@ -254,7 +274,7 @@ test("search and create purchase order verify from mixed manual and recorded evi
   assert.equal(exported.some(item => item.transport.pathTemplate.includes("/product/simple-list")), true);
   assert.equal(exported.some(item => item.transport.pathTemplate.includes("/supplier/simple-list")), true);
   assert.equal(exported.some(item => item.transport.pathTemplate.includes("/account/simple-list")), true);
-  assert.equal(exported.some(item => item.transport.pathTemplate.includes("/stock/get-count")), false);
+  assert.equal(exported.some(item => item.transport.pathTemplate.includes("/stock/get-count")), true);
   assert.equal(exported.filter(item => ["query", "create"].includes(item.operation) && item.transport.pathTemplate.includes("/purchase/order")).length, 2);
   assert.equal(exported.some(item => item.id === im.id || item.transport.pathTemplate.includes("/im/conversation")), false);
   assert.equal(exported.some(item => item.transport.pathTemplate.includes("/auth/login")), false);
@@ -323,7 +343,7 @@ test("nameless forms bind only uniquely evidenced fields", () => {
   assert.equal(create.inputForm.find(field => field.name === "accountId")?.source, "caller");
   assert.equal(create.inputForm.find(field => field.name === "remark")?.source, "caller");
   assert.equal(create.inputForm.find(field => field.name === "taxPercent")?.label, "税率");
-  assert.equal(create.inputForm.find(field => field.name === "productUnitName")?.source, "system");
+  assert.equal(create.inputForm.find(field => field.name === "productUnitName")?.source, "binding");
 });
 
 test("same-day date range binds start and end labels without guessing names", () => {
@@ -429,7 +449,10 @@ test("exported purchase skill keeps API candidates and omits background polls", 
     assert.doesNotMatch(skill, /### 查询采购订单[\s\S]*参数名/);
     assert.doesNotMatch(skill, /net_mtjq|rec_mtjq|生成器实现|TypeScript|执行器/);
     assert.doesNotMatch(capabilities, /## 查询产品名称/);
-    assert.match(forms, /接口候选|页面固定枚举|后台自动|dataSource/);
+    assert.match(forms, /接口候选|页面固定枚举|后台自动|带出|自动计算|dataSource/);
+    assert.match(forms, /unitName|带出/);
+    assert.doesNotMatch(forms, /执行时按录制成功请求写入 台/);
+    assert.doesNotMatch(forms, /执行时省略/);
     assert.match(forms, /入库数量/);
     assert.match(forms, /结束日期/);
     assert.match(forms, /YYYY-MM-DD/);
@@ -479,13 +502,20 @@ test("exported purchase skill keeps API candidates and omits background polls", 
       "--capability", create.id,
       "--input", JSON.stringify({
         supplierId: 12, accountId: 2, orderTime: "2026-09-02", remark: "测试",
-        discountPercent: 5, depositPrice: 100, productId: 3, count: 5, productPrice: 100, taxPercent: 13
+        productId: 3, count: 5, productPrice: 100, taxPercent: 13, discountPercent: 5
       }),
       "--prepare-only"
     ]);
     const createBody = JSON.parse(createPrepared.stdout);
     assert.equal(createBody.prepared.items[0].productId, 3);
     assert.equal(createBody.prepared.items[0].count, 5);
+    assert.equal(createBody.prepared.remark, "测试");
+    assert.equal(createBody.prepared.items[0].remark, undefined);
+    assert.equal(createBody.prepared.items[0].totalProductPrice, 500);
+    assert.equal(createBody.prepared.items[0].taxPrice, 65);
+    assert.equal(createBody.prepared.items[0].totalPrice, 565);
+    assert.equal(createBody.prepared.discountPrice, 28.25);
+    assert.equal(createBody.prepared.totalPrice, 536.75);
     assert.equal(typeof createBody.prepared.orderTime, "number");
     assert.equal(createBody.prepared.orderTime, 1788278400000);
   } finally {
@@ -513,4 +543,56 @@ test("same-page recordings complete query date fields missing from the latest se
   const search = buildCapabilityCandidates(merged).find(item => item.transport.pathTemplate.includes("/purchase/order/page"))!;
   assert.equal(search.inputForm.some(field => field.name === "orderTime[0]"), true);
   assert.equal(search.inputForm.find(field => field.name === "orderTime[0]")?.label, "开始日期");
+});
+
+test("validate reseals write system fields from the recorded success request", () => {
+  const events = purchaseEvents();
+  const capabilities = buildCapabilityCandidates(events);
+  const stale = capabilities.map(capability => ({
+    ...capability,
+    inputForm: capability.inputForm.map(field =>
+      field.source === "caller" || field.source === "binding"
+        ? field
+        : {
+            ...field,
+            defaultRule: undefined,
+            sourceDetail: field.sourceDetail?.includes("只读")
+              ? "页面只读展示，由选择其它字段后自动带出。调用方不要手填"
+              : "请求中出现但未能唯一对应到页面控件。不要使用录制样本填这个字段"
+          }
+    )
+  }));
+  const sealed = finalizeCapabilities(stale, events);
+  const create = sealed.find(item => item.transport.pathTemplate.includes("/purchase/order/create"))!;
+  assert.match(create.inputForm.find(field => field.name === "productUnitName")?.defaultRule || "", /^from:.+\.unitName\|via:productId$/);
+  assert.match(create.inputForm.find(field => field.name === "productBarCode")?.defaultRule || "", /^from:.+\.barCode\|via:productId$/);
+  assert.match(create.inputForm.find(field => field.name === "discountPrice")?.defaultRule || "", /^computed:/);
+  assert.match(create.inputForm.find(field => field.name === "productUnitName")?.sourceDetail || "", /带出/);
+  assert.doesNotMatch(create.inputForm.find(field => field.name === "discountPrice")?.sourceDetail || "", /不要使用录制样本/);
+});
+
+test("export refuses write system fields that appeared in the request but have no recorded value", async () => {
+  const events = purchaseEvents();
+  const verified = finalizeCapabilities(buildCapabilityCandidates(events), events);
+  const broken = verified.map(capability =>
+    capability.operation === "create"
+      ? {
+          ...capability,
+          inputForm: capability.inputForm.map(field =>
+            field.name === "productUnitName"
+              ? { ...field, source: "system", defaultRule: undefined, sourceDetail: "页面只读展示，由选择其它字段后自动带出。调用方不要手填" }
+              : field
+          )
+        }
+      : capability
+  );
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "purchase-unsealed-"));
+  try {
+    await assert.rejects(
+      () => exportSkill(temporary, "采购订单管理", broken),
+      /写操作的系统字段缺少录制成功请求中的写入值/
+    );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 });

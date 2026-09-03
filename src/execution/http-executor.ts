@@ -38,7 +38,14 @@ function expandUrl(cap: CapabilityContract, input: Record<string, unknown>) {
 }
 
 function resolveRule(rule: string) {
-  if (rule.startsWith("literal:")) return JSON.parse(rule.slice("literal:".length));
+  if (rule.startsWith("literal:")) {
+    const raw = rule.slice("literal:".length);
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return raw;
+    }
+  }
   if (rule.startsWith("env:")) {
     const name = rule.slice("env:".length);
     if (!process.env[name]) throw new Error(`Missing environment value: ${name}`);
@@ -49,14 +56,121 @@ function resolveRule(rule: string) {
   throw new Error(`Unsupported field resolution rule: ${rule}`);
 }
 
-function prepareInput(cap: CapabilityContract, input: Record<string, unknown>) {
-  const prepared = structuredClone(input);
-  for (const field of cap.inputForm) {
-    let value = getByPath(prepared, field.path);
-    if (value === undefined && field.defaultRule) {
-      value = resolveRule(field.defaultRule);
-      setByPath(prepared, field.path, value);
+function itemInputKey(field: { path: string }) {
+  return field.path.replace(/^\$\./, "").replace(/\[\*\]/g, "");
+}
+
+function evalComputed(expr: string, prepared: Record<string, unknown>, item?: Record<string, unknown>) {
+  const scope = { ...prepared, ...(item || {}) };
+  const withSum = expr.replace(/sum\(items\.([A-Za-z_][A-Za-z0-9_]*)\)/g, (_, name) => {
+    const items = prepared.items;
+    if (!Array.isArray(items)) throw new Error(`无法计算 sum(items.${name})`);
+    return String((items as Array<Record<string, unknown>>).reduce((sum, row) => sum + Number(row?.[name] || 0), 0));
+  });
+  const text = withSum.replace(/[A-Za-z_][A-Za-z0-9_]*/g, name => {
+    const value = scope[name];
+    if (value === undefined || value === null) throw new Error(`计算缺少字段：${name}`);
+    return String(value);
+  });
+  if (!/^[\d.\seE+\-*/()]+$/.test(text)) throw new Error(`非法计算公式：${expr}`);
+  return Function(`"use strict"; return (${text})`)();
+}
+
+function resolveFieldRule(field: CapabilityContract["inputForm"][number], prepared: Record<string, unknown>, item?: Record<string, unknown>) {
+  const rule = field.defaultRule || "";
+  if (rule.startsWith("copy:")) {
+    const name = rule.slice("copy:".length);
+    if (item && item[name] !== undefined) return item[name];
+    return prepared[name];
+  }
+  if (rule.startsWith("computed:")) return evalComputed(rule.slice("computed:".length), prepared, item);
+  if (rule.startsWith("from:")) return undefined;
+  if (rule) return resolveRule(rule);
+  return undefined;
+}
+
+function nestLineItems(cap: CapabilityContract, supplied: Record<string, unknown>) {
+  const prepared = structuredClone(supplied);
+  const itemFields = cap.inputForm.filter(field => field.path.includes("[*]"));
+  if (!itemFields.length) return prepared;
+  if (Array.isArray(prepared.items)) return prepared;
+  const headerNames = new Set(cap.inputForm.filter(field => !field.path.includes("[*]")).map(field => field.name));
+  const item: Record<string, unknown> = {};
+  for (const field of itemFields) {
+    const dotted = itemInputKey(field);
+    if (dotted !== field.name && Object.prototype.hasOwnProperty.call(prepared, dotted)) {
+      item[field.name] = prepared[dotted];
+      delete prepared[dotted];
+    } else if (Object.prototype.hasOwnProperty.call(prepared, field.name) && !headerNames.has(field.name)) {
+      item[field.name] = prepared[field.name];
+      delete prepared[field.name];
     }
+  }
+  if (Object.keys(item).length) prepared.items = [item];
+  return prepared;
+}
+
+function prepareInput(cap: CapabilityContract, input: Record<string, unknown>) {
+  const prepared = nestLineItems(cap, input);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const field of cap.inputForm) {
+      if (!field.defaultRule) continue;
+      if (field.path.includes("[*]")) {
+        const [prefix, suffix] = field.path.split("[*].");
+        const items = getByPath(prepared, prefix || "");
+        if (!Array.isArray(items)) continue;
+        const name = (suffix || "").split(".").pop() || field.name;
+        for (const row of items) {
+          if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+          const current = row as Record<string, unknown>;
+          if (current[name] !== undefined) continue;
+          try {
+            const value = resolveFieldRule(field, prepared, current);
+            if (value !== undefined) {
+              current[name] = value;
+              changed = true;
+            }
+          } catch {
+            // wait for another field in a later pass
+          }
+        }
+        continue;
+      }
+      if (getByPath(prepared, field.path) !== undefined) continue;
+      try {
+        const value = resolveFieldRule(field, prepared);
+        if (value !== undefined) {
+          setByPath(prepared, field.path, value);
+          changed = true;
+        }
+      } catch {
+        // wait for another field in a later pass
+      }
+    }
+  }
+  for (const field of cap.inputForm) {
+    if (field.path.includes("[*]")) {
+      const [prefix, suffix] = field.path.split("[*].");
+      const items = getByPath(prepared, prefix || "");
+      if (!Array.isArray(items)) {
+        if (field.required && field.source === "caller") {
+          throw new Error(`Missing caller field: ${field.label} (${field.path})`);
+        }
+        continue;
+      }
+      const name = (suffix || "").split(".").pop() || field.name;
+      for (const row of items) {
+        if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+        const value = (row as Record<string, unknown>)[name];
+        if (value === undefined && field.required && field.source === "caller") {
+          throw new Error(`Missing caller field: ${field.label} (${field.path})`);
+        }
+      }
+      continue;
+    }
+    const value = getByPath(prepared, field.path);
     if (value === undefined && field.required) {
       if (field.source === "caller") throw new Error(`Missing caller field: ${field.label} (${field.path})`);
       throw new Error(`Required system field is unresolved: ${field.label} (${field.path})`);

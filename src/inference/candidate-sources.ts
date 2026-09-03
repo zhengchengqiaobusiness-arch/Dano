@@ -125,6 +125,8 @@ export function attachCandidateSources(catalog: CapabilityContract[], events: Ev
     ...capability,
     inputForm: capability.inputForm.map(field => {
       if (field.source !== "caller") return field;
+      if (field.widget === "number" || field.widget === "date" || field.widget === "textarea") return field;
+      if (/天数|数量|金额|单价|税率|库存/.test(field.label || "")) return field;
       const source = lookupFor(field, catalog.filter(item => item.id !== capability.id), events);
       const paths = source ? listPaths(source.outputSchema) : undefined;
       if (!source || !paths) return field;
@@ -152,10 +154,18 @@ export function describeFieldHandling(field: InputFormField) {
     return `页面固定枚举，调用方直接选择：${field.candidates.values.map(item => `${item.label}=${String(item.value)}`).join("；")}`;
   }
   if (field.source === "caller") return `调用方按页面原始格式输入（${field.valueType}），不要改成其它类型`;
-  if (field.source === "computed") return `后台自动计算，调用方不要漏传或改写，否则会提交成功但金额/税额等为空`;
+  if (field.sourceDetail && (field.defaultRule?.startsWith("from:") || field.defaultRule?.startsWith("computed:") || field.defaultRule?.startsWith("copy:") || field.source === "binding")) {
+    return field.sourceDetail;
+  }
+  if (/^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i.test(field.name)) {
+    return `后台自动处理：${field.sourceDetail}`;
+  }
+  if (field.defaultRule?.startsWith("literal:")) {
+    return `系统默认值 ${field.defaultRule.slice("literal:".length)}，调用方未提供时使用，不是某次录制的业务样本`;
+  }
+  if (field.source === "computed") return field.sourceDetail || "由请求内其它字段自动计算，调用方不要手填";
   if (field.source === "generated") return `后台自动生成，调用方不要手填`;
   if (field.source === "fixed") return `系统补齐默认值 ${field.defaultRule || ""}，调用方可覆盖`;
   if (field.source === "session") return `会话环境自动提供 ${field.defaultRule || ""}`;
-  if (field.source === "binding") return field.sourceDetail;
-  return `后台自动处理：${field.sourceDetail}`;
+  return field.sourceDetail ? `后台自动处理：${field.sourceDetail}` : "后台自动处理";
 }

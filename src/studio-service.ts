@@ -6,7 +6,7 @@ import { loadConfig } from "./config.js";
 import { BrowserRecorder } from "./browser/recorder.js";
 import { id, readJson, readJsonl, writeJson } from "./utils.js";
 import { buildCapabilityCandidates } from "./inference/build-candidates.js";
-import { finalizeCapabilities } from "./inference/finalize-capabilities.js";
+import { finalizeCapabilities, sealWriteCapabilities } from "./inference/finalize-capabilities.js";
 import { OpenAIReasoner } from "./llm/openai.js";
 import { fallbackPlan } from "./planner/fallback.js";
 import { applyPlanPolicy } from "./planner/policy.js";
@@ -121,7 +121,7 @@ export class StudioService {
       }
       return {
         ...candidate,
-        id: old.id,
+        id: old.editing?.operation === "manual" ? old.id : candidate.id,
         title: old.editing?.title === "manual" ? old.title : candidate.title,
         description: old.editing?.description === "manual" ? old.description : candidate.description,
         operation,
@@ -137,6 +137,7 @@ export class StudioService {
       };
     });
 
+    candidates = sealWriteCapabilities(candidates, events);
     await writeJson(this.catalogFile(), candidates);
     return candidates;
   }
@@ -147,6 +148,13 @@ export class StudioService {
     const validated = finalizeCapabilities(caps, events);
     await writeJson(this.catalogFile(), validated);
     return validated;
+  }
+
+  async sealWrites() {
+    const events = await this.allEvents();
+    const sealed = sealWriteCapabilities(await this.capabilities(), events);
+    await writeJson(this.catalogFile(), sealed);
+    return sealed;
   }
 
   async routes() {
@@ -197,7 +205,7 @@ export class StudioService {
         if (patch.valueType && !["string", "number", "integer", "boolean", "array", "object", "unknown"].includes(patch.valueType)) {
           throw new Error(`未知字段类型：${patch.valueType}`);
         }
-        if (patch.defaultRule !== undefined && patch.defaultRule && !/^(literal:.+|env:[A-Za-z_][A-Za-z0-9_]*|uuid|now:iso)$/.test(patch.defaultRule)) {
+        if (patch.defaultRule !== undefined && patch.defaultRule && !/^(literal:.+|env:[A-Za-z_][A-Za-z0-9_]*|uuid|now:iso|from:[^|]+(?:\|via:[A-Za-z_][A-Za-z0-9_]*)?|computed:.+|copy:[A-Za-z_][A-Za-z0-9_]*)$/.test(patch.defaultRule)) {
           throw new Error(`字段 ${patch.path} 的处理规则不可执行`);
         }
         Object.assign(field, patch, { path: field.path });
@@ -331,8 +339,8 @@ export class StudioService {
     return executeCapability(cap, input, confirmWrite);
   }
 
-  async export(name: string, outputRoot = path.join(this.config.rootDir, "dist", "skills")) {
-    return exportSkill(outputRoot, name, await this.capabilities());
+  async export(name: string, outputRoot = path.join(this.config.rootDir, "dist", "skills"), match: string[] = []) {
+    return exportSkill(outputRoot, name, await this.sealWrites(), match);
   }
 
   async listSkills() {
@@ -340,7 +348,7 @@ export class StudioService {
   }
 
   async exportManaged(name: string, confirmed: boolean) {
-    return this.skillLibrary.export(name, await this.capabilities(), confirmed);
+    return this.skillLibrary.export(name, await this.sealWrites(), confirmed);
   }
 
   async setSkillFrozen(name: string, frozen: boolean, confirmed: boolean) {

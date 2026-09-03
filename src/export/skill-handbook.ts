@@ -62,7 +62,10 @@ function recommendedDefault(field: InputFormField, capability: CapabilityContrac
     return `${field.defaultRule.slice("literal:".length)}（安全默认值）`;
   }
   if (capability.operation === "query") return "无；用户点名才收集";
-  if (field.defaultRule?.startsWith("literal:")) return `${field.defaultRule.slice("literal:".length)}（系统补齐）`;
+  if (field.defaultRule?.startsWith("computed:")) return `按 ${field.defaultRule.slice("computed:".length)} 计算`;
+  if (field.defaultRule?.startsWith("copy:")) return `拷贝 ${field.defaultRule.slice("copy:".length)}`;
+  if (field.defaultRule?.startsWith("from:")) return "从已录制查询带出";
+  if (field.defaultRule?.startsWith("literal:")) return `${field.defaultRule.slice("literal:".length)}（系统默认，不是录制样本）`;
   return "按用户本次意图填写";
 }
 
@@ -158,9 +161,15 @@ export function dataSourceOf(field: InputFormField, capabilities: CapabilityCont
   };
 }
 
-export function exportedQuestion(field: InputFormField, capabilities: CapabilityContract[]) {
+export function questionKey(field: InputFormField, siblings: InputFormField[] = []) {
+  const clashes = siblings.filter(item => item.name === field.name);
+  if (clashes.length <= 1) return field.name;
+  return field.path.replace(/^\$\./, "").replace(/\[\*\]/g, "");
+}
+
+export function exportedQuestion(field: InputFormField, capabilities: CapabilityContract[], siblings: InputFormField[] = []) {
   const question: Record<string, unknown> = {
-    id: field.name,
+    id: questionKey(field, siblings),
     question: (() => {
       const hint = /页面未唯一对应：(.+)$/.exec(field.sourceDetail || "")?.[1];
       return hint && field.label === field.name ? `${field.label}（${hint}）` : field.label;
@@ -546,7 +555,7 @@ ${fields.map(field => {
     }
     const hint = /页面未唯一对应：(.+)$/.exec(field.sourceDetail || "")?.[1];
     const label = hint && field.label === field.name ? `${field.label}（${hint}）` : field.label;
-    return `| \`${safeCell(field.name)}\` | ${safeCell(label)} | \`${inputType(field)}\` | ${field.required ? "是" : "否"} | ${safeCell(recommendedDefault(field, capability))} | ${safeCell(candidate)} |`;
+    return `| \`${safeCell(questionKey(field, fields))}\` | ${safeCell(label)} | \`${inputType(field)}\` | ${field.required ? "是" : "否"} | ${safeCell(recommendedDefault(field, capability))} | ${safeCell(candidate)} |`;
   }).join("\n")}`;
 }
 
@@ -555,7 +564,7 @@ function systemFieldTable(capability: CapabilityContract) {
   if (!fields.length) return "";
   return `
 
-系统处理字段不要问用户。有安全默认值的按合同补齐；没有默认值的不要按录制样本补齐，执行时省略。
+系统处理字段不要问用户。处理方式以录制证据里唯一成立的来源为准，可能是其它接口带出、请求内计算、字段拷贝、系统默认、会话或生成等。不要把某次录制样本当成固定业务值。查询里没有默认值的筛选不要编造。
 
 | 合同路径 | 业务名称 | 来源 | 处理方式 |
 |---|---|---|---|

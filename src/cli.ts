@@ -10,10 +10,12 @@ function parseArgs(argv: string[]) {
     const token = args[i]!;
     if (token.startsWith("--")) {
       const next = args[i + 1];
+      const key = token.slice(2);
       if (next && !next.startsWith("--")) {
-        flags.set(token.slice(2), next);
+        const previous = flags.get(key);
+        flags.set(key, typeof previous === "string" ? `${previous},${next}` : next);
         i++;
-      } else flags.set(token.slice(2), true);
+      } else flags.set(key, true);
     } else positional.push(token);
   }
   return { command, flags, positional };
@@ -22,6 +24,10 @@ function parseArgs(argv: string[]) {
 function flag(flags: Map<string, string | boolean>, name: string) {
   const value = flags.get(name);
   return typeof value === "string" ? value : undefined;
+}
+
+function flagList(flags: Map<string, string | boolean>, name: string) {
+  return (flag(flags, name) || "").split(",").map(item => item.trim()).filter(Boolean);
 }
 
 async function main() {
@@ -111,7 +117,7 @@ async function main() {
     case "export": {
       const name = flag(flags, "name") || positional[0];
       if (!name) throw new Error("export requires --name <skill-name>");
-      console.log(JSON.stringify(await studio.export(name, flag(flags, "out")), null, 2));
+      console.log(JSON.stringify(await studio.export(name, flag(flags, "out"), flagList(flags, "match")), null, 2));
       break;
     }
     default:
@@ -126,7 +132,7 @@ Commands:
   candidate-source --target <cap> --field <path> --source <query-cap> --value-path <path> --label-path <path> --approve
   plan     <natural language goal>
   execute  --capability <id> --input '<json>' [--confirm-write]
-  export   --name <skill-name> [--out <directory>]
+  export   --name <skill-name> [--out <directory>] [--match <path-or-id>]
 `);
   }
 }

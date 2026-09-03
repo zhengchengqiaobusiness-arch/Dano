@@ -26,22 +26,35 @@ export function isPrimaryCapability(capability: CapabilityContract) {
 
 export function isCandidateSourceCapability(capability: CapabilityContract, catalog: CapabilityContract[]) {
   return catalog.some(item =>
-    item.inputForm.some(field => field.candidates?.type === "capability" && field.candidates.capabilityId === capability.id)
+    item.inputForm.some(field =>
+      (field.candidates?.type === "capability" && field.candidates.capabilityId === capability.id)
+      || Boolean(field.defaultRule?.startsWith(`from:${capability.id}:`))
+    )
+    || item.bindings.some(binding => binding.approved && binding.fromCapabilityId === capability.id)
   );
 }
 
-export function exportableCapabilities(capabilities: CapabilityContract[]) {
+export function matchesExportFilter(capability: CapabilityContract, match: string[] = []) {
+  if (!match.length) return true;
+  const haystack = `${capability.id} ${capability.title} ${capability.transport.pathTemplate} ${capability.transport.urlTemplate}`;
+  return match.some(item => item && haystack.includes(item));
+}
+
+export function exportableCapabilities(capabilities: CapabilityContract[], match: string[] = []) {
   const verified = capabilities.filter(capability => capability.validation.status === "verified");
-  const primary = verified.filter(isPrimaryCapability);
+  const primary = verified.filter(capability => isPrimaryCapability(capability) && matchesExportFilter(capability, match));
   const needed = new Set(primary.map(capability => capability.id));
   for (const capability of primary) {
     for (const field of capability.inputForm) {
       if (field.candidates?.type === "capability") needed.add(field.candidates.capabilityId);
+      const from = field.defaultRule?.startsWith("from:") ? field.defaultRule.slice("from:".length).split(":")[0] : undefined;
+      if (from) needed.add(from);
     }
     for (const binding of capability.bindings.filter(item => item.approved)) needed.add(binding.fromCapabilityId);
   }
   const selected = verified.filter(capability => needed.has(capability.id) && !isNoiseCapability(capability));
   if (selected.length) return selected;
+  if (match.length) return [];
   return verified.filter(capability => !isNoiseCapability(capability));
 }
 

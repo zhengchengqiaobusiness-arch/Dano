@@ -20,12 +20,12 @@ CONTRACT_PATH = Path(__file__).resolve().parents[1] / "references" / "CONTRACT.j
 
 
 def load_contract() -> dict[str, Any]:
-    return json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    return json.loads(CONTRACT_PATH.read_text(encoding="utf-8-sig"))
 
 
 def parse_json_argument(raw: str) -> Any:
     if raw.startswith("@"):
-        return json.loads(Path(raw[1:]).read_text(encoding="utf-8"))
+        return json.loads(Path(raw[1:]).read_text(encoding="utf-8-sig"))
     return json.loads(raw)
 
 
@@ -88,6 +88,10 @@ def normalize_date_string(value: str, clock: str | None = None) -> str:
     return value
 
 
+def item_input_key(field: dict[str, Any]) -> str:
+    return (field.get("path") or "").removeprefix("$.").replace("[*]", "")
+
+
 def nest_line_items(capability: dict[str, Any], supplied: dict[str, Any]) -> dict[str, Any]:
     prepared = copy.deepcopy(supplied)
     item_fields = [field for field in capability.get("inputForm", []) if "[*]" in field.get("path", "")]
@@ -95,10 +99,14 @@ def nest_line_items(capability: dict[str, Any], supplied: dict[str, Any]) -> dic
         return prepared
     if isinstance(prepared.get("items"), list):
         return prepared
+    header_names = {field["name"] for field in capability.get("inputForm", []) if "[*]" not in field.get("path", "")}
     item: dict[str, Any] = {}
     for field in item_fields:
         name = field["name"]
-        if name in prepared:
+        dotted = item_input_key(field)
+        if dotted in prepared and dotted != name:
+            item[name] = prepared.pop(dotted)
+        elif name in prepared and name not in header_names:
             item[name] = prepared.pop(name)
     if item:
         prepared["items"] = [item]
@@ -151,6 +159,115 @@ def resolve_rule(rule: str) -> Any:
     raise ValueError(f"无法执行的字段处理规则：{rule}")
 
 
+def eval_computed(expr: str, prepared: dict[str, Any], item: dict[str, Any] | None = None) -> Any:
+    scope = dict(prepared)
+    if item:
+        scope.update(item)
+
+    def replace_sum(match: re.Match[str]) -> str:
+        name = match.group(1)
+        items = prepared.get("items")
+        if not isinstance(items, list):
+            raise ValueError(f"无法计算 sum(items.{name})")
+        return str(sum(float(row.get(name) or 0) for row in items if isinstance(row, dict)))
+
+    text = re.sub(r"sum\(items\.([A-Za-z_][A-Za-z0-9_]*)\)", replace_sum, expr)
+
+    def replace_name(match: re.Match[str]) -> str:
+        name = match.group(0)
+        if name not in scope or scope[name] is None:
+            raise ValueError(f"计算缺少字段：{name}")
+        return str(scope[name])
+
+    text = re.sub(r"[A-Za-z_][A-Za-z0-9_]*", replace_name, text)
+    if not re.fullmatch(r"[\d\.\seE+\-*/()]+", text):
+        raise ValueError(f"非法计算公式：{expr}")
+    return eval(text, {"__builtins__": {}}, {})
+
+
+def parse_from_rule(rule: str) -> dict[str, str] | None:
+    match = re.fullmatch(r"from:([^:]+):(.+?)(?:\|via:([A-Za-z_][A-Za-z0-9_]*))?", rule)
+    if not match:
+        return None
+    parsed = {"capabilityId": match.group(1), "fromPath": match.group(2)}
+    if match.group(3):
+        parsed["via"] = match.group(3)
+    return parsed
+
+
+def same_join(left: Any, right: Any) -> bool:
+    if left is None or right is None or left == "" or right == "":
+        return False
+    if left == right:
+        return True
+    return str(left) == str(right)
+
+
+def extract_joined(body: Any, json_path: str, via_value: Any = None) -> Any:
+    if "[*]." in json_path:
+        prefix, suffix = json_path.split("[*].", 1)
+        rows = get_by_path(body, prefix)
+        if not isinstance(rows, list):
+            return None
+        name = suffix.split(".")[-1]
+        matched = [
+            row.get(name)
+            for row in rows
+            if isinstance(row, dict) and (
+                via_value is None
+                or same_join(row.get("id"), via_value)
+                or same_join(row.get("value"), via_value)
+                or same_join(row.get("code"), via_value)
+            )
+        ]
+        matched = [item for item in matched if item is not None]
+        return matched[0] if len(matched) == 1 else None
+    return get_by_path(body, json_path)
+
+
+def resolve_from(rule: str, prepared: dict[str, Any], item: dict[str, Any] | None, contract: dict[str, Any] | None) -> Any:
+    parsed = parse_from_rule(rule)
+    if not parsed or not contract:
+        return None
+    source = next((item for item in contract.get("capabilities", []) if item.get("id") == parsed["capabilityId"]), None)
+    if not source:
+        raise ValueError(f"带出查询不存在：{parsed['capabilityId']}")
+    via = parsed.get("via")
+    via_value = (item or {}).get(via) if via else None
+    if via and via_value is None:
+        via_value = prepared.get(via)
+    if via and via_value is None:
+        return None
+    result = execute_capability(source, {via: via_value} if via else {}, False)
+    if not result.get("ok"):
+        raise ValueError(f"带出查询失败：{parsed['capabilityId']}")
+    return extract_joined(result.get("body"), parsed["fromPath"], via_value)
+
+
+def resolve_field_rule(
+    field: dict[str, Any],
+    prepared: dict[str, Any],
+    item: dict[str, Any] | None,
+    contract: dict[str, Any] | None,
+    resolve_lookups: bool,
+) -> Any:
+    rule = field.get("defaultRule") or ""
+    if rule.startswith("copy:"):
+        name = rule.removeprefix("copy:")
+        if item is not None and item.get(name) is not None:
+            return item[name]
+        return prepared.get(name)
+    if rule.startswith("computed:"):
+        return eval_computed(rule.removeprefix("computed:"), prepared, item)
+    if rule.startswith("from:"):
+        if not resolve_lookups:
+            return None
+        return resolve_from(rule, prepared, item, contract)
+    if rule:
+        return resolve_rule(rule)
+    return None
+
+
 def coerce(value: Any, value_type: str, field_path: str, field: dict[str, Any] | None = None) -> Any:
     if value is None:
         return value
@@ -168,6 +285,8 @@ def coerce(value: Any, value_type: str, field_path: str, field: dict[str, Any] |
         return float(value)
     if value_type == "boolean" and isinstance(value, str) and value.lower() in {"true", "false"}:
         return value.lower() == "true"
+    if value_type == "array" and not isinstance(value, list):
+        return [value]
     valid = {
         "integer": isinstance(value, int) and not isinstance(value, bool),
         "number": isinstance(value, (int, float)) and not isinstance(value, bool),
@@ -181,8 +300,61 @@ def coerce(value: Any, value_type: str, field_path: str, field: dict[str, Any] |
     return value
 
 
-def prepare_input(capability: dict[str, Any], supplied: dict[str, Any]) -> dict[str, Any]:
-    prepared = nest_line_items(capability, supplied)
+def hoist_named_fields(capability: dict[str, Any], supplied: dict[str, Any]) -> dict[str, Any]:
+    prepared = copy.deepcopy(supplied)
+    item_names = {field["name"] for field in capability.get("inputForm", []) if "[*]" in field.get("path", "")}
+    for field in capability.get("inputForm", []):
+        name = field.get("name")
+        path = field.get("path") or ""
+        if not name or "[*]" in path or name in item_names or name not in prepared or get_by_path(prepared, path) is not None:
+            continue
+        if literal_key(path) == name:
+            continue
+        value = prepared.pop(name)
+        set_by_path(prepared, path, value)
+    return prepared
+
+
+def prepare_input(
+    capability: dict[str, Any],
+    supplied: dict[str, Any],
+    contract: dict[str, Any] | None = None,
+    resolve_lookups: bool = True,
+) -> dict[str, Any]:
+    prepared = hoist_named_fields(capability, nest_line_items(capability, supplied))
+    changed = True
+    while changed:
+        changed = False
+        for field in capability.get("inputForm", []):
+            if "[*]" in field["path"]:
+                prefix, suffix = field["path"].split("[*].", 1)
+                items = get_by_path(prepared, prefix)
+                if not isinstance(items, list):
+                    continue
+                name = suffix.split(".")[-1]
+                for item in items:
+                    if not isinstance(item, dict) or item.get(name) is not None:
+                        continue
+                    if not field.get("defaultRule"):
+                        continue
+                    try:
+                        value = resolve_field_rule(field, prepared, item, contract, resolve_lookups)
+                    except ValueError:
+                        value = None
+                    if value is not None:
+                        item[name] = coerce(value, field.get("valueType", "unknown"), field["path"], field)
+                        changed = True
+                continue
+            value = get_by_path(prepared, field["path"])
+            if value is not None or not field.get("defaultRule"):
+                continue
+            try:
+                value = resolve_field_rule(field, prepared, None, contract, resolve_lookups)
+            except ValueError:
+                value = None
+            if value is not None:
+                set_by_path(prepared, field["path"], coerce(value, field.get("valueType", "unknown"), field["path"], field))
+                changed = True
     for field in capability.get("inputForm", []):
         if "[*]" in field["path"]:
             prefix, suffix = field["path"].split("[*].", 1)
@@ -196,18 +368,12 @@ def prepare_input(capability: dict[str, Any], supplied: dict[str, Any]) -> dict[
                 if not isinstance(item, dict):
                     continue
                 value = item.get(name)
-                if value is None and field.get("defaultRule"):
-                    value = resolve_rule(field["defaultRule"])
-                    item[name] = value
                 if value is None and field.get("required") and field.get("source") == "caller":
                     raise ValueError(f"缺少调用方必填字段：{field['label']} ({field['path']})")
                 if value is not None:
                     item[name] = coerce(value, field.get("valueType", "unknown"), field["path"], field)
             continue
         value = get_by_path(prepared, field["path"])
-        if value is None and field.get("defaultRule"):
-            value = resolve_rule(field["defaultRule"])
-            set_by_path(prepared, field["path"], value)
         if value is None and field.get("required"):
             if field.get("source") == "caller":
                 raise ValueError(f"缺少调用方必填字段：{field['label']} ({field['path']})")
@@ -320,7 +486,7 @@ def execute_capability(capability: dict[str, Any], supplied: dict[str, Any], con
         raise ValueError("能力没有通过验证")
     if capability.get("confirmation", {}).get("required") and not confirm_write:
         raise ValueError("写操作需要本次执行的明确确认")
-    prepared = prepare_input(capability, supplied)
+    prepared = prepare_input(capability, supplied, load_contract())
     url, options = build_request(capability, prepared)
     req = request.Request(url, method=options["method"], headers=options["headers"], data=options["data"])
     try:
@@ -357,7 +523,7 @@ def main() -> int:
         if not isinstance(supplied, dict):
             raise ValueError("--input 必须是 JSON 对象")
         if args.prepare_only:
-            prepared = prepare_input(capability, supplied)
+            prepared = prepare_input(capability, supplied, contract, resolve_lookups=False)
             url, options = build_request(capability, prepared)
             print(json.dumps({
                 "ok": True,

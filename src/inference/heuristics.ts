@@ -30,6 +30,8 @@ export function inferOperation(event: NetworkEvidence, ui?: UiEvidence): Operati
   const method = event.request.method.toUpperCase();
   const signal = [
     event.request.url,
+    event.pageUrl,
+    ui?.pageUrl,
     ui?.text,
     ui?.label,
     ui?.name
@@ -48,7 +50,7 @@ export function inferOperation(event: NetworkEvidence, ui?: UiEvidence): Operati
   if (CREATE.test(endpoint)) return "create";
   if (UPDATE.test(endpoint)) return "update";
   if (UPDATE.test(signal)) return "update";
-  if (CREATE.test(signal)) return "create";
+  if (CREATE.test(signal) || /submit-process|start-process|startProcess/i.test(endpoint)) return "create";
   if (method === "POST") return "action";
   return "unknown";
 }

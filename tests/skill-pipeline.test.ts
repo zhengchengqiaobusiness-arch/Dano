@@ -53,9 +53,69 @@ test("does not promote request fields that share a leftover UI value or have no 
     response: { status: 200, headers: {}, body: { success: true, data: { id: 1 } } }
   }];
   const capability = buildCapabilityCandidates(events)[0]!;
-  assert.equal(capability.inputForm.find(field => field.name === "qty")?.source, "system");
+  assert.equal(capability.inputForm.find(field => field.name === "qty")?.source, "caller");
+  assert.equal(capability.inputForm.find(field => field.name === "qty")?.label, "数量");
   assert.equal(capability.inputForm.find(field => field.name === "amount")?.source, "system");
   assert.equal(capability.inputForm.find(field => field.name === "token")?.source, "system");
+  assert.notEqual(capability.inputForm.find(field => field.name === "amount")?.defaultRule, "literal:1");
+  assert.equal(capability.inputForm.find(field => field.name === "token")?.defaultRule, undefined);
+});
+
+test("binds create-page enums, prompt twins, and picker assignees from recorded lists", () => {
+  const events: EvidenceEvent[] = [{
+    id: "ui-form", kind: "ui", sessionId: "session", at: "2026-09-01T00:00:00.000Z",
+    pageUrl: "https://example.test/oa/duty/leaveapply/create", eventType: "snapshot",
+    form: [
+      { label: "请假类型", type: "select", value: "病假", required: true },
+      { label: "请输入项目编码", type: "text", value: "P-1" },
+      { label: "请输入项目名称", type: "text", value: "项目甲" },
+      { label: "所属项目", type: "text", value: "项目甲" },
+      { label: "请假天数", type: "number", value: "1", required: true },
+      { label: "领导审批", type: "picker", value: "管理员" },
+      { label: "人力审批", type: "picker", value: "LS部门", required: true }
+    ]
+  }, {
+    id: "ui-submit", kind: "ui", sessionId: "session", at: "2026-09-01T00:00:01.000Z",
+    pageUrl: "https://example.test/oa/duty/leaveapply/create", eventType: "click", text: "提交"
+  }, {
+    id: "net-dict", kind: "network", sessionId: "session", at: "2026-09-01T00:00:00.100Z",
+    request: { method: "GET", url: "https://example.test/admin-api/system/dict-data/simple-list", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { data: [
+      { dictType: "oa_duty_leave_type", value: "1", label: "病假" },
+      { dictType: "oa_duty_leave_type", value: "2", label: "事假" }
+    ] } }
+  }, {
+    id: "net-users", kind: "network", sessionId: "session", at: "2026-09-01T00:00:00.200Z",
+    request: { method: "GET", url: "https://example.test/admin-api/system/user/page", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { data: { list: [
+      { id: 174, username: "LSBM", nickname: "LS部门" },
+      { id: 1, username: "admin", nickname: "管理员" }
+    ] } } }
+  }, {
+    id: "net-submit", kind: "network", sessionId: "session", at: "2026-09-01T00:00:02.000Z",
+    pageUrl: "https://example.test/oa/duty/leave", correlatedUiEvidenceId: "ui-submit",
+    request: {
+      method: "POST", url: "https://example.test/admin-api/oa/duty-leave/submit-process", resourceType: "xhr",
+      headers: {}, query: {},
+      body: { type: 1, day: 1, projectCode: "P-1", projectName: "项目甲", billType: "oa_duty_leave", processDefKey: "oa_duty_leave", startUserSelectAssignees: { Activity_0ag2wyz: [174] } }
+    },
+    response: { status: 200, headers: {}, body: { code: 0, data: 99 } }
+  }];
+  const capability = buildCapabilityCandidates(events).find(item => item.transport.pathTemplate.includes("submit-process"))!;
+  assert.equal(capability.operation, "create");
+  assert.equal(capability.inputForm.find(field => field.name === "type")?.label, "请假类型");
+  assert.equal(capability.inputForm.find(field => field.name === "type")?.source, "caller");
+  assert.equal(capability.inputForm.find(field => field.name === "type")?.widget, "select");
+  assert.equal(capability.inputForm.find(field => field.name === "day")?.source, "caller");
+  assert.equal(capability.inputForm.find(field => field.name === "day")?.label, "请假天数");
+  assert.equal(capability.inputForm.find(field => field.name === "day")?.widget, "number");
+  assert.equal(capability.inputForm.find(field => field.name === "projectName")?.source, "caller");
+  assert.equal(capability.inputForm.find(field => field.name === "projectName")?.label, "请输入项目名称");
+  const assignee = capability.inputForm.find(field => field.name === "Activity_0ag2wyz")!;
+  assert.equal(assignee.source, "caller");
+  assert.equal(assignee.label, "人力审批");
+  assert.equal(assignee.widget, "select");
+  assert.equal(capability.inputForm.find(field => field.name === "billType")?.defaultRule, "literal:oa_duty_leave");
 });
 
 test("binds a leftover request field only when its value uniquely matches leftover UI", () => {
@@ -71,6 +131,7 @@ test("binds a leftover request field only when its value uniquely matches leftov
   assert.equal(capability.inputForm.find(field => field.name === "remark")?.source, "caller");
   assert.equal(capability.inputForm.find(field => field.name === "remark")?.label, "备注");
   assert.equal(capability.inputForm.find(field => field.name === "token")?.source, "system");
+  assert.equal(capability.inputForm.find(field => field.name === "token")?.defaultRule, undefined);
 });
 
 test("distinguishes caller fields from unresolved system fields", () => {

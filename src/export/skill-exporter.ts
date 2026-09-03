@@ -113,7 +113,10 @@ function exportedCapability(capability: CapabilityContract, capabilities: Capabi
     operation: capability.operation,
     transport: capability.transport,
     inputForm: capability.inputForm.map(exportedField),
-    inputQuestions: capability.inputForm.filter(field => field.source === "caller").map(field => exportedQuestion(field, capabilities)),
+    inputQuestions: (() => {
+      const caller = capability.inputForm.filter(field => field.source === "caller");
+      return caller.map(field => exportedQuestion(field, capabilities, caller));
+    })(),
     sideEffect: capability.sideEffect,
     confirmation: capability.confirmation,
     completion: {
@@ -130,13 +133,33 @@ function exportedCapability(capability: CapabilityContract, capabilities: Capabi
   };
 }
 
-export async function exportSkill(outputRoot: string, requestedName: string, allCapabilities: CapabilityContract[]) {
-  const selected = exportableCapabilities(normalizeCatalog(allCapabilities));
+export async function exportSkill(
+  outputRoot: string,
+  requestedName: string,
+  allCapabilities: CapabilityContract[],
+  match: string[] = []
+) {
+  const selected = exportableCapabilities(normalizeCatalog(allCapabilities), match);
   if (!selected.length) throw new Error("没有可导出的已验证能力");
+  const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload", "action"]);
   const unresolved = selected.flatMap(capability => capability.inputForm.filter(field =>
     field.required && field.source !== "caller" && field.source !== "binding" && !field.defaultRule
   ).map(field => `${capability.id}:${field.path}`));
   if (unresolved.length) throw new Error(`存在没有处理规则的系统必填字段：${unresolved.join("、")}`);
+  const unsealed = selected.flatMap(capability => {
+    if (!WRITE_OPERATIONS.has(capability.operation)) return [];
+    return capability.inputForm
+      .filter(field =>
+        field.source !== "caller"
+        && field.source !== "binding"
+        && !field.defaultRule
+        && /请求中出现|页面只读展示/.test(field.sourceDetail || "")
+      )
+      .map(field => `${capability.id}:${field.path}`);
+  });
+  if (unsealed.length) {
+    throw new Error(`写操作的系统字段缺少录制成功请求中的写入值：${unsealed.join("、")}`);
+  }
 
   const displayName = requestedName.trim() || normalizeSkillName(requestedName, selected);
   const capabilities = withExportTitles(selected, displayName);

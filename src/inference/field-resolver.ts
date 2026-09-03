@@ -56,8 +56,11 @@ function eventLabel(event: UiEvidence) {
 export function flattenRequestValues(value: unknown, prefix = "$"): Array<{ path: string; name: string; value: unknown }> {
   if (value === null || value === undefined) return [];
   if (Array.isArray(value)) {
+    const name = prefix.split(".").pop()?.replace(/\[\*\]$/, "") || prefix;
+    if (!value.length) return [{ path: prefix, name, value }];
     const first = value.find(item => item !== null && item !== undefined);
-    return flattenRequestValues(first, `${prefix}[*]`);
+    const children = flattenRequestValues(first, `${prefix}[*]`);
+    return [{ path: prefix, name, value }, ...children];
   }
   if (typeof value !== "object") {
     const name = prefix.split(".").pop()?.replace(/\[\*\]$/, "") || prefix;
@@ -75,7 +78,17 @@ function padDatePart(value: number) {
 export function sameValue(left: unknown, right: unknown) {
   if (left === undefined || left === null || right === undefined || right === null || right === "") return false;
   if (Object.is(left, right)) return true;
-  if (typeof left === "boolean" || typeof right === "boolean") return Boolean(left) === Boolean(right);
+  if (typeof left === "boolean" || typeof right === "boolean") {
+    const asBoolean = (value: unknown) => {
+      if (typeof value === "boolean") return value;
+      if (value === 1 || value === "1" || value === "true") return true;
+      if (value === 0 || value === "0" || value === "false") return false;
+      return undefined;
+    };
+    const leftBoolean = asBoolean(left);
+    const rightBoolean = asBoolean(right);
+    return leftBoolean !== undefined && rightBoolean !== undefined && leftBoolean === rightBoolean;
+  }
   const leftDay = dateDay(left);
   const rightDay = dateDay(right);
   if (leftDay && rightDay && leftDay === rightDay) {
@@ -99,7 +112,89 @@ function isDistinctiveValue(value: unknown) {
 function looksDateControl(item: Pick<UiObservation, "type" | "label" | "name"> | Pick<InputFormField, "name" | "label" | "widget">) {
   const widget = "widget" in item ? item.widget : undefined;
   const type = "type" in item ? item.type : undefined;
-  return /date|time|picker|时间|日期/i.test(`${type || ""} ${widget || ""} ${item.name || ""} ${item.label || ""}`);
+  const label = `${item.name || ""} ${item.label || ""}`;
+  if (/时间|日期/.test(label) || /date|time/i.test(label)) return true;
+  if (widget === "date" || type === "date" || type === "datetime" || type === "daterange") return true;
+  return /datepicker|datetime|daterange|date-editor/i.test(`${type || ""} ${widget || ""}`);
+}
+
+function isPromptLabel(label?: string) {
+  return /^(请输入|请选择|请填写|please (select|enter|choose))/i.test(String(label || "").trim());
+}
+
+function preferPromptObservation(items: UiObservation[]) {
+  const prompts = items.filter(item => isPromptLabel(item.label));
+  const labels = new Set(prompts.map(item => item.label).filter(Boolean));
+  return labels.size === 1 ? prompts[0] : undefined;
+}
+
+const SYNONYM_GROUPS = [
+  /count|qty|quantity|数量/i,
+  /(?:^|[^a-z])price(?:$|[^a-z])|单价|售价/i,
+  /taxpercent|tax_percent|税率/i,
+  /(?:actual)?days?\b|天数/i,
+  /remark|memo|comment|备注|说明/i,
+  /reason|原因/i,
+  /type|类型/i,
+  /status|状态|结果/i,
+  /assignee|approver|Activity_|审批|人员/i,
+  /code|编码/i,
+  /name|名称/i
+];
+
+function fieldText(field: { name?: string; label?: string }) {
+  return `${field.name || ""} ${field.label || ""}`;
+}
+
+function sameSynonymGroup(field: { name?: string; label?: string }, item: { name?: string; label?: string }) {
+  const left = fieldText(field);
+  const right = fieldText(item);
+  return SYNONYM_GROUPS.some(group => group.test(left) && group.test(right));
+}
+
+function looksQuantityField(field: { name?: string; label?: string }) {
+  return /day|count|qty|quantity|price|amount|total|balance|percent|stock|数量|天数|金额|单价|折扣|库存|余额|税率/i.test(fieldText(field));
+}
+
+function looksChoiceObservation(item: UiObservation) {
+  return /select|combobox|picker/i.test(item.type || "");
+}
+
+function looksChoiceField(field: InputFormField) {
+  return field.widget === "select" || field.widget === "multiselect"
+    || /type|status|result|kind|category|dict|assignee|user|Activity_/i.test(field.name);
+}
+
+function looksQuantityObservation(item: UiObservation) {
+  return /number/.test(item.type || "");
+}
+
+function actualPair(text: string) {
+  return /actual|实际/i.test(text);
+}
+
+function scalarRequestValue(value: unknown) {
+  return Array.isArray(value) && value.length === 1 ? value[0] : value;
+}
+
+function observationCompatible(
+  field: InputFormField,
+  item: UiObservation,
+  value: unknown,
+  lists: RecordedList[]
+) {
+  value = scalarRequestValue(value);
+  if (value === undefined || value === null || value === "") return false;
+  const choiceObs = looksChoiceObservation(item);
+  const quantityField = looksQuantityField(field);
+  const quantityObs = looksQuantityObservation(item);
+  if (quantityField && choiceObs && !sameValue(item.value, value) && !dateDay(value)) return false;
+  if (looksChoiceField(field) && quantityObs && !choiceObs) return false;
+  if (quantityField && quantityObs && actualPair(fieldText(field)) !== actualPair(fieldText(item))) return false;
+  if (quantityField && quantityObs && sameValue(item.value, value) && !sameSynonymGroup(field, item)) return false;
+  if (!observationMatchesValue(item, value, lists)) return false;
+  if (sameValue(item.value, value) || (dateDay(value) && dateDay(item.value) === dateDay(value))) return true;
+  return sameSynonymGroup(field, item);
 }
 
 function looksReadonly(item: Pick<UiObservation, "type">) {
@@ -313,6 +408,8 @@ export function findObservation(
 
   if (isDistinctiveValue(requestValue)) {
     const exact = observations.filter(item => sameValue(item.value, requestValue));
+    const preferred = preferPromptObservation(exact);
+    if (preferred) return expandObservation(preferred, observations);
     if (exact.length === 1) return expandObservation(exact[0], observations);
     const labels = new Set(exact.map(item => item.label).filter(Boolean));
     if (exact.length > 1 && labels.size === 1) return expandObservation(exact[0], observations);
@@ -366,10 +463,44 @@ export function isEditableBusinessField(field: Pick<InputFormField, "name" | "la
 
 function literalRule(value: unknown) {
   if (value === undefined || value === null || value === "") return undefined;
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return `literal:${String(value)}`;
+  if (typeof value === "string") return `literal:${value}`;
+  try {
+    return `literal:${JSON.stringify(value)}`;
+  } catch {
+    return undefined;
   }
-  return undefined;
+}
+
+function formatObserved(value: unknown) {
+  if (value === undefined || value === null || value === "") return undefined;
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+export function attachObservedDefaults(
+  fields: InputFormField[],
+  sample: unknown,
+  persistSystemValues = false
+): InputFormField[] {
+  if (!persistSystemValues) return fields;
+  return fields.map(field => {
+    if (field.source === "caller" || field.source === "binding" || PAGE_NAME.test(field.name)) return field;
+    const value = requestValueAt(sample, field.path);
+    const rule = field.defaultRule || literalRule(value);
+    const shown = formatObserved(value);
+    if (!rule || shown === undefined) return field;
+    if (field.defaultRule && /执行时按录制成功请求写入/.test(field.sourceDetail || "")) {
+      return field;
+    }
+    const base = (field.sourceDetail || "业务系统处理")
+      .replace(/。?不要使用录制样本填这个字段/g, "")
+      .replace(/。?不要用录制样本[^。]*/g, "")
+      .replace(/。+$/g, "");
+    return {
+      ...field,
+      defaultRule: rule,
+      sourceDetail: `${base}。执行时按录制成功请求写入 ${shown}，调用方不必提供`
+    };
+  });
 }
 
 function recordedClock(value: unknown) {
@@ -406,15 +537,29 @@ function finalizeUnhandled(field: InputFormField): InputFormField {
 function widgetFromObservation(field: InputFormField, matched?: UiObservation): InputFormField["widget"] {
   const type = `${matched?.type || ""}`.toLowerCase();
   if (/textarea/.test(type)) return "textarea";
-  if (/date|time|picker/.test(type)) return "date";
-  if (/select|combobox/.test(type) || matched?.options?.length) return "select";
+  if (matched && looksDateControl({ ...field, type: matched.type, label: matched.label || field.label, name: matched.name || field.name })) {
+    return "date";
+  }
+  if (/select|combobox|picker/.test(type) || matched?.options?.length) return "select";
   if (/number/.test(type)) return "number";
   if (/checkbox|switch|boolean/.test(type)) return "boolean";
   return field.widget;
 }
 
+function displayLabel(label?: string, rangeIndex?: number) {
+  if (!label) return label;
+  if (/^(开始|结束)(日期|时间)-\d+$/.test(label) || /^(start|end)[- ]?(date|time)-\d+$/i.test(label)) {
+    return label.replace(/-\d+$/, "");
+  }
+  if (rangeIndex === undefined) return label;
+  const stripped = label.replace(/-(\d+)$/, "");
+  if (stripped !== label && /开始|结束|start|end/i.test(stripped)) return stripped;
+  return label;
+}
+
 function observedLabel(field: InputFormField, matched?: UiObservation) {
-  if (matched?.label && matched.label !== field.name) return matched.label;
+  const fromMatch = displayLabel(matched?.label, matched?.rangeIndex);
+  if (fromMatch && fromMatch !== field.name) return fromMatch;
   if (field.label && field.label !== field.name) return field.label;
   return field.name;
 }
@@ -443,8 +588,9 @@ function asCaller(
     || observations.find(item => item.label === matched?.label && item.value !== undefined && item.value !== "")?.value;
   const looksText = /text|textarea|search|date|number|tel|email/i.test(`${matched?.type || ""}`)
     && !/select|combobox/i.test(`${matched?.type || ""}`);
-  const useStatic = Boolean(matched?.options?.length) && !looksText && !looksDateControl(matched || field);
-  const options = looksDateControl(matched || field)
+  const quantityObs = looksQuantityObservation(matched || {});
+  const useStatic = Boolean(matched?.options?.length) && !looksText && !looksDateControl(matched || field) && !quantityObs;
+  const options = looksDateControl(matched || field) || quantityObs
     ? undefined
     : useStatic
       ? matched!.options!.map(item =>
@@ -499,9 +645,9 @@ export function resolveFieldOwnership(
       sourceDetail: "列表分页由执行器按默认值补齐，调用方可覆盖，不要当成业务主键"
     };
   }
-  const matched = findObservation(field, requestValue, observations, lists, sample);
+  const matched = findObservation(field, scalarRequestValue(requestValue), observations, lists, sample);
   if (matched && looksReadonly(matched)) return asReadonly(field, matched);
-  if (matched) return asCaller(field, matched, requestValue, observations, lists);
+  if (matched) return asCaller(field, matched, scalarRequestValue(requestValue), observations, lists);
   return finalizeUnhandled(field);
 }
 
@@ -674,21 +820,27 @@ export function assignUniqueRemaining(
   sample: unknown,
   lists: RecordedList[] = []
 ): InputFormField[] {
-  const callerLabels = leftoverCallerLabels(fields);
-  const leftoverObs = uniqueByLabel(observations.filter(item => item.label && !callerLabels.has(item.label)));
+  const leftoverObs = leftoverEditable(fields, observations);
   const leftoverFields = fields.filter(field => field.source !== "caller" && !PAGE_NAME.test(field.name) && !isReadonlyBound(field));
   const bound = new Map<string, InputFormField>();
+  const boundPaths = new Set<string>();
   for (const field of leftoverFields) {
     const value = requestValueAt(sample, field.path);
     if (value === undefined || value === null || value === "") continue;
-    const sameValueFields = leftoverFields.filter(item => sameValue(requestValueAt(sample, item.path), value));
-    if (sameValueFields.length !== 1) continue;
     const matches = leftoverObs.filter(item =>
-      !bound.has(item.label || "") && observationMatchesValue(item, value, lists)
+      !bound.has(item.label || "") && observationCompatible(field, item, value, lists)
     );
     const unique = [...new Map(matches.map(item => [item.label || "", item])).values()];
     if (unique.length !== 1) continue;
-    bound.set(unique[0]!.label || field.path, bindObservation(field, unique[0]!, value, observations, lists));
+    const observation = unique[0]!;
+    const competitors = leftoverFields.filter(other =>
+      other.path !== field.path
+      && !boundPaths.has(other.path)
+      && observationCompatible(other, observation, requestValueAt(sample, other.path), lists)
+    );
+    if (competitors.length) continue;
+    bound.set(observation.label || field.path, bindObservation(field, observation, value, observations, lists));
+    boundPaths.add(field.path);
   }
   if (!bound.size) return fields;
   const byPath = new Map([...bound.values()].map(field => [field.path, field]));
@@ -838,6 +990,25 @@ function enrichFromObservations(
   };
 }
 
+function looksInvariantConstant(field: InputFormField, value: unknown) {
+  if (Array.isArray(value) && value.length === 0 && /attachment|file/i.test(field.name)) return true;
+  if (typeof value === "string" && /^[a-z][a-z0-9_]*$/i.test(value) && /Type|Key|Code|Def/i.test(field.name)) return true;
+  return false;
+}
+
+function applyInvariantDefaults(fields: InputFormField[], sample: unknown): InputFormField[] {
+  return fields.map(field => {
+    if (field.source === "caller" || field.defaultRule) return field;
+    const value = requestValueAt(sample, field.path);
+    if (!looksInvariantConstant(field, value)) return field;
+    return {
+      ...field,
+      defaultRule: literalRule(value),
+      sourceDetail: "请求中观察到的系统常量，由系统按该值补齐，调用方不要手填"
+    };
+  });
+}
+
 export function finalizeCallerFields(
   fields: InputFormField[],
   observations: UiObservation[],
@@ -851,8 +1022,11 @@ export function finalizeCallerFields(
     sample,
     lists
   );
-  return attachUnresolvedHints(relabeled, observations, sample, lists).map(field =>
-    enrichFromObservations(field, observations, sample, lists)
+  return applyInvariantDefaults(
+    attachUnresolvedHints(relabeled, observations, sample, lists).map(field =>
+      enrichFromObservations(field, observations, sample, lists)
+    ),
+    sample
   );
 }
 
@@ -890,7 +1064,13 @@ export function promoteUnboundFillable(
 }
 
 export function requestValueAt(sample: unknown, path: string) {
-  return flattenRequestValues(sample).find(item => item.path === path)?.value;
+  const items = flattenRequestValues(sample);
+  const exact = items.find(item => item.path === path);
+  if (exact) return exact.value;
+  const starred = items.filter(item => item.path === `${path}[*]`);
+  if (starred.length === 1) return starred[0]!.value;
+  if (starred.length > 1) return starred.map(item => item.value);
+  return undefined;
 }
 
 function formNames(form: NonNullable<UiEvidence["form"]>) {

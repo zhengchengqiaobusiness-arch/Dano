@@ -6,6 +6,7 @@ import type {
   UiEvidence
 } from "../domain.js";
 import { inferOperation, normalizeUrl, operationConfidence } from "./heuristics.js";
+import { attachCatalogDerivations } from "./field-derivation.js";
 import { assignUniqueFromSamples, bindByUniqueMatching, bindLeftoverFields, collectUiObservations, finalizeCallerFields, flattenRequestValues, owningFormEvent, promoteUnboundFillable, recordedLists, relatedUiEvents, requestValueAt, resolveFieldOwnership, sameFormShape } from "./field-resolver.js";
 import { mergeSchemas, schemaFromValue } from "../schema.js";
 import { slugify } from "../utils.js";
@@ -137,7 +138,7 @@ function pickUi(group: NetworkEvidence[], uiById: Map<string, UiEvidence>) {
 }
 
 function capabilityTitle(operation: CapabilityContract["operation"], ui: UiEvidence | undefined, pathTemplate: string) {
-  const skip = new Set(["admin-api", "erp", "system", "page", "create", "update", "delete", "simple-list", "list", "get", "query"]);
+  const skip = new Set(["admin-api", "erp", "system", "page", "create", "update", "delete", "simple-list", "list", "get", "query", "submit-process", "start-process"]);
   const resource = pathTemplate.split("/").filter(part => part && !skip.has(part)).slice(-2).join("/") || pathTemplate;
   if (operation === "create") return `新建 ${resource}`;
   if (operation === "update") return `修改 ${resource}`;
@@ -381,5 +382,5 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
     });
   }
 
-  return result;
+  return attachCatalogDerivations(result, events);
 }
