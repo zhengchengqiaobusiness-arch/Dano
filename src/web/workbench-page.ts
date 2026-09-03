@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import path from "node:path";
+import { seedPageProfile, syncLoginState } from "../browser/login-profile.js";
 import { BrowserRecorder } from "../browser/recorder.js";
 import type { StudioConfig } from "../config.js";
 import { PiRpcBridge } from "./pi-rpc.js";
@@ -30,6 +31,8 @@ export class WorkbenchPage {
   mode: BrowserMode = "automatic";
   readonly clients = new Set<ServerResponse>();
   lastSeen = Date.now();
+  private readonly sharedProfileDir: string;
+  private readonly pageProfileDir: string;
   private starting?: Promise<void>;
 
   constructor(
@@ -41,11 +44,13 @@ export class WorkbenchPage {
   ) {
     this.id = id;
     this.browserToken = randomBytes(32).toString("hex");
+    this.sharedProfileDir = config.profileDir;
+    this.pageProfileDir = path.join(config.profileDir, id);
     this.transcript = new PiTranscript(sanitize);
     this.recorder = new BrowserRecorder({
       ...config,
       headless: true,
-      profileDir: path.join(config.profileDir, id)
+      profileDir: this.pageProfileDir
     });
     this.pi = new PiRpcBridge(config.rootDir, origin, this.browserToken);
     this.attachPi();
@@ -88,20 +93,25 @@ export class WorkbenchPage {
   async startRecording(url: string, name?: string) {
     if (this.recorder.isActive()) {
       await this.recorder.stop().catch(() => this.recorder.disposeImmediate());
+      await this.rememberLogin();
     }
+    await seedPageProfile(this.sharedProfileDir, this.pageProfileDir);
     return this.recorder.start(url, name || "web-session");
   }
 
   async stopRecording() {
-    return this.recorder.stop();
+    const session = await this.recorder.stop();
+    await this.rememberLogin();
+    return session;
   }
 
   async reset() {
     this.epoch += 1;
     this.transcriptOpen = false;
     if (this.recorder.isActive()) {
-      this.recorder.disposeImmediate();
+      const closed = this.recorder.disposeImmediate();
       this.onLog("BROWSER", "Active recording was discarded so the next conversation starts clean.");
+      void Promise.resolve(closed).then(() => this.rememberLogin());
     }
     await this.pi.beginFreshConversation().catch(error => {
       this.onLog("WARN", `Failed to start a new Pi session: ${error instanceof Error ? error.message : String(error)}`);
@@ -114,11 +124,15 @@ export class WorkbenchPage {
 
   dispose() {
     this.pi.stop();
-    this.recorder.disposeImmediate();
+    void Promise.resolve(this.recorder.disposeImmediate()).then(() => this.rememberLogin());
     for (const client of this.clients) {
       try { client.end(); } catch { /* already closed */ }
     }
     this.clients.clear();
+  }
+
+  private async rememberLogin() {
+    await syncLoginState(this.pageProfileDir, this.sharedProfileDir);
   }
 
   private attachPi() {

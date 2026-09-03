@@ -223,7 +223,9 @@ test("refresh keeps a tab session while a new page starts isolated", async () =>
   assert.match(server, /x-bss-page-session/);
   assert.match(server, /pagesByToken/);
   assert.match(page, /class WorkbenchPage/);
-  assert.match(page, /profileDir: path\.join\(config\.profileDir, id\)/);
+  assert.match(page, /profileDir: this\.pageProfileDir/);
+  assert.match(page, /seedPageProfile\(this\.sharedProfileDir, this\.pageProfileDir\)/);
+  assert.match(page, /syncLoginState\(this\.pageProfileDir, this\.sharedProfileDir\)/);
   assert.match(page, /new PiRpcBridge/);
 });
 

@@ -991,9 +991,11 @@ export class BrowserRecorder {
     this.actionBusy = 0;
     this.layerHotUntil = 0;
     clearTimeout(this.inventoryTimer);
-    if (!active) return;
-    void active.context.close().catch(() => {});
-    void active.browser?.close().catch(() => {});
+    if (!active) return Promise.resolve();
+    return Promise.all([
+      active.context.close().catch(() => {}),
+      active.browser?.close().catch(() => {})
+    ]).then(() => undefined);
   }
 
   async stop(): Promise<RecordingSession> {
