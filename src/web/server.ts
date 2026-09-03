@@ -98,6 +98,14 @@ function parseBrowserMode(value: unknown): BrowserInteractionMode {
   throw new Error("录制模式必须是 manual 或 automatic");
 }
 
+function parseViewport(value: unknown) {
+  if (!value || typeof value !== "object") return undefined;
+  const width = Number((value as { width?: unknown }).width);
+  const height = Number((value as { height?: unknown }).height);
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return undefined;
+  return { width, height };
+}
+
 function getOrCreatePage(id: string) {
   const existing = pages.get(id);
   if (existing) {
@@ -239,7 +247,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     const page = requirePage(request);
     const body = await readJsonBody(request);
     if (body.mode !== undefined) page.setMode(parseBrowserMode(body.mode));
-    const session = await page.startRecording(parseBrowserUrl(body.url), body.name);
+    const session = await page.startRecording(parseBrowserUrl(body.url), body.name, parseViewport(body.viewport));
     runtimeLog("BROWSER", `${page.mode === "manual" ? "Manual" : "Pi automatic"} recording session started on ${page.id}.`);
     sendJson(response, 200, { session, state: await page.browserState() });
     page.broadcast({ type: "browser_changed" });
@@ -266,6 +274,14 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
       }
     }
     sendJson(response, 200, result);
+    return;
+  }
+
+  if (request.method === "POST" && pathname === "/api/browser/viewport") {
+    const page = requirePage(request);
+    const size = await page.recorder.fitViewport(parseViewport(await readJsonBody(request)));
+    sendJson(response, 200, { viewport: size, state: await page.browserState() });
+    page.broadcast({ type: "browser_changed" });
     return;
   }
 
@@ -332,7 +348,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     const body = await readJsonBody(request);
     if (request.method === "POST" && pathname === "/internal/browser/start") {
       if (page.mode !== "automatic") throw new Error("当前是手动录制模式；请在前端切换到 Pi 自动点击后再让 Pi 启动浏览器");
-      sendJson(response, 200, await page.startRecording(parseBrowserUrl(body.url), body.name));
+      sendJson(response, 200, await page.startRecording(parseBrowserUrl(body.url), body.name, parseViewport(body.viewport)));
       page.broadcast({ type: "browser_changed" });
       return;
     }

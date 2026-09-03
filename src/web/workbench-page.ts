@@ -90,13 +90,13 @@ export class WorkbenchPage {
     this.broadcast({ type: "browser_mode", mode });
   }
 
-  async startRecording(url: string, name?: string) {
+  async startRecording(url: string, name?: string, viewport?: { width?: number; height?: number }) {
     if (this.recorder.isActive()) {
       await this.recorder.stop().catch(() => this.recorder.disposeImmediate());
       await this.rememberLogin();
     }
     await seedPageProfile(this.sharedProfileDir, this.pageProfileDir);
-    return this.recorder.start(url, name || "web-session");
+    return this.recorder.start(url, name || "web-session", viewport);
   }
 
   async stopRecording() {

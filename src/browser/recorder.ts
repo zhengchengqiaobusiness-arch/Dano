@@ -10,6 +10,16 @@ import { PageActions, type PageSnapshot } from "./page-actions.js";
 import { buildManualSteps, renderManualStepsMarkdown, type ManualStep } from "../record/manual-steps.js";
 
 const FORM_ACTION_BUDGET = 3;
+const DEFAULT_VIEWPORT = { width: 1440, height: 960 };
+
+export function normalizePreviewViewport(input?: { width?: number; height?: number } | null) {
+  const width = Math.round(Number(input?.width));
+  const height = Math.round(Number(input?.height));
+  return {
+    width: Number.isFinite(width) ? Math.min(1920, Math.max(640, width)) : DEFAULT_VIEWPORT.width,
+    height: Number.isFinite(height) ? Math.min(1200, Math.max(400, height)) : DEFAULT_VIEWPORT.height
+  };
+}
 
 const INSPECT_TARGET_IN_PAGE = new Function("el", String.raw`
   const text = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 800);
@@ -183,17 +193,18 @@ export class BrowserRecorder {
     });
   }
 
-  async start(startUrl: string, name = "recording"): Promise<RecordingSession> {
+  async start(startUrl: string, name = "recording", viewport?: { width?: number; height?: number }): Promise<RecordingSession> {
     if (this.active) throw new Error(`Recording already active: ${this.active.session.id}`);
 
     const sessionId = id("rec");
     const dir = path.join(this.config.recordingsDir, sessionId);
     await ensureDir(dir);
     await ensureDir(this.config.profileDir);
+    const size = normalizePreviewViewport(viewport);
 
     const launchOptions = {
       headless: this.config.headless,
-      viewport: { width: 1440, height: 960 },
+      viewport: size,
       deviceScaleFactor: 1,
       args: ["--disable-features=TranslateUI,IsolateOrigins,site-per-process", "--disable-background-timer-throttling", "--disable-site-isolation-trials"]
     };
@@ -244,6 +255,18 @@ export class BrowserRecorder {
       this.pageError = `无法打开页面：${startUrl}`;
     }
     return session;
+  }
+
+  async fitViewport(viewport?: { width?: number; height?: number }) {
+    const size = normalizePreviewViewport(viewport);
+    if (!this.active) return size;
+    for (const page of this.livePages()) {
+      const current = page.viewportSize();
+      if (current?.width === size.width && current?.height === size.height) continue;
+      await page.setViewportSize(size);
+    }
+    this.lastPreview = undefined;
+    return size;
   }
 
   private armPage(target: Page) {

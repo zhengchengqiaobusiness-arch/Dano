@@ -112,10 +112,12 @@ test("starting a recording keeps the workbench conversation", async () => {
 });
 
 test("embedded preview stays clickable in Pi automatic click mode", async () => {
-  const [app, server, css] = await Promise.all([
+  const [app, server, css, recorder, page] = await Promise.all([
     readFile(path.join(root, "web", "app.js"), "utf8"),
     readFile(path.join(root, "src", "web", "server.ts"), "utf8"),
-    readFile(path.join(root, "web", "styles.css"), "utf8")
+    readFile(path.join(root, "web", "styles.css"), "utf8"),
+    readFile(path.join(root, "src", "browser", "recorder.ts"), "utf8"),
+    readFile(path.join(root, "src", "web", "workbench-page.ts"), "utf8")
   ]);
   const manualCommand = app.match(/async function manualCommand[\s\S]*?\n\}/)?.[0] || "";
   const previewHandlers = [
@@ -139,6 +141,13 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
   assert.match(css, /\.browser-frame\s*\{[^}]*object-fit:\s*contain/);
   assert.doesNotMatch(css, /\.browser-frame\s*\{[^}]*object-fit:\s*fill/);
   assert.match(app, /function displayedFrameRect\(/);
+  assert.match(app, /function previewPaneSize\(/);
+  assert.match(app, /viewport: previewPaneSize\(\)/);
+  assert.match(app, /\/api\/browser\/viewport/);
+  assert.match(app, /ResizeObserver/);
+  assert.match(server, /pathname === "\/api\/browser\/viewport"/);
+  assert.match(recorder, /async fitViewport\(/);
+  assert.match(page, /this\.recorder\.start\(url, name \|\| "web-session", viewport\)/);
   assert.match(css, /\.browser-panel\s*\{[^}]*grid-template-rows:\s*40px minmax\(0,\s*1fr\)/);
   assert.doesNotMatch(css, /\.browser-footer/);
   assert.doesNotMatch(css, /\.browser-frame\s*\{[^}]*contain:\s*strict/);

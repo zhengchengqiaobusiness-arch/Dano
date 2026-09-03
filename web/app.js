@@ -365,10 +365,29 @@ async function pollBrowser(forceFrame = false) {
   if (state.browserActive) await refreshBrowserFrame(forceFrame);
 }
 
+function previewPaneSize() {
+  const box = elements.browserViewport?.getBoundingClientRect();
+  const width = Math.round(box?.width || 0);
+  const height = Math.round(box?.height || 0);
+  if (width < 80 || height < 80) return null;
+  return { width, height };
+}
+
+function syncPreviewViewport() {
+  const size = previewPaneSize();
+  if (!size || !state.browserActive) return;
+  const current = state.viewport;
+  if (current && Math.abs(current.width - size.width) < 8 && Math.abs(current.height - size.height) < 8) return;
+  void api("/api/browser/viewport", { method: "POST", body: JSON.stringify(size) }).then(result => {
+    if (result?.viewport) state.viewport = result.viewport;
+    void refreshBrowserFrame(true);
+  }).catch(() => {});
+}
+
 async function openBrowser(rawUrl) {
   const value = rawUrl.trim(); if (!value) return;
   const url = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`;
-  await api("/api/browser/open", { method: "POST", body: JSON.stringify({ url, name: "web-session", mode: state.browserMode }) });
+  await api("/api/browser/open", { method: "POST", body: JSON.stringify({ url, name: "web-session", mode: state.browserMode, viewport: previewPaneSize() }) });
   await pollBrowser();
   showToast("录制已开始");
 }
@@ -800,6 +819,11 @@ async function initialize() {
     state.browserMode = status.browser?.mode || state.browserMode; renderBrowserMode(); await pollBrowser();
   } catch (error) { showToast(error.message); }
   connectEvents();
+  if (elements.browserViewport && typeof ResizeObserver === "function") {
+    const observer = new ResizeObserver(() => syncPreviewViewport());
+    observer.observe(elements.browserViewport);
+  }
+  window.addEventListener("resize", () => syncPreviewViewport());
   setInterval(() => { if (!document.hidden && state.browserActive) void refreshBrowserFrame(); }, 240);
   setInterval(() => { if (!document.hidden) void pollBrowserState(); }, 2000);
 }
