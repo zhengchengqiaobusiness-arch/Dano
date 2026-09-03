@@ -1,4 +1,5 @@
-import type { CapabilityContract } from "../domain.js";
+import type { CapabilityContract, EvidenceEvent } from "../domain.js";
+import { ASK_KEY } from "./heuristics.js";
 import { isPaginationField } from "./field-resolver.js";
 
 const NOISE_PATH = /\/im\/|notify-message|unread-count|online-status|get-permission-info|captcha|tenant\/get-by-website|tenant\/get-id-by-name|\/user\/get-current$|\/auth\/login|\/auth\/logout/i;
@@ -13,7 +14,7 @@ export function hasBusinessCallerField(capability: CapabilityContract) {
 }
 
 const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload"]);
-const LOOKUP_QUERY = /simple-list|dict-data|\/enum(?:\/|$)|get-count|get-current/i;
+const LOOKUP_QUERY = /simple-list|dict-data|\/enum(?:\/|$)|get-count|get-current|getappid|get-app-id|getAppId|save_[\w-]*chat/i;
 const PICKER_PAGE = /\/(?:user|dept|department|role|post|tenant|dict)\/(?:page|list)$/i;
 const PAGE_QUERY = /\/page$/i;
 const LIST_QUERY = /\/(?:list|search|query)$/i;
@@ -47,14 +48,31 @@ function schemaHasRecordArray(schema: any): boolean {
 
 const LIST_SHAPED = /(?:list|page|search|query|find)$/i;
 
+export function isAskFieldName(name?: string) {
+  return Boolean(name && ASK_KEY.test(name));
+}
+
+export function isAskQuery(capability: CapabilityContract) {
+  if (capability.operation !== "query") return false;
+  if (isNoiseCapability(capability)) return false;
+  const path = capability.transport.pathTemplate || capability.transport.urlTemplate || "";
+  if (/\/im\//i.test(path) || isLookupQueryPath(path)) return false;
+  if (capability.inputForm.some(field => isAskFieldName(field.name))) return true;
+  return /(?:chat|ask|qa)$/i.test(lastSegment(path)) && hasBusinessCallerField(capability);
+}
+
 export function isPageResultQuery(capability: CapabilityContract) {
   if (capability.operation !== "query") return false;
   if (isNoiseCapability(capability)) return false;
   const path = capability.transport.pathTemplate || capability.transport.urlTemplate || "";
   if (isLookupQueryPath(path)) return false;
-  if (PAGE_QUERY.test(path) || LIST_QUERY.test(path) || LIST_SHAPED.test(lastSegment(path))) return true;
+  if (isAskQuery(capability)) return true;
+  const last = lastSegment(path);
+  if (/^save/i.test(last) && !schemaHasRecordArray(capability.outputSchema)) return false;
+  if (PAGE_QUERY.test(path) || LIST_QUERY.test(path)) return true;
   const paging = capability.inputForm.some(field => isPaginationField(field.name));
   const collection = schemaHasRecordArray(capability.outputSchema);
+  if (LIST_SHAPED.test(last)) return collection || paging;
   return collection && (paging || hasBusinessCallerField(capability));
 }
 
@@ -83,6 +101,11 @@ export function isPrimaryCapability(capability: CapabilityContract, catalog: Cap
   const path = capability.transport.pathTemplate || capability.transport.urlTemplate || "";
   if (isLookupQueryPath(path)) return false;
   const writes = catalog.filter(isWriteCapability);
+  const asks = catalog.filter(item => isAskQuery(item) && !isLookupQueryPath(item.transport.pathTemplate || ""));
+  if (asks.length) {
+    if (writes.some(item => sameResource(item.transport.pathTemplate, path))) return true;
+    return asks.includes(capability) && (hasBusinessCallerField(capability) || asks.length === 1);
+  }
   if (writes.length) {
     if (writes.some(item => sameResource(item.transport.pathTemplate, path))) return true;
     const shared = catalog.filter(item =>
@@ -90,7 +113,11 @@ export function isPrimaryCapability(capability: CapabilityContract, catalog: Cap
       && !isLookupQueryPath(item.transport.pathTemplate || "")
       && writes.some(write => sameResource(write.transport.pathTemplate, item.transport.pathTemplate))
     );
-    if (shared.length) return false;
+    if (shared.length) {
+      if (PICKER_PAGE.test(path)) return false;
+      if (isPageResultQuery(capability) && hasBusinessCallerField(capability)) return true;
+      return false;
+    }
   }
   if (isPageResultQuery(capability)) {
     const otherLists = catalog.filter(item =>
@@ -159,4 +186,38 @@ export function summarizeCatalog(capabilities: CapabilityContract[]) {
   );
   const noise = capabilities.filter(isNoiseCapability);
   return { primary, lookups, noise };
+}
+
+export function evidencePageKey(url?: string) {
+  if (!url) return "";
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}${parsed.hash.split("?")[0]}`;
+  } catch {
+    return url;
+  }
+}
+
+export function capabilitiesForSession(
+  catalog: CapabilityContract[],
+  allEvents: EvidenceEvent[],
+  sessionEvents: EvidenceEvent[]
+) {
+  if (!sessionEvents.length) return catalog;
+  const sessionIds = new Set(sessionEvents.map(event => event.id));
+  const pages = new Set(sessionEvents.map(event => evidencePageKey(event.pageUrl)).filter(Boolean));
+  const eventPage = new Map(
+    allEvents
+      .filter(event => event.pageUrl)
+      .map(event => [event.id, evidencePageKey(event.pageUrl)])
+  );
+  const scoped = catalog.filter(capability => {
+    if (capability.evidence.some(ref => sessionIds.has(ref.eventId))) return true;
+    if (!WRITE_OPERATIONS.has(capability.operation)) return false;
+    return capability.evidence.some(ref => {
+      const page = eventPage.get(ref.eventId);
+      return Boolean(page && pages.has(page));
+    });
+  });
+  return scoped.length ? scoped : catalog;
 }

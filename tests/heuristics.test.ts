@@ -48,4 +48,8 @@ test("classifies common methods", () => {
   search.request.body = { gjz: "123", pageNo: 1, pageSize: 10 };
   search.response = { status: 200, headers: {}, body: { data: { list: [{ id: "1", title: "a" }] } } };
   assert.equal(inferOperation(search), "query");
+  const ask = event("POST", "https://x.test/dataiq/sjws_chat");
+  ask.request.body = { sys_query: "123123", wybs: "51e561cb-49e9-4f96-817a-2d0a7e2a4360" };
+  ask.response = { status: 200, headers: {}, body: "data: {\"event\":\"answer\"}" };
+  assert.equal(inferOperation(ask), "query");
 });

@@ -10,6 +10,7 @@ const UPLOAD = /upload|import|上传|导入/i;
 const DOWNLOAD = /download|export|下载|导出/i;
 const PAGING_KEY = /^(pageNo|pageNum|page|pageSize|pageIndex|current|size|limit|offset)$/i;
 const SEARCH_KEY = /^(gjz|gjc|keyword|keyWord|keywords|search|searchKey|searchText|queryKey|q|query)$/i;
+export const ASK_KEY = /^(sys_query|userQuery|question|prompt|queryText|askText)$/i;
 const READ_LAST = /^(get|select|query|search|find|list|page|load|fetch)/i;
 const READ_SUFFIX = /(?:List|Page|Search|Query|Find)$/;
 
@@ -34,6 +35,12 @@ function looksCollectionBody(body: unknown): boolean {
   return false;
 }
 
+function hasAskValue(event: NetworkEvidence) {
+  return Object.entries(requestParams(event)).some(([key, value]) =>
+    ASK_KEY.test(key) && typeof value === "string" && value.trim().length > 0
+  );
+}
+
 export function looksRecordedQuery(event: NetworkEvidence) {
   const last = new URL(event.request.url).pathname.split("/").filter(Boolean).pop() || "";
   const keys = Object.keys(requestParams(event));
@@ -41,6 +48,7 @@ export function looksRecordedQuery(event: NetworkEvidence) {
   const search = keys.some(key => SEARCH_KEY.test(key));
   const readPath = READ_LAST.test(last) || READ_SUFFIX.test(last) || /(?:list|page|search|query|find)$/i.test(last);
   const collection = looksCollectionBody(event.response?.body);
+  if (hasAskValue(event)) return true;
   if (collection && (paging || search || readPath)) return true;
   return paging && search;
 }

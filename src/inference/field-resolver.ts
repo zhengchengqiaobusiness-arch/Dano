@@ -1,4 +1,5 @@
 import type { InputFormField, NetworkEvidence, UiEvidence } from "../domain.js";
+import { ASK_KEY } from "./heuristics.js";
 
 const GENERATED_NAME = /^(el-id-\d+|el-[a-z]+-\d+|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i;
 const PAGE_NAME = /^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i;
@@ -158,6 +159,7 @@ const SYNONYM_GROUPS = [
   /yyxtid|yyxtmc|ssxts|所属系统|应用系统/i,
   /ywsxmc|职能清单/i,
   /gjz|gjc|keyword|keyWord|keywords|searchKey|searchText|queryKey|(?:^|[^a-z])q(?:$|[^a-z])|(?:^|[^a-z])query(?:$|[^a-z])|(?:^|[^a-z])search(?:$|[^a-z])|关键字|关键词|搜索/i,
+  /sys_query|userQuery|queryText|askText|(?:^|[^a-z])prompt(?:$|[^a-z])|(?:^|[^a-z])question(?:$|[^a-z])|问数|智能体聊天|聊天内容/i,
   /code|编码/i,
   /name|名称/i
 ];
@@ -484,7 +486,7 @@ export function findObservation(
   const direct = mergeObservations(related);
   if (direct) return expandObservation(direct, observations);
 
-  if (isDistinctiveValue(requestValue)) {
+  if (isDistinctiveValue(requestValue) || ASK_KEY.test(field.name || "")) {
     const exact = observations.filter(item => sameValue(item.value, requestValue));
     const preferred = preferLabeledObservation(exact);
     if (preferred) return expandObservation(preferred, observations);
@@ -1088,8 +1090,8 @@ function enrichFromObservations(
 
 function looksInvariantConstant(field: InputFormField, value: unknown) {
   if (Array.isArray(value) && value.length === 0 && /attachment|file/i.test(field.name)) return true;
-  if (typeof value === "string" && /^[a-z][a-z0-9_]*$/i.test(value) && /Type|Key|Code|Def/i.test(field.name)) return true;
-  return false;
+  if (typeof value !== "string" || /^[a-f0-9]{16,}$/i.test(value)) return false;
+  return /^[a-z][a-z0-9_]*$/i.test(value) && /Type|Key|Code|Def/i.test(field.name);
 }
 
 function applyInvariantDefaults(fields: InputFormField[], sample: unknown): InputFormField[] {
@@ -1257,8 +1259,11 @@ function nameOverlap(form: NonNullable<UiEvidence["form"]>, requestNames: string
 function valueOverlap(form: NonNullable<UiEvidence["form"]>, sample: unknown) {
   const values = flattenRequestValues(sample);
   return form.filter(field =>
-    isDistinctiveValue(field.value)
-    && values.some(item => isDistinctiveValue(item.value) && sameValue(item.value, field.value))
+    field.value !== undefined && field.value !== null && field.value !== ""
+    && values.some(item =>
+      sameValue(item.value, field.value)
+      && (isDistinctiveValue(item.value) || ASK_KEY.test(item.name) || ASK_KEY.test(field.name || ""))
+    )
   ).length;
 }
 
@@ -1331,9 +1336,11 @@ export function sameFormShape(left?: UiEvidence, right?: UiEvidence) {
 function distinctiveRequestTokens(sample: unknown) {
   return new Set(
     flattenRequestValues(sample)
-      .map(item => item.value)
-      .filter(value => isDistinctiveValue(value))
-      .map(value => String(value))
+      .filter(item =>
+        isDistinctiveValue(item.value)
+        || ASK_KEY.test(item.name) && item.value !== undefined && item.value !== null && String(item.value).trim() !== ""
+      )
+      .map(item => String(item.value))
   );
 }
 
@@ -1341,7 +1348,7 @@ function eventMatchesRequest(item: UiEvidence, sample: unknown) {
   const tokens = distinctiveRequestTokens(sample);
   if (!tokens.size) return false;
   const candidates = [item.name, item.value, item.text, ...(item.form || []).map(field => field.value)];
-  return candidates.some(value => isDistinctiveValue(value) && tokens.has(String(value)));
+  return candidates.some(value => value !== undefined && value !== null && value !== "" && tokens.has(String(value)));
 }
 
 export function relatedUiEvents(

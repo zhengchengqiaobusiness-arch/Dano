@@ -316,8 +316,8 @@ function emptyDefault(field: InputFormField, value: unknown) {
 }
 
 function looksInvariantConstant(field: InputFormField, value: unknown) {
-  if (typeof value === "string" && /^[a-z][a-z0-9_]*$/i.test(value) && /Type|Key|Code|Def/i.test(field.name)) return true;
-  return false;
+  if (typeof value !== "string" || /^[a-f0-9]{16,}$/i.test(value)) return false;
+  return /^[a-z][a-z0-9_]*$/i.test(value) && /Type|Key|Code|Def/i.test(field.name);
 }
 
 function generatedRule(field: InputFormField, value: unknown) {
@@ -577,14 +577,16 @@ export function attachDerivationRules(
   sample: unknown,
   events: EvidenceEvent[],
   catalog: CapabilityContract[],
-  capability: CapabilityContract
+  capability: CapabilityContract,
+  mode: "write" | "query" = "write"
 ): { fields: InputFormField[]; bindings: DataBinding[] } {
   const bindings: DataBinding[] = [];
   let next = fields.map(field => {
     if (isAssembledObjectField(field, fields)) {
       return asAssembled(field, fields.filter(item => item.path.startsWith(`${field.path}.`) || item.path.startsWith(`${field.path}[`)));
     }
-    if (shouldKeep(field, capability, fields) || field.defaultRule) return field;
+    if (shouldKeep(field, capability, fields)) return field;
+    if (field.defaultRule && (mode === "write" || !field.defaultRule.startsWith("literal:"))) return field;
     const value = requestValueAt(sample, field.path);
     const from = fromApiMatch(field, value, sample, events, catalog);
     if (from) {
@@ -605,32 +607,35 @@ export function attachDerivationRules(
     return field;
   });
 
-  next = applyComputed(next, sample, capability);
+  if (mode === "write") {
+    next = applyComputed(next, sample, capability);
 
-  const computedOperands = new Set(
-    next.filter(field => field.defaultRule?.startsWith("computed:")).flatMap(field => operandNames(parseComputedRule(field.defaultRule || "") || ""))
-  );
-  next = next.map(field => {
-    if (field.source === "caller" || field.defaultRule || PAGE_NAME.test(field.name)) return field;
-    if (!computedOperands.has(field.name)) return field;
-    if (field.source === "binding") return field;
-    return asCallerInput(field);
-  });
-  next = applyComputed(next, sample, capability);
-  next = attachCallerOverrides(next, sample);
+    const computedOperands = new Set(
+      next.filter(field => field.defaultRule?.startsWith("computed:")).flatMap(field => operandNames(parseComputedRule(field.defaultRule || "") || ""))
+    );
+    next = next.map(field => {
+      if (field.source === "caller" || field.defaultRule || PAGE_NAME.test(field.name)) return field;
+      if (!computedOperands.has(field.name)) return field;
+      if (field.source === "binding") return field;
+      return asCallerInput(field);
+    });
+    next = applyComputed(next, sample, capability);
+    next = attachCallerOverrides(next, sample);
+  }
 
   next = next.map(field => {
     if (shouldKeep(field, capability, next) || field.defaultRule) return field;
     const copied = uniqueCopySource(field, next, sample);
     return copied ? asCopy(field, copied) : field;
   });
-  next = applyComputed(next, sample, capability);
+  if (mode === "write") next = applyComputed(next, sample, capability);
 
   next = next.map(field => {
     if (shouldKeep(field, capability, next) || field.defaultRule) return field;
     const value = requestValueAt(sample, field.path);
     const generated = generatedRule(field, value);
     if (generated) return asGenerated(field, generated.rule, generated.detail);
+    if (mode === "query") return field;
     if (looksInvariantConstant(field, value) && value !== undefined && value !== null && value !== "") {
       return asDefault(field, `literal:${value}`, `请求中观察到的系统常量 ${value}，按该值补齐，调用方不要手填`);
     }
@@ -644,10 +649,17 @@ export function attachDerivationRules(
 
 export function attachCatalogDerivations(capabilities: CapabilityContract[], events: EvidenceEvent[]) {
   return capabilities.map(capability => {
-    if (!WRITE_OPERATIONS.has(capability.operation)) return capability;
+    if (!WRITE_OPERATIONS.has(capability.operation) && capability.operation !== "query") return capability;
     const sample = evidenceSample(capability, events);
     if (!sample) return capability;
-    const derived = attachDerivationRules(capability.inputForm, sample, events, capabilities, capability);
+    const derived = attachDerivationRules(
+      capability.inputForm,
+      sample,
+      events,
+      capabilities,
+      capability,
+      WRITE_OPERATIONS.has(capability.operation) ? "write" : "query"
+    );
     const existing = new Set(capability.bindings.map(item => `${item.fromCapabilityId}|${item.fromPath}|${item.toPath}`));
     return {
       ...capability,

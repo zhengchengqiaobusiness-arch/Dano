@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { CapabilityContract } from "../src/domain.js";
-import { isPrimaryCapability, summarizeCatalog } from "../src/inference/export-scope.js";
+import { capabilitiesForSession, isPrimaryCapability, summarizeCatalog } from "../src/inference/export-scope.js";
 import { reviewCatalog } from "../src/review/catalog-review.js";
 import { mergeCatalogByTransport } from "../src/catalog/normalize.js";
 
@@ -159,4 +159,47 @@ test("analyze merge keeps create when a later session only saw the page query", 
   assert.equal(merged.some(item => item.operation === "create" && item.transport.pathTemplate.includes("/purchase-order/create")), true);
   assert.equal(merged.filter(item => item.transport.pathTemplate.includes("/purchase-order/page")).length, 1);
   assert.equal(merged.find(item => item.transport.pathTemplate.includes("/purchase-order/page"))?.id, "query-order-again");
+});
+
+test("session review keeps same-page writes and ignores other-page unverified creates", () => {
+  const chat = cap({
+    id: "ask-chat",
+    operation: "query",
+    title: "查询 sjws_chat",
+    transport: { method: "POST", urlTemplate: "http://x/dataiq/sjws_chat", origin: "http://x", pathTemplate: "/dataiq/sjws_chat" },
+    inputForm: [{ path: "$.sys_query", name: "sys_query", label: "和数据智能体聊天", valueType: "string", source: "caller", required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面", widget: "text" }],
+    evidence: [{ eventId: "chat-net", sessionId: "chat", kind: "network", at: "2026-09-03T10:00:00.000Z", status: 200 }]
+  });
+  const create = cap({
+    id: "create-order",
+    operation: "create",
+    title: "新建 purchase-order",
+    transport: { method: "POST", urlTemplate: "https://x/erp/purchase-order/create", origin: "https://x", pathTemplate: "/erp/purchase-order/create" },
+    evidence: [{ eventId: "purchase-net", sessionId: "purchase", kind: "network", at: "2026-09-02T10:00:00.000Z", status: 200 }],
+    validation: { version: 2, status: "candidate", checks: [{ name: "caller-fields-backed-by-ui", ok: false, detail: "存在没有页面输入证据的调用方字段" }] }
+  });
+  const chatEvents = [{
+    id: "chat-net",
+    kind: "network" as const,
+    sessionId: "chat",
+    at: "2026-09-03T10:00:00.000Z",
+    pageUrl: "http://10.255.158.85/dopenportal/#/Home",
+    request: { method: "POST", url: "http://x/dataiq/sjws_chat", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: {} }
+  }];
+  const purchaseEvents = [{
+    id: "purchase-net",
+    kind: "network" as const,
+    sessionId: "purchase",
+    at: "2026-09-02T10:00:00.000Z",
+    pageUrl: "http://admin.dianshixinxi.com:90/erp/purchase/order",
+    request: { method: "POST", url: "https://x/erp/purchase-order/create", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: {} }
+  }];
+  const scoped = capabilitiesForSession([chat, create], [...chatEvents, ...purchaseEvents], chatEvents);
+  assert.equal(scoped.some(item => item.id === "ask-chat"), true);
+  assert.equal(scoped.some(item => item.id === "create-order"), false);
+  const review = reviewCatalog(scoped, chatEvents);
+  assert.equal(review.status, "passed", review.summary);
+  assert.equal(review.primaryTitles.join(","), "查询 sjws_chat");
 });

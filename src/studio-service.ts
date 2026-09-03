@@ -13,6 +13,7 @@ import { applyPlanPolicy } from "./planner/policy.js";
 import { exportSkill } from "./export/skill-exporter.js";
 import { executeCapability } from "./execution/http-executor.js";
 import { reviewCatalog } from "./review/catalog-review.js";
+import { capabilitiesForSession } from "./inference/export-scope.js";
 import { mergeCatalogByTransport, normalizeCatalog } from "./catalog/normalize.js";
 import { SkillLibrary } from "./catalog/skill-library.js";
 import { buildApprovedRoutes } from "./planner/routes.js";
@@ -141,7 +142,8 @@ export class StudioService {
     candidates = mergeCatalogByTransport(candidates, existing);
     candidates = sealWriteCapabilities(candidates, events);
     await writeJson(this.catalogFile(), candidates);
-    return candidates;
+    const history = await this.allEvents();
+    return capabilitiesForSession(candidates, history, events);
   }
 
   async validate() {
@@ -153,9 +155,12 @@ export class StudioService {
   }
 
   async review() {
-    const events = await this.allEvents();
+    const history = await this.allEvents();
+    const latest = (await this.listSessions())[0]?.id;
+    const scopeEvents = latest ? await this.sessionEvents(latest) : history;
     const capabilities = await this.validate();
-    return { capabilities, review: reviewCatalog(capabilities, events) };
+    const scoped = capabilitiesForSession(capabilities, history, scopeEvents);
+    return { capabilities, review: reviewCatalog(scoped, history) };
   }
 
   async sealWrites() {

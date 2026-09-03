@@ -137,4 +137,34 @@ test("keyword search with companion requests becomes a reviewable query skill", 
   assert.equal(review.primaryCount > 0, true, review.summary);
   assert.equal(review.status, "passed", review.summary);
   assert.equal(review.primaryTitles.some(title => /查询/.test(title)), true, review.summary);
+
+  const withPurchase = [
+    ...verified,
+    {
+      ...verified[0]!,
+      id: "create-order",
+      operation: "create" as const,
+      title: "新建 purchase-order",
+      transport: { method: "POST", urlTemplate: "https://x/erp/purchase-order/create", origin: "https://x", pathTemplate: "/erp/purchase-order/create" },
+      inputForm: [],
+      evidence: [],
+      sideEffect: true,
+      confirmation: { required: true },
+      validation: { version: 2, status: "verified" as const, checks: [] }
+    },
+    {
+      ...verified[0]!,
+      id: "query-order",
+      operation: "query" as const,
+      title: "查询 purchase-order",
+      transport: { method: "GET", urlTemplate: "https://x/erp/purchase-order/page", origin: "https://x", pathTemplate: "/erp/purchase-order/page" },
+      inputForm: [{ path: "$.no", name: "no", label: "单号", valueType: "string" as const, source: "caller" as const, required: false, requiredBasis: "not-observed" as const, systemHandled: false, sourceDetail: "页面", widget: "text" as const }],
+      evidence: [],
+      sideEffect: false,
+      confirmation: { required: false },
+      validation: { version: 2, status: "verified" as const, checks: [] }
+    }
+  ];
+  const searchAgain = withPurchase.find(item => item.transport.pathTemplate.endsWith("/getAllZy"))!;
+  assert.equal(isPrimaryCapability(searchAgain, withPurchase), true);
 });
