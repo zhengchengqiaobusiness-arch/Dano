@@ -2619,7 +2619,77 @@ test("follows a new tab after a link click and stays on the old page if the tab 
   }
 });
 
-test("failed click is not retried and exercise-form stops after three calls", async () => {
+test("one failed click does not make the next snapshot request manual takeover", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-single-failure-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>单次失败</title></head><body>
+      <button id="ok">确定</button>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "single-failure");
+    await assert.rejects(() => recorder.control({ action: "click", selector: "text=不存在的按钮" }));
+
+    const snapshot: any = await recorder.control({ action: "snapshot" });
+    assert.equal(snapshot.followManualSteps, false, JSON.stringify(snapshot));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("successful form actions do not consume the three-failure repair budget", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-success-budget-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>成功不计失败</title></head><body>
+      <form><label>名称<input placeholder="请输入名称"></label></form>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "success-budget");
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const result: any = await recorder.control({ action: "exercise-form" });
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(result.stopped, undefined, JSON.stringify(result));
+      assert.equal(result.followManualSteps, false, JSON.stringify(result));
+    }
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("manual takeover starts only after three consecutive failed clicks", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-noloop-"));
   const server = http.createServer((_request, response) => {
     response.setHeader("content-type", "text/html; charset=utf-8");
@@ -2643,16 +2713,17 @@ test("failed click is not retried and exercise-form stops after three calls", as
   try {
     await recorder.start(`http://127.0.0.1:${address.port}/`, "noloop");
     await assert.rejects(() => recorder.control({ action: "click", selector: "text=不存在的按钮" }));
-    const retry: any = await recorder.control({ action: "click", selector: "text=不存在的按钮" });
-    assert.equal(retry.stopped, true, JSON.stringify(retry));
-    assert.equal(retry.followManualSteps, true);
-    assert.match(String(retry.reason || ""), /禁止重试/);
-    await recorder.control({ action: "exercise-form" });
-    await recorder.control({ action: "exercise-form" });
-    await recorder.control({ action: "exercise-form" });
-    const fourth: any = await recorder.control({ action: "exercise-form" });
-    assert.equal(fourth.stopped, true, JSON.stringify(fourth));
-    assert.match(String(fourth.reason || ""), /exercise-form/);
+    await assert.rejects(() => recorder.control({ action: "click", selector: "text=不存在的按钮" }));
+    const recovered: any = await recorder.control({ action: "click", selector: "#ok" });
+    assert.equal(recovered.ok, true, JSON.stringify(recovered));
+    await assert.rejects(() => recorder.control({ action: "click", selector: "text=不存在的按钮" }));
+    await assert.rejects(() => recorder.control({ action: "click", selector: "text=不存在的按钮" }));
+    const beforeThirdFailure: any = await recorder.control({ action: "snapshot" });
+    assert.equal(beforeThirdFailure.followManualSteps, false, JSON.stringify(beforeThirdFailure));
+    const third: any = await recorder.control({ action: "click", selector: "text=不存在的按钮" });
+    assert.equal(third.stopped, true, JSON.stringify(third));
+    assert.equal(third.followManualSteps, true);
+    assert.match(String(third.reason || ""), /连续失败 3 次/);
     const snap: any = await recorder.control({ action: "snapshot" });
     assert.equal(snap.followManualSteps, true);
   } finally {

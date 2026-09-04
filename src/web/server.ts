@@ -434,7 +434,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
         followManualSteps?: boolean;
         reason?: string;
       };
-      if (result?.followManualSteps || result?.stopped) {
+      if (result?.stopped) {
         const reason = result.reason || "自动操作连续失败 3 次，请人工完成当前页面后继续";
         page.broadcast({ type: "browser_changed" });
         const takeover = await page.requestManualTakeover(reason);

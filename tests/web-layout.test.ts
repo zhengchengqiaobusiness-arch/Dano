@@ -126,7 +126,10 @@ test("three failed form attempts expose a non-blocking manual takeover and resum
   assert.match(app, /manual_takeover_required/);
   assert.match(app, /\/api\/browser\/takeover\/complete/);
   assert.match(server, /await page\.requestManualTakeover/);
+  assert.match(server, /if \(result\?\.stopped\)/);
+  assert.doesNotMatch(server, /result\?\.followManualSteps\s*\|\|/);
   assert.match(server, /resumedAfterManualTakeover:\s*true/);
+  assert.match(html, /自动操作已暂停/);
 });
 
 test("embedded preview stays clickable in Pi automatic click mode", async () => {
@@ -209,14 +212,14 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.match(browserSkill, /#el-id-\*/);
   assert.match(browserSkill, /YYYY-MM-DD/);
   assert.match(browserSkill, /todoFields|exercise-form/);
-  assert.match(browserSkill, /first `exercise-form`\/`submit-form` `ok: false` is not a stop/);
+  assert.match(browserSkill, /first or second failed automatic operation is not a stop/);
   assert.match(browserSkill, /manual-takeover card/);
   assert.match(browserSkill, /resumedAfterManualTakeover/);
   assert.match(browserSkill, /authoritative whole-form action/);
   assert.match(browserControl, /fills every currently visible eligible field in one pass/);
-  assert.match(browserControl, /first failure is not a stop/);
+  assert.match(browserControl, /first or second failure must be repaired/);
   assert.match(bridge, /todoFields|exercise-form|todoCount/);
-  assert.match(bridge, /first exercise-form failure is not a stop/);
+  assert.match(bridge, /first or second failed automatic operation is not a stop/);
   assert.match(bridge, /never click the dim overlay|Never click text=2/);
   assert.match(bridge, /Windows|Never use bash|WSL/);
   assert.match(bridge, /exclude-tools[\s\S]*bash|The bash tool is disabled/);

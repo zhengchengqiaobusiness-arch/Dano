@@ -111,9 +111,7 @@ const DETECT_LOGIN_IN_PAGE = new Function(String.raw`
 `) as () => LoginPageEvidence;
 
 interface ActionGuard {
-  exerciseFormCount: number;
-  submitFormCount: number;
-  failedKeys: string[];
+  consecutiveFailures: number;
   followManualSteps: boolean;
   formScopeKey?: string;
 }
@@ -322,7 +320,7 @@ export class BrowserRecorder {
       recentUi: [],
       manualEvents: [],
       externalBrowser: false,
-      guard: { exerciseFormCount: 0, submitFormCount: 0, failedKeys: [], followManualSteps: false }
+      guard: { consecutiveFailures: 0, followManualSteps: false }
     };
     this.captureBrowserPid(context);
 
@@ -1000,9 +998,7 @@ export class BrowserRecorder {
   private resetActionGuard(formScopeKey?: string) {
     if (!this.active) return;
     this.active.guard = {
-      exerciseFormCount: 0,
-      submitFormCount: 0,
-      failedKeys: [],
+      consecutiveFailures: 0,
       followManualSteps: false,
       formScopeKey
     };
@@ -1029,25 +1025,44 @@ export class BrowserRecorder {
     };
   }
 
-  private rememberFailure(action: string, selector?: string) {
-    if (!this.active) return;
-    this.active.guard.followManualSteps = true;
-    const key = this.actionKey(action, selector);
-    if (!this.active.guard.failedKeys.includes(key)) this.active.guard.failedKeys.push(key);
+  private resetFailureStreak() {
+    if (!this.active || this.active.guard.followManualSteps) return;
+    this.active.guard.consecutiveFailures = 0;
   }
 
-  private alreadyFailed(action: string, selector?: string) {
-    return Boolean(this.active?.guard.failedKeys.includes(this.actionKey(action, selector)));
+  private recordFailure(action: string, detail?: string) {
+    if (!this.active) return undefined;
+    this.active.guard.consecutiveFailures += 1;
+    if (this.active.guard.consecutiveFailures < FORM_ACTION_BUDGET) return undefined;
+    const suffix = detail ? ` 最后一次失败：${detail}` : "";
+    return this.stopBecauseStuck(`自动${action}连续失败 ${FORM_ACTION_BUDGET} 次，请人工完成当前页面后继续。${suffix}`);
   }
 
-  private async guardedPageAction<T>(action: string, selector: string | undefined, work: () => Promise<T>): Promise<T | ReturnType<BrowserRecorder["stopBecauseStuck"]>> {
-    if (this.alreadyFailed(action, selector)) {
-      return this.stopBecauseStuck(`同一${action}已失败，禁止重试：${selector || ""}。有 recordedManualSteps 就按步骤走，否则请用户切到手动录制。`);
-    }
+  private async guardedPageAction<T>(action: string, _selector: string | undefined, work: () => Promise<T>): Promise<T | ReturnType<BrowserRecorder["stopBecauseStuck"]>> {
     try {
-      return await work();
-    } catch (error) {
-      this.rememberFailure(action, selector);
+      const result = await work();
+      this.resetFailureStreak();
+      return result;
+    } catch (error: any) {
+      const stopped = this.recordFailure(action, String(error?.message || error));
+      if (stopped) return stopped;
+      throw error;
+    }
+  }
+
+  private async guardedFormAction(action: "exercise-form" | "submit-form", work: () => Promise<{ ok?: boolean }>) {
+    await this.ensureFormScope();
+    try {
+      const result = await work();
+      if (result.ok) {
+        this.resetFailureStreak();
+        return { ...result, followManualSteps: false };
+      }
+      const stopped = this.recordFailure(action);
+      return stopped ? { ...result, ...stopped } : { ...result, followManualSteps: false };
+    } catch (error: any) {
+      const stopped = this.recordFailure(action, String(error?.message || error));
+      if (stopped) return stopped;
       throw error;
     }
   }
@@ -1147,28 +1162,10 @@ export class BrowserRecorder {
         case "snapshot":
           return this.actions.captureSnapshot();
         case "exercise-form": {
-          await this.ensureFormScope();
-          if ((this.active?.guard.exerciseFormCount || 0) >= FORM_ACTION_BUDGET) {
-            return this.stopBecauseStuck(`exercise-form 已用满 ${FORM_ACTION_BUDGET} 次，禁止再循环填表。按 recordedManualSteps 或 manual-steps.md 操作，点不动就请用户切到手动录制。不要 record_stop+analyze 一次还没有成功写响应的新增/修改。`);
-          }
-          if (this.active) this.active.guard.exerciseFormCount += 1;
-          const result = await this.actions.exerciseForm() as { ok?: boolean };
-          const used = this.active?.guard.exerciseFormCount || 0;
-          const stop = !result.ok && used >= FORM_ACTION_BUDGET;
-          if (stop && this.active) this.active.guard.followManualSteps = true;
-          return { ...result, followManualSteps: stop };
+          return this.guardedFormAction("exercise-form", () => this.actions.exerciseForm());
         }
         case "submit-form": {
-          await this.ensureFormScope();
-          if ((this.active?.guard.submitFormCount || 0) >= FORM_ACTION_BUDGET) {
-            return this.stopBecauseStuck(`submit-form 已用满 ${FORM_ACTION_BUDGET} 次，禁止再循环提交。按 recordedManualSteps 操作，或请用户切到手动录制。不要 record_stop+analyze 一次还没有成功写响应的新增/修改。`);
-          }
-          if (this.active) this.active.guard.submitFormCount += 1;
-          const result = await this.actions.submitForm() as { ok?: boolean };
-          const used = this.active?.guard.submitFormCount || 0;
-          const stop = !result.ok && used >= FORM_ACTION_BUDGET;
-          if (stop && this.active) this.active.guard.followManualSteps = true;
-          return { ...result, followManualSteps: stop };
+          return this.guardedFormAction("submit-form", () => this.actions.submitForm());
         }
       }
     });
