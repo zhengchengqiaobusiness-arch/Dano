@@ -63,7 +63,7 @@ async function main() {
       break;
     }
     case "validate": {
-      const { capabilities, review } = await studio.review();
+      const { capabilities, review } = await studio.review(flag(flags, "session"));
       console.log(JSON.stringify({
         status: review.status,
         next: review.next,
@@ -124,7 +124,7 @@ async function main() {
     case "export": {
       const name = flag(flags, "name") || positional[0];
       if (!name) throw new Error("export requires --name <skill-name>");
-      console.log(JSON.stringify(await studio.export(name, flag(flags, "out"), flagList(flags, "match")), null, 2));
+      console.log(JSON.stringify(await studio.export(name, flag(flags, "out"), flagList(flags, "match"), flag(flags, "session")), null, 2));
       break;
     }
     default:
@@ -134,12 +134,12 @@ Commands:
   record   --url <url> [--name <name>]
   sessions
   analyze  [--session <id>] [--no-llm]
-  validate              # 审核门禁：通过才能导出；未通过会给出回溯阶段
+  validate [--session <id>]   # 审核门禁：通过才能导出；未通过会给出回溯阶段
   bind     --from <cap> --from-path <jsonpath> --to <cap> --to-path <jsonpath> --approve
   candidate-source --target <cap> --field <path> --source <query-cap> --value-path <path> --label-path <path> --approve
   plan     <natural language goal>
   execute  --capability <id> --input '<json>' [--confirm-write]
-  export   --name <skill-name> [--out <directory>] [--match <path-or-id>]
+  export   --name <skill-name> [--out <directory>] [--match <path-or-id>] [--session <id>]
 `);
   }
 }

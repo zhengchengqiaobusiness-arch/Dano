@@ -256,6 +256,7 @@ export interface RecordingSession {
   startUrl: string;
   eventsFile: string;
   manualStepsFile?: string;
+  pageKeys?: string[];
 }
 
 export type ReviewStage = "record" | "analyze" | "validate" | "export";

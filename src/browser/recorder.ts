@@ -3,7 +3,8 @@ import { writeFile } from "node:fs/promises";
 import { chromium, type BrowserContext, type Browser, type Request, type Response, type Page } from "playwright";
 import type { EvidenceEvent, NetworkEvidence, RecordingSession, UiEvidence } from "../domain.js";
 import type { StudioConfig } from "../config.js";
-import { appendJsonl, ensureDir, id, writeJson } from "../utils.js";
+import { appendJsonl, ensureDir, id, readJsonl, writeJson } from "../utils.js";
+import { sessionBusinessPageKeys } from "../inference/export-scope.js";
 import { parsePossiblyJson, redactHeaders, redactValue } from "../security/redact.js";
 import { UI_RECORDER_SCRIPT } from "./page-script.js";
 import { PageActions, type PageSnapshot } from "./page-actions.js";
@@ -1038,6 +1039,8 @@ export class BrowserRecorder {
     await this.drainNetwork();
     active.session.stoppedAt = new Date().toISOString();
     await this.writeManualStepsFile(active);
+    const events = await readJsonl<EvidenceEvent>(active.eventsFile);
+    active.session.pageKeys = sessionBusinessPageKeys(events, active.session.startUrl);
     const dir = path.dirname(active.eventsFile);
     await writeJson(path.join(dir, "session.json"), active.session);
 

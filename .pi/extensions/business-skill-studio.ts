@@ -247,9 +247,12 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
     name: "business_skill_export",
     label: "Export business skill",
     description: "Export verified capabilities as a self-contained Agent Skill package with manual, contracts, routing, forms, candidates, and executable scripts.",
-    parameters: parameters({ name: { type: "string" } }, ["name"]),
+    parameters: parameters({
+      name: { type: "string" },
+      sessionId: { type: "string" }
+    }, ["name"]),
     async execute(_id, params: any) {
-      const result = await studio.exportManaged(params.name, true);
+      const result = await studio.exportManaged(params.name, true, params.sessionId);
       return {
         content: [{
           type: "text",

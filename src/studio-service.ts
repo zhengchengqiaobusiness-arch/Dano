@@ -6,13 +6,13 @@ import { loadConfig } from "./config.js";
 import { BrowserRecorder } from "./browser/recorder.js";
 import { id, readJson, readJsonl, writeJson } from "./utils.js";
 import { buildCapabilityCandidates } from "./inference/build-candidates.js";
-import { finalizeCapabilities, sealWriteCapabilities } from "./inference/finalize-capabilities.js";
+import { finalizeSessionSlice, sealWriteCapabilities } from "./inference/finalize-capabilities.js";
 import { OpenAIReasoner } from "./llm/openai.js";
 import { fallbackPlan } from "./planner/fallback.js";
 import { applyPlanPolicy } from "./planner/policy.js";
 import { exportSkill } from "./export/skill-exporter.js";
 import { executeCapability } from "./execution/http-executor.js";
-import { capabilitiesForSession, reviewSessionIds, sessionCatalogSlice } from "./inference/export-scope.js";
+import { capabilitiesForSession, reviewSessionIds, sessionBusinessPageKeys, sessionCatalogSlice } from "./inference/export-scope.js";
 import { mergeCatalogByTransport, normalizeCatalog } from "./catalog/normalize.js";
 import { reanalyzeIncoming } from "./inference/reanalyze.js";
 import { reviewSession } from "./review/catalog-review.js";
@@ -38,6 +38,7 @@ export class StudioService {
   readonly reasoner: OpenAIReasoner;
   readonly skillLibrary: SkillLibrary;
   private lastAnalyzedSessionId?: string;
+  private state?: { lastAnalyzedSessionId?: string };
 
   constructor(config = loadConfig()) {
     this.config = config;
@@ -85,10 +86,52 @@ export class StudioService {
     return chunks.flat();
   }
 
+  private stateFile() {
+    return path.join(this.config.dataDir, "studio-state.json");
+  }
+
+  private async studioState() {
+    if (!this.state) this.state = await readJson<{ lastAnalyzedSessionId?: string }>(this.stateFile(), {});
+    return this.state;
+  }
+
+  private async rememberAnalyzedSession(sessionId?: string) {
+    if (!sessionId) return;
+    this.lastAnalyzedSessionId = sessionId;
+    const state = await this.studioState();
+    if (state.lastAnalyzedSessionId === sessionId) return;
+    state.lastAnalyzedSessionId = sessionId;
+    await writeJson(this.stateFile(), state);
+  }
+
+  private async persistSessionPageKeys(sessionId: string, events: EvidenceEvent[]) {
+    const file = path.join(this.config.recordingsDir, sessionId, "session.json");
+    const session = await readJson<RecordingSession | null>(file, null);
+    if (!session) return;
+    const pageKeys = sessionBusinessPageKeys(events, session.startUrl);
+    if ((session.pageKeys || []).join("\n") === pageKeys.join("\n")) return;
+    session.pageKeys = pageKeys;
+    await writeJson(file, session);
+  }
+
+  private async resolveSessionId(sessionId?: string, sessions?: RecordingSession[]) {
+    const list = sessions || await this.listSessions();
+    if (sessionId && list.some(item => item.id === sessionId)) return sessionId;
+    const state = await this.studioState();
+    const remembered = this.lastAnalyzedSessionId || state.lastAnalyzedSessionId;
+    if (remembered && list.some(item => item.id === remembered)) return remembered;
+    return list[0]?.id;
+  }
+
   private async scopedEvidence(sessionId?: string) {
     const sessions = await this.listSessions();
-    const current = sessionId || this.lastAnalyzedSessionId || sessions[0]?.id;
+    const current = await this.resolveSessionId(sessionId, sessions);
     const scopeEvents = current ? await this.sessionEvents(current) : [];
+    if (current) {
+      const session = sessions.find(item => item.id === current);
+      if (session) session.pageKeys = sessionBusinessPageKeys(scopeEvents, session.startUrl);
+      await this.persistSessionPageKeys(current, scopeEvents);
+    }
     const ids = current ? reviewSessionIds(sessions, current, scopeEvents) : new Set<string>();
     const events = (await Promise.all([...ids].map(id => this.sessionEvents(id)))).flat();
     return { current, scopeEvents, events };
@@ -100,8 +143,9 @@ export class StudioService {
 
   async analyze(sessionId?: string, useLlm = true) {
     const latest = sessionId || (await this.listSessions())[0]?.id;
-    this.lastAnalyzedSessionId = latest;
+    await this.rememberAnalyzedSession(latest);
     const events = latest ? await this.sessionEvents(latest) : [];
+    if (latest) await this.persistSessionPageKeys(latest, events);
     const existing = await this.capabilities();
 
     let candidates = buildCapabilityCandidates(events);
@@ -123,10 +167,10 @@ export class StudioService {
 
   async review(sessionId?: string) {
     const { current, scopeEvents, events } = await this.scopedEvidence(sessionId);
-    if (current) this.lastAnalyzedSessionId = current;
+    await this.rememberAnalyzedSession(current);
     const existing = await this.capabilities();
     const slice = sessionCatalogSlice(existing, events, scopeEvents);
-    const validated = finalizeCapabilities(slice, events);
+    const validated = finalizeSessionSlice(slice, events, existing);
     await writeJson(this.catalogFile(), mergeCatalogByTransport(validated, existing));
     return reviewSession(validated, events, scopeEvents);
   }
@@ -141,12 +185,16 @@ export class StudioService {
     return sealed;
   }
 
-  private async exportCatalog() {
-    const { scopeEvents, events } = await this.scopedEvidence();
+  private async exportCatalog(sessionId?: string) {
+    const { current, scopeEvents, events } = await this.scopedEvidence(sessionId);
+    await this.rememberAnalyzedSession(current);
     const existing = await this.capabilities();
     const slice = sessionCatalogSlice(existing, events, scopeEvents);
+    const finalized = finalizeSessionSlice(slice, events, existing);
+    const sealed = sealWriteCapabilities(finalized, events);
+    await writeJson(this.catalogFile(), mergeCatalogByTransport(sealed, existing));
     return {
-      catalog: sealWriteCapabilities(slice, events),
+      catalog: sealed,
       events
     };
   }
@@ -334,8 +382,8 @@ export class StudioService {
     return executeCapability(cap, input, confirmWrite, caps);
   }
 
-  async export(name: string, outputRoot = path.join(this.config.rootDir, "dist", "skills"), match: string[] = []) {
-    const { catalog, events } = await this.exportCatalog();
+  async export(name: string, outputRoot = path.join(this.config.rootDir, "dist", "skills"), match: string[] = [], sessionId?: string) {
+    const { catalog, events } = await this.exportCatalog(sessionId);
     return exportSkill(outputRoot, name, catalog, match, events);
   }
 
@@ -343,9 +391,9 @@ export class StudioService {
     return this.skillLibrary.list();
   }
 
-  async exportManaged(name: string, confirmed: boolean) {
-    const { catalog } = await this.exportCatalog();
-    return this.skillLibrary.export(name, catalog, confirmed);
+  async exportManaged(name: string, confirmed: boolean, sessionId?: string) {
+    const { catalog, events } = await this.exportCatalog(sessionId);
+    return this.skillLibrary.export(name, catalog, confirmed, events);
   }
 
   async setSkillFrozen(name: string, frozen: boolean, confirmed: boolean) {

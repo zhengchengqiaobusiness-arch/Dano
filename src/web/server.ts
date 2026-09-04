@@ -208,7 +208,11 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
   if (request.method === "POST" && pathname === "/api/skills/export") {
     const body = await readJsonBody(request);
     if (typeof body.name !== "string" || !body.name.trim()) throw new Error("请输入 Skill 名称");
-    const record = await studio.exportManaged(body.name, body.confirmed === true);
+    const record = await studio.exportManaged(
+      body.name,
+      body.confirmed === true,
+      typeof body.sessionId === "string" ? body.sessionId : undefined
+    );
     sendJson(response, 200, record);
     broadcastAll({ type: "skills_changed" });
     return;

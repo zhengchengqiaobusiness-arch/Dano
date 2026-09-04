@@ -19,10 +19,39 @@ const PICKER_PAGE = /\/(?:user|dept|department|role|post|tenant|dict)\/(?:page|l
 const PAGE_QUERY = /\/page$/i;
 const LIST_QUERY = /\/(?:list|search|query)$/i;
 
+const OPERATION_SEGMENT = /^(page|list|search|query|find|create|update|delete|save|submit|export|import|detail|info|count|get|add|edit|remove|complete|enable|disable)(?:[-_].+)?$/i;
+const OPERATION_PREFIX = /^(get|create|update|delete|save|submit|query|list|find|add|edit|remove|enable|disable|complete)/i;
+const OPERATION_SUFFIX = /(?:List|Page|Search|Query|Find|Detail|Info|Count|Process|ById)$/i;
+
 export function resourcePrefix(pathTemplate: string) {
   const parts = (pathTemplate || "").split("/").filter(Boolean);
   if (parts.length < 2) return "";
   return `/${parts.slice(0, -1).join("/")}`;
+}
+
+function isOperationSegment(segment: string) {
+  return OPERATION_SEGMENT.test(segment) || OPERATION_PREFIX.test(segment) || OPERATION_SUFFIX.test(segment);
+}
+
+function resourceStem(pathTemplate: string) {
+  const parts = (pathTemplate || "").split("/").filter(Boolean);
+  const last = parts[parts.length - 1] || "";
+  const parent = parts[parts.length - 2] || "";
+  const stem = last.replace(OPERATION_PREFIX, "").replace(OPERATION_SUFFIX, "").replace(/^[-_]+|[-_]+$/g, "");
+  if (stem.length >= 3) return `${parent}/${stem}`.toLowerCase();
+  return resourcePrefix(pathTemplate).toLowerCase();
+}
+
+export function sameResource(left: string, right: string) {
+  const prefix = resourcePrefix(left);
+  if (prefix && prefix === resourcePrefix(right)) {
+    const lastLeft = lastSegment(left);
+    const lastRight = lastSegment(right);
+    if (isOperationSegment(lastLeft) || isOperationSegment(lastRight)) return true;
+    return lastLeft.toLowerCase() === lastRight.toLowerCase();
+  }
+  const stem = resourceStem(left);
+  return Boolean(stem) && stem === resourceStem(right);
 }
 
 export function isLookupQueryPath(pathTemplate: string) {
@@ -89,25 +118,51 @@ function pageQueries(catalog: CapabilityContract[]) {
   );
 }
 
-function sameResource(left: string, right: string) {
-  const prefix = resourcePrefix(left);
-  return Boolean(prefix) && prefix === resourcePrefix(right);
+export function isBusinessEvidenceEvent(event: EvidenceEvent) {
+  if (event.kind === "network") {
+    const url = event.request?.url || "";
+    if (NOISE_PATH.test(url)) return false;
+    const type = event.request?.resourceType || "";
+    if (type && !/xhr|fetch|websocket/i.test(type)) return false;
+    return true;
+  }
+  return Boolean(event.form?.some(field => field.name || field.label));
+}
+
+export function sessionBusinessPageKeys(events: EvidenceEvent[], startUrl?: string) {
+  const pages = new Set<string>();
+  for (const event of events) {
+    const page = evidencePageKey(event.pageUrl);
+    if (page && isBusinessEvidenceEvent(event)) pages.add(page);
+  }
+  if (!pages.size) {
+    const last = [...events].reverse().find(event => event.pageUrl);
+    if (last?.pageUrl) pages.add(evidencePageKey(last.pageUrl));
+    else if (startUrl) pages.add(evidencePageKey(startUrl));
+  }
+  return [...pages];
+}
+
+function otherSessionPageKeys(
+  session: { startUrl?: string; pageKeys?: string[] },
+  currentPages: Set<string>
+) {
+  if (session.pageKeys?.length) return session.pageKeys.map(page => evidencePageKey(page)).filter(Boolean);
+  const start = evidencePageKey(session.startUrl);
+  return start && currentPages.has(start) ? [start] : [];
 }
 
 export function reviewSessionIds(
-  sessions: Array<{ id: string; startUrl?: string }>,
+  sessions: Array<{ id: string; startUrl?: string; pageKeys?: string[] }>,
   currentId: string,
   sessionEvents: EvidenceEvent[] = []
 ) {
-  const pages = new Set<string>();
   const current = sessions.find(item => item.id === currentId);
-  if (current?.startUrl) pages.add(evidencePageKey(current.startUrl));
-  for (const event of sessionEvents) {
-    if (event.pageUrl) pages.add(evidencePageKey(event.pageUrl));
-  }
+  const currentPages = new Set(sessionBusinessPageKeys(sessionEvents, current?.startUrl));
   const ids = new Set<string>(currentId ? [currentId] : []);
   for (const session of sessions) {
-    if (session.startUrl && pages.has(evidencePageKey(session.startUrl))) ids.add(session.id);
+    if (session.id === currentId) continue;
+    if (otherSessionPageKeys(session, currentPages).some(page => currentPages.has(page))) ids.add(session.id);
   }
   return ids;
 }
@@ -131,11 +186,7 @@ export function isPrimaryCapability(capability: CapabilityContract, catalog: Cap
       && !isLookupQueryPath(item.transport.pathTemplate || "")
       && writes.some(write => sameResource(write.transport.pathTemplate, item.transport.pathTemplate))
     );
-    if (shared.length) {
-      if (PICKER_PAGE.test(path)) return false;
-      if (isPageResultQuery(capability) && hasBusinessCallerField(capability)) return true;
-      return false;
-    }
+    if (shared.length) return false;
   }
   if (isPageResultQuery(capability)) {
     const otherLists = catalog.filter(item =>
@@ -143,7 +194,7 @@ export function isPrimaryCapability(capability: CapabilityContract, catalog: Cap
       && isPageResultQuery(item)
       && !PICKER_PAGE.test(item.transport.pathTemplate || "")
     );
-    if (PICKER_PAGE.test(path) && (otherLists.length || pageQueries(catalog).some(item => !PICKER_PAGE.test(item.transport.pathTemplate || "")))) {
+    if (PICKER_PAGE.test(path) && (writes.length || otherLists.length || pageQueries(catalog).some(item => !PICKER_PAGE.test(item.transport.pathTemplate || "")))) {
       return false;
     }
     if (hasBusinessCallerField(capability)) return true;
@@ -227,7 +278,7 @@ export function capabilitiesForSession(
   allEvents: EvidenceEvent[],
   sessionEvents: EvidenceEvent[]
 ) {
-  if (!sessionEvents.length) return catalog;
+  if (!sessionEvents.length) return [];
   const sessionIds = new Set(sessionEvents.map(event => event.id));
   const pages = new Set(sessionEvents.map(event => evidencePageKey(event.pageUrl)).filter(Boolean));
   const eventPage = new Map(

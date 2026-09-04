@@ -35,7 +35,7 @@ This host is Windows. The bash tool is disabled. Page recording uses `business_s
    - For each write field the caller will not type, test origin hypotheses against the recording. Write a rule only when exactly one hypothesis uniquely explains the value. Never freeze a recorded business sample.
 
 3. **Review**
-   - Call `business_skill_validate`. This is the gate. Inference is not assumed correct.
+   - Call `business_skill_validate` with the same `sessionId`. This is the gate. Inference is not assumed correct. If the process restarted, the last analyzed session is remembered; still pass `sessionId` when you have it.
    - **Pass** only when the tool returns `审核通过`: every 主能力 is `verified`; every write non-caller field has a unique origin rule; computed formulas do not use IDs, enums, or timestamps as operands; picker/user-select fields expose a recorded query instead of a frozen page enum; every key in the successful write request has a field or an assemble rule; and every lookup used by `from:` / candidates is usable. Then export is allowed.
    - **Fail** when it returns `审核未通过`. Do not export. Do not treat “some checks passed” as passed. A write Skill that freezes a user picker as a static enum, uses `computed:day - type`, or drops `startUserSelectAssignees` is not passed.
    - Read the **entire** findings list first. Group by stage. Do not bounce back after the first failure.
@@ -54,7 +54,7 @@ This host is Windows. The bash tool is disabled. Page recording uses `business_s
 
 5. **Export**
    - Export only after Review returned `审核通过`. If it did not, go back; do not export a blocked catalog.
-   - Call `business_skill_export` with the page's Chinese business name, such as `采购订单`.
+   - Call `business_skill_export` with the page's Chinese business name, such as `采购订单`, and the same `sessionId`. Do not export a newer unrelated recording.
    - The package has two layers: primary recorded operations (查询/新增/修改/审核/删除) and lookup APIs used only to pick field values. Report them separately. Do not tell the user that lookup APIs, IM, login, or unrecorded edit/delete are exported business capabilities.
    - The exported package is a handbook, not a business spec: `SKILL.md` (router + composition rules) + `references/CAPABILITIES.md` + `references/INPUT_FORMS.md` + `references/OPTIONS.md` + `references/PLAYBOOK.md` + `references/CONTRACT.json` + `scripts/execute.py`. Do not invent endpoints.
    - Report 主能力 and 字段候选接口 separately. Lookup APIs are for field values only.

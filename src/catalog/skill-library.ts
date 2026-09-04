@@ -1,6 +1,6 @@
 import path from "node:path";
 import { readdir, rename, stat } from "node:fs/promises";
-import type { CapabilityContract, SkillListItem, SkillRecord } from "../domain.js";
+import type { CapabilityContract, EvidenceEvent, SkillListItem, SkillRecord } from "../domain.js";
 import { exportSkill, normalizeSkillName } from "../export/skill-exporter.js";
 import { ensureDir, readJson, writeJson } from "../utils.js";
 import { moveDirectory } from "./skill-files.js";
@@ -85,7 +85,7 @@ export class SkillLibrary {
     await writeJson(this.registryFile, records);
   }
 
-  async export(name: string, capabilities: CapabilityContract[], confirmed: boolean) {
+  async export(name: string, capabilities: CapabilityContract[], confirmed: boolean, events: EvidenceEvent[] = []) {
     if (!confirmed) throw new Error("导出或重新导出前必须取得明确确认");
     const slug = normalizeSkillName(name, capabilities);
     const records = await this.allRecords();
@@ -94,7 +94,7 @@ export class SkillLibrary {
     );
 
     const temporaryRoot = path.join(this.stateDir, "staging", `${slug}-${Date.now()}`);
-    const exported = await exportSkill(temporaryRoot, name, capabilities);
+    const exported = await exportSkill(temporaryRoot, name, capabilities, [], events);
     const destination = path.join(this.outputRoot, exported.skillName);
     assertInside(this.outputRoot, destination);
     if (await exists(destination)) throw new Error(`导出目录已存在：${exported.skillName}`);

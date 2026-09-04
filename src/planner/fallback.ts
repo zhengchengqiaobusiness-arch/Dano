@@ -35,7 +35,7 @@ export function fallbackPlan(goal: string, capabilities: CapabilityContract[]): 
   }
 
   const selected = ranked[0]!.cap;
-  const route = buildApprovedRoutes(verified).find(item => item.targetCapabilityId === selected.id);
+  const route = buildApprovedRoutes(verified).find(item => item.targetCapabilityId === selected.id && item.steps.length);
   const ordered = route?.steps.map(step => verified.find(capability => capability.id === step.capabilityId)!) || [selected];
   const steps = ordered.map((capability, index) => ({
     capabilityId: capability.id,

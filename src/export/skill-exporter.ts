@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import type { CapabilityContract, DataBinding, EvidenceEvent, InputFormField } from "../domain.js";
 import { normalizeCatalog } from "../catalog/normalize.js";
-import { buildApprovedRoutes } from "../planner/routes.js";
+import { buildApprovedRoutes, collectRouteIssues } from "../planner/routes.js";
 import { id, writeJson } from "../utils.js";
 import { exportableCapabilities, isPrimaryCapability } from "../inference/export-scope.js";
 import { assertExportable } from "../review/catalog-review.js";
@@ -160,6 +160,7 @@ export async function exportSkill(
   await mkdir(scriptsDir, { recursive: true });
 
   const routes = buildApprovedRoutes(capabilities);
+  const routeIssues = collectRouteIssues(capabilities);
   const { primary, lookups } = classifyExported(capabilities);
   await writeFile(path.join(directory, "SKILL.md"), buildSkillMd(skillName, displayName, capabilities, routes), "utf8");
   await writeJson(path.join(referencesDir, "CONTRACT.json"), {
@@ -172,12 +173,17 @@ export async function exportSkill(
       completion: "http-status-and-all-assertions"
     },
     capabilities: capabilities.map(capability => exportedCapability(capability, capabilities)),
-    routes
+    routes,
+    ...(routeIssues.length ? { routeIssues } : {})
   });
   await writeFile(path.join(referencesDir, "CAPABILITIES.md"), buildCapabilities(capabilities, routes), "utf8");
   await writeFile(path.join(referencesDir, "INPUT_FORMS.md"), buildInputForms(capabilities), "utf8");
   await writeFile(path.join(referencesDir, "OPTIONS.md"), buildOptions(capabilities), "utf8");
-  await writeFile(path.join(referencesDir, "PLAYBOOK.md"), buildPlaybook(displayName, capabilities, routes), "utf8");
+  const playbook = buildPlaybook(displayName, capabilities, routes);
+  const routeIssueNotes = routeIssues.length
+    ? `\n## 未生成的组合路线\n\n${routeIssues.map(item => `- \`${item.targetCapabilityId}\`：${item.reason}`).join("\n")}\n`
+    : "";
+  await writeFile(path.join(referencesDir, "PLAYBOOK.md"), playbook + routeIssueNotes, "utf8");
   for (const route of routes) {
     await writeFile(path.join(routesDir, `${route.id}.md`), buildRoute(route, capabilities), "utf8");
   }
