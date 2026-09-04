@@ -143,28 +143,13 @@ export function sessionBusinessPageKeys(events: EvidenceEvent[], startUrl?: stri
   return [...pages];
 }
 
-function otherSessionPageKeys(
-  session: { startUrl?: string; pageKeys?: string[] },
-  currentPages: Set<string>
-) {
-  if (session.pageKeys?.length) return session.pageKeys.map(page => evidencePageKey(page)).filter(Boolean);
-  const start = evidencePageKey(session.startUrl);
-  return start && currentPages.has(start) ? [start] : [];
-}
-
 export function reviewSessionIds(
   sessions: Array<{ id: string; startUrl?: string; pageKeys?: string[] }>,
   currentId: string,
-  sessionEvents: EvidenceEvent[] = []
+  _sessionEvents: EvidenceEvent[] = []
 ) {
-  const current = sessions.find(item => item.id === currentId);
-  const currentPages = new Set(sessionBusinessPageKeys(sessionEvents, current?.startUrl));
-  const ids = new Set<string>(currentId ? [currentId] : []);
-  for (const session of sessions) {
-    if (session.id === currentId) continue;
-    if (otherSessionPageKeys(session, currentPages).some(page => currentPages.has(page))) ids.add(session.id);
-  }
-  return ids;
+  void sessions;
+  return new Set<string>(currentId ? [currentId] : []);
 }
 
 export function isPrimaryCapability(capability: CapabilityContract, catalog: CapabilityContract[] = []) {
@@ -275,27 +260,16 @@ export function evidencePageKey(url?: string) {
 
 export function capabilitiesForSession(
   catalog: CapabilityContract[],
-  allEvents: EvidenceEvent[],
+  _allEvents: EvidenceEvent[],
   sessionEvents: EvidenceEvent[]
 ) {
   if (!sessionEvents.length) return [];
-  const sessionIds = new Set(sessionEvents.map(event => event.id));
-  const pages = new Set(sessionEvents.map(event => evidencePageKey(event.pageUrl)).filter(Boolean));
-  const eventPage = new Map(
-    allEvents
-      .filter(event => event.pageUrl)
-      .map(event => [event.id, evidencePageKey(event.pageUrl)])
-  );
-  const scoped = catalog.filter(capability => {
+  const eventIds = new Set(sessionEvents.map(event => event.id));
+  const recordingIds = new Set(sessionEvents.map(event => event.sessionId).filter(Boolean));
+  return catalog.filter(capability => {
     if (isNoiseCapability(capability)) return false;
-    if (capability.evidence.some(ref => sessionIds.has(ref.eventId))) return true;
-    if (!WRITE_OPERATIONS.has(capability.operation)) return false;
-    return capability.evidence.some(ref => {
-      const page = eventPage.get(ref.eventId);
-      return Boolean(page && pages.has(page));
-    });
+    return capability.evidence.some(ref => eventIds.has(ref.eventId) || recordingIds.has(ref.sessionId));
   });
-  return scoped;
 }
 
 function referencedCapabilityIds(capabilities: CapabilityContract[]) {

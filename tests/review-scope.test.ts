@@ -79,7 +79,7 @@ test("review session ids stay on the current page and skip other-page history", 
     { id: "order-old", startUrl: ORDER_PAGE }
   ], "order-now", orderEvents());
   assert.equal(ids.has("order-now"), true);
-  assert.equal(ids.has("order-old"), true);
+  assert.equal(ids.has("order-old"), false);
   assert.equal(ids.has("leave-old"), false);
 });
 

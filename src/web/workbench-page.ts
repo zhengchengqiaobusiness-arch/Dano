@@ -33,6 +33,7 @@ export class WorkbenchPage {
   mode: BrowserMode = "automatic";
   readonly clients = new Set<ServerResponse>();
   lastSeen = Date.now();
+  lastRecordingSessionId?: string;
   preferredViewport?: { width: number; height: number; scale?: number };
   private readonly sharedProfileDir: string;
   private readonly pageProfileDir: string;
@@ -130,6 +131,7 @@ export class WorkbenchPage {
     const size = viewport || this.preferredViewport;
     if (size) this.preferredViewport = normalizePreviewViewport(size);
     const session = await this.recorder.start(url, name || "web-session", this.preferredViewport);
+    this.lastRecordingSessionId = session.id;
     this.onLog("PROCESS", formatProcessLog("OPEN", "playwright-browser", { pid: this.recorder.browserProcessId(), page: this.id }));
     return session;
   }
@@ -144,6 +146,7 @@ export class WorkbenchPage {
   async stopRecording() {
     const pid = this.recorder.browserProcessId();
     const session = await this.recorder.stop();
+    if (session?.id) this.lastRecordingSessionId = session.id;
     this.onLog("PROCESS", formatProcessLog("CLOSE", "playwright-browser", { pid, page: this.id, reason: "stop-recording" }));
     await this.rememberLogin();
     return session;

@@ -27,6 +27,14 @@ test("manual page fills are appended to the session log", () => {
   assert.equal(event.item.phase, "complete");
 });
 
+test("manual page clicks are appended to the session log", () => {
+  const transcript = new PiTranscript(value => value);
+  const event = transcript.addManual({ eventType: "click", label: "高级筛选", text: "高级筛选" });
+  assert.equal(event.item.kind, "tool");
+  assert.equal(event.item.toolName, "manual_page_click");
+  assert.equal(event.item.phase, "complete");
+});
+
 test("clearing the transcript empties the workbench session", () => {
   const transcript = new PiTranscript(value => value);
   transcript.addUser("上次录制");

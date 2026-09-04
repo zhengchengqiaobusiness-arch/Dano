@@ -121,8 +121,8 @@ test("portal startUrl does not pull another menu's recording into this page's re
     { id: "purchase-keyed", startUrl: PORTAL, pageKeys: [ORDER_PAGE] }
   ], "leave-now", currentEvents);
   assert.equal(ids.has("leave-now"), true);
-  assert.equal(ids.has("leave-old-direct"), true);
-  assert.equal(ids.has("leave-old-portal"), true);
+  assert.equal(ids.has("leave-old-direct"), false);
+  assert.equal(ids.has("leave-old-portal"), false);
   assert.equal(ids.has("purchase-old"), false);
   assert.equal(ids.has("purchase-keyed"), false);
   assert.deepEqual(sessionBusinessPageKeys(currentEvents, PORTAL), [LEAVE_PAGE]);
@@ -241,7 +241,7 @@ test("finalize on export verifies this page's candidate without unverifying a lo
   assert.equal(kept.inputForm[0]?.sourceDetail, "采购页");
 });
 
-test("review and export follow persisted analyzed session after a process restart", async () => {
+test("review after restart uses the latest recording, not a leftover analyzed page", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "pipeline-persist-"));
   const recordingsDir = path.join(temporary, "recordings");
   const catalogDir = path.join(temporary, "catalog");
@@ -280,8 +280,8 @@ test("review and export follow persisted analyzed session after a process restar
   await first.analyze("leave", false);
   const restarted = studioOf(temporary, recordingsDir, catalogDir);
   const { capabilities } = await restarted.review();
-  assert.equal(capabilities.some(item => item.transport.pathTemplate.includes("duty-leave")), true);
-  assert.equal(capabilities.some(item => item.transport.pathTemplate.includes("purchase-order")), false);
+  assert.equal(capabilities.some(item => item.transport.pathTemplate.includes("duty-leave")), false);
+  assert.equal(capabilities.some(item => item.transport.pathTemplate.includes("purchase-order")), true);
   await rm(temporary, { recursive: true, force: true });
 });
 

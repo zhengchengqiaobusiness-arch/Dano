@@ -30,12 +30,13 @@ export class PiTranscript {
     return { type: "session_item", item };
   }
 
-  addManual(observation: { eventType?: string; label?: string; name?: string; value?: unknown; selector?: string }) {
+  addManual(observation: { eventType?: string; label?: string; name?: string; text?: string; value?: unknown; selector?: string }) {
+    const clicked = observation.eventType === "click" || observation.eventType === "submit";
     const item: TranscriptItem = {
       id: this.nextId("manual"),
       kind: "tool",
       toolCallId: this.nextId("manual-call"),
-      toolName: "manual_page_input",
+      toolName: clicked ? "manual_page_click" : "manual_page_input",
       args: observation,
       result: { recorded: true },
       at: new Date().toISOString(),

@@ -48,6 +48,8 @@ function pageHeaders(extra = {}) {
   return { "Content-Type": "application/json", "X-Bss-Page-Session": pageSessionId(), ...extra };
 }
 
+let pendingPrompt = "";
+
 const state = {
   view: "recording", browserActive: false, browserMode: "automatic", agentReady: false, agentStreaming: false, agentAborting: false,
   currentUiRequest: null, localConfirmation: null, invokeSkill: null,
@@ -117,7 +119,8 @@ function toolLabel(name) {
     business_browser_control: "操作内置浏览器", business_skill_analyze: "识别业务能力",
     business_skill_validate: "验证能力", business_skill_plan: "规划路线", business_skill_execute: "执行业务能力",
     business_skill_approve_binding: "确认数据绑定", business_skill_export: "导出 Python Skill",
-    manual_page_input: "手动填写" })[name] || name;
+    manual_page_input: "手动填写",
+    manual_page_click: "手动点击" })[name] || name;
 }
 
 function dataText(value) {
@@ -260,6 +263,11 @@ function updateAgentStatus(ready, streaming) {
   state.agentReady = Boolean(ready); state.agentStreaming = Boolean(streaming);
   if (!state.agentStreaming) state.agentAborting = false;
   renderAgentControls();
+  if (state.agentReady && pendingPrompt) {
+    const queued = pendingPrompt;
+    pendingPrompt = "";
+    void submitPrompt(queued);
+  }
 }
 
 function renderBrowserMode() {
@@ -421,9 +429,26 @@ async function completeRecording() {
   }
 }
 
+function manualFeedback(command, result) {
+  if (command.action === "scroll") return;
+  const observed = result?.observed || {};
+  const label = observed.label || observed.text || observed.name || "";
+  if (command.action === "click") {
+    showToast(label ? `已记录点击：${label}` : "已记录点击，并加入当前录制");
+    return;
+  }
+  if (command.action === "text") {
+    showToast(label ? `已记录填写：${label}` : "已记录手动输入");
+    return;
+  }
+  if (command.action === "key") showToast(label ? `已记录按键：${label}` : "已记录按键");
+}
+
 async function manualCommand(command) {
   if (!state.browserActive) return;
-  await api("/api/browser/manual", { method: "POST", body: JSON.stringify(command) });
+  const result = await api("/api/browser/manual", { method: "POST", body: JSON.stringify(command) });
+  state.sessionLive = true;
+  manualFeedback(command, result);
   for (const timer of state.manualRefreshTimers) clearTimeout(timer);
   state.manualRefreshTimers = [];
   void refreshBrowserFrame(true);
@@ -465,16 +490,39 @@ function browserCoordinates(event) {
   };
 }
 
+function composePrompt(raw) {
+  const text = String(raw || "").replace(/(https?:\/\/[^\s\u4e00-\u9fff]+)(?=[\u4e00-\u9fff])/g, "$1\n").trim();
+  if (!text) return "";
+  const url = (elements.browserUrl?.value || "").trim();
+  if (url && !/https?:\/\/|当前业务系统地址/.test(text)) return `当前业务系统地址：${url}\n${text}`;
+  return text;
+}
+
 async function submitPrompt(message) {
-  const text = message.trim();
-  if (!text || !state.agentReady) return;
+  const text = composePrompt(message);
+  if (!text) return;
   elements.prompt.value = "";
+  if (!state.agentReady) {
+    pendingPrompt = text;
+    showToast("Pi 还在启动，消息将在就绪后发送");
+    return;
+  }
   state.sessionLive = true;
   state.sessionFollow = true;
   followSessionIfWanted();
   updateAgentStatus(true, true);
   try { await api("/api/chat", { method: "POST", body: JSON.stringify({ message: text }) }); }
   catch (error) { updateAgentStatus(state.agentReady, state.agentStreaming); showToast(error.message); }
+}
+
+function notifyPageLeave() {
+  const id = pageSessionId();
+  const url = `/api/session/leave?pageSession=${encodeURIComponent(id)}`;
+  try {
+    const body = new Blob([JSON.stringify({ pageSession: id })], { type: "application/json" });
+    if (navigator.sendBeacon(url, body)) return;
+  } catch { /* fall through */ }
+  void fetch(url, { method: "POST", headers: pageHeaders(), body: "{}", keepalive: true }).catch(() => {});
 }
 
 async function abortAgent() {
@@ -487,16 +535,6 @@ async function abortAgent() {
   } catch (error) {
     state.agentAborting = false; renderAgentControls(); showToast(error.message);
   }
-}
-
-function notifyPageLeave() {
-  const id = pageSessionId();
-  const url = `/api/session/leave?pageSession=${encodeURIComponent(id)}`;
-  try {
-    const body = new Blob([JSON.stringify({ pageSession: id })], { type: "application/json" });
-    if (navigator.sendBeacon(url, body)) return;
-  } catch { /* fall through */ }
-  void fetch(url, { method: "POST", headers: pageHeaders(), body: "{}", keepalive: true }).catch(() => {});
 }
 
 function resetConfirmation() {
@@ -705,12 +743,16 @@ function connectEvents() {
       return;
     }
     if (event.epoch != null && event.epoch !== state.sessionEpoch) return;
-    if ((event.type === "session_item" || event.type === "session_patch" || event.type === "session_replace" || event.type === "ui_request") && !state.sessionLive) return;
+    const manualItem = event.item && (event.item.role === "user" || String(event.item.toolName || "").startsWith("manual_page"));
+    if ((event.type === "session_item" || event.type === "session_patch" || event.type === "session_replace" || event.type === "ui_request") && !state.sessionLive && !manualItem) return;
     if (event.type === "session_item") renderSessionItem(event.item);
     if (event.type === "session_patch") patchSessionItem(event);
     if (event.type === "session_replace") renderSessionItem(event.item);
     if (event.type === "ui_request") showUiRequest(event);
-    if (event.type === "browser_changed") void pollBrowser(true).then(() => rememberPaneViewport());
+    if (event.type === "browser_changed") void pollBrowser(true).then(() => {
+      rememberPaneViewport();
+      if (state.browserActive) state.sessionLive = true;
+    });
     if (event.type === "browser_mode") { state.browserMode = event.mode; renderBrowserMode(); }
     if (event.type === "skills_changed" && state.view === "skills") void loadSkills();
     if (event.type === "studio_shutdown") showToast("Studio 服务已停止，页面保留");
@@ -736,7 +778,11 @@ elements.composer.addEventListener("submit", event => {
 });
 if (elements.abortPrompt) elements.abortPrompt.addEventListener("click", () => void abortAgent());
 elements.prompt.addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); elements.composer.requestSubmit(); } });
-document.querySelectorAll("[data-prompt]").forEach(button => button.addEventListener("click", () => void submitPrompt(button.dataset.prompt || "")));
+document.querySelectorAll("[data-prompt]").forEach(button => button.addEventListener("click", () => {
+  const typed = elements.prompt.value.trim();
+  const hint = button.dataset.prompt || "";
+  void submitPrompt(typed ? `${typed}\n${hint}` : hint);
+}));
 elements.confirmationCancel.addEventListener("click", () => void closeConfirmation(false)); elements.confirmationApprove.addEventListener("click", () => void closeConfirmation(true));
 elements.exportForm.addEventListener("submit", event => { event.preventDefault(); void exportSkill(elements.skillName.value.trim()).catch(error => showToast(error.message)); });
 elements.skillsSortTime?.addEventListener("click", () => {

@@ -225,7 +225,12 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
   if (request.method === "POST" && pathname === "/api/skills/export") {
     const body = await readJsonBody(request);
     if (typeof body.name !== "string" || !body.name.trim()) throw new Error("请输入 Skill 名称");
-    const record = await studio.exportManaged(body.name, body.confirmed === true);
+    const pageId = pageSessionIdFrom(request);
+    const workbench = isPageSessionId(pageId) ? pages.get(pageId) : undefined;
+    const sessionId = typeof body.sessionId === "string" && body.sessionId.trim()
+      ? body.sessionId.trim()
+      : workbench?.lastRecordingSessionId;
+    const record = await studio.exportManaged(body.name, body.confirmed === true, sessionId);
     sendJson(response, 200, record);
     broadcastAll({ type: "skills_changed" });
     return;
@@ -282,15 +287,17 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
 
   if (request.method === "POST" && pathname === "/api/browser/manual") {
     const page = requirePage(request);
-    const result = await page.recorder.manualControl(await readJsonBody(request)) as { observed?: { eventType?: string; label?: string; name?: string; value?: unknown; selector?: string } };
-    if (result.observed && (result.observed.eventType === "input" || result.observed.eventType === "change" || result.observed.label || result.observed.value !== undefined)) {
-      const label = result.observed.label || result.observed.name || "页面字段";
-      runtimeLog("BROWSER", `Manual ${result.observed.eventType || "action"}: ${label}=${String(result.observed.value ?? "")}`);
-      if (page.transcriptOpen && (result.observed.eventType === "input" || result.observed.eventType === "change")) {
-        page.broadcastSession(page.transcript.addManual(result.observed));
-      }
+    const body = await readJsonBody(request);
+    const result = await page.recorder.manualControl(body) as { observed?: { eventType?: string; label?: string; name?: string; text?: string; value?: unknown; selector?: string } };
+    const observed = result.observed || (body.action === "click"
+      ? { eventType: "click", label: "页面", value: `${body.x},${body.y}` }
+      : undefined);
+    if (observed && body.action !== "scroll") {
+      const label = observed.label || observed.text || observed.name || (body.action === "click" ? "页面" : "页面字段");
+      runtimeLog("BROWSER", `Manual ${observed.eventType || body.action || "action"}: ${label}=${String(observed.value ?? "")}`);
+      if (page.transcriptOpen) page.broadcastSession(page.transcript.addManual(observed));
     }
-    sendJson(response, 200, result);
+    sendJson(response, 200, { ...result, observed, recorded: Boolean(observed && body.action !== "scroll") });
     return;
   }
 

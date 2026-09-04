@@ -33,10 +33,11 @@ export function resourceSlugFromPath(pathTemplate: string) {
 export function normalizeSkillName(value: string, capabilities: CapabilityContract[] = []) {
   const ascii = value.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
   if (ascii) return ascii;
+  const digest = createHash("sha256").update(value.trim() || "skill").digest("hex").slice(0, 8);
   const primary = capabilities.filter(item => isPrimaryCapability(item, capabilities));
-  const named = primary.find(item => ["create", "update", "review", "delete", "upload"].includes(item.operation)) || primary[0] || capabilities[0];
-  const fromPath = resourceSlugFromPath(named?.transport.pathTemplate || "");
-  return fromPath || `business-skill-${createHash("sha256").update(value).digest("hex").slice(0, 8)}`;
+  const resources = [...new Set(primary.map(item => resourceSlugFromPath(item.transport.pathTemplate || "")).filter(Boolean))];
+  if (resources.length === 1) return resources[0]!;
+  return `skill-${digest}`;
 }
 
 export function uniqueSkillExportName(slug: string) {

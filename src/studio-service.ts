@@ -137,9 +137,6 @@ export class StudioService {
   private async resolveSessionId(sessionId?: string, sessions?: RecordingSession[]) {
     const list = sessions || await this.listSessions();
     if (sessionId && list.some(item => item.id === sessionId)) return sessionId;
-    const state = await this.studioState();
-    const remembered = this.lastAnalyzedSessionId || state.lastAnalyzedSessionId;
-    if (remembered && list.some(item => item.id === remembered)) return remembered;
     return list[0]?.id;
   }
 

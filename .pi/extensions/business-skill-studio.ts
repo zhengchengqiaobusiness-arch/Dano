@@ -21,6 +21,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   }
 
   const studio = new StudioService();
+  let lastRecordingSessionId: string | undefined;
   const browserServiceUrl = process.env.BSS_BROWSER_SERVICE_URL?.replace(/\/+$/, "");
   const browserServiceToken = process.env.BSS_BROWSER_SERVICE_TOKEN;
 
@@ -63,6 +64,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
     }, ["url"]),
     async execute(_toolCallId, params: any) {
       const session = await startBrowser(params.url, params.name);
+      if (session?.id) lastRecordingSessionId = session.id;
       return {
         content: [{ type: "text", text: `Recording started: ${session.id}. The live page is visible in the Studio browser panel.` }],
         details: session
@@ -77,6 +79,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
     parameters: parameters({}),
     async execute() {
       const session = await stopBrowser();
+      if (session?.id) lastRecordingSessionId = session.id;
       return {
         content: [{ type: "text", text: session.manualStepsFile
           ? `Recording saved: ${session.id}. Manual steps: ${session.manualStepsFile}`
@@ -116,7 +119,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       noLlm: { type: "boolean" }
     }),
     async execute(_id, params: any) {
-      const caps = await studio.analyze(params.sessionId, !params.noLlm);
+      const caps = await studio.analyze(params.sessionId || lastRecordingSessionId, !params.noLlm);
       const summary = summarizeCatalog(caps);
       const primaryTitles = summary.primary.map(item => item.title).join("、") || "无";
       return {
@@ -137,7 +140,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       sessionId: { type: "string" }
     }),
     async execute(_id, params: any) {
-      const { capabilities, review } = await studio.review(params.sessionId);
+      const { capabilities, review } = await studio.review(params.sessionId || lastRecordingSessionId);
       return {
         content: [{
           type: "text",
@@ -252,7 +255,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       sessionId: { type: "string" }
     }, ["name"]),
     async execute(_id, params: any) {
-      const result = await studio.exportManaged(params.name, true, params.sessionId);
+      const result = await studio.exportManaged(params.name, true, params.sessionId || lastRecordingSessionId);
       return {
         content: [{
           type: "text",

@@ -117,11 +117,18 @@ export class PiRpcBridge {
   async prompt(message: string) {
     if (!this.ready) throw new Error("Pi is still starting");
     this.suppressEvents = false;
-    return this.request({
-      type: "prompt",
-      message,
-      ...(this.streaming ? { streamingBehavior: "followUp" } : {})
-    });
+    const command: Record<string, unknown> = { type: "prompt", message };
+    if (this.streaming) command.streamingBehavior = "steer";
+    this.streaming = true;
+    try {
+      return await this.request(command);
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      if (/stream/i.test(text)) {
+        return await this.request({ type: "prompt", message, streamingBehavior: "steer" });
+      }
+      throw error;
+    }
   }
 
   async abort() {
