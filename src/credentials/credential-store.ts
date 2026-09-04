@@ -22,6 +22,7 @@ interface SkillCredentialProfile {
 const AUTH_CONTEXT_HEADER = /^(?:x-)?(?:tenant|organization|org)-?id$/i;
 const NON_RUNTIME_HEADER = /^(?:proxy-authorization|set-cookie)$/i;
 const writeQueues = new Map<string, Promise<void>>();
+const originProfileCache = new Map<string, OriginCredentialProfile | undefined>();
 
 function isCredentialHeader(name: string) {
   return !NON_RUNTIME_HEADER.test(name) && (isSecretBearingHeader(name) || AUTH_CONTEXT_HEADER.test(name));
@@ -74,19 +75,34 @@ async function serializedWrite(file: string, work: () => Promise<void>) {
   }
 }
 
+function equalHeaders(left: Record<string, string>, right: Record<string, string>) {
+  const leftEntries = Object.entries(left);
+  const rightEntries = Object.entries(right);
+  return leftEntries.length === rightEntries.length && leftEntries.every(([name, value]) => right[name] === value);
+}
+
 export async function persistOriginCredentials(dataDir: string, rawUrl: string, rawHeaders: Record<string, string>) {
   const headers = credentialHeaders(rawHeaders);
   if (!Object.keys(headers).length) return undefined;
   const origin = originOf(rawUrl);
   const file = originCredentialFile(dataDir, origin);
   await serializedWrite(file, async () => {
-    const previous = await readProfile<OriginCredentialProfile>(file);
-    await writePrivateJson(file, {
+    let previous: OriginCredentialProfile | undefined;
+    if (originProfileCache.has(file)) previous = originProfileCache.get(file);
+    else {
+      previous = await readProfile<OriginCredentialProfile>(file);
+      originProfileCache.set(file, previous);
+    }
+    const mergedHeaders = { ...(previous?.origin === origin ? previous.headers : {}), ...headers };
+    if (previous?.origin === origin && equalHeaders(previous.headers, mergedHeaders)) return;
+    const next = {
       version: 1,
       origin,
-      headers: { ...(previous?.origin === origin ? previous.headers : {}), ...headers },
+      headers: mergedHeaders,
       updatedAt: new Date().toISOString()
-    } satisfies OriginCredentialProfile);
+    } satisfies OriginCredentialProfile;
+    await writePrivateJson(file, next);
+    originProfileCache.set(file, next);
   });
   return file;
 }

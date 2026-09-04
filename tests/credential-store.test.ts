@@ -17,6 +17,26 @@ import type { CapabilityContract, EvidenceEvent } from "../src/domain.js";
 
 const execFileAsync = promisify(execFile);
 
+test("does not rewrite an unchanged origin credential on every request", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-skill-credential-cache-"));
+  try {
+    const file = await persistOriginCredentials(temporary, "https://erp.example.test/orders", {
+      authorization: "Bearer unchanged"
+    });
+    assert.ok(file);
+    const first = await readFile(file, "utf8");
+    await new Promise(resolve => setTimeout(resolve, 20));
+    for (let index = 0; index < 20; index += 1) {
+      await persistOriginCredentials(temporary, "https://erp.example.test/orders", {
+        authorization: "Bearer unchanged"
+      });
+    }
+    assert.equal(await readFile(file, "utf8"), first);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("extracts only authentication-related request headers", () => {
   assert.deepEqual(credentialHeaders({
     authorization: "Bearer session-token",
