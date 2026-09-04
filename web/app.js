@@ -60,7 +60,8 @@ const state = {
   manualQueue: Promise.resolve(), manualRefreshTimers: [], recordingAction: null, clearingSession: false,
   pollInFlight: false, frameLoading: false, frameBlobUrl: null, lastFrameAt: 0, frameEpoch: 0,
   lastStatusText: "", viewport: { width: 1440, height: 960 },
-  imeComposing: false, imeBuffer: "", imeTimer: null, viewportSyncTimer: null
+  imeComposing: false, imeBuffer: "", imeTimer: null, viewportSyncTimer: null,
+  previewDrag: null, previewPointerUsed: false
 };
 
 async function api(path, options = {}) {
@@ -133,6 +134,8 @@ function dataText(value) {
 
 function resetBrowserWorkbench() {
   state.browserActive = false;
+  state.previewDrag = null;
+  state.previewPointerUsed = false;
   state.recordingAction = null;
   state.pollInFlight = false;
   state.frameLoading = false;
@@ -469,6 +472,10 @@ function manualFeedback(command, result) {
   const label = observed.label || observed.text || observed.name || "";
   if (command.action === "click") {
     showToast(label ? `已记录点击：${label}` : "已记录点击，并加入当前录制");
+    return;
+  }
+  if (command.action === "drag") {
+    showToast(label ? `已记录滑动：${label}` : "已记录滑动，并加入当前录制");
     return;
   }
   if (command.action === "text") {
@@ -860,8 +867,69 @@ function focusBrowserIme(event) {
   elements.browserIme.focus();
 }
 
+function appendPreviewPoint(points, point) {
+  const last = points[points.length - 1];
+  if (last && last.x === point.x && last.y === point.y) return;
+  if (points.length >= 80) {
+    points[points.length - 1] = point;
+    return;
+  }
+  points.push(point);
+}
+
+function previewDragDistance(points) {
+  if (!points.length) return 0;
+  const first = points[0];
+  const last = points[points.length - 1];
+  return Math.hypot(last.x - first.x, last.y - first.y);
+}
+
+function startPreviewPointer(event) {
+  if (!state.browserActive || event.button !== 0) return;
+  const point = browserCoordinates(event);
+  if (!point) return;
+  event.preventDefault();
+  state.previewPointerUsed = true;
+  state.previewDrag = { pointerId: event.pointerId, points: [point] };
+  elements.browserFrame.setPointerCapture?.(event.pointerId);
+}
+
+function movePreviewPointer(event) {
+  const drag = state.previewDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  event.preventDefault();
+  const point = browserCoordinates(event);
+  if (point) appendPreviewPoint(drag.points, point);
+}
+
+function endPreviewPointer(event) {
+  const drag = state.previewDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  event.preventDefault();
+  state.previewDrag = null;
+  try { elements.browserFrame.releasePointerCapture?.(event.pointerId); } catch {}
+  const point = browserCoordinates(event);
+  if (point) appendPreviewPoint(drag.points, point);
+  flushImeText();
+  if (previewDragDistance(drag.points) < 4) {
+    focusBrowserIme(event);
+    enqueueManualCommand({ action: "click", ...drag.points[0] });
+    return;
+  }
+  enqueueManualCommand({ action: "drag", points: drag.points });
+}
+
+elements.browserFrame.addEventListener("pointerdown", startPreviewPointer);
+elements.browserFrame.addEventListener("pointermove", movePreviewPointer);
+elements.browserFrame.addEventListener("pointerup", endPreviewPointer);
+elements.browserFrame.addEventListener("pointercancel", endPreviewPointer);
 elements.browserFrame.addEventListener("click", event => {
   if (!state.browserActive) return;
+  if (state.previewPointerUsed) {
+    state.previewPointerUsed = false;
+    event.preventDefault();
+    return;
+  }
   const point = browserCoordinates(event); if (!point) return;
   flushImeText();
   focusBrowserIme(event);

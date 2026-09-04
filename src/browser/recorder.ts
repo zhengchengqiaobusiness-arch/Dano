@@ -938,6 +938,7 @@ export class BrowserRecorder {
 
   async manualControl(command:
     | { action: "click"; x: number; y: number; button?: "left" | "right" | "middle"; clickCount?: number }
+    | { action: "drag"; x?: number; y?: number; toX?: number; toY?: number; points?: Array<{ x: number; y: number }>; button?: "left" | "right" | "middle" }
     | { action: "text"; value: string }
     | { action: "key"; key: string }
     | { action: "scroll"; deltaX?: number; deltaY?: number }
@@ -945,34 +946,44 @@ export class BrowserRecorder {
     const result = await this.withAction(async () => {
       const page = this.currentPage();
       const known = new Set(this.livePages());
-      const watch = command.action === "click" || command.action === "key" ? this.watchNewPages() : undefined;
+      const watch = command.action === "click" || command.action === "drag" || command.action === "key" ? this.watchNewPages() : undefined;
       if (command.action === "click") {
-        const viewport = page.viewportSize();
-        if (!viewport || !Number.isFinite(command.x) || !Number.isFinite(command.y)) throw new Error("manual click requires finite x and y coordinates");
-        if (command.x < 0 || command.y < 0 || command.x > viewport.width || command.y > viewport.height) {
-          throw new Error("manual click coordinates are outside the embedded browser viewport");
-        }
-        await page.mouse.click(command.x, command.y, {
+        const point = this.manualViewportPoint(page, command.x, command.y, "click");
+        await page.mouse.click(point.x, point.y, {
           button: command.button || "left",
           clickCount: Math.max(1, Math.min(Number(command.clickCount) || 1, 2))
         });
+      } else if (command.action === "drag") {
+        const points = this.manualDragPoints(page, command);
+        await page.mouse.move(points[0]!.x, points[0]!.y);
+        await page.mouse.down({ button: command.button || "left" });
+        if (points.length === 2) {
+          await page.mouse.move(points[1]!.x, points[1]!.y, { steps: 20 });
+        } else {
+          for (const point of points.slice(1)) {
+            await page.mouse.move(point.x, point.y, { steps: 1 });
+          }
+        }
+        await page.mouse.up({ button: command.button || "left" });
       } else if (command.action === "text") {
         if (typeof command.value !== "string" || command.value.length > 10_000) throw new Error("manual text requires a string no longer than 10000 characters");
         await page.keyboard.insertText(command.value);
       } else if (command.action === "key") {
         if (typeof command.key !== "string" || !command.key || command.key.length > 80) throw new Error("manual key requires a valid key name");
         await page.keyboard.press(command.key);
-      } else {
+      } else if (command.action === "scroll") {
         const deltaX = Math.max(-5_000, Math.min(Number(command.deltaX) || 0, 5_000));
         const deltaY = Math.max(-5_000, Math.min(Number(command.deltaY) || 0, 5_000));
         await page.mouse.wheel(deltaX, deltaY);
+      } else {
+        throw new Error("manual control requires click, drag, text, key, or scroll");
       }
       const observed = command.action === "scroll"
         ? undefined
         : await this.captureActiveControl(command.action === "text" ? "input" : command.action === "key" ? "change" : "click", page);
       if (command.action !== "scroll") this.scheduleInventory();
       try {
-        if (command.action === "click" || command.action === "key") {
+        if (command.action === "click" || command.action === "drag" || command.action === "key") {
           await this.followAfterGesture(page, known, watch?.appeared || []);
         }
         const current = this.currentPage();
@@ -987,12 +998,26 @@ export class BrowserRecorder {
         watch?.stop();
       }
     });
-    if (command.action === "click" || command.action === "key") this.watchLayerPaint();
+    if (command.action === "click" || command.action === "drag" || command.action === "key") this.watchLayerPaint();
     return result;
   }
 
-  private actionKey(action: string, selector?: string) {
-    return `${action}:${selector || ""}`;
+  private manualViewportPoint(page: Page, x: number, y: number, label: string) {
+    const viewport = page.viewportSize();
+    if (!viewport || !Number.isFinite(x) || !Number.isFinite(y)) throw new Error(`manual ${label} requires finite x and y coordinates`);
+    if (x < 0 || y < 0 || x > viewport.width || y > viewport.height) {
+      throw new Error(`manual ${label} coordinates are outside the embedded browser viewport`);
+    }
+    return { x, y };
+  }
+
+  private manualDragPoints(page: Page, command: { x?: number; y?: number; toX?: number; toY?: number; points?: Array<{ x: number; y: number }> }) {
+    const raw = Array.isArray(command.points) && command.points.length
+      ? command.points
+      : [{ x: command.x, y: command.y }, { x: command.toX, y: command.toY }];
+    const points = raw.slice(0, 80).map(item => this.manualViewportPoint(page, Number(item?.x), Number(item?.y), "drag"));
+    if (points.length < 2) throw new Error("manual drag requires at least two points");
+    return points;
   }
 
   private resetActionGuard(formScopeKey?: string) {

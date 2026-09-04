@@ -9,6 +9,68 @@ import { SNAPSHOT_IN_PAGE } from "../src/browser/page-script.js";
 import { readJsonl } from "../src/utils.js";
 import type { EvidenceEvent } from "../src/domain.js";
 
+test("manual drag moves a hold-to-slide control that a click cannot finish", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-slider-drag-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body>
+      <div id="track" style="position:fixed;left:20px;top:200px;width:260px;height:40px;background:#ddd">
+        <div id="knob" style="position:absolute;left:0;top:0;width:40px;height:40px;background:#09f"></div>
+      </div>
+      <script>
+        const track = document.getElementById("track");
+        const knob = document.getElementById("knob");
+        let dragging = false;
+        knob.addEventListener("mousedown", () => { dragging = true; });
+        document.addEventListener("mousemove", event => {
+          if (!dragging) return;
+          const rect = track.getBoundingClientRect();
+          const x = Math.max(0, Math.min(rect.width - 40, event.clientX - rect.left - 20));
+          knob.style.left = x + "px";
+          document.title = "offset:" + Math.round(x);
+        });
+        document.addEventListener("mouseup", () => { dragging = false; });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "slider-drag");
+    await recorder.manualControl({ action: "click", x: 40, y: 220 });
+    const afterClick: any = await recorder.control({ action: "snapshot" });
+    const clickOffset = Number(String(afterClick.title || "").replace(/^offset:/, "") || 0);
+    assert.ok(clickOffset < 80, `click should not complete the slider, got ${afterClick.title}`);
+    await recorder.manualControl({
+      action: "drag",
+      points: [
+        { x: 40, y: 220 },
+        { x: 90, y: 220 },
+        { x: 140, y: 220 },
+        { x: 200, y: 220 }
+      ]
+    });
+    const afterDrag: any = await recorder.control({ action: "snapshot" });
+    const dragOffset = Number(String(afterDrag.title || "").replace(/^offset:/, ""));
+    assert.ok(dragOffset >= 120, `drag should move the slider across the track, got ${afterDrag.title}`);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("manual button clicks keep their own action label and do not synthesize field changes", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-button-evidence-"));
   const server = http.createServer((_request, response) => {

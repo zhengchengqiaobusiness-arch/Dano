@@ -142,6 +142,9 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
   ]);
   const manualCommand = app.match(/async function manualCommand[\s\S]*?\n\}/)?.[0] || "";
   const previewHandlers = [
+    app.match(/elements\.browserFrame\.addEventListener\("pointerdown"[\s\S]*?\n\}\);/)?.[0] || "",
+    app.match(/elements\.browserFrame\.addEventListener\("pointermove"[\s\S]*?\n\}\);/)?.[0] || "",
+    app.match(/elements\.browserFrame\.addEventListener\("pointerup"[\s\S]*?\n\}\);/)?.[0] || "",
     app.match(/elements\.browserFrame\.addEventListener\("click"[\s\S]*?\n\}\);/)?.[0] || "",
     app.match(/elements\.browserViewport\.addEventListener\("wheel"[\s\S]*?\n\}, \{ passive: false \}\);/)?.[0] || "",
     app.match(/elements\.browserViewport\.addEventListener\("keydown"[\s\S]*?\n\}\);/)?.[0] || ""
@@ -152,6 +155,10 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
   assert.match(manualCommand, /if \(!state\.browserActive\) return;/);
   assert.doesNotMatch(manualCommand, /browserMode !== "manual"/);
   assert.match(app, /flushImeText|action: "text"/);
+  assert.match(app, /action: "drag"/);
+  assert.match(app, /pointerdown|startPreviewPointer/);
+  assert.match(recorder, /action: "drag"/);
+  assert.match(css, /touch-action:\s*none/);
   assert.match(previewHandlers, /if \(!state\.browserActive\) return;/);
   assert.doesNotMatch(previewHandlers, /browserMode !== "manual"/);
   assert.doesNotMatch(userControlRoute, /请先切换到手动录制模式/);
