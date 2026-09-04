@@ -143,6 +143,58 @@ from dano.execution.page.request_identity import (
 )
 
 
+PRESERVE_RECORDED_UNKNOWN_POLICY = "preserve_recorded_literal"
+
+
+def apply_recorded_unknown_policy(spec: FlowSpec) -> FlowSpec:
+    """Keep unresolved fields as the exact values captured on the wire.
+
+    The policy is intentionally opt-in through ``spec.meta``. Page recording
+    uses it when model/Pi analysis is unavailable; other callers can continue to
+    inspect unresolved source evidence without having it rewritten.
+    """
+
+    if str((spec.meta or {}).get("unknown_source_policy") or "") != PRESERVE_RECORDED_UNKNOWN_POLICY:
+        return spec
+    for step in spec.steps or []:
+        for param in step.params or []:
+            if str(param.source_kind or "").strip().lower() not in {"", "unknown", "ambiguous"}:
+                continue
+            previous_source = dict(param.source or {})
+            previous_kind = str(previous_source.get("kind") or param.source_kind or "unknown")
+            param.category = "system_const"
+            param.source_kind = "constant"
+            param.source = {
+                **previous_source,
+                "kind": "recorded_literal",
+                "path": param.path,
+                "original_source_kind": previous_kind,
+                "preserve_recorded_value": True,
+            }
+            param.exposed_to_user = False
+            param.editable = False
+            param.locked = True
+            param.required = False
+            param.need_human_confirm = False
+            param.default_value = copy.deepcopy(param.value)
+            param.reason = "来源未识别，系统按录制请求中的原始值自动处理并原样保存"
+            if param.key:
+                step.sample_inputs.pop(param.key, None)
+    preserved = sum(
+        1
+        for step in spec.steps or []
+        for param in step.params or []
+        if param.source_kind == "constant"
+        and str((param.source or {}).get("kind") or "") == "recorded_literal"
+    )
+    spec.meta = {
+        **(spec.meta or {}),
+        "unknown_source_policy": PRESERVE_RECORDED_UNKNOWN_POLICY,
+        "preserved_unknown_field_count": preserved,
+    }
+    return spec
+
+
 def _request_fact_causal_scope(fact: Any) -> tuple[str, ...] | None:
     scope = (
         str(getattr(fact, "page_id", None) or ""),

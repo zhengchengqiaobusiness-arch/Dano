@@ -25,11 +25,18 @@ from dano.execution.page.flow_spec_core.models import (
     RequestUsage,
     SelectBinding,
 )
-from dano.execution.page.flow_spec_core.request_contract import _runtime_select_bindings
+from dano.execution.page.flow_spec_core.request_contract import (
+    _runtime_select_bindings,
+    flow_spec_to_api_request,
+)
 from dano.execution.page.flow_spec_core.request_contract import _compile_row_enrichment
 from dano.execution.page.flow_spec_core.request_contract import _compile_option_provider_link
 from dano.execution.page.flow_materialization.field_contracts.dynamic_array import (
     _materialize_dynamic_array_inputs,
+)
+from dano.execution.page.flow_materialization.builder import (
+    PRESERVE_RECORDED_UNKNOWN_POLICY,
+    apply_recorded_unknown_policy,
 )
 from dano.execution.page.recording_agent_contract import (
     apply_recording_agent_submission,
@@ -40,6 +47,12 @@ from dano.execution.page.recording_live import apply_recording_agent_edit
 from dano.onboarding.recording_gateway import (
     RecordingGatewaySession,
     RecordingSessionConfig,
+)
+from dano.onboarding.recording_workflow import (
+    PipelineContext,
+    PipelineSeed,
+    SelfHealingPipeline,
+    WorkflowStatus,
 )
 
 
@@ -2042,3 +2055,185 @@ def test_final_tail_model_failure_does_not_abort_freeze(monkeypatch) -> None:
 
     assert session._live_pending_reason == ""
     assert session._live_notebook is not None
+    assert session._pi_analysis_unavailable is True
+
+
+def test_successful_pi_analysis_keeps_normal_path_after_later_batch_failure(monkeypatch) -> None:
+    class Capture:
+        def captured_all_requests(self) -> list[dict]:
+            return [{"request_id": "req-create"}]
+
+        def recorded_page_events(self) -> list[dict]:
+            return []
+
+        def recorded_field_evidence(self) -> list[dict]:
+            return []
+
+        def recorded_page_enum_options(self) -> dict:
+            return {}
+
+    class Pi:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.flow_spec = FlowSpec(meta={
+                "capability_model": {
+                    "semantic_plan": _capability_plan("create_sale_order", "req-create"),
+                },
+            })
+
+        def bind_live_recording(self, *_args, **_kwargs) -> None:
+            return None
+
+        def current_flow_spec(self) -> FlowSpec:
+            return self.flow_spec.model_copy(deep=True)
+
+        async def notify_live_batch(self, _delta: dict) -> dict:
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("temporary model timeout")
+            return {}
+
+    pi = Pi()
+
+    async def pi_factory(_fresh: bool) -> Pi:
+        return pi
+
+    monkeypatch.setattr(recording_gateway, "emit_run_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(recording_gateway, "emit_run_exception", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(recording_gateway, "note_run_fact", lambda *_args, **_kwargs: None)
+    session = RecordingGatewaySession(
+        config=RecordingSessionConfig(
+            tenant="default",
+            subsystem="default",
+            recording_id="recording_" + "b" * 32,
+            action="record",
+            start_url="https://example.test/orders",
+        ),
+        send=None,
+        pi_factory=pi_factory,
+        publisher=None,  # type: ignore[arg-type]
+    )
+    session.capture = Capture()  # type: ignore[assignment]
+    session._live_pending_reason = "business_request"
+    asyncio.run(session._drain_live())
+    session._live_pending_reason = "final_request_tail"
+    asyncio.run(session._drain_live())
+
+    assert session._pi_analysis_succeeded is True
+    assert session._pi_analysis_unavailable is False
+
+
+def test_pi_unavailable_unknown_fields_preserve_exact_recorded_values() -> None:
+    recorded_values = {
+        "enabled": False,
+        "count": 0,
+        "note": "",
+        "items": [1, 2],
+    }
+    params = [
+        ParamField(
+            path=path,
+            key=path,
+            value=value,
+            source_kind="unknown",
+            source={"kind": "unknown"},
+        )
+        for path, value in recorded_values.items()
+    ]
+    params.append(ParamField(
+        path="path.2",
+        key="order_id",
+        value="17",
+        source_kind="ambiguous",
+        source={"kind": "ambiguous"},
+    ))
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="save-order",
+            method="POST",
+            url="https://example.test/orders/17",
+            path="/orders/17",
+            body_source='{"enabled":false,"count":0,"note":"","items":[1,2]}',
+            body_template=recorded_values,
+            params=params,
+            sample_inputs={**recorded_values, "order_id": "17"},
+        )],
+        meta={"stage_1_6_contract_version": 2},
+    )
+    for index, param in enumerate(spec.steps[0].params):
+        param.category = "runtime_var"
+        param.source_kind = "ambiguous" if index == len(spec.steps[0].params) - 1 else "unknown"
+        param.source = {"kind": param.source_kind}
+        param.exposed_to_user = False
+        param.editable = False
+        param.locked = False
+    spec.meta = {
+        **spec.meta,
+        "unknown_source_policy": PRESERVE_RECORDED_UNKNOWN_POLICY,
+    }
+
+    apply_recorded_unknown_policy(spec)
+
+    for param in spec.steps[0].params:
+        assert param.source_kind == "constant"
+        assert param.source["kind"] == "recorded_literal"
+        assert param.default_value == param.value
+        assert param.exposed_to_user is False
+        assert param.need_human_confirm is False
+        assert param.locked is True
+    api_request, errors = flow_spec_to_api_request(spec)
+    assert errors == []
+    assert api_request is not None
+    assert api_request["url"] == "https://example.test/orders/17"
+    assert "url_template" not in api_request
+    assert api_request["body_template"] == recorded_values
+    assert api_request["params"] == []
+    assert api_request["sample_inputs"] == {}
+
+
+def test_pi_unavailable_skips_requested_verification_after_saving() -> None:
+    progress: list[str] = []
+    persisted: list[dict] = []
+
+    class Runtime:
+        async def prepare(self, _seed, _context):  # noqa: ANN001, ANN202
+            return {
+                "meta": {"pi_analysis_available": False},
+                "capabilities": [{"name": "save_order"}],
+            }
+
+        async def check(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+            raise AssertionError("PI verification must not run while PI is unavailable")
+
+        async def repair(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+            raise AssertionError("PI repair must not run while PI is unavailable")
+
+        async def publish(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+            raise AssertionError("publish must not run while PI is unavailable")
+
+    async def record_progress(_step, label, _round):  # noqa: ANN001, ANN202
+        progress.append(label)
+
+    async def ask_operator(_question):  # noqa: ANN001, ANN202
+        raise AssertionError("operator input must not be requested")
+
+    async def persist(draft):  # noqa: ANN001, ANN202
+        persisted.append(draft)
+
+    context = PipelineContext(
+        progress=record_progress,
+        ask_operator=ask_operator,
+        cancelled=lambda: False,
+        persist_stage_six=persist,
+    )
+
+    outcome = asyncio.run(SelfHealingPipeline(Runtime()).run(
+        PipelineSeed(kind="recording", machine_verification=True),
+        context,
+    ))
+
+    assert outcome.status == WorkflowStatus.EDITABLE
+    assert outcome.error == ""
+    assert len(persisted) == 1
+    assert context.machine_verification is False
+    assert progress[-1] == "PI 不可用，录制结果已保存；未识别字段已保留录制原值"

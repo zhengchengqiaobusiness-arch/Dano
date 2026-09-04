@@ -340,6 +340,7 @@ function paramSourceLabel(param: FlowParam) {
   }
   if (param.source_kind === "constant") {
     const kind = safeString(source.kind);
+    if (kind === "recorded_literal") return "系统自动处理（保留原值）";
     if (kind === "recorded_control_default") return "页面只读默认值";
     if (kind === "empty_field") return "未知";
     if (["option_query_filter", "query_constant", "recorded_command_state"].includes(kind)) {
@@ -351,6 +352,7 @@ function paramSourceLabel(param: FlowParam) {
 
 function constantValueCaption(param: FlowParam) {
   const kind = safeString(asRecord(param.source).kind);
+  if (kind === "recorded_literal") return "录制原值";
   if (kind === "recorded_control_default") return "录制页面默认值";
   if (kind === "empty_field") return "接口空值";
   return "固定值";

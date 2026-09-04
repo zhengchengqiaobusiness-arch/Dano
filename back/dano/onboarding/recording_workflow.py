@@ -309,15 +309,22 @@ class SelfHealingPipeline:
             await context.progress(WorkflowStep.MATERIALIZING, "正在生成权威事实草稿", 0)
         draft = await self._bounded(self.runtime.prepare(seed, context))
         context.remember_draft(draft)
+        pi_unavailable = bool(
+            seed.kind == "recording"
+            and isinstance(draft.get("meta"), dict)
+            and draft["meta"].get("pi_analysis_available") is False
+        )
+        machine_verification = seed.machine_verification and not pi_unavailable
+        context.machine_verification = machine_verification
         if seed.kind == "recording" and context.persist_stage_six is not None:
             await context.persist_stage_six(draft)
-            if seed.machine_verification:
+            if machine_verification:
                 await context.progress(
                     WorkflowStep.VERIFYING,
                     "第 1～6 阶段已完成，开始机器验证",
                     0,
                 )
-        if not seed.machine_verification:
+        if not machine_verification:
             if not list(draft.get("capabilities") or []):
                 return PipelineOutcome(
                     status=WorkflowStatus.EDITABLE,
@@ -333,7 +340,11 @@ class SelfHealingPipeline:
             )
             await context.progress(
                 WorkflowStep.READY,
-                "第 1～6 阶段已完成，尚未机器验证，Skill 未产出",
+                (
+                    "PI 不可用，录制结果已保存；未识别字段已保留录制原值"
+                    if pi_unavailable
+                    else "第 1～6 阶段已完成，尚未机器验证，Skill 未产出"
+                ),
                 0,
             )
             return PipelineOutcome(
@@ -564,10 +575,15 @@ def _pipeline_complete_label(
     *,
     error: str = "",
 ) -> str:
-    del draft
     if status == WorkflowStatus.PUBLISHED:
         return "Skill 已导出"
     if status == WorkflowStatus.EDITABLE and not error:
+        if (
+            seed.kind == "recording"
+            and isinstance((draft or {}).get("meta"), dict)
+            and (draft or {})["meta"].get("pi_analysis_available") is False
+        ):
+            return "PI 不可用，录制结果已按原值保存"
         if seed.machine_verification:
             return "能力已验证，Skill 未产出"
         return "第 1～6 阶段已完成，Skill 未产出"

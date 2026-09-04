@@ -649,6 +649,12 @@ def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
                 cap.confirmation_hash = _capability_confirmation_hash(
                     current, cap, prepared=True,
                 )
+    if (current.meta or {}).get("unknown_source_policy"):
+        from dano.execution.page.flow_materialization.builder import (
+            apply_recorded_unknown_policy,
+        )
+
+        apply_recorded_unknown_policy(current)
     return current
 
 

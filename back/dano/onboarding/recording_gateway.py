@@ -19,6 +19,10 @@ from dano.execution.page.flow_spec import (
     flow_spec_fingerprint,
     to_flow_spec,
 )
+from dano.execution.page.flow_materialization.builder import (
+    PRESERVE_RECORDED_UNKNOWN_POLICY,
+    apply_recorded_unknown_policy,
+)
 from dano.execution.page.recorder import RecordSession
 from dano.execution.page.recording_field_identity import bind_field_evidence
 from dano.execution.page.recording_live import LiveNotebook
@@ -231,6 +235,8 @@ class RecordingGatewaySession:
     _last_live_count: int = field(default=0, init=False)
     _live_iteration: int = field(default=0, init=False)
     _live_failed_batches: set[tuple[str, int]] = field(default_factory=set, init=False)
+    _pi_analysis_succeeded: bool = field(default=False, init=False)
+    _pi_analysis_unavailable: bool = field(default=False, init=False)
     _live_notebook: LiveNotebook | None = field(default=None, init=False, repr=False)
     _capture_frozen: bool = field(default=False, init=False)
     _closed: bool = field(default=False, init=False)
@@ -547,9 +553,21 @@ class RecordingGatewaySession:
         )
         if use_live_notebook and self._live_notebook is not None:
             spec = self._live_notebook.apply_to(spec)
+        if self._pi_analysis_unavailable:
+            # Pi can be intentionally disconnected. In that case the captured
+            # wire request remains authoritative and unresolved fields become
+            # system-owned recorded literals instead of blocking persistence.
+            spec.meta = {
+                **(spec.meta or {}),
+                "pi_analysis_available": False,
+                "unknown_source_policy": PRESERVE_RECORDED_UNKNOWN_POLICY,
+            }
+            spec = apply_recorded_unknown_policy(spec)
         from dano.execution.page.capability_compiler import ensure_grounded_capability_output
 
         spec = ensure_grounded_capability_output(spec)
+        if self._pi_analysis_unavailable:
+            spec = apply_recorded_unknown_policy(spec)
         if not spec.capabilities:
             capability_model = dict((spec.meta or {}).get("capability_model") or {})
             plan = (
@@ -624,6 +642,7 @@ class RecordingGatewaySession:
         # threshold.  Drain that same queue once more with the same Skill.
         if (
             self.capture.captured_all_requests()
+            and not self._pi_analysis_unavailable
             and not self._live_plan_is_complete_for_freeze()
         ):
             # The final tail is a consolidation phase, not merely a count
@@ -815,7 +834,7 @@ class RecordingGatewaySession:
         await self._send({"type": "frame", **frame})
 
     def _schedule_live(self, reason: str) -> None:
-        if self._capture_frozen or self._closed:
+        if self._capture_frozen or self._closed or self._pi_analysis_unavailable:
             return
         priority = {
             "recording_started": 1,
@@ -871,6 +890,8 @@ class RecordingGatewaySession:
                     "reason": reason,
                     "since_seq": self._last_live_count,
                 })
+                self._pi_analysis_succeeded = True
+                self._pi_analysis_unavailable = False
                 if self.capture is None:
                     return
                 self._capture_live_notebook()
@@ -931,6 +952,8 @@ class RecordingGatewaySession:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - keep capture responsive
+                self._pi_analysis_unavailable = not self._pi_analysis_succeeded
+                self._live_pending_reason = ""
                 emit_run_exception(
                     "recording.batch.failed",
                     exc,

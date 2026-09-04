@@ -416,7 +416,10 @@ def _flow_step_query_template(
 def _flow_step_url_template(
     step: FlowStep,
 ) -> tuple[str, list[str], dict[str, Any], dict[str, str]]:
-    path_params = [param for param in step.params if param.path.startswith("path.")]
+    path_params = [
+        param for param in step.params
+        if param.path.startswith("path.") and _param_exposed_to_caller(param)
+    ]
     if not path_params:
         return "", [], {}, {}
     parsed = urlparse(step.url or step.path)
