@@ -9,13 +9,24 @@ const root = path.resolve(import.meta.dirname, "..");
 test("preview viewport follows the workbench pane without stretching past safe bounds", () => {
   assert.deepEqual(normalizePreviewViewport(), { width: 1440, height: 960, scale: 1 });
   assert.deepEqual(normalizePreviewViewport({ width: 1600, height: 900 }), { width: 1600, height: 900, scale: 1 });
-  assert.deepEqual(normalizePreviewViewport({ width: 1800, height: 720, scale: 1.5 }), { width: 1800, height: 720, scale: 1.5 });
+  assert.deepEqual(normalizePreviewViewport({ width: 1800, height: 720, scale: 1.5 }), { width: 1800, height: 720, scale: 1 });
   assert.deepEqual(normalizePreviewViewport({ width: 500, height: 400 }), { width: 500, height: 400, scale: 1 });
   assert.equal(normalizePreviewScale(1.25), 1.25);
   assert.equal(normalizePreviewScale(3), 2);
   const large = normalizePreviewViewport({ width: 5000, height: 4000 });
   assert.ok(large.width <= 3840 && large.height <= 2160);
   assert.ok(Math.abs(large.width / large.height - 5000 / 4000) < 0.02);
+});
+
+test("host pixel ratio must not zoom the recorded page", () => {
+  assert.deepEqual(
+    normalizePreviewViewport({ width: 1000, height: 600, scale: 1.25 }),
+    { width: 1000, height: 600, scale: 1 }
+  );
+  assert.deepEqual(
+    normalizePreviewViewport({ width: 1548, height: 988, scale: 2 }),
+    { width: 1548, height: 988, scale: 1 }
+  );
 });
 
 test("session auto-open and address-bar open share the same remembered pane size", async () => {
@@ -34,9 +45,11 @@ test("session auto-open and address-bar open share the same remembered pane size
   assert.match(viewportRoute, /rememberViewport/);
   assert.doesNotMatch(viewportRoute, /browser_changed/);
   assert.match(app, /function rememberPaneViewport\(/);
-  assert.match(app, /devicePixelRatio/);
+  assert.match(app, /scale:\s*1/);
+  assert.doesNotMatch(app, /devicePixelRatio/);
   assert.match(app, /browser_changed[\s\S]*rememberPaneViewport/);
   assert.match(recorder, /quality:\s*82/);
-  assert.match(recorder, /scale:\s*"device"/);
-  assert.match(recorder, /deviceScaleFactor:\s*size\.scale/);
+  assert.match(recorder, /scale:\s*"css"/);
+  assert.match(recorder, /deviceScaleFactor:\s*1/);
+  assert.doesNotMatch(recorder, /deviceScaleFactor:\s*size\.scale/);
 });

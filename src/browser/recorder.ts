@@ -32,7 +32,7 @@ export function normalizePreviewViewport(input?: { width?: number; height?: numb
     width = Math.max(1, Math.round(width * down));
     height = Math.max(1, Math.round(height * down));
   }
-  return { width, height, scale: normalizePreviewScale(input?.scale) };
+  return { width, height, scale: 1 };
 }
 
 const INSPECT_TARGET_IN_PAGE = new Function("el", String.raw`
@@ -168,7 +168,7 @@ export class BrowserRecorder {
     const buffer = await this.withTimeout<Buffer | undefined>(page.screenshot({
       type: "jpeg",
       quality: 82,
-      scale: "device",
+      scale: "css",
       fullPage: false,
       animations: "disabled",
       caret: "hide"
@@ -229,7 +229,7 @@ export class BrowserRecorder {
     const launchOptions = {
       headless: this.config.headless,
       viewport: { width: size.width, height: size.height },
-      deviceScaleFactor: size.scale,
+      deviceScaleFactor: 1,
       args: ["--disable-features=TranslateUI,IsolateOrigins,site-per-process", "--disable-background-timer-throttling", "--disable-site-isolation-trials"]
     };
     const context = await chromium.launchPersistentContext(this.config.profileDir, launchOptions).catch(error => {
@@ -288,7 +288,7 @@ export class BrowserRecorder {
     for (const page of this.livePages()) {
       const current = page.viewportSize();
       if (current?.width === size.width && current?.height === size.height) continue;
-      await page.setViewportSize(size);
+      await page.setViewportSize({ width: size.width, height: size.height });
     }
     this.lastPreview = undefined;
     return size;

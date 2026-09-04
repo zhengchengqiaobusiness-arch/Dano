@@ -378,8 +378,7 @@ function previewPaneSize() {
   const width = Math.round(box?.width || 0);
   const height = Math.round(box?.height || 0);
   if (width < 80 || height < 80) return null;
-  const scale = Math.min(2, Math.max(1, Number(window.devicePixelRatio) || 1));
-  return { width, height, scale };
+  return { width, height, scale: 1 };
 }
 
 function rememberPaneViewport() {
