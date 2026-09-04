@@ -3,19 +3,52 @@ import { unlink, writeFile } from "node:fs/promises";
 import { chromium, type BrowserContext, type Browser, type Request, type Response, type Page } from "playwright";
 import type { EvidenceEvent, NetworkEvidence, OperationKind, RecordingSession, UiEvidence } from "../domain.js";
 import type { StudioConfig } from "../config.js";
-import { appendJsonl, ensureDir, id, writeJson } from "../utils.js";
+import { appendJsonl, ensureDir, id, readJsonl, writeJson } from "../utils.js";
 import { parsePossiblyJson, redactHeaders, redactValue } from "../security/redact.js";
 import { UI_RECORDER_SCRIPT } from "./page-script.js";
 import { PageActions, type PageSnapshot } from "./page-actions.js";
 import { buildManualSteps, renderManualStepsMarkdown, type ManualStep } from "../record/manual-steps.js";
 import { killCommandLineMatches, killProcessTree } from "../process-lifecycle.js";
 import { persistOriginCredentials } from "../credentials/credential-store.js";
+import { buildCapabilityCandidates } from "../inference/build-candidates.js";
+import { summarizeCatalog } from "../inference/export-scope.js";
+import { businessFailureReason, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
 
 const FORM_ACTION_BUDGET = 3;
 const EXPECTABLE_OPERATIONS = new Set<OperationKind>(["query", "create", "update", "review", "delete", "upload", "download", "action"]);
 const LOGIN_BLOCKED_ACTIONS = new Set(["goto", "click", "fill", "select", "choose", "press", "exercise-form", "submit-form"]);
 const DEFAULT_VIEWPORT = { width: 1440, height: 960 };
 const MAX_PREVIEW_VIEWPORT = { width: 3840, height: 2160 };
+const OPERATION_LABEL: Partial<Record<OperationKind, string>> = {
+  query: "查询", create: "新增", update: "修改", review: "审核", delete: "删除",
+  upload: "上传", download: "导出/下载", action: "业务动作"
+};
+
+export function recordingStopReadiness(events: EvidenceEvent[], expectedOperations: OperationKind[] = []) {
+  const byId = new Map(events.map(event => [event.id, event]));
+  const candidates = buildCapabilityCandidates(events);
+  const primary = summarizeCatalog(candidates).primary;
+  const successfulOperations = new Set(primary.filter(capability => capability.evidence.some(ref => {
+    const event = byId.get(ref.eventId);
+    return event?.kind === "network" && isSuccessfulNetworkEvidence(event);
+  })).map(capability => capability.operation));
+  const expected = [...new Set(expectedOperations)].filter(operation => EXPECTABLE_OPERATIONS.has(operation));
+  const missingOperations = expected.filter(operation => !successfulOperations.has(operation));
+  const failures = events.flatMap(event => {
+    if (event.kind !== "network" || isSuccessfulNetworkEvidence(event)) return [];
+    const reason = businessFailureReason(event);
+    return reason ? [{ url: event.request.url, reason }] : [];
+  });
+  return {
+    ready: missingOperations.length === 0,
+    expectedOperations: expected,
+    successfulOperations: [...successfulOperations],
+    missingOperations,
+    message: missingOperations.length
+      ? `录制尚未完成：${missingOperations.map(operation => OPERATION_LABEL[operation] || operation).join("、")}没有取得业务成功响应。继续当前浏览器会话，修复后再结束录制。${failures.length ? ` 最近的业务失败：${failures.at(-1)!.reason}` : ""}`
+      : "要求的操作均已取得业务成功响应，可以结束录制。"
+  };
+}
 
 async function releaseChromiumDebugLog(profileDir: string, timeoutMs = 2_000) {
   const file = path.join(profileDir, "Default", "chrome_debug.log");
@@ -1098,6 +1131,14 @@ export class BrowserRecorder {
     this.resetActionGuard();
   }
 
+  async stopReadiness() {
+    const active = this.active;
+    if (!active) return { ready: true, expectedOperations: [], successfulOperations: [], missingOperations: [], message: "当前没有活动录制。" };
+    await this.drainNetwork(300);
+    const events = await readJsonl<EvidenceEvent>(active.eventsFile);
+    return recordingStopReadiness(events, active.session.expectedOperations || []);
+  }
+
   private stopBecauseStuck(reason: string) {
     if (this.active) this.active.guard.followManualSteps = true;
     return {
@@ -1137,13 +1178,18 @@ export class BrowserRecorder {
   private async guardedFormAction(action: "exercise-form" | "submit-form", work: () => Promise<{ ok?: boolean }>) {
     await this.ensureFormScope();
     try {
-      const result = await work();
-      if (result.ok) {
-        this.resetFailureStreak();
-        return { ...result, followManualSteps: false };
+      for (let automaticAttempts = 1; automaticAttempts <= FORM_ACTION_BUDGET; automaticAttempts += 1) {
+        const result = await work() as { ok?: boolean; retryReady?: boolean; businessFailure?: string };
+        if (result.ok) {
+          this.resetFailureStreak();
+          return { ...result, automaticAttempts, followManualSteps: false };
+        }
+        const stopped = this.recordFailure(action, result.businessFailure);
+        if (stopped) return { ...result, automaticAttempts, ...stopped };
+        if (action === "submit-form" && result.retryReady) continue;
+        return { ...result, automaticAttempts, followManualSteps: false };
       }
-      const stopped = this.recordFailure(action);
-      return stopped ? { ...result, ...stopped } : { ...result, followManualSteps: false };
+      return this.stopBecauseStuck(`自动${action}连续失败 ${FORM_ACTION_BUDGET} 次，请人工完成当前页面后继续。`);
     } catch (error: any) {
       const stopped = this.recordFailure(action, String(error?.message || error));
       if (stopped) return stopped;

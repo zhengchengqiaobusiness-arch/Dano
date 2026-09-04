@@ -3,6 +3,7 @@ import { getByPath } from "../utils.js";
 import { fieldHasUiEvidence, flattenRequestValues, requestValueAt, sameValue, staticCandidatesHaveUiEvidence } from "../inference/field-resolver.js";
 import { evidenceSample, isExecutableRule } from "../inference/field-derivation.js";
 import { pickerFieldsMissingQuery, uncoveredWriteLeaves, unresolvedWriteFields, unsoundFormulaFields } from "../review/catalog-review.js";
+import { businessFailureReason, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
 
 function schemaHasPath(schema: CapabilityContract["inputSchema"], jsonPath: string) {
   const parts = jsonPath.replace(/^\$\.?/, "").split(".").filter(Boolean);
@@ -36,13 +37,14 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
     detail: hasNetwork ? `${networkRefs.length} recorded network event(s)` : "No recorded network evidence"
   });
 
-  const successful = networkRefs.some(e =>
-    Boolean(e.response && e.response.status >= 200 && e.response.status < 400)
-  );
+  const successful = networkRefs.some(isSuccessfulNetworkEvidence);
+  const failureReasons = networkRefs.map(businessFailureReason).filter((item): item is string => Boolean(item));
   checks.push({
     name: "successful-response",
     ok: successful,
-    detail: successful ? "At least one recorded response is 2xx/3xx" : "No successful recorded response"
+    detail: successful
+      ? "至少一个录制响应同时满足 HTTP 与业务成功条件"
+      : `没有成功的录制响应${failureReasons.length ? `：${[...new Set(failureReasons)].join("；")}` : ""}`
   });
 
   const transportMatches = networkRefs.every(e =>
@@ -56,8 +58,8 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
 
   const completionAssertionsBacked = (cap.completion.assertions || []).every(assertion =>
     networkRefs.some(event => {
-      if (!event.response || event.response.status < 200 || event.response.status >= 400) return false;
-      const actual = getByPath(event.response.body, assertion.path);
+      if (!isSuccessfulNetworkEvidence(event)) return false;
+      const actual = getByPath(event.response!.body, assertion.path);
       if (assertion.kind === "exists") return actual !== undefined;
       if (assertion.kind === "nonempty") return actual !== undefined && actual !== null && actual !== "" && (!Array.isArray(actual) || actual.length > 0);
       return Object.is(actual, assertion.value);

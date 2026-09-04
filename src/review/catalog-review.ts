@@ -3,7 +3,7 @@ import { evidenceSample, isAssembledObjectField, isExecutableRule, parseComputed
 import { queryCandidateForField } from "../inference/candidate-sources.js";
 import { flattenRequestValues, isPaginationField, looksPickerField } from "../inference/field-resolver.js";
 import { capabilitiesForSession, isCandidateSourceCapability, isNoiseCapability, sessionCatalogSlice, summarizeCatalog } from "../inference/export-scope.js";
-import { inferUiOperationIntent } from "../inference/heuristics.js";
+import { inferUiOperationIntent, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
 
 const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload", "action"]);
 const OPERATION_LABEL: Partial<Record<OperationKind, string>> = {
@@ -99,14 +99,13 @@ function completeCoverageUiFields(capability: CapabilityContract, events: Eviden
     event.kind === "network"
     && evidenceIds.has(event.id)
     && Boolean(event.correlatedUiEvidenceId)
-    && Boolean(event.response && event.response.status >= 200 && event.response.status < 400)
+    && isSuccessfulNetworkEvidence(event)
   ).filter(event => {
     if (capability.operation !== "query") return true;
     const ui = uiById.get(event.correlatedUiEvidenceId!);
     return ui && inferUiOperationIntent(ui.text || ui.label || "", ui.pageUrl) === "query";
   }).sort((left, right) => left.at.localeCompare(right.at));
-  const latest = submissions.at(-1);
-  return latest ? uiById.get(latest.correlatedUiEvidenceId!)?.form || [] : [];
+  return submissions.flatMap(event => uiById.get(event.correlatedUiEvidenceId!)?.form || []);
 }
 
 function emptyCoverageValue(value: unknown) {
@@ -118,17 +117,20 @@ function emptyCoverageValue(value: unknown) {
 }
 
 function blankCompleteCoverageFields(capability: CapabilityContract, events: EvidenceEvent[]) {
-  const seen = new Set<string>();
-  return completeCoverageUiFields(capability, events).filter(field => {
+  type CoverageField = NonNullable<Extract<EvidenceEvent, { kind: "ui" }>["form"]>[number];
+  const coverage = new Map<string, { field: CoverageField; filled: boolean }>();
+  for (const field of completeCoverageUiFields(capability, events)) {
     const label = String(field.label || field.name || "").trim();
     const type = String(field.type || "");
-    if (!label || /upload|file|readonly|hidden/i.test(type) || /附件|上传/.test(label)) return false;
-    if (!emptyCoverageValue(field.value)) return false;
+    if (!label || /upload|file|readonly|hidden/i.test(type) || /附件|上传/.test(label)) continue;
     const key = `${label}:${field.rangeIndex ?? ""}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+    const previous = coverage.get(key);
+    coverage.set(key, {
+      field: previous?.field || field,
+      filled: Boolean(previous?.filled || !emptyCoverageValue(field.value))
+    });
+  }
+  return [...coverage.values()].filter(item => !item.filled).map(item => item.field);
 }
 
 function emptyBusinessCollections(capability: CapabilityContract, events: EvidenceEvent[]) {

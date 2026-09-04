@@ -22,6 +22,9 @@ const UI_REVIEW = /^(审核|审批|提交审批|通过|驳回|拒绝|复核|appr
 const UI_DOWNLOAD = /^(导出|下载|export|download)(?:\S*)$/i;
 const UI_ACTION = /^(撤销|撤回|签章|反馈|跟踪|重新计算|recalculate|withdraw|revoke|sign)(?:\S*)$/i;
 const UI_COMMIT = /^(保存|提交|确定|申请|save|submit|confirm|apply)$/i;
+const FORM_COMMIT = /^(?:(?:确认)?(?:保存|提交)(?:草稿|申请|审批)?|保存并提交|提交申请|确定|确认|申请|save|submit|confirm|apply)$/i;
+const BUSINESS_FAILURE = /失败|错误|异常|不能为空|不正确|无权限|未登录|登录失效|无效|拒绝|invalid|error|fail(?:ed|ure)?|denied|required|unauthori[sz]ed|forbidden/i;
+const FAILURE_CODE = /^(?:fail(?:ed|ure)?|error|invalid|denied|unauthori[sz]ed|forbidden)$/i;
 
 export function inferUiOperationIntent(text?: string, pageUrl = ""): OperationKind | undefined {
   const label = String(text || "").replace(/\s+/g, "").replace(/^[^A-Za-z0-9\u4e00-\u9fff]+/, "");
@@ -37,6 +40,51 @@ export function inferUiOperationIntent(text?: string, pageUrl = ""): OperationKi
   if (/(?:^|[/_-])(add|new|create)(?:[/_?-]|$)|新增|新建|创建/i.test(pageUrl)) return "create";
   if (/(?:^|[/_-])(edit|modify|update)(?:[/_?-]|$)|修改|编辑/i.test(pageUrl)) return "update";
   return "action";
+}
+
+function nonemptyError(value: unknown) {
+  if (value === undefined || value === null || value === false || value === "") return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value as Record<string, unknown>).length > 0;
+  return true;
+}
+
+export function businessResponseFailureReason(response?: { status: number; body?: unknown }): string | undefined {
+  if (!response) return "没有响应";
+  if (response.status < 200 || response.status >= 400) return `HTTP ${response.status}`;
+  const body = response.body;
+  if (body === false) return "响应值为 false";
+  if (typeof body === "string") return BUSINESS_FAILURE.test(body) ? body.slice(0, 500) : undefined;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const record = body as Record<string, unknown>;
+  const message = [record.msg, record.message, record.detail]
+    .filter(value => typeof value === "string")
+    .join(" ");
+  if (record.success === false) return "success=false";
+  if (record.ok === false) return "ok=false";
+  for (const key of ["code", "statusCode", "errorCode"]) {
+    const value = record[key];
+    const numeric = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value.trim()) ? Number(value) : undefined;
+    if (numeric !== undefined && numeric >= 400) return `${key}=${String(value)}${message ? `：${message}` : ""}`;
+    if (typeof value === "string" && FAILURE_CODE.test(value.trim())) return `${key}=${value}`;
+  }
+  for (const key of ["error", "errors", "errorMessage", "error_description"]) {
+    if (nonemptyError(record[key])) return `${key}=${typeof record[key] === "string" ? record[key] : "非空"}`;
+  }
+  return BUSINESS_FAILURE.test(message) ? message : undefined;
+}
+
+export function businessFailureReason(event: NetworkEvidence): string | undefined {
+  return businessResponseFailureReason(event.response);
+}
+
+export function isSuccessfulNetworkEvidence(event: NetworkEvidence) {
+  return businessFailureReason(event) === undefined;
+}
+
+function isFormCommit(ui?: UiEvidence) {
+  const label = String(ui?.text || ui?.label || "").replace(/\s+/g, "").replace(/^[^A-Za-z0-9\u4e00-\u9fff]+/, "");
+  return FORM_COMMIT.test(label);
 }
 
 function requestParams(event: NetworkEvidence) {
@@ -107,7 +155,7 @@ export function normalizeUrl(rawUrl: string) {
   };
 }
 
-export function inferOperation(event: NetworkEvidence, ui?: UiEvidence): OperationKind {
+export function inferOperation(event: NetworkEvidence, ui?: UiEvidence, activeFormIntent?: OperationKind): OperationKind {
   const method = event.request.method.toUpperCase();
   const endpoint = new URL(event.request.url).pathname;
   const actionSignal = [
@@ -125,6 +173,8 @@ export function inferOperation(event: NetworkEvidence, ui?: UiEvidence): Operati
   if (method === "GET" || method === "HEAD") return "query";
   if (CREATE.test(endpoint) || /submit-process|start-process|startProcess/i.test(endpoint)) return "create";
   const uiIntent = inferUiOperationIntent(ui?.text || ui?.label, ui?.pageUrl || event.pageUrl || "");
+  if (uiIntent && uiIntent !== "action") return uiIntent;
+  if ((activeFormIntent === "create" || activeFormIntent === "update") && isFormCommit(ui)) return activeFormIntent;
   if (uiIntent) return uiIntent;
   if (CREATE.test(actionSignal)) return "create";
   if (REVIEW.test(actionSignal) || (REVIEW.test(pageSignal) && REVIEW.test(actionSignal))) return "review";
@@ -137,8 +187,8 @@ export function inferOperation(event: NetworkEvidence, ui?: UiEvidence): Operati
   return "unknown";
 }
 
-export function operationConfidence(event: NetworkEvidence, ui?: UiEvidence) {
-  const operation = inferOperation(event, ui);
+export function operationConfidence(event: NetworkEvidence, ui?: UiEvidence, activeFormIntent?: OperationKind) {
+  const operation = inferOperation(event, ui, activeFormIntent);
   if (operation === "unknown") return 0.35;
   const method = event.request.method.toUpperCase();
   if (method === "GET" || method === "DELETE" || method === "PATCH" || method === "PUT") return 0.92;

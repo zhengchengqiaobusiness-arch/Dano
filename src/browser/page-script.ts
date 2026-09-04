@@ -47,7 +47,7 @@ export const PAGE_HELPERS = String.raw`
   const EMPTY_VALUE = /^(请选择|请输入|请填写|请挑选|select|please select|please enter|please choose|choose|yyyy-mm-dd|年\/月\/日)/i;
   const PROMPT_ONLY = /^(请选择|请输入|请填写|请挑选|select|please select|please enter|please choose|choose)[.…]?$/i;
   const DATE_PLACEHOLDER = /yyyy-mm-dd|年\/月\/日/i;
-  const UPLOAD_LABEL = /上传|附件|文件|图片|image|upload|attachment|file/i;
+  const UPLOAD_LABEL = /上传|附件|图片|image|upload|attachment/i;
   const PLUS_ONLY = /^(＋|\+|添加|选择)$/;
   const ACTION_ONLY = /^(新增|新增一行|添加一行|加一行|添加明细|新增明细|创建|导入|导出|删除|搜索|查询|重置|提交|确定|取消|关闭|保存|返回)$/;
   const CHROME_SEL = "nav, header, .el-menu, .ant-menu, .el-pagination, .ant-pagination, [class*='toolbar'], [class*='header-bar'], [data-w-e-toolbar], [data-menu-key], [class*='w-e-bar'], [class*='editor-menu']";
@@ -296,6 +296,7 @@ export const PAGE_HELPERS = String.raw`
     const role = el.getAttribute("role") || "";
     const popup = el.getAttribute("aria-haspopup") || item?.getAttribute?.("aria-haspopup") || "";
     const placeholder = el.getAttribute("placeholder") || "";
+    const selectPlaceholder = /^(请选择|请挑选|please select|please choose)/i.test(clean(placeholder));
     const blob = [type, placeholder, label, popup, role].join(" ");
     if (isUploadWidget(el, label) || type === "file") return "upload";
     if (type === "checkbox" || role === "checkbox" || role === "switch") return "checkbox";
@@ -305,6 +306,7 @@ export const PAGE_HELPERS = String.raw`
     if (/dialog/i.test(popup)) return "picker";
     if (el.closest(".el-select, .ant-select, .arco-select, .n-select, .el-cascader") || /(?:^|\s)(el-select|ant-select|arco-select|n-select)/.test(String(el.className || ""))) return "select";
     if (el instanceof HTMLSelectElement || role === "combobox" || /listbox|menu/i.test(popup) || el.closest("[role='combobox']")) return "select";
+    if (selectPlaceholder && !isChooserFilter(el)) return "picker";
     if (el.hasAttribute("readonly") && !isDisabledWidget(el) && (EMPTY_VALUE.test(placeholder) || /请选择|please select/i.test(blob))) return "picker";
     if (isDisabledWidget(el)) return "readonly";
     if (type === "number" || el.getAttribute("inputmode") === "decimal" || el.getAttribute("inputmode") === "numeric") return "number";
@@ -327,6 +329,8 @@ export const PAGE_HELPERS = String.raw`
     if (el instanceof HTMLSelectElement) return true;
     const role = el.getAttribute("role") || "";
     if (/combobox|listbox/.test(role)) return true;
+    if (/listbox|menu|dialog/i.test(el.getAttribute("aria-haspopup") || "")) return true;
+    if (/^(请选择|请挑选|please select|please choose)/i.test(clean(el.getAttribute("placeholder") || "")) && !isChooserFilter(el)) return true;
     return Boolean(el.closest(".el-select, .ant-select, .arco-select, .n-select, .el-cascader"));
   };
 
@@ -762,7 +766,8 @@ export const PAGE_HELPERS = String.raw`
     const value = displayValue(el);
     const required = Boolean(item?.classList?.contains("is-required") || el.hasAttribute("required") || el.getAttribute("aria-required") === "true" || el.closest(".is-required"));
     const numericZero = kind === "number" && /^(0+|0*\.0+)$/.test(clean(value));
-    const filled = !isEmptyValue(value) && !(required && numericZero);
+    const syntheticChoice = (kind === "select" || kind === "picker") && /^样例(?:-|$)/.test(clean(value));
+    const filled = !isEmptyValue(value) && !syntheticChoice && !(required && numericZero);
     const errorNode = item?.querySelector?.(".el-form-item__error, .ant-form-item-explain-error, .arco-form-item-message");
     const error = errorNode && isVisible(errorNode) ? clean(errorNode.textContent || "") : "";
     const invalid = Boolean(error);

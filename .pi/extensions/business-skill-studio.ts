@@ -46,6 +46,9 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   const stopBrowser = () => browserServiceUrl
     ? browserRequest<any>("/stop")
     : studio.stopRecording();
+  const stopReadiness = () => browserServiceUrl
+    ? browserRequest<any>("/stop-readiness")
+    : studio.recorder.stopReadiness();
   const controlBrowser = (command: any) => browserServiceUrl
     ? browserRequest<any>("/control", command)
     : studio.recorder.control(command);
@@ -64,7 +67,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       expectedOperations: {
         type: "array",
         items: { type: "string", enum: ["query", "create", "update", "review", "delete", "upload", "download", "action"] },
-        description: "Operations the user explicitly requires in this recording, for example ['query','create']."
+        description: "Operations explicitly required by the user. Exact mapping: 查询=query, 新增=create, 修改/编辑=update, 审核=review, 删除=delete, 上传=upload, 导出/下载=download. action is only for custom business actions such as 撤回/签章; never map 导出 to action."
       },
       completeFieldCoverage: {
         type: "boolean",
@@ -84,9 +87,16 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_record_stop",
     label: "Stop business recording",
-    description: "Stop the active browser recording and persist its evidence, including session.json, events.jsonl, and manual-steps.md for later replay when automatic clicking fails.",
+    description: "Stop only after every expected operation has a real business-success response. If any required operation is missing or only returned a business error inside HTTP 200, this tool keeps the current browser session open and returns the exact unfinished operations so automation can continue instead of exporting a partial Skill.",
     parameters: parameters({}),
     async execute() {
+      const readiness = await stopReadiness();
+      if (!readiness.ready) {
+        return {
+          content: [{ type: "text", text: readiness.message }],
+          details: { ...readiness, stopped: false }
+        };
+      }
       const session = await stopBrowser();
       if (session?.id) lastRecordingSessionId = session.id;
       return {

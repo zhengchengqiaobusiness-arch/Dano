@@ -425,6 +425,10 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
       page.broadcast({ type: "browser_changed" });
       return;
     }
+    if (request.method === "POST" && pathname === "/internal/browser/stop-readiness") {
+      sendJson(response, 200, await page.recorder.stopReadiness());
+      return;
+    }
     if (request.method === "POST" && pathname === "/internal/browser/inspect") {
       if (typeof body.selector !== "string" || !body.selector) throw new Error("A selector is required");
       sendJson(response, 200, await page.recorder.inspectTarget(body.selector));

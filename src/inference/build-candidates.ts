@@ -5,7 +5,7 @@ import type {
   NetworkEvidence,
   UiEvidence
 } from "../domain.js";
-import { inferOperation, normalizeUrl, operationConfidence } from "./heuristics.js";
+import { inferOperation, inferUiOperationIntent, isSuccessfulNetworkEvidence, normalizeUrl, operationConfidence } from "./heuristics.js";
 import { attachCatalogDerivations } from "./field-derivation.js";
 import { assignUniqueFromSamples, bindByLabelAffinity, bindByRecordedOptions, bindBySemanticLabel, bindByUniqueMatching, bindLeftoverFields, collectUiObservations, finalizeCallerFields, flattenRequestValues, owningFormEvent, preferRequestValueType, promoteUnboundFillable, recordedLists, relatedUiEvents, requestValueAt, resolveFieldOwnership, sameFormShape } from "./field-resolver.js";
 import { mergeSchemas, schemaFromValue } from "../schema.js";
@@ -162,14 +162,16 @@ function capabilityTitle(operation: CapabilityContract["operation"], ui: UiEvide
 }
 
 function inferCompletion(group: NetworkEvidence[], operation: string) {
-  const successful = group.filter(g => g.response && g.response.status >= 200 && g.response.status < 400);
+  const successful = group.filter(isSuccessfulNetworkEvidence);
   const acceptedHttpStatuses = [...new Set(successful.map(g => g.response!.status))];
   const assertions: NonNullable<CapabilityContract["completion"]["assertions"]> = [];
   const sample = successful.find(g => g.response?.body && typeof g.response.body === "object")?.response?.body as any;
   if (sample && typeof sample === "object" && !Array.isArray(sample)) {
     if (sample.success === true) assertions.push({ path: "$.success", kind: "equals", value: true });
     else if (sample.ok === true) assertions.push({ path: "$.ok", kind: "equals", value: true });
-    if (sample.code === 0) assertions.push({ path: "$.code", kind: "equals", value: 0 });
+    if (["string", "number", "boolean"].includes(typeof sample.code)) {
+      assertions.push({ path: "$.code", kind: "equals", value: sample.code });
+    }
     if (operation === "create") {
       if (sample.id !== undefined && sample.id !== null) assertions.push({ path: "$.id", kind: "nonempty" });
       else if (sample.data && typeof sample.data === "object" && !Array.isArray(sample.data) && sample.data.id !== undefined && sample.data.id !== null) {
@@ -192,11 +194,46 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
     e.kind === "network" && Boolean(e.response) && ["xhr", "fetch"].includes(e.request.resourceType) && !isStudioInternal(e)
   );
   const groups = new Map<string, NetworkEvidence[]>();
+  type ActiveFormIntent = {
+    intent: "create" | "update";
+    entryPageUrl: string;
+    formPageUrl?: string;
+    successSeen?: boolean;
+  };
+  const activeIntentBySession = new Map<string, ActiveFormIntent>();
+  const formIntentByNetworkId = new Map<string, "create" | "update">();
+  const cancelled = /^(重置|取消|关闭|返回|reset|cancel|close|back)$/i;
+
+  for (const event of events) {
+    if (event.kind === "ui") {
+      const label = String(event.text || event.label || "").replace(/\s+/g, "");
+      const intent = inferUiOperationIntent(label, event.pageUrl);
+      if (intent === "create" || intent === "update") {
+        activeIntentBySession.set(event.sessionId, { intent, entryPageUrl: event.pageUrl });
+      }
+      else if (cancelled.test(label)) activeIntentBySession.delete(event.sessionId);
+      else {
+        const active = activeIntentBySession.get(event.sessionId);
+        if (active && event.pageUrl !== active.entryPageUrl) active.formPageUrl = event.pageUrl;
+        else if (active?.successSeen && active.formPageUrl && event.pageUrl === active.entryPageUrl) {
+          activeIntentBySession.delete(event.sessionId);
+        }
+      }
+      continue;
+    }
+    if (event.kind !== "network") continue;
+    const active = activeIntentBySession.get(event.sessionId);
+    if (active) formIntentByNetworkId.set(event.id, active.intent);
+    const correlated = event.correlatedUiEvidenceId ? uiById.get(event.correlatedUiEvidenceId) : undefined;
+    if (active && inferOperation(event, correlated, active.intent) === active.intent && isSuccessfulNetworkEvidence(event)) {
+      active.successSeen = true;
+    }
+  }
 
   for (const event of network) {
     const normalized = normalizeUrl(event.request.url);
     const ui = event.correlatedUiEvidenceId ? uiById.get(event.correlatedUiEvidenceId) : undefined;
-    const operation = inferOperation(event, ui);
+    const operation = inferOperation(event, ui, formIntentByNetworkId.get(event.id));
     const key = `${operation}|${event.request.method.toUpperCase()}|${normalized.pathTemplate}`;
     const list = groups.get(key) || [];
     list.push(event);
@@ -210,7 +247,8 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
     const first = group[0]!;
     const normalized = unionUrl(group);
     const ui = pickUi(group, uiById);
-    const operation = inferOperation(first, ui);
+    const activeFormIntent = formIntentByNetworkId.get(first.id);
+    const operation = inferOperation(first, ui, activeFormIntent);
     const method = first.request.method.toUpperCase();
     const baseTitle = `${operation}-${method.toLowerCase()}-${normalized.pathTemplate.split("/").filter(Boolean).slice(-2).join("-") || "root"}`;
     let capId = slugify(baseTitle);
@@ -299,7 +337,7 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
       title: capabilityTitle(operation, ui, normalized.pathTemplate),
       description: `已从真实操作观察到“${OPERATION_NAMES[operation]}”能力。请结合业务含义核对并修改本描述。`,
       operation,
-      confidence: operationConfidence(first, ui),
+      confidence: operationConfidence(first, ui, activeFormIntent),
       transport: {
         method,
         urlTemplate: normalized.urlTemplate,

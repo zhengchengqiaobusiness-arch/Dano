@@ -1,7 +1,7 @@
 import type { Frame, Locator, Page } from "playwright";
 import type { OperationKind } from "../domain.js";
 import { MARK_LABELED_CONTROL, SNAPSHOT_FIELDS_IN_PAGE, SNAPSHOT_IN_PAGE } from "./page-script.js";
-import { inferUiOperationIntent } from "../inference/heuristics.js";
+import { businessResponseFailureReason, inferUiOperationIntent } from "../inference/heuristics.js";
 
 export const FORM_ITEMS = ".el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [class*='form-item']";
 export const FORM_LABELS = "label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label";
@@ -103,7 +103,8 @@ function isNumericZero(value?: string) {
   return /^(0+|0*\.0+)$/.test(String(value || "").trim());
 }
 
-const SUBMIT_LABEL = /^(提交|确定|保存|搜索|查询|search|submit|save|ok|confirm|apply)/i;
+const WRITE_SUBMIT_LABEL = /^(确认提交|确认保存|提交申请|保存并提交|提交|确定|保存|submit|save|ok|confirm|apply)/i;
+const SUBMIT_LABEL = /^(确认提交|确认保存|提交申请|保存并提交|提交|确定|保存|搜索|查询|search|submit|save|ok|confirm|apply)/i;
 const CANCEL_LABEL = /取消|关闭|重置|reset|cancel|close|back/i;
 
 export class PageActions {
@@ -140,16 +141,26 @@ export class PageActions {
 
   private async awaitFormRequest(timeout = 2_500, write = false) {
     try {
-      await this.page().waitForResponse(response => {
+      const response = await this.page().waitForResponse(response => {
         const request = response.request();
         const type = request.resourceType();
         if (type !== "xhr" && type !== "fetch") return false;
         if (write) return /^(POST|PUT|PATCH|DELETE)$/i.test(request.method());
         return true;
       }, { timeout });
-      return true;
+      const text = await response.text().catch(() => "");
+      let body: unknown = text;
+      if (text) {
+        try { body = JSON.parse(text); } catch { /* keep text response */ }
+      }
+      return {
+        status: response.status(),
+        body,
+        url: response.url(),
+        method: response.request().method()
+      };
     } catch {
-      return false;
+      return undefined;
     }
   }
 
@@ -816,6 +827,7 @@ export class PageActions {
     }
     const chooser = await locator.evaluate(el => {
       if (el instanceof HTMLTextAreaElement) return false;
+      if (/^(请选择|请挑选|please select|please choose)/i.test(String(el.getAttribute("placeholder") || "").trim())) return true;
       if (el instanceof HTMLInputElement && !el.readOnly && el.getAttribute("role") !== "combobox" && !el.getAttribute("aria-haspopup")) return false;
       const role = el.getAttribute("role") || "";
       const popup = el.getAttribute("aria-haspopup") || "";
@@ -1227,6 +1239,43 @@ export class PageActions {
     return leftover.length === 0 && !zeroRequired && this.page().url() === startUrl;
   }
 
+  private async repairBusinessFailure(reason: string, startUrl: string) {
+    if (this.page().url() !== startUrl) return undefined;
+    const marker = reason.match(/不能为空|未填写|必填|请选择|required/i);
+    if (!marker || marker.index === undefined) return undefined;
+    const prefix = reason.slice(0, marker.index);
+    const subject = prefix.split(/[:：,，;；]/).at(-1)?.trim() || "";
+    const normalize = (value: string) => value
+      .replace(/[\s*＊()（）\[\]【】:_-]/g, "")
+      .replace(/(?:编号|编码|号码|名称|ID)$/i, "")
+      .toLowerCase();
+    const wanted = normalize(subject);
+    if (!wanted) return undefined;
+    const snapshot = await this.captureFields();
+    const ranked = (snapshot.formFields || []).flatMap(field => {
+      if (field.skip || field.disabled) return [];
+      const label = normalize(String(field.label || ""));
+      const name = normalize(String(field.name || ""));
+      let score = 0;
+      if (label && label === wanted) score = 12;
+      else if (label && (wanted.includes(label) || label.includes(wanted))) score = 10;
+      else if (name && (wanted.includes(name) || name.includes(wanted))) score = 8;
+      if (field.kind === "picker" || field.kind === "select") score += 3;
+      return score > 0 ? [{ field, score }] : [];
+    }).sort((left, right) => right.score - left.score);
+    const target = ranked[0]?.field;
+    if (!target) return undefined;
+    const selector = target.selector || `label=${target.label}`;
+    const previous = target.value;
+    if (target.kind === "picker") await this.pickFirstChoice(selector);
+    else if (target.kind === "select") await this.chooseFirstOption(selector);
+    else if (!target.filled) await this.fillOneField(target, startUrl);
+    else return undefined;
+    const current = this.matchField(await this.captureFields(), target);
+    if (!current?.filled || this.isSampleValue(String(current.value || ""), target)) return undefined;
+    return { label: target.label, previous, value: current.value };
+  }
+
   private async repairFormValues(startUrl: string) {
     const snapshot = await this.captureFields();
     const dates = (snapshot.formFields || []).filter(field => field.kind === "date" && !field.skip && !field.disabled);
@@ -1323,7 +1372,7 @@ export class PageActions {
       if (!button) return [];
       if (!(control.type === "submit" || SUBMIT_LABEL.test(text))) return [];
       const draft = /草稿|draft/i.test(text);
-      const write = /^(提交|确定|save|submit|ok|confirm|apply)/i.test(text) && !draft;
+      const write = WRITE_SUBMIT_LABEL.test(text) && !draft;
       const search = /^(搜索|查询|search)$/i.test(text);
       return [{
         selector: /^(label|placeholder)=/i.test(String(control.selector || "")) ? `text=${text}` : String(control.selector || `text=${text}`),
@@ -1424,20 +1473,21 @@ export class PageActions {
     };
   }
 
-  async submitForm() {
+  async submitForm(stage = 0): Promise<Record<string, unknown>> {
     await this.completeChooserDialog();
     await this.dismissTransientOverlays();
     let before = await this.captureSnapshot();
     const startUrl = this.page().url();
     const button = this.submitControl(before);
     if (!button) throw new Error("No submit/search button in the active form");
+    const write = WRITE_SUBMIT_LABEL.test(button.text) && !/搜索|查询|search/i.test(button.text);
     let repaired = false;
     if (!this.formReady(before, startUrl)) {
       await this.repairFormValues(startUrl);
       before = await this.captureSnapshot();
       repaired = true;
     }
-    if (!this.formReady(before, startUrl) && /^(提交|确定|save|submit|ok|confirm|apply)/i.test(button.text) && !/搜索|查询|search/i.test(button.text)) {
+    if (!this.formReady(before, startUrl) && WRITE_SUBMIT_LABEL.test(button.text) && !/搜索|查询|search/i.test(button.text)) {
       return {
         ok: false,
         submitted: button.text,
@@ -1453,24 +1503,46 @@ export class PageActions {
         followManualSteps: true
       };
     }
-    const write = /^(提交|确定|save|submit|ok|confirm|apply)/i.test(button.text) && !/搜索|查询|search/i.test(button.text);
     const pending = this.awaitFormRequest(write ? 6_000 : 3_000, write);
     await this.click(button.selector);
-    const sawRequest = await pending;
+    const responseSignal = pending.then(response => ({ kind: "response" as const, response }));
+    const dialogSignal = before.scope === "dialog" ? new Promise<never>(() => {}) : this.page().locator(DIALOGS).first()
+      .waitFor({ state: "visible", timeout: 1_200 })
+      .then(() => ({ kind: "dialog" as const }))
+      .catch(() => new Promise<never>(() => {}));
+    const outcome = write ? await Promise.race([responseSignal, dialogSignal]) : await responseSignal;
+    const formResponse = outcome.kind === "response" ? outcome.response : undefined;
+    const sawRequest = Boolean(formResponse);
+    const businessFailure = formResponse ? businessResponseFailureReason(formResponse) : undefined;
     await this.waitForPageQuiet();
     const after = await this.captureSnapshot();
-    const leftoverErrors = after.errors || [];
+    if (write && !sawRequest && after.scope === "dialog" && before.scope !== "dialog" && stage < 2) {
+      const dialogFields = await this.exerciseForm();
+      if (!dialogFields.ok) return { ...dialogFields, submitted: button.text, submitStages: stage + 1 };
+      const continued = await this.submitForm(stage + 1);
+      return {
+        ...continued,
+        repaired: repaired || continued.repaired === true,
+        submitStages: stage + 2
+      };
+    }
+    const leftoverErrors = [...(after.errors || []), ...(businessFailure ? [businessFailure] : [])];
     const closed = this.page().url() !== startUrl || after.scope !== before.scope;
     const invalid = (after.formFields || []).some(field => field.invalid || this.requiredNumberInvalid(field));
     const leftoverTodos = (after.todoFields || []).filter(field => !field.skip && !field.disabled);
     const ok = write
-      ? Boolean(sawRequest && leftoverErrors.length === 0 && (closed || (!invalid && leftoverTodos.length === 0)))
+      ? Boolean(sawRequest && !businessFailure && leftoverErrors.length === 0 && (closed || (!invalid && leftoverTodos.length === 0)))
       : closed || Boolean(sawRequest && leftoverErrors.length === 0 && !invalid && leftoverTodos.length === 0);
+    const businessRepair = businessFailure ? await this.repairBusinessFailure(businessFailure, startUrl).catch(() => undefined) : undefined;
     return {
       ok,
       submitted: button.text,
       repaired,
       sawRequest,
+      response: formResponse ? { status: formResponse.status, url: formResponse.url, method: formResponse.method } : undefined,
+      businessFailure,
+      businessRepair,
+      retryReady: Boolean(businessRepair),
       errors: leftoverErrors,
       url: this.page().url(),
       scope: after.scope,

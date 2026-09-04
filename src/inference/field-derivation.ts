@@ -2,7 +2,7 @@ import type { CapabilityContract, DataBinding, EvidenceEvent, InputFormField, Ne
 import type { SemanticConcept } from "./field-resolver.js";
 import { id } from "../utils.js";
 import { flattenRequestValues, isPaginationField, nameTokens, requestValueAt, sameSynonymGroup, sameValue, semanticConcepts } from "./field-resolver.js";
-import { normalizeUrl } from "./heuristics.js";
+import { isSuccessfulNetworkEvidence, normalizeUrl } from "./heuristics.js";
 import { isNoiseCapability, isPageResultQuery, isPrimaryCapability, relatedResource } from "./export-scope.js";
 
 const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload", "action"]);
@@ -605,10 +605,10 @@ function buildLookupIndex(events: EvidenceEvent[], catalog: CapabilityContract[]
   };
   const index: LookupIndexEntry[] = [];
   for (const event of events) {
-    if (event.kind !== "network" || !event.response || event.response.status < 200 || event.response.status >= 400) continue;
+    if (event.kind !== "network" || !isSuccessfulNetworkEvidence(event)) continue;
     const capability = capabilityForEvent(event, catalog);
     if (!capability) continue;
-    const leaves = responseHits(event.response.body);
+    const leaves = responseHits(event.response!.body);
     const leavesByValue = new Map<string, IndexedLeaf[]>();
     for (const leaf of leaves) {
       addLeafKey(leavesByValue, primitiveValueKey(leaf.value), leaf);
