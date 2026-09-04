@@ -178,12 +178,14 @@ function preferSpecificObservation(field: InputFormField, items: UiObservation[]
 
 const SYNONYM_GROUPS = [
   /\b(?:count|qty|quantity)\b|数量/i,
+  /\b(?:user|person|people)\s*count\b|人数/i,
   /(?:^|[^a-z])price(?:$|[^a-z])|单价|售价/i,
   /taxpercent|tax_percent|税率/i,
   /(?:actual)?days?\b|天数/i,
   /remark|memo|comment|备注|说明|qzms|职能描述/i,
   /reason|原因/i,
   /type|类型/i,
+  /level|等级/i,
   /catalogStatus|编目状态/i,
   /status|状态|结果/i,
   /assignee|approver|Activity_|审批|人员/i,
@@ -429,7 +431,12 @@ function mergeObservations(items: UiObservation[]) {
   if (!items.length) return undefined;
   const texts = items.filter(looksTextObservation);
   const choices = items.filter(looksChoiceObservation);
-  const pool = texts.length && choices.length ? texts : items;
+  const hasValue = (item: UiObservation) => item.value !== undefined && item.value !== "";
+  const textHasEvidence = texts.some(hasValue);
+  const choiceHasEvidence = choices.some(item => hasValue(item) || Boolean(item.options?.length));
+  const pool = texts.length && choices.length
+    ? (textHasEvidence || !choiceHasEvidence ? texts : choices)
+    : items;
   const named = pool.find(item => item.name);
   return pool.reduce((best, item) => ({
     name: best.name || item.name,
@@ -447,7 +454,7 @@ function mergeObservations(items: UiObservation[]) {
 }
 
 function rowIdentity(row: Record<string, unknown>) {
-  for (const key of ["id", "value", "code", "key"]) {
+  for (const key of ["id", "value", "code", "key", "dictValue", "dictCode"]) {
     const value = row[key];
     if (value !== undefined && value !== null && value !== "") return value;
   }
@@ -455,7 +462,7 @@ function rowIdentity(row: Record<string, unknown>) {
 }
 
 function rowDisplay(row: Record<string, unknown>) {
-  for (const key of ["name", "label", "title", "nickname", "text", "xtmc", "yymc", "bmmc", "ssbmmc", "yyxtmc", "mc", "csmc"]) {
+  for (const key of ["name", "label", "title", "dictLabel", "nickname", "text", "xtmc", "yymc", "bmmc", "ssbmmc", "yyxtmc", "mc", "csmc"]) {
     const value = row[key];
     if (value !== undefined && value !== null && value !== "") return value;
   }
@@ -1016,16 +1023,15 @@ function bindIndexedDateRange(
   lists: RecordedList[],
   includeCaller = false
 ) {
-  const eligible = fields.filter(field =>
-    (includeCaller ? field.source === "caller" && field.label === field.name : field.source !== "caller")
-    && !PAGE_NAME.test(field.name)
+  const indexed = fields.filter(field =>
+    !PAGE_NAME.test(field.name)
     && !isReadonlyBound(field)
     && looksDateControl(field)
     && nameIndex(field.name) !== undefined
   );
-  if (eligible.length < 2) return fields;
+  if (indexed.length < 2) return fields;
   const byStem = new Map<string, InputFormField[]>();
-  for (const field of eligible) {
+  for (const field of indexed) {
     const stem = field.name.replace(/\[\d+\]$/, "");
     byStem.set(stem, [...(byStem.get(stem) || []), field]);
   }
@@ -1045,6 +1051,10 @@ function bindIndexedDateRange(
       : adjacentDateSlots(owner).find(item => item.length === sorted.length);
     if (!slots || slots.some(item => !item)) continue;
     sorted.forEach((field, index) => {
+      const eligible = includeCaller
+        ? field.source === "caller" && field.label === field.name
+        : field.source !== "caller";
+      if (!eligible) return;
       bound.set(field.path, asCaller(field, slots[index]!, requestValueAt(sample, field.path), observations, lists));
     });
   }
@@ -1310,7 +1320,7 @@ function leftoverExplainsValue(
 ) {
   if (value === undefined || value === null || value === "") return false;
   return leftoverEditable(fields, observations).some(item =>
-    sameSynonymGroup(field, item)
+    uiNameMatches(item.name, field.name)
     || item.options?.some(option => sameValue(option.value, value) || sameValue(option.label, value))
   );
 }
@@ -1728,11 +1738,22 @@ export function relatedUiEvents(
   const owner = owningFormEvent(event, uiEvents, sample);
   const ownerLabels = new Set(owner?.form ? formLabels(owner.form) : []);
   const ownerNames = new Set(owner?.form ? formNames(owner.form) : []);
+  const pageKey = (raw?: string) => {
+    if (!raw) return "";
+    try {
+      const parsed = new URL(raw);
+      return `${parsed.origin}${parsed.pathname}`;
+    } catch {
+      return raw.split(/[?#]/, 1)[0] || raw;
+    }
+  };
+  const ownerPage = pageKey(owner?.pageUrl);
   const at = Date.parse(event.at);
   return uiEvents
     .filter(item => {
       if (item.sessionId !== event.sessionId) return false;
       if (Date.parse(item.at) > at + 500) return false;
+      if (ownerPage && pageKey(item.pageUrl) !== ownerPage && item.id !== event.correlatedUiEvidenceId) return false;
       return belongsToOwningForm(item, owner, ownerLabels, ownerNames, event.correlatedUiEvidenceId)
         || eventMatchesRequest(item, sample)
         || Boolean(item.form?.length && formFitsRequest(item.form, sample));

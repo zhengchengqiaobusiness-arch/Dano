@@ -359,9 +359,8 @@ function schemaLeafPaths(schema: CapabilityContract["outputSchema"], prefix = "$
 
 const GENERIC_LEAF = /^(data|result|value|item|items|record|records|rows|list|content)$/i;
 
-function namesRelated(field: InputFormField, leaf: string, pathText: string) {
-  if (sameSynonymGroup(field, { name: leaf, label: leaf })) return true;
-  return sameSynonymGroup({ name: field.name, label: field.name }, { name: leaf, label: pathText });
+function namesRelated(field: InputFormField, leaf: string) {
+  return sameSynonymGroup(field, { name: leaf, label: leaf });
 }
 
 function lookupAffinityScore(
@@ -374,7 +373,7 @@ function lookupAffinityScore(
   const fieldText = `${field.name} ${field.label}`;
   const pathText = capability.transport.pathTemplate || "";
   const exact = leaf.toLowerCase() === field.name.toLowerCase();
-  const synonym = !exact && namesRelated(field, leaf, pathText);
+  const synonym = !exact && namesRelated(field, leaf);
   const nameScore = exact ? 8 : synonym ? 5 : 0;
   const fieldToks = new Set(nameTokens(fieldText));
   const overlap = nameTokens(`${leaf} ${pathText}`).filter(token =>
@@ -518,6 +517,7 @@ type LookupIndexEntry = {
   leavesByValue: Map<string, IndexedLeaf[]>;
   isPageQuery: boolean;
   isPrimary: boolean;
+  triggeredByFieldChoice: boolean;
 };
 
 type LookupHit = {
@@ -586,6 +586,7 @@ function matchingLeaves(entry: LookupIndexEntry, value: unknown) {
 }
 
 function buildLookupIndex(events: EvidenceEvent[], catalog: CapabilityContract[]) {
+  const uiById = new Map(events.filter(item => item.kind === "ui").map(item => [item.id, item]));
   const primaryCache = new Map<string, boolean>();
   const pageQueryCache = new Map<string, boolean>();
   const isPrimary = (capability: CapabilityContract) => {
@@ -620,7 +621,14 @@ function buildLookupIndex(events: EvidenceEvent[], catalog: CapabilityContract[]
       leaves,
       leavesByValue,
       isPageQuery: isPageQuery(capability),
-      isPrimary: isPrimary(capability)
+      isPrimary: isPrimary(capability),
+      triggeredByFieldChoice: (() => {
+        const ui = event.correlatedUiEvidenceId ? uiById.get(event.correlatedUiEvidenceId) : undefined;
+        if (!ui) return false;
+        const actionControl = ui.tag === "button" || ui.role === "button"
+          || ui.inputType === "button" || ui.inputType === "submit";
+        return !actionControl && ["click", "change", "input"].includes(ui.eventType);
+      })()
     });
   }
   const indexed = new Set(index.map(entry => entry.capability.id));
@@ -636,7 +644,8 @@ function buildLookupIndex(events: EvidenceEvent[], catalog: CapabilityContract[]
       leaves: paths.map(path => ({ path, value: undefined })),
       leavesByValue: new Map(),
       isPageQuery: isPageQuery(capability),
-      isPrimary: isPrimary(capability)
+      isPrimary: isPrimary(capability),
+      triggeredByFieldChoice: false
     });
     indexed.add(capability.id);
   }
@@ -649,7 +658,8 @@ function fromApiMatch(
   sample: unknown,
   index: LookupIndexEntry[],
   write?: CapabilityContract,
-  mode: "write" | "query" = "write"
+  mode: "write" | "query" = "write",
+  targetAt?: string
 ) {
   if (value === undefined || value === null || value === "") return undefined;
   const joins = requestJoins(sample);
@@ -657,19 +667,15 @@ function fromApiMatch(
   for (const entry of index) {
     const { event, capability } = entry;
     if (write && capability.id === write.id) continue;
+    if (event && targetAt && Date.parse(event.at) > Date.parse(targetAt)) continue;
+    if (entry.isPageQuery && entry.isPrimary) continue;
     for (const leaf of matchingLeaves(entry, value)) {
       if (isEnvelopePath(leaf.path, field.name)) continue;
       if (leaf.value !== undefined && !sameDerivedValue(leaf.value, value)) continue;
       if (leaf.value === undefined) continue;
-      // A page list describes old rows; it is not the source of a value being written now
-      // unless that exact value was also selected as a filter on the recorded request.
-      if (entry.isPageQuery && entry.isPrimary && (!event || !requestSelectsValue(event, field.name, value))) continue;
-      if (entry.isPageQuery && entry.isPrimary && lastPathName(leaf.path).toLowerCase() === field.name.toLowerCase() && (!event || !requestSelectsValue(event, field.name, value))) continue;
-      const query = event?.request.query || {};
-      const queryJoin = joins.find(item =>
-        Object.entries(query).some(([key, queryValue]) => key === item.name && sameValue(queryValue, item.value))
-      );
-      const via = leaf.row ? pickVia(field, joins, leaf.row) : queryJoin;
+      const exactLeafName = lastPathName(leaf.path).toLowerCase() === field.name.toLowerCase();
+      if (isLowInformationValue(value) && !entry.triggeredByFieldChoice && !exactLeafName) continue;
+      const via = leaf.row ? pickVia(field, joins, leaf.row) : causalLookupVia(field, joins, entry);
       if (leaf.row && !via) {
         const siblings = entry.leaves.filter(item => item.path === leaf.path);
         if (!siblings.length || siblings.some(item => !sameDerivedValue(item.value, value))) continue;
@@ -692,20 +698,27 @@ function fromApiMatch(
   const unique = [...new Map(valueHits.map(item => [`${item.capabilityId}|${item.fromPath}|${item.via || ""}`, item])).values()];
   const viaHits = unique.filter(item => item.via);
   const chosen = viaHits.length ? viaHits : unique;
-  if (chosen.length === 1) {
-    const direct = pickUniqueHit(chosen);
-    if (direct) return direct;
-  }
+  const direct = pickUniqueHit(chosen);
+  if (direct) return direct;
   if (mode !== "write") return undefined;
 
   const associated: LookupHit[] = [];
   for (const entry of index) {
     if (write && entry.capability.id === write.id) continue;
+    if (entry.event && targetAt && Date.parse(entry.event.at) > Date.parse(targetAt)) continue;
     if (entry.isPageQuery && entry.isPrimary) continue;
     const via = causalLookupVia(field, joins, entry);
     if (!via) continue;
     for (const leaf of entry.leaves) {
       if (isEnvelopePath(leaf.path, field.name)) continue;
+      const leafName = lastPathName(leaf.path);
+      const strongFieldSemantics = leafName.toLowerCase() === field.name.toLowerCase()
+        || namesRelated(field, leafName);
+      const sameBusinessResource = Boolean(write && relatedResource(write.transport.pathTemplate, entry.capability.transport.pathTemplate));
+      const valuesAgree = leaf.value !== undefined && sameDerivedValue(leaf.value, value);
+      const causallySupported = strongFieldSemantics && (entry.triggeredByFieldChoice || sameBusinessResource);
+      if (!valuesAgree && !causallySupported) continue;
+      if (isLowInformationValue(value) && !entry.triggeredByFieldChoice && !causallySupported) continue;
       const score = lookupAffinityScore(field, leaf.path, entry.capability, write);
       if (score < 6) continue;
       associated.push({
@@ -783,6 +796,13 @@ function computedForField(field: InputFormField, sample: unknown, known: Set<str
   if (semantic) return semantic;
   const duration = durationFormulas(field.name, value, others);
   return duration.length === 1 ? duration[0] : undefined;
+}
+
+function isLowInformationValue(value: unknown) {
+  if (Array.isArray(value)) return value.length === 0;
+  if (value === false || value === true || value === 0 || value === 1) return true;
+  if (typeof value !== "string") return false;
+  return /^(?:0|1|true|false)$/i.test(value.trim());
 }
 
 function viaLabel(fields: InputFormField[], via?: string) {
@@ -897,7 +917,7 @@ function asGenerated(field: InputFormField, rule: string, detail: string): Input
 
 function uniqueCopySource(field: InputFormField, fields: InputFormField[], sample: unknown) {
   const value = requestValueAt(sample, field.path);
-  if (value === undefined || value === null || value === "" || value === 0 || value === 1 || value === false) return undefined;
+  if (value === undefined || value === null || value === "" || isLowInformationValue(value)) return undefined;
   const sameScope = fields.filter(item => item.path !== field.path && fieldScope(item.path) === fieldScope(field.path));
   const hits = sameScope.filter(item =>
     sameDerivedValue(requestValueAt(sample, item.path), value)
@@ -927,25 +947,43 @@ function knownNames(fields: InputFormField[]) {
   );
 }
 
-export function evidenceSample(capability: CapabilityContract, events: EvidenceEvent[]) {
+function evidenceInput(network: NetworkEvidence) {
+  const body = network.request.body;
+  const query = network.request.query || {};
+  return body && typeof body === "object" && !Array.isArray(body)
+    ? { ...query, ...(body as Record<string, unknown>) }
+    : query;
+}
+
+function observedAsLookupInput(field: InputFormField, value: unknown, index: LookupIndexEntry[], targetAt?: string) {
+  if (value === undefined || value === null || value === "") return false;
+  return index.some(entry => {
+    if (!entry.event || (targetAt && Date.parse(entry.event.at) > Date.parse(targetAt))) return false;
+    return flattenRequestValues(evidenceInput(entry.event)).some(item =>
+      item.name.toLowerCase() === field.name.toLowerCase() && sameDerivedValue(item.value, value)
+    );
+  });
+}
+
+function evidenceSampleEvent(capability: CapabilityContract, events: EvidenceEvent[]) {
   const ids = new Set(capability.evidence.filter(item => item.kind === "network").map(item => item.eventId));
-  let best: unknown;
+  let best: NetworkEvidence | undefined;
   let size = -1;
   for (const event of events) {
     if (event.kind !== "network" || !ids.has(event.id)) continue;
-    const network = event as NetworkEvidence;
-    const body = network.request.body;
-    const query = network.request.query || {};
-    const input = body && typeof body === "object" && !Array.isArray(body)
-      ? { ...query, ...(body as Record<string, unknown>) }
-      : query;
+    const input = evidenceInput(event);
     const nextSize = JSON.stringify(input ?? {}).length;
     if (nextSize > size) {
       size = nextSize;
-      best = input;
+      best = event;
     }
   }
   return best;
+}
+
+export function evidenceSample(capability: CapabilityContract, events: EvidenceEvent[]) {
+  const event = evidenceSampleEvent(capability, events);
+  return event ? evidenceInput(event) : undefined;
 }
 
 function applyComputed(fields: InputFormField[], sample: unknown, capability: CapabilityContract) {
@@ -1004,7 +1042,8 @@ export function attachDerivationRules(
   catalog: CapabilityContract[],
   capability: CapabilityContract,
   mode: "write" | "query" = "write",
-  index?: LookupIndexEntry[]
+  index?: LookupIndexEntry[],
+  targetAt?: string
 ): { fields: InputFormField[]; bindings: DataBinding[] } {
   const lookupIndex = index || buildLookupIndex(events, catalog);
   const bindings: DataBinding[] = [];
@@ -1015,7 +1054,7 @@ export function attachDerivationRules(
     if (shouldKeep(field, capability, fields)) return field;
     if (field.defaultRule && (mode === "write" || !field.defaultRule.startsWith("literal:"))) return field;
     const value = requestValueAt(sample, field.path);
-    const from = fromApiMatch(field, value, sample, lookupIndex, capability, mode);
+    const from = fromApiMatch(field, value, sample, lookupIndex, capability, mode, targetAt);
     if (from) {
       bindings.push({
         id: id("bind"),
@@ -1063,6 +1102,12 @@ export function attachDerivationRules(
     const generated = generatedRule(field, value);
     if (generated) return asGenerated(field, generated.rule, generated.detail);
     if (mode === "query") return field;
+    if (observedAsLookupInput(field, value, lookupIndex, targetAt)) {
+      return {
+        ...asCallerInput(field),
+        sourceDetail: "该字段在写请求前作为已录制查询的同名输入，执行时由调用方提供，不能从查询结果或录制样本猜测"
+      };
+    }
     if (looksInvariantConstant(field, value) && value !== undefined && value !== null && value !== "") {
       return asDefault(field, `literal:${value}`, `请求中观察到的系统常量 ${value}，按该值补齐，调用方不要手填`);
     }
@@ -1084,8 +1129,9 @@ export function attachCatalogDerivations(capabilities: CapabilityContract[], eve
   return capabilities.map(capability => {
     if (capability.validation?.status === "verified") return capability;
     if (!WRITE_OPERATIONS.has(capability.operation) && capability.operation !== "query") return capability;
-    const sample = evidenceSample(capability, events);
-    if (!sample) return capability;
+    const sampleEvent = evidenceSampleEvent(capability, events);
+    if (!sampleEvent) return capability;
+    const sample = evidenceInput(sampleEvent);
     const derived = attachDerivationRules(
       capability.inputForm,
       sample,
@@ -1093,7 +1139,8 @@ export function attachCatalogDerivations(capabilities: CapabilityContract[], eve
       capabilities,
       capability,
       WRITE_OPERATIONS.has(capability.operation) ? "write" : "query",
-      index
+      index,
+      sampleEvent.at
     );
     const existing = new Set(capability.bindings.map(item => `${item.fromCapabilityId}|${item.fromPath}|${item.toPath}`));
     return {

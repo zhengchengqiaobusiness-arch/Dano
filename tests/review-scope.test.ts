@@ -83,7 +83,7 @@ test("review session ids stay on the current page and skip other-page history", 
   assert.equal(ids.has("leave-old"), false);
 });
 
-test("finalize on this page keeps unique from-rules that other-page history would poison", () => {
+test("exact lookup field semantics keep a from-rule despite unrelated duplicate leaves", () => {
   const current = orderEvents();
   const catalog = finalizeCapabilities(buildCapabilityCandidates(current), current);
   const create = catalog.find(item => item.transport.pathTemplate.includes("/order/create"))!;
@@ -92,7 +92,7 @@ test("finalize on this page keeps unique from-rules that other-page history woul
   const mixed = [...current, ...otherPagePoison("leave-old", "2026-09-01T00:00:00.000Z")];
   const poisoned = finalizeCapabilities(buildCapabilityCandidates(mixed), mixed);
   const unit = poisoned.find(item => item.transport.pathTemplate.includes("/order/create"))!.inputForm.find(field => field.name === "unitName")!;
-  assert.equal(unit.defaultRule?.startsWith("from:") ?? false, false);
+  assert.match(unit.defaultRule || "", /^from:.+\.unitName\|via:productId$/);
 });
 
 test("validate only loads this page's sessions and keeps the recorded request shape", async () => {

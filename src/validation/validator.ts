@@ -1,7 +1,7 @@
 import type { CapabilityContract, EvidenceEvent, NetworkEvidence, UiEvidence } from "../domain.js";
 import { getByPath } from "../utils.js";
-import { fieldHasUiEvidence, staticCandidatesHaveUiEvidence } from "../inference/field-resolver.js";
-import { isExecutableRule } from "../inference/field-derivation.js";
+import { fieldHasUiEvidence, flattenRequestValues, requestValueAt, sameValue, staticCandidatesHaveUiEvidence } from "../inference/field-resolver.js";
+import { evidenceSample, isExecutableRule } from "../inference/field-derivation.js";
 import { pickerFieldsMissingQuery, uncoveredWriteLeaves, unresolvedWriteFields, unsoundFormulaFields } from "../review/catalog-review.js";
 
 function schemaHasPath(schema: CapabilityContract["inputSchema"], jsonPath: string) {
@@ -176,12 +176,25 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
       fieldHasUiEvidence(field, uiRefs)
       || field.candidates?.type === "capability"
       || field.candidates?.type === "static"
+      || (() => {
+        const value = requestValueAt(evidenceSample(cap, events), field.path);
+        const lastTargetAt = networkRefs.map(event => event.at).sort().at(-1);
+        return value !== undefined && events.some(event => {
+          if (event.kind !== "network" || networkRefs.includes(event) || (lastTargetAt && event.at > lastTargetAt)) return false;
+          const input = event.request.body && typeof event.request.body === "object" && !Array.isArray(event.request.body)
+            ? { ...event.request.query, ...(event.request.body as Record<string, unknown>) }
+            : event.request.query;
+          return flattenRequestValues(input).some(item =>
+            item.name.toLowerCase() === field.name.toLowerCase() && sameValue(item.value, value)
+          );
+        });
+      })()
     );
   checks.push({
     name: "caller-fields-backed-by-ui",
     ok: callerFieldsBacked,
     detail: callerFieldsBacked
-      ? "所有调用方字段均有真实页面输入证据"
+      ? "所有调用方字段均有真实页面输入、候选或先行查询输入证据"
       : "存在没有页面输入证据的调用方字段"
   });
 
