@@ -18,16 +18,21 @@ const LOGIN_BLOCKED_ACTIONS = new Set(["goto", "click", "fill", "select", "choos
 const DEFAULT_VIEWPORT = { width: 1440, height: 960 };
 const MAX_PREVIEW_VIEWPORT = { width: 3840, height: 2160 };
 
-async function releaseChromiumDebugLog(profileDir: string, timeoutMs = 2_000) {
+export async function releaseChromiumDebugLog(
+  profileDir: string,
+  timeoutMs = 2_000,
+  removeFile: (file: string) => Promise<void> = unlink
+) {
   const file = path.join(profileDir, "Default", "chrome_debug.log");
   const started = Date.now();
   while (true) {
     try {
-      await unlink(file);
-      return;
+      await removeFile(file);
+      return true;
     } catch (error: any) {
-      if (error?.code === "ENOENT") return;
-      if (!new Set(["EBUSY", "EPERM", "EACCES"]).has(error?.code) || Date.now() - started >= timeoutMs) throw error;
+      if (error?.code === "ENOENT") return true;
+      if (!new Set(["EBUSY", "EPERM", "EACCES"]).has(error?.code)) throw error;
+      if (Date.now() - started >= timeoutMs) return false;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
   }
