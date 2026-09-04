@@ -164,7 +164,7 @@ function coerceFieldValue(value: unknown, field: InputFormField) {
   if (value === undefined || value === null) return value;
   let next = applyCandidate(field, value);
   if (typeof next === "string" && isDateInput(next.trim())) {
-    if (field.valueType === "integer" || field.valueType === "number") return dateToMillis(next);
+    if (field.valueType === "integer" || field.valueType === "number") return dateToMillis(next, field.dateClock);
     if (field.valueType === "string") return normalizeDateString(next, field.dateClock);
   }
   if (field.valueType === "string") return typeof next === "string" ? next : String(next);

@@ -111,7 +111,7 @@ test("binds create-page enums, prompt twins, and picker assignees from recorded 
   assert.equal(capability.inputForm.find(field => field.name === "day")?.label, "请假天数");
   assert.equal(capability.inputForm.find(field => field.name === "day")?.widget, "number");
   assert.equal(capability.inputForm.find(field => field.name === "projectName")?.source, "caller");
-  assert.equal(capability.inputForm.find(field => field.name === "projectName")?.label, "所属项目");
+  assert.equal(capability.inputForm.find(field => field.name === "projectName")?.label, "项目名称");
   const assignee = capability.inputForm.find(field => field.name === "Activity_0ag2wyz")!;
   assert.equal(assignee.source, "caller");
   assert.equal(assignee.label, "人力审批");

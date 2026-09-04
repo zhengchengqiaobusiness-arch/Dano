@@ -142,23 +142,58 @@ function binaryFormulas(targetName: string, target: number, others: Array<{ name
   return hits;
 }
 
+function splitCamel(name: string) {
+  return String(name || "").replace(/([a-z])([A-Z])/g, "$1 $2");
+}
+
+function actualFamily(name: string) {
+  return /actual|实际/i.test(name);
+}
+
+function looksDurationName(name: string) {
+  return DURATION_NAME.test(name) || DURATION_NAME.test(splitCamel(name));
+}
+
+function timeRole(name: string): "start" | "end" | "other" {
+  const text = splitCamel(name);
+  if (/(^|[^a-z])(start|begin|from)([^a-z]|$)|开始/i.test(text)) return "start";
+  if (/(^|[^a-z])(end|to|until|expire)([^a-z]|$)|结束|截止/i.test(text)) return "end";
+  return "other";
+}
+
+function durationPairScore(targetName: string, startName: string, endName: string) {
+  let score = 0;
+  if (actualFamily(targetName) === actualFamily(startName) && actualFamily(startName) === actualFamily(endName)) score += 5;
+  if (timeRole(startName) === "start" && timeRole(endName) === "end") score += 3;
+  return score;
+}
+
 function durationFormulas(targetName: string, target: number, others: Array<{ name: string; value: number }>) {
-  if (!DURATION_NAME.test(targetName)) return [];
+  if (!looksDurationName(targetName)) return [];
   const times = others.filter(item => isEpochMs(item.value) || /time|date|At$/i.test(item.name));
-  const hits: string[] = [];
-  for (const start of times) {
-    for (const end of times) {
+  const targetActual = actualFamily(targetName);
+  const sameFamily = times.filter(item => actualFamily(item.name) === targetActual);
+  const pool = sameFamily.length >= 2 ? sameFamily : [];
+  const hits: Array<{ expr: string; score: number }> = [];
+  for (const start of pool) {
+    for (const end of pool) {
       if (start.name === end.name || end.value <= start.value) continue;
+      if (actualFamily(start.name) !== actualFamily(end.name)) continue;
+      if (timeRole(start.name) === "end" || timeRole(end.name) === "start") continue;
       const days = (end.value - start.value) / 86400000;
+      const score = durationPairScore(targetName, start.name, end.name);
       if (near(target, days) || near(target, Math.ceil(days - 1e-9)) || near(target, Math.max(0, Math.round(days)))) {
-        hits.push(`(${end.name} - ${start.name}) / 86400000`);
+        hits.push({ expr: `(${end.name} - ${start.name}) / 86400000`, score });
       }
       if (/hour|小时/.test(targetName) && near(target, (end.value - start.value) / 3600000)) {
-        hits.push(`(${end.name} - ${start.name}) / 3600000`);
+        hits.push({ expr: `(${end.name} - ${start.name}) / 3600000`, score });
       }
     }
   }
-  return hits;
+  if (!hits.length) return [];
+  const best = Math.max(...hits.map(item => item.score));
+  const top = [...new Set(hits.filter(item => item.score === best).map(item => item.expr))];
+  return top.length === 1 ? top : [];
 }
 
 function inferredFormula(targetName: string, target: number, others: Array<{ name: string; value: number }>) {
@@ -769,7 +804,7 @@ function attachCallerOverrides(fields: InputFormField[], sample: unknown) {
     if (field.source !== "caller" || field.defaultRule) return field;
     if (field.candidates || field.widget === "select" || field.widget === "multiselect") return field;
     const expr = computedForField(field, sample, known, fields);
-    if (!expr || !DURATION_NAME.test(`${field.name} ${field.label}`)) return field;
+    if (!expr || !looksDurationName(`${field.name} ${field.label}`)) return field;
     return asCallerOverride(field, expr);
   });
 }

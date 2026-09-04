@@ -137,6 +137,21 @@ function preferLabeledObservation(items: UiObservation[]) {
   return promptLabels.size === 1 ? prompts[0] : undefined;
 }
 
+function preferSpecificObservation(field: InputFormField, items: UiObservation[]) {
+  if (items.length <= 1) return items[0];
+  const named = items.filter(item => uiNameMatches(item.name, field.name));
+  if (named.length === 1) return named[0];
+  const promptHits = items.filter(item => {
+    const specific = emptyPromptLabel(item.label);
+    if (!specific && !isPromptLabel(item.label)) return false;
+    return sameSynonymGroup(field, { name: specific || item.label, label: specific || item.label });
+  });
+  if (promptHits.length === 1) return promptHits[0];
+  const synonym = items.filter(item => sameSynonymGroup(field, item));
+  if (synonym.length === 1) return synonym[0];
+  return preferLabeledObservation(items);
+}
+
 const SYNONYM_GROUPS = [
   /count|qty|quantity|数量/i,
   /(?:^|[^a-z])price(?:$|[^a-z])|单价|售价/i,
@@ -189,6 +204,25 @@ function looksQuantityField(field: { name?: string; label?: string }) {
 
 function looksChoiceObservation(item: UiObservation) {
   return /select|combobox|picker/i.test(item.type || "");
+}
+
+function looksTextObservation(item: Pick<UiObservation, "type">) {
+  return /text|textarea|search|tel|email/i.test(item.type || "")
+    && !/select|combobox|picker/i.test(item.type || "");
+}
+
+function eventLooksChoice(event: UiEvidence) {
+  if (/select|combobox|listbox/i.test(`${event.role || ""} ${event.tag || ""} ${event.inputType || ""}`)) return true;
+  if (/text|textarea|search|tel|email|date|number|password/i.test(event.inputType || "")) return false;
+  const labeled = (event.form || []).find(field =>
+    field.label === event.label
+    || Boolean(event.name && field.name === event.name)
+    || Boolean(event.text && (field.label === event.text || field.label === emptyPromptLabel(event.text)))
+  );
+  if (labeled && looksTextObservation({ type: labeled.type }) && !looksChoiceObservation({ type: labeled.type })) {
+    return false;
+  }
+  return Boolean((event.options?.length || event.visibleOptions?.length) && event.eventType !== "input");
 }
 
 function looksChoiceField(field: InputFormField) {
@@ -267,19 +301,20 @@ function looksIdentityToken(value?: string) {
 export function collectUiObservations(events: UiEvidence[]): UiObservation[] {
   const items: UiObservation[] = [];
   for (const event of events) {
-    const eventOptions = optionsOf(event);
+    const choiceEvent = eventLooksChoice(event);
+    const eventOptions = choiceEvent ? optionsOf(event) : undefined;
     const label = eventLabel(event);
-    const controlType = eventOptions?.length || event.role === "combobox" ? "select" : (event.inputType || event.role);
+    const controlType = choiceEvent ? "select" : (event.inputType || event.role);
     if (looksIdentityToken(event.name) && (event.value === undefined || event.value === "")) {
       items.push({
         name: undefined,
         label: label && label !== event.name ? label : event.text,
         value: event.name,
-        type: controlType || "select",
+        type: controlType || (choiceEvent ? "select" : undefined),
         options: eventOptions
       });
       if (event.text && event.text !== event.name && event.text !== label) {
-        items.push({ name: undefined, label: event.text, value: event.text, type: controlType || "select" });
+        items.push({ name: undefined, label: event.text, value: event.text, type: controlType || (choiceEvent ? "select" : undefined) });
       }
     } else if (event.name && !isGeneratedFieldName(event.name)) {
       items.push({ name: event.name, label, value: event.value, type: controlType, options: eventOptions });
@@ -319,14 +354,22 @@ export function collectUiObservations(events: UiEvidence[]): UiObservation[] {
 
 function mergeObservations(items: UiObservation[]) {
   if (!items.length) return undefined;
-  const named = items.find(item => item.name);
-  return items.reduce((best, item) => ({
+  const texts = items.filter(looksTextObservation);
+  const choices = items.filter(looksChoiceObservation);
+  const pool = texts.length && choices.length ? texts : items;
+  const named = pool.find(item => item.name);
+  return pool.reduce((best, item) => ({
     name: best.name || item.name,
     label: named?.label || best.label || item.label,
     value: best.value !== undefined && best.value !== "" ? best.value : item.value,
-    type: best.type || item.type,
+    type: looksTextObservation(best) || looksTextObservation(item)
+      ? (looksTextObservation(best) ? best.type : item.type)
+      : (best.type || item.type),
     required: best.required === true || item.required === true,
-    options: (item.options?.length || 0) > (best.options?.length || 0) ? item.options : best.options
+    options: looksTextObservation(best) || looksTextObservation(item)
+      ? undefined
+      : ((item.options?.length || 0) > (best.options?.length || 0) ? item.options : best.options),
+    rangeIndex: best.rangeIndex ?? item.rangeIndex
   }));
 }
 
@@ -476,23 +519,37 @@ export function findObservation(
   sample?: unknown
 ) {
   const byName = observations.filter(item => uiNameMatches(item.name, field.name));
-  const seedLabel = byName.find(item => item.label)?.label || field.label;
-  const related = observations.filter(item =>
-    uiNameMatches(item.name, field.name)
-    || Boolean(item.label) && (
-      item.label === seedLabel
-      || item.label === field.label
+  if (byName.length) {
+    const seedLabel = byName.find(item => item.label)?.label || field.label;
+    const related = observations.filter(item => {
+      if (uiNameMatches(item.name, field.name)) return true;
+      if (!item.label || !seedLabel) return false;
+      if (item.label !== seedLabel && item.label !== field.label && !labelsEquivalent(item.label, seedLabel) && !labelsEquivalent(item.label, field.label)) {
+        return false;
+      }
+      return !item.name || uiNameMatches(item.name, field.name);
+    });
+    const direct = mergeObservations(related.length ? related : byName);
+    if (direct) return expandObservation(direct, observations);
+  }
+
+  if (field.label && field.label !== field.name) {
+    const related = observations.filter(item =>
+      item.label === field.label
       || item.label === field.name
-      || labelsEquivalent(item.label, seedLabel)
       || labelsEquivalent(item.label, field.label)
-    )
-  );
-  const direct = mergeObservations(related);
-  if (direct) return expandObservation(direct, observations);
+    );
+    const names = new Set(related.map(item => item.name).filter((name): name is string => Boolean(name)));
+    const scoped = field.name && names.size > 1
+      ? related.filter(item => !item.name || uiNameMatches(item.name, field.name))
+      : related;
+    const direct = mergeObservations(scoped);
+    if (direct) return expandObservation(direct, observations);
+  }
 
   if (isDistinctiveValue(requestValue) || ASK_KEY.test(field.name || "")) {
     const exact = observations.filter(item => sameValue(item.value, requestValue));
-    const preferred = preferLabeledObservation(exact);
+    const preferred = preferSpecificObservation(field, exact);
     if (preferred) return expandObservation(preferred, observations);
     if (exact.length === 1) return expandObservation(exact[0], observations);
     const labels = new Set(exact.map(item => item.label).filter(Boolean));
@@ -586,10 +643,10 @@ export function attachObservedDefaults(
 
 
 function formatHint(field: InputFormField, requestValue?: unknown) {
-  if (/time|date|start|end/i.test(`${field.name} ${field.label}`)) {
+  if (/time|date|start|end/i.test(`${field.name} ${field.label}`) || field.widget === "date") {
     const clock = recordedClock(requestValue);
     if (typeof requestValue === "number") {
-      return "，页面按 YYYY-MM-DD 填写，执行器转成当天 00:00 的毫秒时间戳";
+      return `，页面按 YYYY-MM-DD 填写，执行器转成当天 ${clock || "00:00:00"} 的毫秒时间戳`;
     }
     if (clock) {
       return `，页面按 YYYY-MM-DD 填写，请求使用 YYYY-MM-DD ${clock}`;
@@ -617,7 +674,8 @@ function widgetFromObservation(field: InputFormField, matched?: UiObservation): 
   if (matched && looksDateControl({ ...field, type: matched.type, label: matched.label || field.label, name: matched.name || field.name })) {
     return "date";
   }
-  if (/select|combobox|picker/.test(type) || matched?.options?.length) return "select";
+  if (/select|combobox|picker/.test(type) && !looksTextObservation(matched || {})) return "select";
+  if (matched?.options?.length && !looksTextObservation(matched) && !looksDateControl(matched || field)) return "select";
   if (/number/.test(type)) return "number";
   if (/checkbox|switch|boolean/.test(type)) return "boolean";
   return field.widget;
@@ -690,9 +748,11 @@ function asCaller(
   const choiceWidget = field.valueType === "array" ? "multiselect" : "select";
   const widget = looksDateControl(matched || field)
     ? "date"
-    : options?.length || picker || /select|combobox|picker/i.test(`${matched?.type || ""}`)
-      ? choiceWidget
-      : widgetFromObservation(field, matched);
+    : looksText
+      ? widgetFromObservation(field, { ...matched, options: undefined })
+      : options?.length || picker || /select|combobox|picker/i.test(`${matched?.type || ""}`)
+        ? choiceWidget
+        : widgetFromObservation(field, matched);
   return {
     ...field,
     label: observedLabel(field, matched),
@@ -748,7 +808,19 @@ export function resolveFieldOwnership(
 
 function expandObservation(hit: UiObservation | undefined, observations: UiObservation[]) {
   if (!hit?.label) return hit;
-  return mergeObservations(observations.filter(item => item.label === hit.label)) || hit;
+  const same = observations.filter(item => item.label === hit.label);
+  const names = new Set(same.map(item => item.name).filter((name): name is string => Boolean(name)));
+  let scoped = same;
+  if (hit.name && names.size > 1) {
+    scoped = same.filter(item => !item.name || item.name === hit.name);
+  }
+  const values = scoped
+    .map(item => item.value)
+    .filter(value => value !== undefined && value !== "");
+  if (values.length > 1 && hit.value !== undefined && hit.value !== "") {
+    scoped = scoped.filter(item => item.value === undefined || item.value === "" || sameValue(item.value, hit.value));
+  }
+  return mergeObservations(scoped) || hit;
 }
 
 function uniqueByLabel(items: UiObservation[]) {
@@ -1015,7 +1087,11 @@ export function bindByUniqueMatching(
   const assignment = uniqueAssignment(leftoverFields, leftoverObs, (field, item) => {
     const value = requestValueAt(sample, field.path);
     if (value === undefined || value === null || value === "") return false;
+    if (looksTextObservation({ type: field.widget }) && looksChoiceObservation(item) && !sameSynonymGroup(field, item)) {
+      return false;
+    }
     if (observationMatchesValue(item, value, lists)) return true;
+    if (!looksChoiceField(field) && !looksChoiceObservation(item)) return false;
     const list = listForObservation(item, lists, value);
     return Boolean(list && list.rows.some(row => sameValue(rowIdentity(row), value)));
   });
@@ -1065,7 +1141,7 @@ function leftoverForField(
   sample: unknown,
   lists: RecordedList[]
 ) {
-  if ((field.widget === "select" || field.widget === "text") && field.valueType !== "number" && field.valueType !== "integer") {
+  if (field.widget === "select" && field.valueType !== "number" && field.valueType !== "integer") {
     const selects = leftover.filter(item => /select|combobox|picker/.test(item.type || ""));
     if (selects.length) return selects;
   }
@@ -1213,6 +1289,82 @@ export function bindByRecordedOptions(
   return fields.map(field => bound.get(field.path) || field);
 }
 
+const QUALIFIER_LABEL: Record<string, string> = {
+  code: "编码",
+  name: "名称",
+  type: "类型",
+  status: "状态",
+  key: "键",
+  time: "时间",
+  date: "日期"
+};
+
+function lastNameToken(name: string) {
+  const parts = String(name || "")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[^A-Za-z0-9\u4e00-\u9fff]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  return parts.at(-1) || "";
+}
+
+function qualifySharedLabel(shared: string, field: InputFormField, siblings: InputFormField[]) {
+  const token = lastNameToken(field.name).toLowerCase();
+  if (!token) return undefined;
+  const others = siblings.filter(item => item.path !== field.path).map(item => lastNameToken(item.name).toLowerCase());
+  if (!others.length || others.includes(token)) return undefined;
+  const zh = QUALIFIER_LABEL[token];
+  if (!zh) return `${shared}（${lastNameToken(field.name)}）`;
+  if (shared.includes(zh)) return shared;
+  const stem = shared.replace(/^(所属|相关|对应)/, "").replace(/(信息|资料)$/, "");
+  if (stem && stem !== shared) return `${stem}${zh}`;
+  return `${shared}${zh}`;
+}
+
+function refineSharedCallerLabels(
+  fields: InputFormField[],
+  observations: UiObservation[],
+  sample: unknown
+): InputFormField[] {
+  const callers = fields.filter(field => field.source === "caller" && field.label);
+  const groups = new Map<string, InputFormField[]>();
+  for (const field of callers) {
+    groups.set(field.label!, [...(groups.get(field.label!) || []), field]);
+  }
+  const relabel = new Map<string, string>();
+  for (const [label, group] of groups) {
+    if (group.length < 2) continue;
+    const used = new Set<string>();
+    for (const field of group) {
+      const value = requestValueAt(sample, field.path);
+      const better = observations.filter(item => {
+        if (!item.label || item.label === label || used.has(item.label)) return false;
+        const specific = emptyPromptLabel(item.label);
+        const matchesValue = value !== undefined && value !== null && value !== ""
+          && (sameValue(item.value, value) || Boolean(dateDay(value) && dateDay(item.value) === dateDay(value)));
+        const matchesName = uiNameMatches(item.name, field.name)
+          || Boolean(specific && sameSynonymGroup(field, { name: specific, label: specific }));
+        return (matchesValue || matchesName) && (isPromptLabel(item.label) || matchesName);
+      });
+      const unique = [...new Map(better.map(item => [item.label || "", item])).values()];
+      if (unique.length === 1) {
+        relabel.set(field.path, observedLabel(field, unique[0]));
+        if (unique[0]!.label) used.add(unique[0]!.label);
+      }
+    }
+    const still = group.filter(field => (relabel.get(field.path) || field.label) === label);
+    if (still.length > 1) {
+      for (const field of still) {
+        const qualified = qualifySharedLabel(label, field, still);
+        if (qualified && qualified !== label) relabel.set(field.path, qualified);
+      }
+    }
+  }
+  if (!relabel.size) return fields;
+  return fields.map(field => relabel.has(field.path) ? { ...field, label: relabel.get(field.path)! } : field);
+}
+
 export function finalizeCallerFields(
   fields: InputFormField[],
   observations: UiObservation[],
@@ -1237,8 +1389,12 @@ export function finalizeCallerFields(
     lists
   );
   return applyInvariantDefaults(
-    attachUnresolvedHints(relabeled, observations, sample, lists).map(field =>
-      enrichFromObservations(field, observations, sample, lists)
+    refineSharedCallerLabels(
+      attachUnresolvedHints(relabeled, observations, sample, lists).map(field =>
+        enrichFromObservations(field, observations, sample, lists)
+      ),
+      observations,
+      sample
     ),
     sample,
     observations

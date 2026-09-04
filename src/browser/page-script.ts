@@ -322,6 +322,14 @@ export const PAGE_HELPERS = String.raw`
     return { value: raw !== undefined && raw !== null && raw !== "" ? raw : label, label };
   };
 
+  const isChoiceControl = (el) => {
+    if (!(el instanceof Element)) return false;
+    if (el instanceof HTMLSelectElement) return true;
+    const role = el.getAttribute("role") || "";
+    if (/combobox|listbox/.test(role)) return true;
+    return Boolean(el.closest(".el-select, .ant-select, .arco-select, .n-select, .el-cascader"));
+  };
+
   const optionsOf = (el) => {
     if (el instanceof HTMLSelectElement) {
       return [...el.options].slice(0, 300).map((item) => ({ value: item.value, label: clean(item.textContent) }));
@@ -1016,8 +1024,10 @@ export const UI_RECORDER_SCRIPT = `(() => {
         if (/password|passwd|pwd|secret|token|credential|current-password|new-password/i.test(key)) return "[REDACTED]";
         return displayValue(control);
       })(),
-      options: eventType === "change" || eventType === "submit" ? (optionsOf(control) || collectOptionRecords()) : optionsOf(control),
-      visibleOptions: eventType === "change" || eventType === "submit" ? collectVisibleOptions(document) : [],
+      options: eventType === "change" || eventType === "submit"
+        ? (optionsOf(control) || (isChoiceControl(control) ? collectOptionRecords() : undefined))
+        : optionsOf(control),
+      visibleOptions: (eventType === "change" || eventType === "submit") && isChoiceControl(control) ? collectVisibleOptions(document) : [],
       scope: scopeName(formContainer || control),
       form: formSnapshot(formContainer)
     };

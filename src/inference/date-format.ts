@@ -11,16 +11,22 @@ export function isDateInput(value: unknown): value is string {
 }
 
 export function recordedClock(value: unknown) {
-  const match = String(value ?? "").trim().replace("T", " ").match(/^\d{4}-\d{2}-\d{2} (\d{2}:\d{2}:\d{2})/);
-  return match?.[1];
+  if (typeof value === "string") {
+    const match = value.trim().replace("T", " ").match(/^\d{4}-\d{2}-\d{2} (\d{2}:\d{2}:\d{2})/);
+    if (match?.[1]) return match[1];
+  }
+  return clockFromEpoch(value);
 }
 
-export function dateToMillis(value: string) {
+export function dateToMillis(value: string, clock?: string) {
   const raw = value.trim().replace("T", " ");
-  const withClock = raw.length === 10 ? `${raw} 00:00:00` : raw.slice(0, 19);
-  const [day, clock = "00:00:00"] = withClock.split(" ");
+  const day = raw.length >= 10 ? raw.slice(0, 10) : raw;
+  const fromValue = raw.length >= 19 ? raw.slice(11, 19) : undefined;
+  const suffix = raw.length === 10 && clock && /^\d{2}:\d{2}:\d{2}$/.test(clock)
+    ? clock
+    : (fromValue || (clock && /^\d{2}:\d{2}:\d{2}$/.test(clock) ? clock : "00:00:00"));
   const [year, month, date] = day.split("-").map(Number);
-  const [hour, minute, second] = clock.split(":").map(Number);
+  const [hour, minute, second] = suffix.split(":").map(Number);
   return Date.UTC(year, (month || 1) - 1, date || 1, hour || 0, minute || 0, second || 0) - BUSINESS_TZ_OFFSET_MS;
 }
 
