@@ -4,6 +4,7 @@ import type { CapabilityContract, EvidenceEvent, SkillListItem, SkillRecord } fr
 import { exportSkill, normalizeSkillName } from "../export/skill-exporter.js";
 import { ensureDir, readJson, writeJson } from "../utils.js";
 import { moveDirectory } from "./skill-files.js";
+import { materializeSkillCredentials, requiredCredentialOrigins } from "../credentials/credential-store.js";
 
 async function exists(target: string) {
   try {
@@ -37,7 +38,7 @@ export class SkillLibrary {
   private readonly historyDir: string;
   private readonly trashDir: string;
 
-  constructor(private readonly outputRoot: string, dataDir: string) {
+  constructor(private readonly outputRoot: string, private readonly dataDir: string) {
     this.stateDir = path.join(dataDir, "skills");
     this.registryFile = path.join(this.stateDir, "registry.json");
     this.historyDir = path.join(this.stateDir, "history");
@@ -98,6 +99,15 @@ export class SkillLibrary {
     const destination = path.join(this.outputRoot, exported.skillName);
     assertInside(this.outputRoot, destination);
     if (await exists(destination)) throw new Error(`导出目录已存在：${exported.skillName}`);
+    const exportedIds = new Set(exported.capabilityIds);
+    const exportedCapabilities = capabilities.filter(capability => exportedIds.has(capability.id));
+    const credentialFile = await materializeSkillCredentials(
+      this.dataDir,
+      this.outputRoot,
+      exported.skillName,
+      exportedCapabilities.map(capability => capability.transport.origin),
+      requiredCredentialOrigins(exportedCapabilities, events)
+    );
     await ensureDir(this.outputRoot);
     await rename(exported.dir, destination);
 
@@ -120,6 +130,7 @@ export class SkillLibrary {
     return {
       ...await this.enrich(record),
       count: exported.count,
+      credentialFile,
       primaryCapabilityIds: exported.primaryCapabilityIds,
       lookupCapabilityIds: exported.lookupCapabilityIds
     };

@@ -9,6 +9,7 @@ import { UI_RECORDER_SCRIPT } from "./page-script.js";
 import { PageActions, type PageSnapshot } from "./page-actions.js";
 import { buildManualSteps, renderManualStepsMarkdown, type ManualStep } from "../record/manual-steps.js";
 import { killCommandLineMatches, killProcessTree } from "../process-lifecycle.js";
+import { persistOriginCredentials } from "../credentials/credential-store.js";
 
 const FORM_ACTION_BUDGET = 3;
 const DEFAULT_VIEWPORT = { width: 1440, height: 960 };
@@ -395,6 +396,7 @@ export class BrowserRecorder {
   private async requestPart(request: Request) {
     const postData = request.postData();
     const rawHeaders = await request.allHeaders().catch(() => ({} as Record<string, string>));
+    await persistOriginCredentials(this.config.dataDir, request.url(), rawHeaders).catch(() => {});
     const contentType = rawHeaders["content-type"] || "";
     let body: unknown;
     if (postData && /application\/x-www-form-urlencoded/i.test(contentType)) {

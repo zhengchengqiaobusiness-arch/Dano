@@ -332,7 +332,7 @@ description: >
 ## 前置
 
 - 工作目录必须是本 \`SKILL.md\` 所在目录。
-- 认证只走环境变量 \`SKILL_AUTH_HEADERS\`。不要把凭证写进对话或文件。
+- 认证默认读取 Skill 外部同名运行时凭据文件；\`SKILL_AUTH_HEADERS\` 或 \`SKILL_AUTH_FILE\` 可显式覆盖。凭据不写入 Skill、合同或对话。
 - Prefer HTTP：用本目录 \`scripts/\` 执行。不要绕过脚本直接拼请求。
 
 ## 何时使用
@@ -410,7 +410,7 @@ ${routeIndex(routes)}
 
 | 情况 | 处理 |
 | --- | --- |
-| 缺鉴权或 401/403 | 停止。请用户提供当前会话的 \`SKILL_AUTH_HEADERS\`，不要猜 token。 |
+| 缺鉴权或 401/403 | 停止。检查外部运行时凭据是否仍有效；必要时重新登录并录制一次请求，或显式提供 \`SKILL_AUTH_HEADERS\`。 |
 | 超时或网络失败 | Prefer 整段改走 Fallback，并写明路径。不要重试写操作。 |
 | HTTP 已返回但断言不满足 | 按合同失败处理；展示关键错误字段，不要编造成功。 |
 | \`ask_user_question\` 为 \`cancelled\` | 立即停止当前流程。 |
@@ -471,7 +471,7 @@ ${write ? `「${write.title}」成功后只报告：已提交、合同完成条�
 
 ## 失败细则
 
-- 缺 \`SKILL_AUTH_HEADERS\`、401、403：停止并请用户提供当前已登录会话头。
+- 外部运行时凭据缺失或返回 401/403：停止并提示重新登录；也可显式提供 \`SKILL_AUTH_HEADERS\` 或 \`SKILL_AUTH_FILE\`。
 - 超时、连接失败：写明改走 Fallback；读操作可整段改走，写操作不自动重试。
 - 业务返回失败字段：展示合同里存在的错误信息，不编造成功。
 - \`invalid_question_arguments\` 且可重试：一次修正全部 issue 后替换提问。

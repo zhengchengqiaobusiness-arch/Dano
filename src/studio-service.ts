@@ -2,7 +2,7 @@ import path from "node:path";
 import { readdir } from "node:fs/promises";
 import type { CapabilityContract, EvidenceEvent, ExecutionPlan, InputFormField, OperationKind, RecordingSession } from "./domain.js";
 import type { StudioConfig } from "./config.js";
-import { loadConfig } from "./config.js";
+import { defaultSkillOutputRoot, loadConfig } from "./config.js";
 import { BrowserRecorder } from "./browser/recorder.js";
 import { id, readJson, readJsonl, writeJson } from "./utils.js";
 import { buildCapabilityCandidates } from "./inference/build-candidates.js";
@@ -19,6 +19,7 @@ import { reanalyzeIncoming } from "./inference/reanalyze.js";
 import { reviewSession } from "./review/catalog-review.js";
 import { SkillLibrary } from "./catalog/skill-library.js";
 import { buildApprovedRoutes } from "./planner/routes.js";
+import { materializeSkillCredentials, requiredCredentialOrigins } from "./credentials/credential-store.js";
 
 function schemaPathExists(schema: CapabilityContract["inputSchema"], jsonPath: string) {
   const parts = jsonPath.replace(/^\$\.?/, "").split(".").filter(Boolean);
@@ -48,7 +49,7 @@ export class StudioService {
     this.config = config;
     this.recorder = new BrowserRecorder(config);
     this.reasoner = new OpenAIReasoner(config.openaiModel);
-    this.skillLibrary = new SkillLibrary(path.join(config.rootDir, "dist", "skills"), config.dataDir);
+    this.skillLibrary = new SkillLibrary(defaultSkillOutputRoot(config.rootDir), config.dataDir);
   }
 
   private catalogFile() {
@@ -427,9 +428,19 @@ export class StudioService {
     return executeCapability(cap, input, confirmWrite, caps);
   }
 
-  async export(name: string, outputRoot = path.join(this.config.rootDir, "dist", "skills"), match: string[] = [], sessionId?: string) {
+  async export(name: string, outputRoot = defaultSkillOutputRoot(this.config.rootDir), match: string[] = [], sessionId?: string) {
     const { catalog, events } = await this.exportCatalog(sessionId);
-    return exportSkill(outputRoot, name, catalog, match, events);
+    const exported = await exportSkill(outputRoot, name, catalog, match, events);
+    const exportedIds = new Set(exported.capabilityIds);
+    const exportedCapabilities = catalog.filter(capability => exportedIds.has(capability.id));
+    const credentialFile = await materializeSkillCredentials(
+      this.config.dataDir,
+      outputRoot,
+      exported.skillName,
+      exportedCapabilities.map(capability => capability.transport.origin),
+      requiredCredentialOrigins(exportedCapabilities, events)
+    );
+    return { ...exported, credentialFile };
   }
 
   async listSkills() {

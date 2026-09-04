@@ -1,11 +1,15 @@
 const SENSITIVE_HEADER = /^(authorization|proxy-authorization|cookie|set-cookie)$/i;
 const SENSITIVE_KEY = /(password|passwd|pwd|secret|token|api[-_]?key|access[-_]?key|refresh[-_]?token|session|credential)/i;
 
+export function isSecretBearingHeader(name: string) {
+  return SENSITIVE_HEADER.test(name) || SENSITIVE_KEY.test(name);
+}
+
 export function redactHeaders(headers: Record<string, string>): Record<string, string> {
   return Object.fromEntries(
     Object.entries(headers).map(([key, value]) => [
       key,
-      SENSITIVE_HEADER.test(key) || SENSITIVE_KEY.test(key) ? "[REDACTED]" : value
+      isSecretBearingHeader(key) ? "[REDACTED]" : value
     ])
   );
 }

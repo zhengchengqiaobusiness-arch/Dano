@@ -16,7 +16,8 @@ from typing import Any
 from urllib import error, parse, request
 
 
-CONTRACT_PATH = Path(__file__).resolve().parents[1] / "references" / "CONTRACT.json"
+SKILL_ROOT = Path(__file__).resolve().parents[1]
+CONTRACT_PATH = SKILL_ROOT / "references" / "CONTRACT.json"
 
 
 def load_contract() -> dict[str, Any]:
@@ -403,11 +404,47 @@ def prepare_input(
     return prepared
 
 
-def auth_headers() -> dict[str, str]:
-    raw = os.environ.get("SKILL_AUTH_HEADERS", "{}")
-    headers = json.loads(raw)
-    if not isinstance(headers, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in headers.items()):
-        raise ValueError("SKILL_AUTH_HEADERS 必须是字符串键值组成的 JSON 对象")
+def checked_headers(value: Any, source: str) -> dict[str, str]:
+    if not isinstance(value, dict) or not all(isinstance(key, str) and isinstance(item, str) for key, item in value.items()):
+        raise ValueError(f"{source} 必须是字符串键值组成的 JSON 对象")
+    return value
+
+
+def default_auth_file() -> Path:
+    return SKILL_ROOT.parent.parent / "credentials" / f"{SKILL_ROOT.name}.json"
+
+
+def url_origin(url: str) -> str:
+    parsed = parse.urlsplit(url)
+    scheme = parsed.scheme.lower()
+    hostname = parsed.hostname
+    if scheme not in {"http", "https"} or not hostname:
+        raise ValueError(f"不支持从 URL 读取运行时凭据：{url}")
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    port = parsed.port
+    if port is not None and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
+        host = f"{host}:{port}"
+    return f"{scheme}://{host}"
+
+
+def auth_headers(url: str) -> dict[str, str]:
+    raw = os.environ.get("SKILL_AUTH_HEADERS", "").strip()
+    if raw:
+        headers = checked_headers(json.loads(raw), "SKILL_AUTH_HEADERS")
+        return {"Accept": "application/json", **headers}
+
+    configured_file = os.environ.get("SKILL_AUTH_FILE", "").strip()
+    auth_file = Path(configured_file or default_auth_file())
+    if not auth_file.exists():
+        if configured_file:
+            raise ValueError(f"SKILL_AUTH_FILE 不存在：{auth_file}")
+        return {"Accept": "application/json"}
+    profile = json.loads(auth_file.read_text(encoding="utf-8-sig"))
+    origins = profile.get("origins") if isinstance(profile, dict) else None
+    if not isinstance(origins, dict):
+        raise ValueError("Skill 运行时凭据文件缺少 origins 对象")
+    origin = url_origin(url)
+    headers = checked_headers(origins.get(origin, {}), f"{auth_file} 中 {origin} 的认证头")
     return {"Accept": "application/json", **headers}
 
 
@@ -464,7 +501,7 @@ def build_request(capability: dict[str, Any], prepared: dict[str, Any]) -> tuple
             delete_by_path(body, field_path)
 
     final_url = parse.urlunsplit((split.scheme, split.netloc, path_value, parse.urlencode(query_items, doseq=True), split.fragment))
-    headers = auth_headers()
+    headers = auth_headers(final_url)
     data = None
     if method not in {"GET", "HEAD"}:
         headers["Content-Type"] = "application/json"
