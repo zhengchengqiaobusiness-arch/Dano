@@ -323,9 +323,12 @@ function pickVia(field: InputFormField, joins: ReturnType<typeof requestJoins>, 
     return usable.find(item => fieldScope(field.path) === item.scope) || usable[0];
   }
   const identity = rowIdentity(row);
+  if (joins.some(item => item.name === field.name && sameValue(item.value, identity))) return undefined;
   const matched = usable.filter(item => sameValue(item.value, identity));
   if (!matched.length) return undefined;
-  return matched.find(item => fieldScope(item.path) === fieldScope(field.path)) || matched[0];
+  const sameScope = matched.filter(item => fieldScope(item.path) === fieldScope(field.path));
+  if (sameScope.length === 1) return sameScope[0];
+  return matched.length === 1 ? matched[0] : undefined;
 }
 
 function requestContainsFieldValue(event: NetworkEvidence, fieldName: string, value: unknown) {

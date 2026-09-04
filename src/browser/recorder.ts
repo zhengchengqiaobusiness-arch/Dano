@@ -1,5 +1,5 @@
 import path from "node:path";
-import { writeFile } from "node:fs/promises";
+import { unlink, writeFile } from "node:fs/promises";
 import { chromium, type BrowserContext, type Browser, type Request, type Response, type Page } from "playwright";
 import type { EvidenceEvent, NetworkEvidence, OperationKind, RecordingSession, UiEvidence } from "../domain.js";
 import type { StudioConfig } from "../config.js";
@@ -16,6 +16,21 @@ const FORM_ACTION_BUDGET = 3;
 const EXPECTABLE_OPERATIONS = new Set<OperationKind>(["query", "create", "update", "review", "delete", "upload", "download", "action"]);
 const DEFAULT_VIEWPORT = { width: 1440, height: 960 };
 const MAX_PREVIEW_VIEWPORT = { width: 3840, height: 2160 };
+
+async function releaseChromiumDebugLog(profileDir: string, timeoutMs = 2_000) {
+  const file = path.join(profileDir, "Default", "chrome_debug.log");
+  const started = Date.now();
+  while (true) {
+    try {
+      await unlink(file);
+      return;
+    } catch (error: any) {
+      if (error?.code === "ENOENT") return;
+      if (!new Set(["EBUSY", "EPERM", "EACCES"]).has(error?.code) || Date.now() - started >= timeoutMs) throw error;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
+}
 
 export function normalizePreviewScale(input?: number | null) {
   const scale = Number(input);
@@ -1188,5 +1203,6 @@ export class BrowserRecorder {
     this.browserLaunched = false;
     if (pid) await killProcessTree(pid);
     if (launched) await killCommandLineMatches(this.config.profileDir);
+    if (launched) await releaseChromiumDebugLog(this.config.profileDir);
   }
 }

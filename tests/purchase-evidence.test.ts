@@ -502,7 +502,7 @@ test("exported purchase skill keeps API candidates and omits background polls", 
       "--prepare-only"
     ]);
     const queryBody = JSON.parse(queryPrepared.stdout);
-    assert.match(queryBody.url, /orderTime%5B0%5D=2026-09-01\+00%3A00%3A00/);
+    assert.match(queryBody.url, /orderTime%5B0%5D=2026-09-01(?:&|$)/);
     assert.equal(queryBody.prepared.status, 10);
     const queryOpen = await execFileAsync("python", [
       path.join(result.dir, "scripts", "execute.py"),
