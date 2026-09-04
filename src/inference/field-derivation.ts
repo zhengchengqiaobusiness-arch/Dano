@@ -1,6 +1,7 @@
 import type { CapabilityContract, DataBinding, EvidenceEvent, InputFormField, NetworkEvidence } from "../domain.js";
+import type { SemanticConcept } from "./field-resolver.js";
 import { id } from "../utils.js";
-import { flattenRequestValues, nameTokens, requestValueAt, sameSynonymGroup, sameValue } from "./field-resolver.js";
+import { flattenRequestValues, isPaginationField, nameTokens, requestValueAt, sameSynonymGroup, sameValue, semanticConcepts } from "./field-resolver.js";
 import { normalizeUrl } from "./heuristics.js";
 import { isNoiseCapability, isPageResultQuery, isPrimaryCapability, relatedResource } from "./export-scope.js";
 
@@ -204,6 +205,126 @@ function inferredFormula(targetName: string, target: number, others: Array<{ nam
   ]);
 }
 
+function semanticOperand(
+  entry: { name: string; value: number },
+  target: InputFormField,
+  fields: InputFormField[]
+) {
+  const aggregate = /^sum\(items\.([^)]+)\)$/.exec(entry.name);
+  const scope = aggregate ? "item" : fieldScope(target.path);
+  const name = aggregate?.[1] || entry.name;
+  const matched = fields.find(field => field.name === name && fieldScope(field.path) === scope)
+    || fields.find(field => field.name === name);
+  return semanticConcepts(matched || { name });
+}
+
+function namedNumber(
+  entries: Array<{ name: string; value: number }>,
+  pattern: RegExp,
+  target: InputFormField,
+  fields: InputFormField[],
+  requiredConcepts: SemanticConcept[],
+  excludedConcepts: SemanticConcept[] = []
+) {
+  const exact = entries.find(entry => pattern.test(entry.name));
+  if (exact) return exact;
+  const semantic = entries.filter(entry => {
+    if (entry.name.startsWith("sum(items.")) return false;
+    const concepts = semanticOperand(entry, target, fields);
+    return requiredConcepts.every(concept => concepts.has(concept))
+      && excludedConcepts.every(concept => !concepts.has(concept));
+  });
+  return semantic.length === 1 ? semantic[0] : undefined;
+}
+
+function verifiedFormula(target: number, expression: string, value: number) {
+  return Number.isFinite(value) && near(target, value) ? expression : undefined;
+}
+
+function semanticComputedFormula(
+  field: InputFormField,
+  target: number,
+  others: Array<{ name: string; value: number }>,
+  fields: InputFormField[]
+) {
+  const name = field.name;
+  const targetConcepts = semanticConcepts(field);
+  const has = (...concepts: SemanticConcept[]) => concepts.every(concept => targetConcepts.has(concept));
+  const lacks = (...concepts: SemanticConcept[]) => concepts.every(concept => !targetConcepts.has(concept));
+  const conventionalDerived = /^(?:totalProductPrice|lineAmount|amount|subtotal|taxPrice|taxAmount|totalPrice|totalAmount|grossAmount|netAmount|discountPrice|discountAmount)$/i.test(name);
+  const count = namedNumber(others, /^(?:count|qty|quantity)$/i, field, fields, ["count"], ["stock"]);
+  const unitPrice = namedNumber(others, /^(?:productPrice|unitPrice|price)$/i, field, fields, ["unit-price"]);
+  const lineAmount = namedNumber(
+    others,
+    /^(?:totalProductPrice|lineAmount|amount|subtotal)$/i,
+    field,
+    fields,
+    ["money"],
+    ["unit-price", "tax", "total", "discount", "deposit"]
+  );
+  const taxPercent = namedNumber(others, /^(?:taxPercent|taxRate)$/i, field, fields, ["tax", "percent"]);
+  const taxPrice = namedNumber(others, /^(?:taxPrice|taxAmount)$/i, field, fields, ["tax", "money"], ["percent", "total"]);
+
+  if (/^(?:productPrice|unitPrice|price|discountPercent|discountRate|taxPercent|taxRate|depositPrice|depositAmount)$/i.test(name)
+    || (!conventionalDerived && (
+      has("unit-price")
+      || (has("percent") && (has("discount") || has("tax")))
+      || has("deposit")
+    ))) {
+    return undefined;
+  }
+
+  const lineAmountTarget = /^(?:totalProductPrice|lineAmount|amount|subtotal)$/i.test(name)
+    || (has("money") && lacks("unit-price", "tax", "total", "discount", "deposit"));
+  if (lineAmountTarget && count && unitPrice) {
+    return verifiedFormula(target, `${count.name} * ${unitPrice.name}`, count.value * unitPrice.value);
+  }
+  const taxAmountTarget = /^(?:taxPrice|taxAmount)$/i.test(name)
+    || (has("tax", "money") && lacks("percent", "total"));
+  if (taxAmountTarget && taxPercent) {
+    if (lineAmount) {
+      const hit = verifiedFormula(target, `${lineAmount.name} * ${taxPercent.name} / 100`, lineAmount.value * taxPercent.value / 100);
+      if (hit) return hit;
+    }
+    if (count && unitPrice) {
+      return verifiedFormula(
+        target,
+        `${count.name} * ${unitPrice.name} * ${taxPercent.name} / 100`,
+        count.value * unitPrice.value * taxPercent.value / 100
+      );
+    }
+  }
+  const totalTarget = /^(?:totalPrice|totalAmount|grossAmount)$/i.test(name) || has("total", "money");
+  if (totalTarget) {
+    if (lineAmount && taxPrice) {
+      const hit = verifiedFormula(target, `${lineAmount.name} + ${taxPrice.name}`, lineAmount.value + taxPrice.value);
+      if (hit) return hit;
+    }
+    if (count && unitPrice && taxPercent) {
+      const hit = verifiedFormula(
+        target,
+        `${count.name} * ${unitPrice.name} * (1 + ${taxPercent.name} / 100)`,
+        count.value * unitPrice.value * (1 + taxPercent.value / 100)
+      );
+      if (hit) return hit;
+    }
+  }
+  if (fieldScope(field.path) === "item") return undefined;
+
+  const gross = namedNumber(others, /^sum\(items\.(?:totalPrice|totalAmount|grossAmount)\)$/i, field, fields, ["total", "money"]);
+  const discountPercent = namedNumber(others, /^(?:discountPercent|discountRate)$/i, field, fields, ["discount", "percent"]);
+  const discountPrice = namedNumber(others, /^(?:discountPrice|discountAmount)$/i, field, fields, ["discount", "money"], ["percent", "total"]);
+  const discountAmountTarget = /^(?:discountPrice|discountAmount)$/i.test(name)
+    || (has("discount", "money") && lacks("percent", "total"));
+  if (discountAmountTarget && gross && discountPercent) {
+    return verifiedFormula(target, `${gross.name} * ${discountPercent.name} / 100`, gross.value * discountPercent.value / 100);
+  }
+  if (totalTarget && gross && discountPrice) {
+    return verifiedFormula(target, `${gross.name} - ${discountPrice.name}`, gross.value - discountPrice.value);
+  }
+  return undefined;
+}
+
 function fieldScope(path: string) {
   return path.includes("[*]") ? "item" : "header";
 }
@@ -319,9 +440,7 @@ function isJoinFieldName(name: string) {
 
 function pickVia(field: InputFormField, joins: ReturnType<typeof requestJoins>, row: Record<string, unknown> | undefined) {
   const usable = joins.filter(item => item.name !== field.name && isJoinFieldName(item.name));
-  if (!row) {
-    return usable.find(item => fieldScope(field.path) === item.scope) || usable[0];
-  }
+  if (!row) return undefined;
   const identity = rowIdentity(row);
   if (joins.some(item => item.name === field.name && sameValue(item.value, identity))) return undefined;
   const matched = usable.filter(item => sameValue(item.value, identity));
@@ -356,6 +475,37 @@ function requestSelectsValue(event: NetworkEvidence, fieldName: string, value: u
     ...(body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {})
   };
   return Object.values(params).some(item => sameValue(item, value));
+}
+
+function lookupRequestValues(entry: LookupIndexEntry) {
+  if (!entry.event) {
+    return entry.capability.inputForm.map(field => ({ name: field.name, value: undefined }));
+  }
+  const body = entry.event.request.body;
+  const input = {
+    ...(entry.event.request.query || {}),
+    ...(body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {})
+  };
+  return flattenRequestValues(input).filter(item => item.value !== undefined && item.value !== null && item.value !== "");
+}
+
+function causalLookupVia(field: InputFormField, joins: ReturnType<typeof requestJoins>, entry: LookupIndexEntry) {
+  const inputs = lookupRequestValues(entry);
+  if (!inputs.length) return undefined;
+  const candidates = joins.filter(join =>
+    join.name !== field.name
+    && !isPaginationField(join.name)
+    && inputs.some(input => {
+      const namesMatch = input.name === join.name
+        || sameSynonymGroup({ name: input.name }, { name: join.name });
+      if (!namesMatch) return false;
+      return input.value === undefined || sameValue(input.value, join.value);
+    })
+  );
+  const unique = [...new Map(candidates.map(item => [item.path, item])).values()];
+  if (unique.length === 1) return unique[0];
+  const sameScope = unique.filter(item => item.scope === fieldScope(field.path));
+  return sameScope.length === 1 ? sameScope[0] : undefined;
 }
 
 type IndexedLeaf = { path: string; value: unknown; row?: Record<string, unknown> };
@@ -511,8 +661,8 @@ function fromApiMatch(
       if (isEnvelopePath(leaf.path, field.name)) continue;
       if (leaf.value !== undefined && !sameDerivedValue(leaf.value, value)) continue;
       if (leaf.value === undefined) continue;
-      // The page's own result list often repeats the field we just wrote.
-      // Only keep it when that value was also a same-named filter on the list request.
+      // A page list describes old rows; it is not the source of a value being written now
+      // unless that exact value was also selected as a filter on the recorded request.
       if (entry.isPageQuery && entry.isPrimary && (!event || !requestSelectsValue(event, field.name, value))) continue;
       if (entry.isPageQuery && entry.isPrimary && lastPathName(leaf.path).toLowerCase() === field.name.toLowerCase() && (!event || !requestSelectsValue(event, field.name, value))) continue;
       const query = event?.request.query || {};
@@ -524,7 +674,10 @@ function fromApiMatch(
         const siblings = entry.leaves.filter(item => item.path === leaf.path);
         if (!siblings.length || siblings.some(item => !sameDerivedValue(item.value, value))) continue;
       }
-      const score = lookupAffinityScore(field, leaf.path, capability, write) + (via ? 2 : 0) + 4;
+      const score = lookupAffinityScore(field, leaf.path, capability, write)
+        + (via ? 2 : 0)
+        + (isDistinctiveJoinValue(value) ? 4 : 0)
+        + 4;
       valueHits.push({
         capabilityId: capability.id,
         fromPath: leaf.path,
@@ -539,33 +692,34 @@ function fromApiMatch(
   const unique = [...new Map(valueHits.map(item => [`${item.capabilityId}|${item.fromPath}|${item.via || ""}`, item])).values()];
   const viaHits = unique.filter(item => item.via);
   const chosen = viaHits.length ? viaHits : unique;
-  if (chosen.length === 1) return chosen[0];
-  if (chosen.length > 1 || mode !== "write") return undefined;
+  if (chosen.length === 1) {
+    const direct = pickUniqueHit(chosen);
+    if (direct) return direct;
+  }
+  if (mode !== "write") return undefined;
 
-  const affinityHits: LookupHit[] = [];
+  const associated: LookupHit[] = [];
   for (const entry of index) {
     if (write && entry.capability.id === write.id) continue;
     if (entry.isPageQuery && entry.isPrimary) continue;
+    const via = causalLookupVia(field, joins, entry);
+    if (!via) continue;
     for (const leaf of entry.leaves) {
       if (isEnvelopePath(leaf.path, field.name)) continue;
       const score = lookupAffinityScore(field, leaf.path, entry.capability, write);
       if (score < 6) continue;
-      const query = entry.event?.request.query || {};
-      const queryJoin = joins.find(item =>
-        Object.entries(query).some(([key, queryValue]) => key === item.name && sameValue(queryValue, item.value))
-      );
-      affinityHits.push({
+      associated.push({
         capabilityId: entry.capability.id,
         fromPath: leaf.path,
-        via: queryJoin?.name,
+        via: via.name,
         eventId: entry.event?.id || entry.evidenceIds[0] || entry.capability.id,
         method: entry.capability.transport.method,
         pathTemplate: entry.capability.transport.pathTemplate,
-        score: score + (queryJoin ? 2 : 0)
+        score: score + 2
       });
     }
   }
-  return pickUniqueHit([...valueHits, ...affinityHits]);
+  return pickUniqueHit(associated);
 }
 
 function emptyDefault(field: InputFormField, value: unknown) {
@@ -610,17 +764,25 @@ function computedForField(field: InputFormField, sample: unknown, known: Set<str
   const header = headerRecord(sample);
   const items = itemRecords(sample);
   if (fieldScope(field.path) === "item") {
-    const formulas = [...new Set(items.map(item => {
-      const others = numericEntries(item).filter(entry => known.has(entry.name) && usableArithmeticOperand(entry, fields));
-      return inferredFormula(field.name, Number(item[field.name]), others);
-    }).filter(Boolean))];
+    const rows = items.map(item => ({
+      target: Number(item[field.name]),
+      others: numericEntries(item).filter(entry => known.has(entry.name) && usableArithmeticOperand(entry, fields))
+    }));
+    const semantic = [...new Set(rows.map(row => semanticComputedFormula(field, row.target, row.others, fields)).filter(Boolean))];
+    if (semantic.length === 1) return semantic[0];
+    const distinctRows = new Set(rows.map(row => JSON.stringify(row.others))).size;
+    if (rows.length < 2 || distinctRows < 2) return undefined;
+    const formulas = [...new Set(rows.map(row => inferredFormula(field.name, row.target, row.others)).filter(Boolean))];
     return formulas.length === 1 ? formulas[0] : undefined;
   }
   const others = [
     ...numericEntries(header).filter(entry => known.has(entry.name) && (usableArithmeticOperand(entry, fields) || isEpochMs(entry.value))),
     ...headerAggregates(items, known)
   ];
-  return inferredFormula(field.name, value, others);
+  const semantic = semanticComputedFormula(field, value, others, fields);
+  if (semantic) return semantic;
+  const duration = durationFormulas(field.name, value, others);
+  return duration.length === 1 ? duration[0] : undefined;
 }
 
 function viaLabel(fields: InputFormField[], via?: string) {

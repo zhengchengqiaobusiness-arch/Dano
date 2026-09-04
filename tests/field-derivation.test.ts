@@ -206,3 +206,123 @@ test("an overwritten editable number stays caller when no lookup uniquely explai
   assert.equal(price.defaultRule, undefined);
   assert.match(price.sourceDetail || "", /调用方提供/);
 });
+
+test("single-sample zero and one values use UI meaning, joins, and business formulas instead of coincidences", () => {
+  const recorded: EvidenceEvent[] = [{
+    id: "ui-purchase-form", kind: "ui", sessionId: "s", at: "2026-09-02T00:00:00.000Z",
+    pageUrl: "https://example.test/purchase/order", eventType: "input",
+    form: [
+      { name: "productId", label: "产品名称", type: "select", required: true, value: "苹果" },
+      { label: "产品单价", type: "number", required: true, value: 1 },
+      { name: "count", label: "数量", type: "number", required: true, value: 1 },
+      { name: "taxPercent", label: "税率（%）", type: "number", value: 1 },
+      { label: "单位", type: "readonly", value: "盒" },
+      { label: "条码", type: "readonly", value: "0101010101" },
+      { label: "库存", type: "readonly", value: 925.5 },
+      { label: "金额", type: "readonly", value: 1 },
+      { label: "税额", type: "readonly", value: 0.01 },
+      { label: "税额合计", type: "readonly", value: 1.01 },
+      { label: "优惠率（%）", type: "number", value: 0 },
+      { label: "付款优惠", type: "readonly", value: 0 },
+      { label: "优惠后金额", type: "readonly", value: 1.01 },
+      { label: "支付订金", type: "number", value: 0 }
+    ]
+  }, {
+    id: "ui-purchase-submit", kind: "ui", sessionId: "s", at: "2026-09-02T00:00:01.000Z",
+    pageUrl: "https://example.test/purchase/order", eventType: "click", text: "确定", label: "确定", tag: "button"
+  }, {
+    id: "net-products", kind: "network", sessionId: "s", at: "2026-09-02T00:00:00.200Z",
+    request: { method: "GET", url: "https://example.test/admin-api/product/simple-list", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { success: true, data: [{ id: 9, name: "苹果", unitName: "盒", barCode: "0101010101", purchasePrice: 5000 }] } }
+  }, {
+    id: "net-stock", kind: "network", sessionId: "s", at: "2026-09-02T00:00:00.300Z",
+    request: { method: "GET", url: "https://example.test/admin-api/stock/get-count?productId=9", resourceType: "xhr", headers: {}, query: { productId: 9 } },
+    response: { status: 200, headers: {}, body: { success: true, data: 925.5 } }
+  }, {
+    id: "net-unrelated-zero", kind: "network", sessionId: "s", at: "2026-09-02T00:00:00.400Z",
+    request: { method: "GET", url: "https://example.test/admin-api/tenant/simple-list", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { success: true, data: [{ id: 1, name: "默认租户", accountCount: 0 }] } }
+  }, {
+    id: "net-purchase-create", kind: "network", sessionId: "s", at: "2026-09-02T00:00:02.000Z",
+    correlatedUiEvidenceId: "ui-purchase-submit",
+    request: {
+      method: "POST", url: "https://example.test/admin-api/purchase/order/create", resourceType: "xhr", headers: {}, query: {},
+      body: {
+        discountPercent: 0,
+        discountPrice: 0,
+        totalPrice: 1.01,
+        depositPrice: 0,
+        items: [{
+          productId: 9,
+          productUnitName: "盒",
+          productBarCode: "0101010101",
+          productPrice: 1,
+          stockCount: 925.5,
+          count: 1,
+          totalProductPrice: 1,
+          taxPercent: 1,
+          taxPrice: 0.01,
+          totalPrice: 1.01
+        }]
+      }
+    },
+    response: { status: 200, headers: {}, body: { success: true, data: 172 } }
+  }];
+
+  const create = buildCapabilityCandidates(recorded).find(item => item.transport.pathTemplate.includes("/purchase/order/create"))!;
+  const byName = (name: string) => create.inputForm.find(field => field.name === name)!;
+
+  assert.equal(byName("productPrice").source, "caller");
+  assert.equal(byName("productPrice").label, "产品单价");
+  assert.equal(byName("discountPercent").source, "caller");
+  assert.equal(byName("discountPercent").label, "优惠率（%）");
+  assert.equal(byName("depositPrice").source, "caller");
+  assert.equal(byName("depositPrice").label, "支付订金");
+  assert.match(byName("productUnitName").defaultRule || "", /^from:.+\.unitName\|via:productId$/);
+  assert.equal(byName("productUnitName").label, "单位");
+  assert.match(byName("productBarCode").defaultRule || "", /^from:.+\.barCode\|via:productId$/);
+  assert.equal(byName("productBarCode").label, "条码");
+  assert.match(byName("stockCount").defaultRule || "", /^from:.+\.data\|via:productId$/);
+  assert.equal(byName("stockCount").label, "库存");
+  assert.equal(byName("totalProductPrice").defaultRule, "computed:count * productPrice");
+  assert.equal(byName("totalProductPrice").label, "金额");
+  assert.equal(byName("taxPrice").defaultRule, "computed:count * productPrice * taxPercent / 100");
+  assert.equal(byName("taxPrice").label, "税额");
+  assert.equal(create.inputForm.find(field => field.path === "$.items[*].totalPrice")?.defaultRule, "computed:count * productPrice * (1 + taxPercent / 100)");
+  assert.equal(create.inputForm.find(field => field.path === "$.items[*].totalPrice")?.label, "税额合计");
+  assert.equal(byName("discountPrice").defaultRule, "computed:sum(items.totalPrice) * discountPercent / 100");
+  assert.equal(byName("discountPrice").label, "付款优惠");
+  assert.equal(create.inputForm.find(field => field.path === "$.totalPrice")?.defaultRule, "computed:sum(items.totalPrice) - discountPrice");
+  assert.equal(create.inputForm.find(field => field.path === "$.totalPrice")?.label, "优惠后金额");
+  assert.equal(create.bindings.some(binding => binding.fromPath.endsWith(".accountCount")), false, JSON.stringify(create.bindings));
+  assert.equal(create.inputForm.some(field => field.defaultRule?.includes("accountCount")), false, JSON.stringify(create.inputForm));
+  assert.equal(create.inputForm.some(field => /taxPercent\s*\/\s*count/.test(field.defaultRule || "")), false, JSON.stringify(create.inputForm));
+});
+
+test("semantic UI labels derive a verified amount formula when request keys are unfamiliar", () => {
+  const recorded: EvidenceEvent[] = [{
+    id: "ui-generic-form", kind: "ui", sessionId: "s", at: "2026-09-02T00:00:00.000Z",
+    pageUrl: "https://example.test/biz/form", eventType: "input",
+    form: [
+      { name: "q", label: "数量", type: "number", required: true, value: 2 },
+      { name: "p", label: "产品单价", type: "number", required: true, value: 10 },
+      { name: "a", label: "金额", type: "readonly", value: 20 }
+    ]
+  }, {
+    id: "ui-generic-submit", kind: "ui", sessionId: "s", at: "2026-09-02T00:00:01.000Z",
+    pageUrl: "https://example.test/biz/form", eventType: "click", text: "保存", label: "保存", tag: "button"
+  }, {
+    id: "net-generic-create", kind: "network", sessionId: "s", at: "2026-09-02T00:00:02.000Z",
+    correlatedUiEvidenceId: "ui-generic-submit",
+    request: {
+      method: "POST", url: "https://example.test/api/biz/create", resourceType: "xhr", headers: {}, query: {},
+      body: { q: 2, p: 10, a: 20 }
+    },
+    response: { status: 200, headers: {}, body: { success: true, data: 1 } }
+  }];
+
+  const create = buildCapabilityCandidates(recorded).find(item => item.transport.pathTemplate.includes("/biz/create"))!;
+  assert.equal(create.inputForm.find(field => field.name === "q")?.source, "caller");
+  assert.equal(create.inputForm.find(field => field.name === "p")?.source, "caller");
+  assert.equal(create.inputForm.find(field => field.name === "a")?.defaultRule, "computed:q * p");
+});

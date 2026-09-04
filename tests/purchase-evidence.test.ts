@@ -621,10 +621,10 @@ test("live product list plus echoed page rows still verify query and create", ()
       return {
         ...event,
         form: (event.form || []).map(field => {
-          if (field.name === "productPrice") return { name: "productPrice", type: "number", value: 1 };
-          if (field.name === "count") return { ...field, value: 1 };
-          if (field.name === "taxPercent") return { ...field, value: 1 };
-          return field;
+          const value = ["productPrice", "count", "taxPercent"].includes(field.name || "") ? 1
+            : ["discountPercent", "depositPrice", "discountPrice"].includes(field.name || "") ? 0
+            : field.value;
+          return { ...field, value };
         })
       };
     }
@@ -674,11 +674,15 @@ test("live product list plus echoed page rows still verify query and create", ()
   assert.match(create.inputForm.find(field => field.name === "productUnitName")?.defaultRule || "", /^from:.+\.unitName\|via:productId$/);
   assert.match(create.inputForm.find(field => field.name === "productBarCode")?.defaultRule || "", /^from:.+\.barCode\|via:productId$/);
   assert.doesNotMatch(create.inputForm.find(field => field.name === "productUnitName")?.defaultRule || "", /purchase\/order\/page/);
-  assert.ok(
-    ["caller", "computed"].includes(create.inputForm.find(field => field.name === "productPrice")?.source || ""),
-    create.inputForm.find(field => field.name === "productPrice")?.sourceDetail || JSON.stringify(create.inputForm)
-  );
+  assert.equal(create.inputForm.find(field => field.name === "productPrice")?.source, "caller");
+  assert.equal(create.inputForm.find(field => field.name === "productPrice")?.label, "产品单价");
+  assert.equal(create.inputForm.find(field => field.name === "discountPercent")?.source, "caller");
+  assert.equal(create.inputForm.find(field => field.name === "discountPercent")?.label, "优惠率");
+  assert.equal(create.inputForm.find(field => field.name === "depositPrice")?.source, "caller");
+  assert.equal(create.inputForm.find(field => field.name === "depositPrice")?.label, "支付订金");
   assert.doesNotMatch(create.inputForm.find(field => field.name === "productPrice")?.defaultRule || "", /purchase\/order\/page/);
+  assert.doesNotMatch(create.inputForm.find(field => field.name === "productPrice")?.defaultRule || "", /taxPercent\s*\/\s*count/);
+  assert.doesNotMatch(create.inputForm.find(field => field.name === "depositPrice")?.defaultRule || "", /discountPercent\s*-\s*discountPrice/);
   assert.match(create.inputForm.find(field => field.path === "$.totalPrice")?.defaultRule || "", /^computed:/);
   assert.match(create.inputForm.find(field => field.path === "$.items[*].totalPrice")?.defaultRule || "", /^computed:/);
   const review = reviewCatalog(verified, events);

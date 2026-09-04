@@ -177,7 +177,7 @@ function preferSpecificObservation(field: InputFormField, items: UiObservation[]
 }
 
 const SYNONYM_GROUPS = [
-  /count|qty|quantity|数量/i,
+  /\b(?:count|qty|quantity)\b|数量/i,
   /(?:^|[^a-z])price(?:$|[^a-z])|单价|售价/i,
   /taxpercent|tax_percent|税率/i,
   /(?:actual)?days?\b|天数/i,
@@ -204,13 +204,60 @@ const SYNONYM_GROUPS = [
 ];
 
 function fieldText(field: { name?: string; label?: string }) {
-  return `${field.name || ""} ${field.label || ""}`;
+  return `${field.name || ""} ${field.label || ""}`.replace(/([a-z])([A-Z])/g, "$1 $2");
 }
 
 export function sameSynonymGroup(field: { name?: string; label?: string }, item: { name?: string; label?: string }) {
   const left = fieldText(field);
   const right = fieldText(item);
   return SYNONYM_GROUPS.some(group => group.test(left) && group.test(right));
+}
+
+const SEMANTIC_CONCEPTS = [
+  ["supplier", /\b(?:supplier|vendor)\b|供应商|供货商/i],
+  ["account", /\baccount\b|账户|账号/i],
+  ["product", /\b(?:product|goods)\b|商品|产品/i],
+  ["discount", /\bdiscount\b|优惠|折扣/i],
+  ["deposit", /\bdeposit\b|订金|定金/i],
+  ["tax", /\btax\b|税/i],
+  ["percent", /\b(?:percent|percentage|rate)\b|百分比|率/i],
+  ["total", /\btotal\b|合计|总计|总额|优惠后/i],
+  ["unit-price", /\b(?:unit|product)\s+price\b|单价/i],
+  ["money", /\b(?:price|amount)\b|金额|税额|单价|价格|价款|货款|付款|订金|定金/i],
+  ["count", /\b(?:count|qty|quantity)\b|数量/i],
+  ["stock", /\b(?:stock|inventory)\b|库存/i],
+  ["unit", /\bunit\b|单位/i],
+  ["barcode", /\bbar\s*code\b|条码/i],
+  ["remark", /\b(?:remark|memo|comment)\b|备注|说明/i],
+  ["order", /\border\b|订单/i],
+  ["time", /\b(?:time|date)\b|时间|日期/i]
+] as const;
+
+export type SemanticConcept = (typeof SEMANTIC_CONCEPTS)[number][0];
+
+export function semanticConcepts(value: { name?: string; label?: string }): Set<SemanticConcept> {
+  const text = fieldText(value).replace(/([a-z])([A-Z])/g, "$1 $2");
+  return new Set(SEMANTIC_CONCEPTS.filter(([, pattern]) => pattern.test(text)).map(([name]) => name));
+}
+
+export function semanticLabelScore(field: InputFormField, item: UiObservation) {
+  const target = semanticConcepts(field);
+  const observed = semanticConcepts(item);
+  if (!target.size || [...target].some(concept => !observed.has(concept))) return 0;
+  return target.size * 10 - Math.max(0, observed.size - target.size);
+}
+
+function readonlySemanticScore(field: InputFormField, item: UiObservation) {
+  const target = semanticConcepts(field);
+  const observed = semanticConcepts(item);
+  const overlap = [...target].filter(concept => observed.has(concept)).length;
+  if (!overlap) return 0;
+  let score = overlap * 10 - (target.size - overlap) * 2 - (observed.size - overlap);
+  if (target.has("total")) {
+    if (field.path.includes("[*]") && observed.has("tax")) score += 5;
+    if (!field.path.includes("[*]") && observed.has("discount")) score += 5;
+  }
+  return score;
 }
 
 export function nameTokens(text: string) {
@@ -329,6 +376,8 @@ export function collectUiObservations(events: UiEvidence[]): UiObservation[] {
     const eventOptions = choiceEvent ? optionsOf(event) : undefined;
     const label = eventLabel(event);
     const controlType = choiceEvent ? "select" : (event.inputType || event.role);
+    const actionControl = (event.eventType === "click" || event.eventType === "submit")
+      && (event.tag === "button" || event.tag === "a" || event.role === "button" || event.role === "link" || event.inputType === "button" || event.inputType === "submit");
     if (looksIdentityToken(event.name) && (event.value === undefined || event.value === "")) {
       items.push({
         name: undefined,
@@ -342,7 +391,7 @@ export function collectUiObservations(events: UiEvidence[]): UiObservation[] {
       }
     } else if (event.name && !isGeneratedFieldName(event.name)) {
       items.push({ name: event.name, label, value: event.value, type: controlType, options: eventOptions });
-    } else if (label) {
+    } else if (label && !actionControl) {
       items.push({ name: undefined, label, value: event.value, type: controlType, options: eventOptions });
     } else if (eventOptions?.length) {
       const matches = (event.form || []).filter(field =>
@@ -894,6 +943,34 @@ function bindObservation(
   return looksReadonly(full)
     ? asReadonly(field, full)
     : asCaller(field, full, requestValue, observations, lists);
+}
+
+export function bindBySemanticLabel(
+  fields: InputFormField[],
+  observations: UiObservation[],
+  sample: unknown,
+  lists: RecordedList[] = []
+): InputFormField[] {
+  const editable = leftoverEditable(fields, observations).filter(item => !pollutedLabel(item));
+  if (!editable.length) return fields;
+  return fields.map(field => {
+    if (field.source === "caller" || PAGE_NAME.test(field.name) || isReadonlyBound(field)) return field;
+    const value = requestValueAt(sample, field.path);
+    if (value === undefined || value === null || value === "") return field;
+    const scored = editable
+      .filter(item => !looksReadonly(item) && observationMatchesValue(item, value, lists))
+      .map(item => ({ item, score: semanticLabelScore(field, item) }))
+      .filter(hit => hit.score > 0)
+      .sort((left, right) => right.score - left.score || String(left.item.label || "").localeCompare(String(right.item.label || "")));
+    if (!scored.length || (scored[1] && scored[1].score === scored[0]!.score && scored[1].item.label !== scored[0]!.item.label)) return field;
+    const best = scored[0]!;
+    const competingScore = Math.max(0, ...fields
+      .filter(other => other.path !== field.path && other.name !== field.name && other.source !== "caller" && !PAGE_NAME.test(other.name) && !isReadonlyBound(other))
+      .filter(other => sameValue(requestValueAt(sample, other.path), value))
+      .map(other => semanticLabelScore(other, best.item)));
+    if (competingScore >= best.score) return field;
+    return bindObservation(field, best.item, value, observations, lists);
+  });
 }
 
 function nameIndex(name: string) {
@@ -1453,7 +1530,7 @@ export function finalizeCallerFields(
     sample,
     lists
   );
-  return applyInvariantDefaults(
+  const finalized = applyInvariantDefaults(
     refineSharedCallerLabels(
       attachUnresolvedHints(relabeled, observations, sample, lists).map(field =>
         enrichFromObservations(field, observations, sample, lists)
@@ -1464,6 +1541,20 @@ export function finalizeCallerFields(
     sample,
     observations
   );
+  const readonly = uniqueByLabel(observations.filter(item => item.label && looksReadonly(item) && !pollutedLabel(item)));
+  if (!readonly.length) return finalized;
+  return finalized.map(field => {
+    if (field.source === "caller" || (field.label !== field.name && /[^\x00-\x7f]/.test(field.label))) return field;
+    const value = requestValueAt(sample, field.path);
+    if (value === undefined || value === null || value === "") return field;
+    const scored = readonly
+      .filter(item => observationMatchesValue(item, value, lists))
+      .map(item => ({ item, score: readonlySemanticScore(field, item) }))
+      .filter(hit => hit.score > 0)
+      .sort((left, right) => right.score - left.score || String(left.item.label || "").localeCompare(String(right.item.label || "")));
+    if (!scored.length || (scored[1] && scored[1].score === scored[0]!.score && scored[1].item.label !== scored[0]!.item.label)) return field;
+    return { ...field, label: scored[0]!.item.label! };
+  });
 }
 
 export function promoteUnboundFillable(

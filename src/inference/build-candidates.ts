@@ -7,7 +7,7 @@ import type {
 } from "../domain.js";
 import { inferOperation, normalizeUrl, operationConfidence } from "./heuristics.js";
 import { attachCatalogDerivations } from "./field-derivation.js";
-import { assignUniqueFromSamples, bindByLabelAffinity, bindByRecordedOptions, bindByUniqueMatching, bindLeftoverFields, collectUiObservations, finalizeCallerFields, flattenRequestValues, owningFormEvent, preferRequestValueType, promoteUnboundFillable, recordedLists, relatedUiEvents, requestValueAt, resolveFieldOwnership, sameFormShape } from "./field-resolver.js";
+import { assignUniqueFromSamples, bindByLabelAffinity, bindByRecordedOptions, bindBySemanticLabel, bindByUniqueMatching, bindLeftoverFields, collectUiObservations, finalizeCallerFields, flattenRequestValues, owningFormEvent, preferRequestValueType, promoteUnboundFillable, recordedLists, relatedUiEvents, requestValueAt, resolveFieldOwnership, sameFormShape } from "./field-resolver.js";
 import { mergeSchemas, schemaFromValue } from "../schema.js";
 import { slugify } from "../utils.js";
 
@@ -355,7 +355,13 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
               bindByLabelAffinity(
                 bindByUniqueMatching(
                   assignUniqueFromSamples(
-                    bindLeftoverFields([...forms.values()], observations, sample, lists, owner),
+                    bindLeftoverFields(
+                      bindBySemanticLabel([...forms.values()], observations, sample, lists),
+                      observations,
+                      sample,
+                      lists,
+                      owner
+                    ),
                     observations,
                     samples,
                     lists
