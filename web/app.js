@@ -370,14 +370,20 @@ function previewPaneSize() {
   const width = Math.round(box?.width || 0);
   const height = Math.round(box?.height || 0);
   if (width < 80 || height < 80) return null;
-  return { width, height };
+  const scale = Math.min(2, Math.max(1, Number(window.devicePixelRatio) || 1));
+  return { width, height, scale };
 }
 
 function rememberPaneViewport() {
   const size = previewPaneSize();
   if (!size) return;
   const current = state.viewport;
-  if (current && Math.abs(current.width - size.width) < 2 && Math.abs(current.height - size.height) < 2) return;
+  if (
+    current
+    && Math.abs(current.width - size.width) < 2
+    && Math.abs(current.height - size.height) < 2
+    && Math.abs((current.scale || 1) - size.scale) < 0.05
+  ) return;
   void api("/api/browser/viewport", { method: "POST", body: JSON.stringify(size) }).then(result => {
     if (result?.viewport) state.viewport = result.viewport;
     if (state.browserActive) void refreshBrowserFrame(true);

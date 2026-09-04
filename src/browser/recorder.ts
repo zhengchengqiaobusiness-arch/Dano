@@ -12,19 +12,27 @@ import { killCommandLineMatches, killProcessTree } from "../process-lifecycle.js
 
 const FORM_ACTION_BUDGET = 3;
 const DEFAULT_VIEWPORT = { width: 1440, height: 960 };
-const MAX_PREVIEW_VIEWPORT = { width: 2560, height: 1600 };
+const MAX_PREVIEW_VIEWPORT = { width: 3840, height: 2160 };
 
-export function normalizePreviewViewport(input?: { width?: number; height?: number } | null) {
+export function normalizePreviewScale(input?: number | null) {
+  const scale = Number(input);
+  if (!Number.isFinite(scale) || scale < 1) return 1;
+  return Math.min(2, Math.round(scale * 100) / 100);
+}
+
+export type PreviewViewport = { width: number; height: number; scale: number };
+
+export function normalizePreviewViewport(input?: { width?: number; height?: number; scale?: number } | null): PreviewViewport {
   const rawWidth = Math.round(Number(input?.width));
   const rawHeight = Math.round(Number(input?.height));
   let width = Number.isFinite(rawWidth) && rawWidth >= 80 ? rawWidth : DEFAULT_VIEWPORT.width;
   let height = Number.isFinite(rawHeight) && rawHeight >= 80 ? rawHeight : DEFAULT_VIEWPORT.height;
   if (width > MAX_PREVIEW_VIEWPORT.width || height > MAX_PREVIEW_VIEWPORT.height) {
-    const scale = Math.min(MAX_PREVIEW_VIEWPORT.width / width, MAX_PREVIEW_VIEWPORT.height / height);
-    width = Math.max(1, Math.round(width * scale));
-    height = Math.max(1, Math.round(height * scale));
+    const down = Math.min(MAX_PREVIEW_VIEWPORT.width / width, MAX_PREVIEW_VIEWPORT.height / height);
+    width = Math.max(1, Math.round(width * down));
+    height = Math.max(1, Math.round(height * down));
   }
-  return { width, height };
+  return { width, height, scale: normalizePreviewScale(input?.scale) };
 }
 
 const INSPECT_TARGET_IN_PAGE = new Function("el", String.raw`
@@ -157,9 +165,10 @@ export class BrowserRecorder {
     }
     const buffer = await this.withTimeout<Buffer | undefined>(page.screenshot({
       type: "jpeg",
-      quality: 62,
+      quality: 82,
+      scale: "device",
       fullPage: false,
-      animations: "allow",
+      animations: "disabled",
       caret: "hide"
     }), 900, undefined);
     if (!buffer || buffer.length < 800) return this.lastPreview?.buffer || EMPTY_JPEG;
@@ -205,7 +214,7 @@ export class BrowserRecorder {
     });
   }
 
-  async start(startUrl: string, name = "recording", viewport?: { width?: number; height?: number }): Promise<RecordingSession> {
+  async start(startUrl: string, name = "recording", viewport?: { width?: number; height?: number; scale?: number }): Promise<RecordingSession> {
     if (this.active) throw new Error(`Recording already active: ${this.active.session.id}`);
 
     const sessionId = id("rec");
@@ -216,8 +225,8 @@ export class BrowserRecorder {
 
     const launchOptions = {
       headless: this.config.headless,
-      viewport: size,
-      deviceScaleFactor: 1,
+      viewport: { width: size.width, height: size.height },
+      deviceScaleFactor: size.scale,
       args: ["--disable-features=TranslateUI,IsolateOrigins,site-per-process", "--disable-background-timer-throttling", "--disable-site-isolation-trials"]
     };
     const context = await chromium.launchPersistentContext(this.config.profileDir, launchOptions).catch(error => {
@@ -270,7 +279,7 @@ export class BrowserRecorder {
     return session;
   }
 
-  async fitViewport(viewport?: { width?: number; height?: number }) {
+  async fitViewport(viewport?: { width?: number; height?: number; scale?: number }) {
     const size = normalizePreviewViewport(viewport);
     if (!this.active) return size;
     for (const page of this.livePages()) {

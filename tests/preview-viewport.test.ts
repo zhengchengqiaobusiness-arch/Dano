@@ -2,18 +2,20 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { normalizePreviewViewport } from "../src/browser/recorder.js";
+import { normalizePreviewScale, normalizePreviewViewport } from "../src/browser/recorder.js";
 
 const root = path.resolve(import.meta.dirname, "..");
 
 test("preview viewport follows the workbench pane without stretching past safe bounds", () => {
-  assert.deepEqual(normalizePreviewViewport(), { width: 1440, height: 960 });
-  assert.deepEqual(normalizePreviewViewport({ width: 1600, height: 900 }), { width: 1600, height: 900 });
-  assert.deepEqual(normalizePreviewViewport({ width: 1800, height: 720 }), { width: 1800, height: 720 });
-  assert.deepEqual(normalizePreviewViewport({ width: 500, height: 400 }), { width: 500, height: 400 });
-  const large = normalizePreviewViewport({ width: 4000, height: 3000 });
-  assert.ok(large.width <= 2560 && large.height <= 1600);
-  assert.ok(Math.abs(large.width / large.height - 4000 / 3000) < 0.02);
+  assert.deepEqual(normalizePreviewViewport(), { width: 1440, height: 960, scale: 1 });
+  assert.deepEqual(normalizePreviewViewport({ width: 1600, height: 900 }), { width: 1600, height: 900, scale: 1 });
+  assert.deepEqual(normalizePreviewViewport({ width: 1800, height: 720, scale: 1.5 }), { width: 1800, height: 720, scale: 1.5 });
+  assert.deepEqual(normalizePreviewViewport({ width: 500, height: 400 }), { width: 500, height: 400, scale: 1 });
+  assert.equal(normalizePreviewScale(1.25), 1.25);
+  assert.equal(normalizePreviewScale(3), 2);
+  const large = normalizePreviewViewport({ width: 5000, height: 4000 });
+  assert.ok(large.width <= 3840 && large.height <= 2160);
+  assert.ok(Math.abs(large.width / large.height - 5000 / 4000) < 0.02);
 });
 
 test("session auto-open and address-bar open share the same remembered pane size", async () => {
@@ -27,11 +29,14 @@ test("session auto-open and address-bar open share the same remembered pane size
   assert.match(page, /async rememberViewport\(/);
   assert.match(page, /viewport \|\| this\.preferredViewport/);
   assert.match(server, /parseViewport\(body\.viewport\) \|\| page\.preferredViewport/);
-  assert.match(server, /pathname === "\/internal\/browser\/start"/);
+  assert.match(server, /scale/);
   const viewportRoute = server.match(/pathname === "\/api\/browser\/viewport"[\s\S]*?return;/)?.[0] || "";
   assert.match(viewportRoute, /rememberViewport/);
   assert.doesNotMatch(viewportRoute, /browser_changed/);
   assert.match(app, /function rememberPaneViewport\(/);
+  assert.match(app, /devicePixelRatio/);
   assert.match(app, /browser_changed[\s\S]*rememberPaneViewport/);
-  assert.match(recorder, /quality:\s*62/);
+  assert.match(recorder, /quality:\s*82/);
+  assert.match(recorder, /scale:\s*"device"/);
+  assert.match(recorder, /deviceScaleFactor:\s*size\.scale/);
 });

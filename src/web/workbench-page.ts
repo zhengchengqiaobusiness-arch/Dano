@@ -33,7 +33,7 @@ export class WorkbenchPage {
   mode: BrowserMode = "automatic";
   readonly clients = new Set<ServerResponse>();
   lastSeen = Date.now();
-  preferredViewport?: { width: number; height: number };
+  preferredViewport?: { width: number; height: number; scale?: number };
   private readonly sharedProfileDir: string;
   private readonly pageProfileDir: string;
   private starting?: Promise<void>;
@@ -119,7 +119,7 @@ export class WorkbenchPage {
     this.broadcast({ type: "browser_mode", mode });
   }
 
-  async startRecording(url: string, name?: string, viewport?: { width?: number; height?: number }) {
+  async startRecording(url: string, name?: string, viewport?: { width?: number; height?: number; scale?: number }) {
     if (this.recorder.isActive()) {
       const oldPid = this.recorder.browserProcessId();
       await this.recorder.stop().catch(() => this.recorder.disposeAndKill("rerecord"));
@@ -134,7 +134,7 @@ export class WorkbenchPage {
     return session;
   }
 
-  async rememberViewport(viewport?: { width?: number; height?: number }) {
+  async rememberViewport(viewport?: { width?: number; height?: number; scale?: number }) {
     const size = normalizePreviewViewport(viewport);
     this.preferredViewport = size;
     if (this.recorder.isActive()) await this.recorder.fitViewport(size);

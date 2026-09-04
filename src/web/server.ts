@@ -103,8 +103,13 @@ function parseViewport(value: unknown) {
   if (!value || typeof value !== "object") return undefined;
   const width = Number((value as { width?: unknown }).width);
   const height = Number((value as { height?: unknown }).height);
+  const scale = Number((value as { scale?: unknown }).scale);
   if (!Number.isFinite(width) || !Number.isFinite(height)) return undefined;
-  return { width, height };
+  return {
+    width,
+    height,
+    ...(Number.isFinite(scale) ? { scale } : {})
+  };
 }
 
 function forgetPage(page: WorkbenchPage) {
