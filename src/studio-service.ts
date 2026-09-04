@@ -12,8 +12,9 @@ import { fallbackPlan } from "./planner/fallback.js";
 import { applyPlanPolicy } from "./planner/policy.js";
 import { exportSkill } from "./export/skill-exporter.js";
 import { executeCapability } from "./execution/http-executor.js";
-import { capabilitiesForSession, reviewSessionIds, sessionBusinessPageKeys, sessionCatalogSlice } from "./inference/export-scope.js";
+import { capabilitiesForSession, relatedLookupCapabilities, reviewSessionIds, sessionBusinessPageKeys, sessionCatalogSlice } from "./inference/export-scope.js";
 import { mergeCatalogByTransport, normalizeCatalog } from "./catalog/normalize.js";
+import { attachCatalogDerivations } from "./inference/field-derivation.js";
 import { reanalyzeIncoming } from "./inference/reanalyze.js";
 import { reviewSession } from "./review/catalog-review.js";
 import { SkillLibrary } from "./catalog/skill-library.js";
@@ -134,9 +135,25 @@ export class StudioService {
     return slice.some(capability => capability.evidence.some(ref => !have.has(ref.eventId)));
   }
 
+  private async eventsFromRefs(capabilities: CapabilityContract[], haveEvents: EvidenceEvent[]) {
+    const have = new Set(haveEvents.map(event => event.id));
+    const sessionIds = new Set<string>();
+    for (const capability of capabilities) {
+      for (const ref of capability.evidence) {
+        if (!have.has(ref.eventId) && ref.sessionId) sessionIds.add(ref.sessionId);
+      }
+    }
+    if (!sessionIds.size) return [];
+    const extra = (await Promise.all([...sessionIds].map(id => this.sessionEvents(id).catch(() => [] as EvidenceEvent[])))).flat();
+    return extra.filter(event => !have.has(event.id));
+  }
+
   private async resolveSessionId(sessionId?: string, sessions?: RecordingSession[]) {
     const list = sessions || await this.listSessions();
     if (sessionId && list.some(item => item.id === sessionId)) return sessionId;
+    if (this.lastAnalyzedSessionId && list.some(item => item.id === this.lastAnalyzedSessionId)) {
+      return this.lastAnalyzedSessionId;
+    }
     return list[0]?.id;
   }
 
@@ -180,6 +197,14 @@ export class StudioService {
 
     candidates = reanalyzeIncoming(candidates, existing);
     candidates = mergeCatalogByTransport(candidates, existing);
+    const scoped = capabilitiesForSession(candidates, events, events);
+    const related = relatedLookupCapabilities(candidates, scoped);
+    const extra = await this.eventsFromRefs([...scoped, ...related], events);
+    const derived = attachCatalogDerivations(
+      [...scoped, ...related.filter(item => !scoped.some(current => current.id === item.id))],
+      [...events, ...extra]
+    );
+    candidates = mergeCatalogByTransport(derived, candidates);
     await this.writeCatalog(candidates);
     return capabilitiesForSession(candidates, events, events);
   }
@@ -297,9 +322,7 @@ export class StudioService {
     const to = caps.find(c => c.id === input.toCapabilityId);
     if (!from || !to) throw new Error("Both source and target capabilities must exist");
     if (from.id === to.id) throw new Error("能力不能绑定到自身");
-    if (from.validation.status !== "verified" || to.validation.status !== "verified") {
-      throw new Error("Bindings can only be approved between verified capabilities");
-    }
+    if (from.operation !== "query") throw new Error("绑定来源必须是已录制查询");
     const targetField = to.inputForm.find(field => field.path === input.toPath);
     if (!targetField) throw new Error("绑定目标必须是已录制的输入字段");
     if (!schemaPathExists(from.outputSchema, input.fromPath)) {
@@ -344,8 +367,9 @@ export class StudioService {
     }
     targetField.source = "binding";
     targetField.systemHandled = true;
+    targetField.required = false;
     targetField.sourceDetail = `由已确认绑定从 ${from.id}${input.fromPath} 提供`;
-    targetField.defaultRule = undefined;
+    targetField.defaultRule = `from:${from.id}:${input.fromPath}`;
     to.validation = { version: 2, status: "candidate", checks: [] };
     await this.writeCatalog(caps);
     return to;

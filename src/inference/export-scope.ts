@@ -54,6 +54,44 @@ export function sameResource(left: string, right: string) {
   return Boolean(stem) && stem === resourceStem(right);
 }
 
+const GENERIC_SEGMENT = /^(api|admin-api|app|appgateway|gateway|open|inner|public|erp|oa|system|bpm|admin|backend|service|services|v\d+(?:\.\d+)*)$/i;
+
+export function resourceTokens(pathTemplate: string) {
+  return (pathTemplate || "").split("/").filter(Boolean)
+    .filter(part => !GENERIC_SEGMENT.test(part) && !isOperationSegment(part));
+}
+
+export function relatedResource(left: string, right: string) {
+  if (sameResource(left, right)) return true;
+  const leftTokens = resourceTokens(left);
+  const rightTokens = resourceTokens(right);
+  const leftHead = leftTokens[0]?.toLowerCase();
+  const rightHead = rightTokens[0]?.toLowerCase();
+  return Boolean(leftHead && leftHead.length >= 3 && leftHead === rightHead);
+}
+
+export function isBroughtOutLookup(capability: CapabilityContract) {
+  if (capability.operation !== "query") return false;
+  if (isNoiseCapability(capability)) return false;
+  if (isPageResultQuery(capability) || isAskQuery(capability)) return false;
+  return true;
+}
+
+function transportKey(capability: CapabilityContract) {
+  return `${capability.transport.method}|${capability.transport.pathTemplate}`;
+}
+
+export function relatedLookupCapabilities(catalog: CapabilityContract[], scoped: CapabilityContract[]) {
+  const writes = scoped.filter(item => WRITE_OPERATIONS.has(item.operation) && !isNoiseCapability(item));
+  if (!writes.length) return [];
+  const have = new Set(scoped.map(transportKey));
+  return catalog.filter(item => {
+    if (have.has(transportKey(item))) return false;
+    if (!isBroughtOutLookup(item)) return false;
+    return writes.some(write => relatedResource(write.transport.pathTemplate, item.transport.pathTemplate));
+  });
+}
+
 export function isLookupQueryPath(pathTemplate: string) {
   return LOOKUP_QUERY.test(pathTemplate || "");
 }
@@ -292,7 +330,9 @@ export function sessionCatalogSlice(
   sessionEvents: EvidenceEvent[]
 ) {
   const scoped = capabilitiesForSession(catalog, allEvents, sessionEvents);
-  const ids = referencedCapabilityIds(scoped);
+  const related = relatedLookupCapabilities(catalog, scoped);
+  const ids = referencedCapabilityIds([...scoped, ...related]);
+  for (const item of related) ids.add(item.id);
   const slice = catalog.filter(capability => ids.has(capability.id));
   return slice.length ? slice : scoped;
 }

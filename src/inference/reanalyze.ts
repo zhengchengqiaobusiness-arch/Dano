@@ -24,7 +24,7 @@ function applyApprovedBindings(inputForm: InputFormField[], bindings: Capability
       field.source = "binding";
       field.systemHandled = true;
       field.sourceDetail = `由已确认绑定从 ${binding.fromCapabilityId}${binding.fromPath} 提供`;
-      field.defaultRule = undefined;
+      field.defaultRule = `from:${binding.fromCapabilityId}:${binding.fromPath}`;
     }
   }
   return inputForm;

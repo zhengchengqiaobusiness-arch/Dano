@@ -53,6 +53,18 @@ export function looksRecordedQuery(event: NetworkEvidence) {
   return paging && search;
 }
 
+function looksScalarLookup(event: NetworkEvidence) {
+  const last = new URL(event.request.url).pathname.split("/").filter(Boolean).pop() || "";
+  if (!READ_LAST.test(last) && !READ_SUFFIX.test(last) && !/(?:^|[\/_-])(get|fetch|load|query|find)(?:[\/_-]|$)/i.test(last)) {
+    return false;
+  }
+  const body = event.response?.body;
+  if (!body || typeof body !== "object" || Array.isArray(body) || looksCollectionBody(body)) return false;
+  const data = (body as { data?: unknown; result?: unknown }).data ?? (body as { result?: unknown }).result;
+  if (data === undefined || data === null || Array.isArray(data)) return false;
+  return typeof data === "object";
+}
+
 export function normalizeUrl(rawUrl: string) {
   const url = new URL(rawUrl);
   const segments = url.pathname.split("/").map(segment => {
@@ -90,7 +102,7 @@ export function inferOperation(event: NetworkEvidence, ui?: UiEvidence): Operati
   if (CREATE.test(actionSignal)) return "create";
   if (REVIEW.test(actionSignal) || (REVIEW.test(pageSignal) && REVIEW.test(actionSignal))) return "review";
   if (DELETE.test(actionSignal)) return "delete";
-  if (method === "POST" && (QUERY.test(actionSignal) || looksRecordedQuery(event))) return "query";
+  if (method === "POST" && (QUERY.test(actionSignal) || looksRecordedQuery(event) || looksScalarLookup(event))) return "query";
   if (method === "PATCH" || method === "PUT") return "update";
   if (UPDATE.test(endpoint)) return "update";
   if (UPDATE.test(actionSignal)) return "update";

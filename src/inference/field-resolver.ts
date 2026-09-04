@@ -158,17 +158,27 @@ const SYNONYM_GROUPS = [
   /gjz|gjc|keyword|keyWord|keywords|searchKey|searchText|queryKey|(?:^|[^a-z])q(?:$|[^a-z])|(?:^|[^a-z])query(?:$|[^a-z])|(?:^|[^a-z])search(?:$|[^a-z])|关键字|关键词|搜索/i,
   /sys_query|userQuery|queryText|askText|(?:^|[^a-z])prompt(?:$|[^a-z])|(?:^|[^a-z])question(?:$|[^a-z])|问数|智能体聊天|聊天内容/i,
   /code|编码/i,
-  /name|名称/i
+  /name|名称/i,
+  /balance|remaining|remain|surplus|stock|inventory|quota|余额|剩余|库存/i
 ];
 
 function fieldText(field: { name?: string; label?: string }) {
   return `${field.name || ""} ${field.label || ""}`;
 }
 
-function sameSynonymGroup(field: { name?: string; label?: string }, item: { name?: string; label?: string }) {
+export function sameSynonymGroup(field: { name?: string; label?: string }, item: { name?: string; label?: string }) {
   const left = fieldText(field);
   const right = fieldText(item);
   return SYNONYM_GROUPS.some(group => group.test(left) && group.test(right));
+}
+
+export function nameTokens(text: string) {
+  return String(text || "")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[^A-Za-z0-9\u4e00-\u9fff]+/g, " ")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(token => token.length >= 2 && !/^(id|the|and|for|get|set|my|data|list|page|info|code|key)$/i.test(token));
 }
 
 function looksQuantityField(field: { name?: string; label?: string }) {

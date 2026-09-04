@@ -52,4 +52,8 @@ test("classifies common methods", () => {
   ask.request.body = { sys_query: "123123", wybs: "51e561cb-49e9-4f96-817a-2d0a7e2a4360" };
   ask.response = { status: 200, headers: {}, body: "data: {\"event\":\"answer\"}" };
   assert.equal(inferOperation(ask), "query");
+  const balance = event("POST", "https://x.test/oa/duty-leave/get-leave-balance-my");
+  balance.request.query = { leaveType: "1" };
+  balance.response = { status: 200, headers: {}, body: { success: true, data: { remainingDays: 8 } } };
+  assert.equal(inferOperation(balance), "query");
 });

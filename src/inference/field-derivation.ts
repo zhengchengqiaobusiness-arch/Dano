@@ -1,8 +1,8 @@
 import type { CapabilityContract, DataBinding, EvidenceEvent, InputFormField, NetworkEvidence } from "../domain.js";
 import { id } from "../utils.js";
-import { flattenRequestValues, requestValueAt, sameValue } from "./field-resolver.js";
+import { flattenRequestValues, nameTokens, requestValueAt, sameSynonymGroup, sameValue } from "./field-resolver.js";
 import { normalizeUrl } from "./heuristics.js";
-import { isNoiseCapability, isPageResultQuery, isPrimaryCapability } from "./export-scope.js";
+import { isNoiseCapability, isPageResultQuery, isPrimaryCapability, relatedResource } from "./export-scope.js";
 
 const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload", "action"]);
 const PAGE_NAME = /^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i;
@@ -187,6 +187,61 @@ function lastPathName(path: string) {
   return (path.split(".").pop() || "").replace(/\[\*\]/g, "");
 }
 
+function schemaLeafPaths(schema: CapabilityContract["outputSchema"], prefix = "$"): string[] {
+  if (!schema) return [];
+  const type = Array.isArray(schema.type) ? schema.type.find(item => item !== "null") : schema.type;
+  if (type === "object" && schema.properties) {
+    return Object.entries(schema.properties).flatMap(([key, child]) =>
+      schemaLeafPaths(child as CapabilityContract["outputSchema"], `${prefix}.${key}`)
+    );
+  }
+  if (type === "array") {
+    return schemaLeafPaths((schema.items || {}) as CapabilityContract["outputSchema"], `${prefix}[*]`);
+  }
+  return type && type !== "object" ? [prefix] : [];
+}
+
+const GENERIC_LEAF = /^(data|result|value|item|items|record|records|rows|list|content)$/i;
+
+function namesRelated(field: InputFormField, leaf: string, pathText: string) {
+  if (sameSynonymGroup(field, { name: leaf, label: leaf })) return true;
+  return sameSynonymGroup({ name: field.name, label: field.name }, { name: leaf, label: pathText });
+}
+
+function lookupAffinityScore(
+  field: InputFormField,
+  leafPath: string,
+  capability: CapabilityContract,
+  write?: CapabilityContract
+) {
+  const leaf = lastPathName(leafPath);
+  const fieldText = `${field.name} ${field.label}`;
+  const pathText = capability.transport.pathTemplate || "";
+  const exact = leaf.toLowerCase() === field.name.toLowerCase();
+  const synonym = !exact && namesRelated(field, leaf, pathText);
+  const nameScore = exact ? 8 : synonym ? 5 : 0;
+  const fieldToks = new Set(nameTokens(fieldText));
+  const overlap = nameTokens(`${leaf} ${pathText}`).filter(token =>
+    fieldToks.has(token) || [...fieldToks].some(item => item.includes(token) || token.includes(item))
+  );
+  const tokenScore = Math.min(6, new Set(overlap).size * 2);
+  const related = Boolean(write && relatedResource(write.transport.pathTemplate, pathText));
+  if (!nameScore && (!tokenScore || !related)) return 0;
+  return nameScore
+    + tokenScore
+    + (related ? 3 : 0)
+    + (leafPath.includes("[*]") ? 0 : 2)
+    - (GENERIC_LEAF.test(leaf) ? 4 : 0);
+}
+
+function pickUniqueHit(hits: LookupHit[]) {
+  const unique = [...new Map(hits.map(item => [`${item.capabilityId}|${item.fromPath}|${item.via || ""}`, item])).values()]
+    .sort((left, right) => right.score - left.score || left.fromPath.localeCompare(right.fromPath));
+  if (!unique.length || unique[0]!.score < 6) return undefined;
+  if (unique.length > 1 && unique[0]!.score - unique[1]!.score < 2) return undefined;
+  return unique[0];
+}
+
 function responseHits(body: unknown, prefix = "$", row?: Record<string, unknown>): Array<{ path: string; value: unknown; row?: Record<string, unknown> }> {
   if (body === undefined) return [];
   if (Array.isArray(body)) {
@@ -268,12 +323,23 @@ function requestSelectsValue(event: NetworkEvidence, fieldName: string, value: u
 type IndexedLeaf = { path: string; value: unknown; row?: Record<string, unknown> };
 
 type LookupIndexEntry = {
-  event: NetworkEvidence;
+  event?: NetworkEvidence;
+  evidenceIds: string[];
   capability: CapabilityContract;
   leaves: IndexedLeaf[];
   leavesByValue: Map<string, IndexedLeaf[]>;
   isPageQuery: boolean;
   isPrimary: boolean;
+};
+
+type LookupHit = {
+  capabilityId: string;
+  fromPath: string;
+  via?: string;
+  eventId: string;
+  method: string;
+  pathTemplate: string;
+  score: number;
 };
 
 function primitiveValueKey(value: unknown) {
@@ -361,12 +427,30 @@ function buildLookupIndex(events: EvidenceEvent[], catalog: CapabilityContract[]
     }
     index.push({
       event,
+      evidenceIds: [event.id],
       capability,
       leaves,
       leavesByValue,
       isPageQuery: isPageQuery(capability),
       isPrimary: isPrimary(capability)
     });
+  }
+  const indexed = new Set(index.map(entry => entry.capability.id));
+  for (const capability of catalog) {
+    if (capability.operation !== "query" || isNoiseCapability(capability) || indexed.has(capability.id)) continue;
+    if (isPageQuery(capability) && isPrimary(capability)) continue;
+    const paths = schemaLeafPaths(capability.outputSchema);
+    if (!paths.length) continue;
+    const evidenceIds = capability.evidence.filter(item => item.kind === "network").map(item => item.eventId);
+    index.push({
+      evidenceIds,
+      capability,
+      leaves: paths.map(path => ({ path })),
+      leavesByValue: new Map(),
+      isPageQuery: isPageQuery(capability),
+      isPrimary: isPrimary(capability)
+    });
+    indexed.add(capability.id);
   }
   return index;
 }
@@ -375,21 +459,24 @@ function fromApiMatch(
   field: InputFormField,
   value: unknown,
   sample: unknown,
-  index: LookupIndexEntry[]
+  index: LookupIndexEntry[],
+  write?: CapabilityContract,
+  mode: "write" | "query" = "write"
 ) {
   if (value === undefined || value === null || value === "") return undefined;
   const joins = requestJoins(sample);
-  const hits: Array<{ capabilityId: string; fromPath: string; via?: string; eventId: string; method: string; pathTemplate: string }> = [];
+  const valueHits: LookupHit[] = [];
   for (const entry of index) {
     const { event, capability } = entry;
     for (const leaf of matchingLeaves(entry, value)) {
       if (isEnvelopePath(leaf.path, field.name)) continue;
-      if (!sameDerivedValue(leaf.value, value)) continue;
+      if (leaf.value !== undefined && !sameDerivedValue(leaf.value, value)) continue;
+      if (leaf.value === undefined) continue;
       // The page's own result list often repeats the field we just wrote.
       // Only keep it when that value was also a same-named filter on the list request.
-      if (entry.isPageQuery && entry.isPrimary && !requestSelectsValue(event, field.name, value)) continue;
-      if (entry.isPageQuery && entry.isPrimary && lastPathName(leaf.path).toLowerCase() === field.name.toLowerCase() && !requestSelectsValue(event, field.name, value)) continue;
-      const query = event.request.query || {};
+      if (entry.isPageQuery && entry.isPrimary && (!event || !requestSelectsValue(event, field.name, value))) continue;
+      if (entry.isPageQuery && entry.isPrimary && lastPathName(leaf.path).toLowerCase() === field.name.toLowerCase() && (!event || !requestSelectsValue(event, field.name, value))) continue;
+      const query = event?.request.query || {};
       const queryJoin = joins.find(item =>
         Object.entries(query).some(([key, queryValue]) => key === item.name && sameValue(queryValue, item.value))
       );
@@ -398,21 +485,47 @@ function fromApiMatch(
         const siblings = entry.leaves.filter(item => item.path === leaf.path);
         if (!siblings.length || siblings.some(item => !sameDerivedValue(item.value, value))) continue;
       }
-      hits.push({
+      const score = lookupAffinityScore(field, leaf.path, capability, write) + (via ? 2 : 0) + 4;
+      valueHits.push({
         capabilityId: capability.id,
         fromPath: leaf.path,
         via: via?.name,
-        eventId: event.id,
+        eventId: event?.id || entry.evidenceIds[0] || capability.id,
         method: capability.transport.method,
-        pathTemplate: capability.transport.pathTemplate
+        pathTemplate: capability.transport.pathTemplate,
+        score
       });
     }
   }
-  const unique = [...new Map(hits.map(item => [`${item.capabilityId}|${item.fromPath}|${item.via || ""}`, item])).values()];
+  const unique = [...new Map(valueHits.map(item => [`${item.capabilityId}|${item.fromPath}|${item.via || ""}`, item])).values()];
   const viaHits = unique.filter(item => item.via);
   const chosen = viaHits.length ? viaHits : unique;
-  if (chosen.length !== 1) return undefined;
-  return chosen[0];
+  if (chosen.length === 1) return chosen[0];
+  if (chosen.length > 1 || mode !== "write") return undefined;
+
+  const affinityHits: LookupHit[] = [];
+  for (const entry of index) {
+    if (entry.isPageQuery && entry.isPrimary) continue;
+    for (const leaf of entry.leaves) {
+      if (isEnvelopePath(leaf.path, field.name)) continue;
+      const score = lookupAffinityScore(field, leaf.path, entry.capability, write);
+      if (score < 6) continue;
+      const query = entry.event?.request.query || {};
+      const queryJoin = joins.find(item =>
+        Object.entries(query).some(([key, queryValue]) => key === item.name && sameValue(queryValue, item.value))
+      );
+      affinityHits.push({
+        capabilityId: entry.capability.id,
+        fromPath: leaf.path,
+        via: queryJoin?.name,
+        eventId: entry.event?.id || entry.evidenceIds[0] || entry.capability.id,
+        method: entry.capability.transport.method,
+        pathTemplate: entry.capability.transport.pathTemplate,
+        score: score + (queryJoin ? 2 : 0)
+      });
+    }
+  }
+  return pickUniqueHit([...valueHits, ...affinityHits]);
 }
 
 function emptyDefault(field: InputFormField, value: unknown) {
@@ -700,7 +813,7 @@ export function attachDerivationRules(
     if (shouldKeep(field, capability, fields)) return field;
     if (field.defaultRule && (mode === "write" || !field.defaultRule.startsWith("literal:"))) return field;
     const value = requestValueAt(sample, field.path);
-    const from = fromApiMatch(field, value, sample, lookupIndex);
+    const from = fromApiMatch(field, value, sample, lookupIndex, capability, mode);
     if (from) {
       bindings.push({
         id: id("bind"),

@@ -8,6 +8,7 @@ import { reanalyzeIncoming } from "../src/inference/reanalyze.js";
 import {
   capabilitiesForSession,
   exportableCapabilities,
+  relatedResource,
   reviewSessionIds,
   sameResource,
   sessionBusinessPageKeys
@@ -88,6 +89,11 @@ test("same resource does not treat sibling names under a version prefix as one f
   assert.equal(sameResource("/api/v1/orders", "/api/v1/users"), false);
   assert.equal(sameResource("/erp/foo/bar", "/erp/foo/baz"), false);
   assert.equal(sameResource("/oa/duty-leave/page", "/erp/purchase-order/create"), false);
+  assert.equal(relatedResource("/oa/duty-leave/submit-process", "/oa/duty-leave/leave-balance/my"), true);
+  assert.equal(relatedResource("/oa/duty-leave/submit-process", "/oa/duty-leave/get-leave-balance-my"), true);
+  assert.equal(relatedResource("/erp/purchase/order/create", "/erp/purchase/product/simple-list"), true);
+  assert.equal(relatedResource("/oa/duty-leave/submit-process", "/system/user/page"), false);
+  assert.equal(relatedResource("/api/v1/orders", "/api/v1/users"), false);
 });
 
 test("exportable catalog drops a verified query that only shares an API version prefix with the write", () => {

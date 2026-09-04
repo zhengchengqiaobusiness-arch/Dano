@@ -49,6 +49,7 @@ export interface PageActionHost {
   page(): Page;
   writePageInventory(page: Page, snapshot: PageSnapshot): Promise<void>;
   recentUserActions(): unknown[];
+  drainNetwork?(timeout?: number): Promise<void>;
   recordedManualSteps?(): unknown[];
   followManualSteps?(): boolean;
   recordSelectObservation?(info: {
@@ -102,8 +103,10 @@ export class PageActions {
 
   async waitForPageQuiet(timeout = 600) {
     const busy = this.page().locator(BUSY_SPINNERS);
-    if (!(await busy.count())) return;
-    await busy.first().waitFor({ state: "hidden", timeout }).catch(() => {});
+    if (await busy.count()) {
+      await busy.first().waitFor({ state: "hidden", timeout }).catch(() => {});
+    }
+    await this.host.drainNetwork?.(Math.max(timeout, 1_200));
   }
 
   async nudgeOverlayFrames() {
@@ -1310,6 +1313,7 @@ export class PageActions {
         break;
       }
       await run(leftover.filter(field => field.kind === "select"));
+      await this.waitForPageQuiet(800);
       await run(leftover.filter(field => field.kind === "date"));
       await this.closeDatePanel();
       await run(leftover.filter(field => field.kind !== "select" && field.kind !== "date" && field.kind !== "picker"));

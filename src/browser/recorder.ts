@@ -81,6 +81,7 @@ export class BrowserRecorder {
   private browserLaunched = false;
   private actionBusy = 0;
   private readonly networkJobs = new Set<Promise<void>>();
+  private readonly pendingRequests = new Map<Request, number>();
   private previewInFlight?: Promise<Buffer>;
   private lastPreview?: { at: number; buffer: Buffer };
   private focused?: Page;
@@ -94,6 +95,7 @@ export class BrowserRecorder {
     page: () => this.currentPage(),
     writePageInventory: (page, snapshot) => this.writePageInventory(page, snapshot),
     recentUserActions: () => this.recentUserActions(),
+    drainNetwork: timeout => this.drainNetwork(timeout),
     recordedManualSteps: () => this.recordedManualSteps(),
     followManualSteps: () => Boolean(this.active?.guard.followManualSteps),
     recordSelectObservation: info => this.writeUiEvent(this.currentPage(), {
@@ -194,6 +196,7 @@ export class BrowserRecorder {
   private async waitForPageQuiet(page: Page, timeout = 800) {
     void page;
     await this.actions.waitForPageQuiet(timeout);
+    await this.drainNetwork(Math.max(timeout, 1_200));
   }
 
   async reload() {
@@ -324,13 +327,22 @@ export class BrowserRecorder {
     context.on("request", request => {
       if (!this.active) return;
       this.active.requestIds.set(request, id("net"));
+      if (this.shouldCapture(request) && !this.isNoiseUrl(request.url())) {
+        this.pendingRequests.set(request, Date.now());
+      }
     });
 
     context.on("requestfailed", request => {
+      this.pendingRequests.delete(request);
       this.trackNetwork(this.captureFailedRequest(request));
     });
 
+    context.on("requestfinished", request => {
+      this.pendingRequests.delete(request);
+    });
+
     context.on("response", response => {
+      this.pendingRequests.delete(response.request());
       this.trackNetwork(this.captureResponse(response));
     });
   }
@@ -341,9 +353,17 @@ export class BrowserRecorder {
     void tracked.finally(() => this.networkJobs.delete(tracked));
   }
 
+  private isNoiseUrl(url: string) {
+    return /\/im\/|unread-count|online-status|notify-message|get-permission-info/i.test(url);
+  }
+
   private async drainNetwork(timeout = 1_500) {
+    const watchFrom = Date.now() - 80;
     const deadline = Date.now() + timeout;
-    while (this.networkJobs.size && Date.now() < deadline) {
+    const relevant = () =>
+      this.networkJobs.size > 0
+      || [...this.pendingRequests.entries()].some(([, started]) => started >= watchFrom);
+    while (relevant() && Date.now() < deadline) {
       await Promise.race([...this.networkJobs, new Promise(resolve => setTimeout(resolve, 40))]);
     }
   }
@@ -962,6 +982,7 @@ export class BrowserRecorder {
           if (!command.selector || command.value === undefined) throw new Error("choose requires selector and value");
           return this.guardedPageAction("choose", command.selector, async () => {
             const result = await this.actions.chooseOption(command.selector!, command.value!);
+            await this.waitForPageQuiet(page);
             await this.actions.recordFormInventory().catch(() => {});
             return result;
           });
@@ -970,10 +991,12 @@ export class BrowserRecorder {
           return this.guardedPageAction("select", command.selector, async () => {
             try {
               await (await this.actions.locate(command.selector!)).selectOption(command.value!, { timeout: 1_500 });
+              await this.waitForPageQuiet(page);
               await this.actions.recordFormInventory().catch(() => {});
               return { ok: true };
             } catch {
               const result = await this.actions.chooseOption(command.selector!, command.value!);
+              await this.waitForPageQuiet(page);
               await this.actions.recordFormInventory().catch(() => {});
               return result;
             }

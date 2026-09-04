@@ -214,7 +214,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_approve_binding",
     label: "Approve capability binding",
-    description: "Record an approved data binding from one verified capability output path into another verified capability input path.",
+    description: "Record an approved data binding from a recorded query output path into a write capability input path. Both capabilities must exist and the paths must be in the recorded schemas; they do not need to be verified yet.",
     parameters: parameters({
       fromCapabilityId: { type: "string" },
       fromPath: { type: "string" },
