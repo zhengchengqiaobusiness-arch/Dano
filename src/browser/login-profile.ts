@@ -78,20 +78,20 @@ async function newestLoginSource(sharedDir: string, exclude: string) {
   try {
     entries = await readdir(sharedDir, { withFileTypes: true });
   } catch {
-    return best?.dir;
+    return best;
   }
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name === "Default") continue;
     await consider(path.join(sharedDir, entry.name));
   }
-  return best?.dir;
+  return best;
 }
 
 export async function seedPageProfile(sharedDir: string, pageDir: string) {
   await mkdir(pageDir, { recursive: true });
-  if (await hasLoginState(pageDir)) return pageDir;
   const source = await newestLoginSource(sharedDir, pageDir);
-  if (source) await copyLoginState(source, pageDir);
+  const pageAt = await loginStamp(pageDir);
+  if (source && source.at > pageAt) await copyLoginState(source.dir, pageDir);
   return pageDir;
 }
 

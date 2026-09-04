@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, mkdir, readFile, writeFile, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, stat, utimes } from "node:fs/promises";
 import { seedPageProfile, syncLoginState, hasLoginState } from "../src/browser/login-profile.js";
 
 async function exists(target: string) {
@@ -20,6 +20,12 @@ async function writeLogin(profileDir: string, mark: string) {
   await mkdir(path.dirname(local), { recursive: true });
   await writeFile(cookies, `${mark}-cookie`);
   await writeFile(local, `${mark}-local`);
+}
+
+async function markLoginTime(profileDir: string, epochMs: number) {
+  const at = new Date(epochMs);
+  await utimes(path.join(profileDir, "Default", "Cookies"), at, at);
+  await utimes(path.join(profileDir, "Default", "Local Storage"), at, at);
 }
 
 test("empty page profile inherits shared login cookies", async () => {
@@ -45,6 +51,21 @@ test("page profile with its own login is not overwritten", async () => {
   await seedPageProfile(shared, page);
 
   assert.equal(await readFile(path.join(page, "Default", "Cookies"), "utf8"), "page-cookie");
+});
+
+test("reopening a page refreshes stale login state from the newest shared profile", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "bss-login-"));
+  const shared = path.join(root, "browser-profile");
+  const page = path.join(shared, "page_reopen");
+  await writeLogin(page, "expired-page");
+  await markLoginTime(page, 1_700_000_000_000);
+  await writeLogin(shared, "fresh-shared");
+  await markLoginTime(shared, 1_800_000_000_000);
+
+  await seedPageProfile(shared, page);
+
+  assert.equal(await readFile(path.join(page, "Default", "Cookies"), "utf8"), "fresh-shared-cookie");
+  assert.equal(await readFile(path.join(page, "Default", "Local Storage", "000003.log"), "utf8"), "fresh-shared-local");
 });
 
 test("new page can inherit login from a previous page profile", async () => {
