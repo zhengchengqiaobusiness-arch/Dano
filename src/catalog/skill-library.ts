@@ -91,7 +91,7 @@ export class SkillLibrary {
     const slug = normalizeSkillName(name, capabilities);
     const records = await this.allRecords();
     const family = records.filter(record =>
-      record.status !== "deleted" && normalizeSkillName(record.displayName) === slug
+      record.status !== "deleted" && record.displayName.trim() === name.trim()
     );
 
     const temporaryRoot = path.join(this.stateDir, "staging", `${slug}-${Date.now()}`);

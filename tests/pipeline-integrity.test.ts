@@ -168,6 +168,35 @@ test("review blocks a capability that tries to obtain an input from itself", () 
   assert.equal(review.findings.some(item => item.code === "binding-structure-valid" && item.fieldPath === "$.billType"), true, review.summary);
 });
 
+test("same-resource list stays primary while its picker list stays a dependency", () => {
+  const query = cap({
+    id: "query-seal-apply",
+    operation: "query",
+    transport: { method: "GET", urlTemplate: "https://x/prod-api/oa/sealApply/list", origin: "https://x", pathTemplate: "/prod-api/oa/sealApply/list" }
+  });
+  const picker = cap({
+    id: "query-seal-options",
+    operation: "query",
+    transport: { method: "GET", urlTemplate: "https://x/prod-api/oa/seal/listAll", origin: "https://x", pathTemplate: "/prod-api/oa/seal/listAll" }
+  });
+  const create = cap({
+    id: "create-seal-apply",
+    operation: "create",
+    transport: { method: "POST", urlTemplate: "https://x/prod-api/oa/sealApply", origin: "https://x", pathTemplate: "/prod-api/oa/sealApply" },
+    inputForm: [field({
+      name: "sealId",
+      path: "$.sealId",
+      source: "caller",
+      systemHandled: false,
+      candidates: { type: "capability", capabilityId: picker.id, valuePath: "$.data[*].id", labelPath: "$.data[*].name" }
+    })]
+  });
+  const catalog = [query, picker, create];
+  assert.equal(isPrimaryCapability(query, catalog), true);
+  assert.equal(isPrimaryCapability(picker, catalog), false);
+  assert.deepEqual(exportableCapabilities(catalog).map(item => item.id), [query.id, picker.id, create.id]);
+});
+
 test("lookup-named API is primary only when it is the page's own query", () => {
   const balance = cap({
     id: "query-balance",

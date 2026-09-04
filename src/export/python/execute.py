@@ -84,8 +84,9 @@ def date_to_millis(value: str) -> int:
 def normalize_date_string(value: str, clock: str | None = None) -> str:
     raw = value.strip().replace("T", " ")
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
-        suffix = clock if clock and re.fullmatch(r"\d{2}:\d{2}:\d{2}", str(clock)) else "00:00:00"
-        return f"{raw} {suffix}"
+        if clock and re.fullmatch(r"\d{2}:\d{2}:\d{2}", str(clock)):
+            return f"{raw} {clock}"
+        return raw
     return value
 
 

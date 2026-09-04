@@ -327,12 +327,12 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
         const lists = recordedLists(network);
         for (const field of inferred) {
           const seen = observed.get(field.path);
-          const merged = seen ? {
+          const merged: InputFormField = seen ? {
             ...field,
             ...seen,
             valueType: preferRequestValueType(field.valueType, seen.valueType),
             required: seen.required === true,
-            requiredBasis: seen.required ? "ui-required" : "not-observed",
+            requiredBasis: seen.required ? "ui-required" as const : "not-observed" as const,
             widget: preferRequestValueType(field.valueType, seen.valueType) === "array"
               && (seen.widget === "select" || seen.widget === "text")
               ? "multiselect"

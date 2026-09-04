@@ -303,3 +303,40 @@ test("manages export versions, freezing and recoverable deletion", async () => {
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+test("managed export versions Chinese display names as one Skill family", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-skill-chinese-family-"));
+  const library = new SkillLibrary(path.join(temporary, "dist"), path.join(temporary, "data"));
+  const capabilities = [verifiedCapability("find-orders")];
+  try {
+    const first = await library.export("销售订单", capabilities, true);
+    const second = await library.export("销售订单", capabilities, true);
+    assert.equal(first.version, 1);
+    assert.equal(second.version, 2);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exported executor preserves a recorded date-only string", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-skill-date-only-"));
+  const create = verifiedCapability("create-visit", "create");
+  create.title = "新建来访";
+  create.inputSchema = { type: "object", properties: { visitDate: { type: "string" } }, required: ["visitDate"] };
+  create.inputForm = [{
+    path: "$.visitDate", name: "visitDate", label: "来访日期", valueType: "string", source: "caller",
+    required: true, requiredBasis: "ui-required", systemHandled: false, sourceDetail: "保持页面原始日期格式", widget: "date"
+  }];
+  try {
+    const exported = await exportSkill(temporary, "来访登记", [create]);
+    const { stdout } = await execFileAsync("python", [
+      path.join(exported.dir, "scripts", "execute.py"),
+      "--capability", create.id,
+      "--input", JSON.stringify({ visitDate: "2026-09-04" }),
+      "--prepare-only"
+    ]);
+    assert.equal(JSON.parse(stdout).prepared.visitDate, "2026-09-04");
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});

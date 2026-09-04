@@ -38,8 +38,10 @@ function resourceStem(pathTemplate: string) {
   const last = parts[parts.length - 1] || "";
   const parent = parts[parts.length - 2] || "";
   const stem = last.replace(OPERATION_PREFIX, "").replace(OPERATION_SUFFIX, "").replace(/^[-_]+|[-_]+$/g, "");
-  if (stem.length >= 3) return `${parent}/${stem}`.toLowerCase();
-  return resourcePrefix(pathTemplate).toLowerCase();
+  const prefix = resourcePrefix(pathTemplate).toLowerCase();
+  if (stem.length < 3) return prefix;
+  if (parent.toLowerCase() === stem.toLowerCase()) return prefix;
+  return `${prefix}/${stem}`.toLowerCase();
 }
 
 export function sameResource(left: string, right: string) {
