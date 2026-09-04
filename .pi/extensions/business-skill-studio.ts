@@ -40,9 +40,9 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
     return payload as T;
   };
 
-  const startBrowser = (url: string, name?: string) => browserServiceUrl
-    ? browserRequest<any>("/start", { url, name })
-    : studio.startRecording(url, name);
+  const startBrowser = (url: string, name?: string, expectedOperations: any[] = []) => browserServiceUrl
+    ? browserRequest<any>("/start", { url, name, expectedOperations })
+    : studio.startRecording(url, name, expectedOperations);
   const stopBrowser = () => browserServiceUrl
     ? browserRequest<any>("/stop")
     : studio.stopRecording();
@@ -57,13 +57,18 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_record_start",
     label: "Start business recording",
-    description: "Start the embedded Playwright browser and record real UI actions plus XHR/fetch/document requests and responses.",
+    description: "Start the embedded Playwright browser and record real UI actions plus XHR/fetch/document requests and responses. When the user names required operations, always pass every one in expectedOperations so review cannot export a partial Skill.",
     parameters: parameters({
       url: { type: "string", description: "Real business-system URL" },
-      name: { type: "string", description: "Optional recording name" }
+      name: { type: "string", description: "Optional recording name" },
+      expectedOperations: {
+        type: "array",
+        items: { type: "string", enum: ["query", "create", "update", "review", "delete", "upload", "download", "action"] },
+        description: "Operations the user explicitly requires in this recording, for example ['query','create']."
+      }
     }, ["url"]),
     async execute(_toolCallId, params: any) {
-      const session = await startBrowser(params.url, params.name);
+      const session = await startBrowser(params.url, params.name, params.expectedOperations || []);
       if (session?.id) lastRecordingSessionId = session.id;
       return {
         content: [{ type: "text", text: `Recording started: ${session.id}. The live page is visible in the Studio browser panel.` }],
@@ -92,7 +97,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_browser_control",
     label: "Control recording browser",
-    description: "Control the active embedded browser with goto/snapshot/click/fill/select/choose/press/wait/screenshot/exercise-form/submit-form. Use choose for dropdowns and tree/cascader nodes. exercise-form at most 3 times, submit-form at most 3 times. The first exercise-form/submit-form failure is not a stop: call it again. followManualSteps is true only after the third failure or stopped=true; then follow recordedManualSteps or ask 手动录制. The same click/choose/fill may fail only once. Never loop snapshot-click-snapshot or retry a failed selector. Do not record_stop+analyze a planned 新增 with no successful write response. Required number 0 is empty.",
+    description: "Control the active embedded browser with goto/snapshot/click/fill/select/choose/press/wait/screenshot/exercise-form/submit-form. Snapshot includes operationInventory and enabled availableOperations across the page and visible iframes, so complete every requested page operation rather than only opening its route. Actual clicked operations are added to the recording completion contract. The first exercise-form call is authoritative and fills every currently visible eligible field in one pass; later calls may handle only returned todoFields or fields newly revealed by that pass. Use choose for dropdowns and tree/cascader nodes. exercise-form at most 3 times, submit-form at most 3 times per page/form. The first failure is not a stop. On the third form failure this same tool call pauses for the Studio manual-takeover card; wait until it returns resumedAfterManualTakeover and continue from its snapshot. The same click/choose/fill may fail only once. Never loop snapshot-click-snapshot or retry a failed selector. Do not record_stop+analyze a planned write with no successful response. Required number 0 is empty.",
     parameters: parameters({
       action: { type: "string", enum: ["goto", "snapshot", "click", "fill", "select", "choose", "press", "wait", "screenshot", "exercise-form", "submit-form"] },
       selector: { type: "string" },

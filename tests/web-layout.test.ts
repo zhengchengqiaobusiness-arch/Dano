@@ -112,6 +112,23 @@ test("starting a recording keeps the workbench conversation", async () => {
   assert.doesNotMatch(server, /studio\.recorder\.control\(\{\s*action:\s*"goto"/);
 });
 
+test("three failed form attempts expose a non-blocking manual takeover and resume endpoint", async () => {
+  const [html, css, app, server] = await Promise.all([
+    readFile(path.join(root, "web", "index.html"), "utf8"),
+    readFile(path.join(root, "web", "styles.css"), "utf8"),
+    readFile(path.join(root, "web", "app.js"), "utf8"),
+    readFile(path.join(root, "src", "web", "server.ts"), "utf8")
+  ]);
+  assert.match(html, /id="manual-takeover"/);
+  assert.match(html, /我已完成，继续自动执行/);
+  assert.match(css, /\.manual-takeover\s*\{[^}]*position:\s*fixed/s);
+  assert.doesNotMatch(html, /modal-backdrop[^>]*id="manual-takeover"/);
+  assert.match(app, /manual_takeover_required/);
+  assert.match(app, /\/api\/browser\/takeover\/complete/);
+  assert.match(server, /await page\.requestManualTakeover/);
+  assert.match(server, /resumedAfterManualTakeover:\s*true/);
+});
+
 test("embedded preview stays clickable in Pi automatic click mode", async () => {
   const [app, server, css, recorder, page] = await Promise.all([
     readFile(path.join(root, "web", "app.js"), "utf8"),
@@ -149,7 +166,7 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
   assert.match(app, /ResizeObserver/);
   assert.match(server, /pathname === "\/api\/browser\/viewport"/);
   assert.match(recorder, /async fitViewport\(/);
-  assert.match(page, /this\.recorder\.start\(url, name \|\| "web-session", this\.preferredViewport\)/);
+  assert.match(page, /this\.recorder\.start\(url, name \|\| "web-session", this\.preferredViewport, expectedOperations\)/);
   assert.match(css, /\.empty-browser\s*\{[^}]*max-width:\s*none/);
   assert.match(css, /\.browser-panel\s*\{[^}]*grid-template-rows:\s*40px minmax\(0,\s*1fr\)/);
   assert.doesNotMatch(css, /\.browser-footer/);
@@ -191,8 +208,11 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.match(browserSkill, /YYYY-MM-DD/);
   assert.match(browserSkill, /todoFields|exercise-form/);
   assert.match(browserSkill, /first `exercise-form`\/`submit-form` `ok: false` is not a stop/);
-  assert.match(browserSkill, /Follow `recordedManualSteps`[\s\S]*only after `followManualSteps`/);
-  assert.match(browserControl, /first exercise-form\/submit-form failure is not a stop/);
+  assert.match(browserSkill, /manual-takeover card/);
+  assert.match(browserSkill, /resumedAfterManualTakeover/);
+  assert.match(browserSkill, /authoritative whole-form action/);
+  assert.match(browserControl, /fills every currently visible eligible field in one pass/);
+  assert.match(browserControl, /first failure is not a stop/);
   assert.match(bridge, /todoFields|exercise-form|todoCount/);
   assert.match(bridge, /first exercise-form failure is not a stop/);
   assert.match(bridge, /never click the dim overlay|Never click text=2/);

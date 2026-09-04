@@ -8,6 +8,7 @@ import { chromium } from "playwright";
 import { loadConfig } from "../config.js";
 import { formatProcessLog, killCommandLineMatches } from "../process-lifecycle.js";
 import { StudioService } from "../studio-service.js";
+import type { OperationKind } from "../domain.js";
 import { isPageSessionId, sendEvent, WorkbenchPage } from "./workbench-page.js";
 
 const host = "127.0.0.1";
@@ -97,6 +98,15 @@ function parseBrowserUrl(value: unknown) {
 function parseBrowserMode(value: unknown): BrowserInteractionMode {
   if (value === "manual" || value === "automatic") return value;
   throw new Error("录制模式必须是 manual 或 automatic");
+}
+
+function parseExpectedOperations(value: unknown): OperationKind[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("expectedOperations 必须是操作类型数组");
+  const allowed = new Set<OperationKind>(["query", "create", "update", "review", "delete", "upload", "download", "action"]);
+  const operations = value.filter((item): item is OperationKind => typeof item === "string" && allowed.has(item as OperationKind));
+  if (operations.length !== value.length) throw new Error("expectedOperations 包含不支持的操作类型");
+  return [...new Set(operations)];
 }
 
 function parseViewport(value: unknown) {
@@ -269,7 +279,12 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     const page = requirePage(request);
     const body = await readJsonBody(request);
     if (body.mode !== undefined) page.setMode(parseBrowserMode(body.mode));
-    const session = await page.startRecording(parseBrowserUrl(body.url), body.name, parseViewport(body.viewport) || page.preferredViewport);
+    const session = await page.startRecording(
+      parseBrowserUrl(body.url),
+      body.name,
+      parseViewport(body.viewport) || page.preferredViewport,
+      parseExpectedOperations(body.expectedOperations)
+    );
     runtimeLog("BROWSER", `${page.mode === "manual" ? "Manual" : "Pi automatic"} recording session started on ${page.id}.`);
     sendJson(response, 200, { session, state: await page.browserState() });
     page.broadcast({ type: "browser_changed" });
@@ -298,6 +313,16 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
       if (page.transcriptOpen) page.broadcastSession(page.transcript.addManual(observed));
     }
     sendJson(response, 200, { ...result, observed, recorded: Boolean(observed && body.action !== "scroll") });
+    return;
+  }
+
+  if (request.method === "POST" && pathname === "/api/browser/takeover/complete") {
+    const page = requirePage(request);
+    const body = await readJsonBody(request);
+    const completed = typeof body.id === "string" && page.completeManualTakeover(body.id);
+    if (!completed) throw new Error("人工接管已结束或接管标识无效，请刷新页面状态");
+    sendJson(response, 200, { completed: true, state: await page.browserState() });
+    page.broadcast({ type: "browser_changed" });
     return;
   }
 
@@ -379,7 +404,12 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     const body = await readJsonBody(request);
     if (request.method === "POST" && pathname === "/internal/browser/start") {
       if (page.mode !== "automatic") throw new Error("当前是手动录制模式；请在前端切换到 Pi 自动点击后再让 Pi 启动浏览器");
-      sendJson(response, 200, await page.startRecording(parseBrowserUrl(body.url), body.name, parseViewport(body.viewport) || page.preferredViewport));
+      sendJson(response, 200, await page.startRecording(
+        parseBrowserUrl(body.url),
+        body.name,
+        parseViewport(body.viewport) || page.preferredViewport,
+        parseExpectedOperations(body.expectedOperations)
+      ));
       page.broadcast({ type: "browser_changed" });
       return;
     }
@@ -398,7 +428,32 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
       if (page.mode !== "automatic" && new Set(["goto", "click", "fill", "select", "choose", "press", "exercise-form", "submit-form"]).has(String(body.action))) {
         throw new Error("当前是手动录制模式；Pi 只能读取页面，不能自动点击或输入");
       }
-      sendJson(response, 200, await page.recorder.control(body));
+      const result = await page.recorder.control(body) as {
+        ok?: boolean;
+        stopped?: boolean;
+        followManualSteps?: boolean;
+        reason?: string;
+      };
+      if (result?.followManualSteps || result?.stopped) {
+        const reason = result.reason || "自动操作连续失败 3 次，请人工完成当前页面后继续";
+        page.broadcast({ type: "browser_changed" });
+        const takeover = await page.requestManualTakeover(reason);
+        if (takeover.completed) {
+          const snapshot = await page.recorder.control({ action: "snapshot" });
+          sendJson(response, 200, {
+            ...result,
+            ok: true,
+            stopped: false,
+            followManualSteps: false,
+            resumedAfterManualTakeover: true,
+            snapshot
+          });
+        } else {
+          sendJson(response, 200, { ...result, manualTakeoverCancelled: true });
+        }
+        return;
+      }
+      sendJson(response, 200, result);
       page.broadcast({ type: "browser_changed" });
       return;
     }

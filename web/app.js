@@ -20,7 +20,9 @@ const elements = {
   confirmationInput: $("#confirmation-input"), confirmationEditor: $("#confirmation-editor"),
   confirmationCancel: $("#confirmation-cancel"), confirmationApprove: $("#confirmation-approve"),
   invokeModal: $("#invoke-modal"), invokeTitle: $("#invoke-title"), invokeGoal: $("#invoke-goal"),
-  invokeCancel: $("#invoke-cancel"), invokeSubmit: $("#invoke-submit"), toast: $("#toast")
+  invokeCancel: $("#invoke-cancel"), invokeSubmit: $("#invoke-submit"), toast: $("#toast"),
+  manualTakeover: $("#manual-takeover"), manualTakeoverReason: $("#manual-takeover-reason"),
+  manualTakeoverComplete: $("#manual-takeover-complete")
 };
 
 const PAGE_SESSION_KEY = "bss-page-session";
@@ -52,7 +54,7 @@ let pendingPrompt = "";
 
 const state = {
   view: "recording", browserActive: false, browserMode: "automatic", agentReady: false, agentStreaming: false, agentAborting: false,
-  currentUiRequest: null, localConfirmation: null, invokeSkill: null,
+  currentUiRequest: null, localConfirmation: null, invokeSkill: null, manualTakeover: null, manualTakeoverCompleting: false,
   sessionNodes: new Map(), toastTimer: null, skills: [], skillsPage: 1, skillsPageSize: 8, skillsSort: "desc",
   sessionFollow: false, sessionLive: true, sessionEpoch: 0,
   manualQueue: Promise.resolve(), manualRefreshTimers: [], recordingAction: null, clearingSession: false,
@@ -162,6 +164,7 @@ function resetWorkbench() {
     resolve(false);
   }
   state.currentUiRequest = null;
+  showManualTakeover();
   elements.confirmationModal.hidden = true;
   if (elements.invokeModal) elements.invokeModal.hidden = true;
   state.invokeSkill = null;
@@ -281,6 +284,37 @@ function renderBrowserMode() {
   }
 }
 
+function showManualTakeover(takeover) {
+  state.manualTakeover = takeover || null;
+  if (!elements.manualTakeover) return;
+  elements.manualTakeover.hidden = !state.manualTakeover;
+  if (!state.manualTakeover) {
+    state.manualTakeoverCompleting = false;
+    return;
+  }
+  elements.manualTakeoverReason.textContent = state.manualTakeover.reason || "请直接在左侧内置浏览器完成当前页面，完成后继续。";
+  elements.manualTakeoverComplete.disabled = state.manualTakeoverCompleting;
+  elements.manualTakeoverComplete.textContent = state.manualTakeoverCompleting ? "正在恢复…" : "我已完成，继续自动执行";
+}
+
+async function completeManualTakeover() {
+  const takeover = state.manualTakeover;
+  if (!takeover || state.manualTakeoverCompleting) return;
+  state.manualTakeoverCompleting = true;
+  elements.manualTakeoverComplete.disabled = true;
+  elements.manualTakeoverComplete.textContent = "正在恢复…";
+  try {
+    await api("/api/browser/takeover/complete", { method: "POST", body: JSON.stringify({ id: takeover.id }) });
+    showManualTakeover();
+    await pollBrowser(true);
+  } catch (error) {
+    state.manualTakeoverCompleting = false;
+    elements.manualTakeoverComplete.disabled = false;
+    elements.manualTakeoverComplete.textContent = "我已完成，继续自动执行";
+    showToast(error.message);
+  }
+}
+
 function renderRecordingActions() {
   const busy = Boolean(state.recordingAction);
   elements.stopRecording.disabled = !state.browserActive || busy;
@@ -344,6 +378,7 @@ async function pollBrowserState() {
     if (epoch !== state.frameEpoch) return;
     state.browserActive = Boolean(browser.active);
     state.browserMode = browser.mode || state.browserMode;
+    showManualTakeover(browser.manualTakeover);
     renderBrowserMode();
     elements.browserFrame.classList.toggle("active", state.browserActive);
     elements.reloadBrowser.disabled = !state.browserActive;
@@ -753,6 +788,8 @@ function connectEvents() {
       if (state.browserActive) state.sessionLive = true;
     });
     if (event.type === "browser_mode") { state.browserMode = event.mode; renderBrowserMode(); }
+    if (event.type === "manual_takeover_required") showManualTakeover(event.takeover);
+    if (event.type === "manual_takeover_completed" || event.type === "manual_takeover_cancelled") showManualTakeover();
     if (event.type === "skills_changed" && state.view === "skills") void loadSkills();
     if (event.type === "studio_shutdown") showToast("Studio 服务已停止，页面保留");
     if (event.type === "agent_error") showToast(event.message || "Pi 连接异常");
@@ -783,6 +820,7 @@ document.querySelectorAll("[data-prompt]").forEach(button => button.addEventList
   void submitPrompt(typed ? `${typed}\n${hint}` : hint);
 }));
 elements.confirmationCancel.addEventListener("click", () => void closeConfirmation(false)); elements.confirmationApprove.addEventListener("click", () => void closeConfirmation(true));
+elements.manualTakeoverComplete?.addEventListener("click", () => void completeManualTakeover());
 elements.exportForm.addEventListener("submit", event => { event.preventDefault(); void exportSkill(elements.skillName.value.trim()).catch(error => showToast(error.message)); });
 elements.skillsSortTime?.addEventListener("click", () => {
   state.skillsSort = state.skillsSort === "desc" ? "asc" : "desc";

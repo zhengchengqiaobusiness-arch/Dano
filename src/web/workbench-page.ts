@@ -4,6 +4,7 @@ import path from "node:path";
 import { seedPageProfile, syncLoginState } from "../browser/login-profile.js";
 import { BrowserRecorder, normalizePreviewViewport } from "../browser/recorder.js";
 import type { StudioConfig } from "../config.js";
+import type { OperationKind } from "../domain.js";
 import { formatProcessLog } from "../process-lifecycle.js";
 import { PiRpcBridge } from "./pi-rpc.js";
 import { PiTranscript } from "./transcript.js";
@@ -11,6 +12,15 @@ import { PiTranscript } from "./transcript.js";
 export type BrowserMode = "manual" | "automatic";
 export type PageLogLevel = "PLAIN" | "CHECK" | "START" | "INFO" | "READY" | "BROWSER" | "PI" | "TOOL" | "WAIT" | "WARN" | "ERROR" | "PROCESS";
 export const PAGE_LEAVE_GRACE_MS = 3_000;
+
+interface ManualTakeover {
+  id: string;
+  reason: string;
+  requestedAt: string;
+  returnMode: BrowserMode;
+  waiting: Promise<{ completed: boolean }>;
+  resolve: (result: { completed: boolean }) => void;
+}
 
 const PAGE_SESSION_PATTERN = /^page_[A-Za-z0-9_-]{8,80}$/;
 
@@ -40,6 +50,7 @@ export class WorkbenchPage {
   private starting?: Promise<void>;
   private abandonTimer?: ReturnType<typeof setTimeout>;
   private disposing?: Promise<void>;
+  private manualTakeover?: ManualTakeover;
 
   constructor(
     id: string,
@@ -110,17 +121,70 @@ export class WorkbenchPage {
   }
 
   async browserState() {
-    return { ...(await this.recorder.state()), mode: this.mode };
+    return { ...(await this.recorder.state()), mode: this.mode, manualTakeover: this.manualTakeoverState() };
+  }
+
+  manualTakeoverState() {
+    if (!this.manualTakeover) return undefined;
+    const { id, reason, requestedAt } = this.manualTakeover;
+    return { id, reason, requestedAt };
+  }
+
+  requestManualTakeover(reason: string) {
+    if (this.manualTakeover) return this.manualTakeover.waiting;
+    let resolve!: (result: { completed: boolean }) => void;
+    const waiting = new Promise<{ completed: boolean }>(done => { resolve = done; });
+    const takeover: ManualTakeover = {
+      id: `takeover_${randomBytes(12).toString("hex")}`,
+      reason,
+      requestedAt: new Date().toISOString(),
+      returnMode: this.mode,
+      waiting,
+      resolve
+    };
+    this.manualTakeover = takeover;
+    this.setMode("manual");
+    this.onLog("WAIT", `Automatic browser operation paused for manual takeover: ${reason}`);
+    this.broadcast({ type: "manual_takeover_required", takeover: this.manualTakeoverState() });
+    return waiting;
+  }
+
+  completeManualTakeover(id: string) {
+    const takeover = this.manualTakeover;
+    if (!takeover || takeover.id !== id) return false;
+    this.manualTakeover = undefined;
+    this.recorder.resumeAfterManualTakeover();
+    this.setMode(takeover.returnMode);
+    takeover.resolve({ completed: true });
+    this.onLog("BROWSER", "Manual takeover completed; automatic execution resumed from the current page.");
+    this.broadcast({ type: "manual_takeover_completed", id });
+    return true;
+  }
+
+  private cancelManualTakeover(reason: string) {
+    const takeover = this.manualTakeover;
+    if (!takeover) return;
+    this.manualTakeover = undefined;
+    this.setMode(takeover.returnMode);
+    takeover.resolve({ completed: false });
+    this.broadcast({ type: "manual_takeover_cancelled", id: takeover.id, reason });
   }
 
   setMode(mode: BrowserMode) {
+    if (this.manualTakeover && mode === "automatic") return;
     if (this.mode === mode) return;
     this.mode = mode;
     this.onLog("BROWSER", mode === "manual" ? "Switched to manual recording mode." : "Switched to Pi automatic click mode.");
     this.broadcast({ type: "browser_mode", mode });
   }
 
-  async startRecording(url: string, name?: string, viewport?: { width?: number; height?: number; scale?: number }) {
+  async startRecording(
+    url: string,
+    name?: string,
+    viewport?: { width?: number; height?: number; scale?: number },
+    expectedOperations: OperationKind[] = []
+  ) {
+    this.cancelManualTakeover("new-recording");
     if (this.recorder.isActive()) {
       const oldPid = this.recorder.browserProcessId();
       await this.recorder.stop().catch(() => this.recorder.disposeAndKill("rerecord"));
@@ -130,7 +194,7 @@ export class WorkbenchPage {
     await seedPageProfile(this.sharedProfileDir, this.pageProfileDir);
     const size = viewport || this.preferredViewport;
     if (size) this.preferredViewport = normalizePreviewViewport(size);
-    const session = await this.recorder.start(url, name || "web-session", this.preferredViewport);
+    const session = await this.recorder.start(url, name || "web-session", this.preferredViewport, expectedOperations);
     this.lastRecordingSessionId = session.id;
     this.onLog("PROCESS", formatProcessLog("OPEN", "playwright-browser", { pid: this.recorder.browserProcessId(), page: this.id }));
     return session;
@@ -144,6 +208,7 @@ export class WorkbenchPage {
   }
 
   async stopRecording() {
+    this.cancelManualTakeover("recording-stopped");
     const pid = this.recorder.browserProcessId();
     const session = await this.recorder.stop();
     if (session?.id) this.lastRecordingSessionId = session.id;
@@ -153,10 +218,11 @@ export class WorkbenchPage {
   }
 
   async abortWork(reason = "abort") {
+    this.cancelManualTakeover(reason);
     const pid = this.pi.processId();
     if (this.pi.status().streaming) {
       try {
-        await this.pi.abort(2_500);
+        await this.pi.abort();
         if (this.pi.status().streaming) await new Promise(resolve => setTimeout(resolve, 200));
         if (this.pi.status().streaming) throw new Error("abort did not stop streaming");
         this.onLog("PROCESS", formatProcessLog("CLOSE", "pi-rpc-task", { pid, page: this.id, reason }));
@@ -205,6 +271,7 @@ export class WorkbenchPage {
 
   private async disposeNow(reason: string) {
     this.cancelAbandon();
+    this.cancelManualTakeover(reason);
     this.transcriptOpen = false;
     const piPid = this.pi.processId();
     await this.pi.stop();

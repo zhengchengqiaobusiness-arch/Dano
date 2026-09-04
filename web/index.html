@@ -88,7 +88,7 @@
 
       <main class="view management-view" data-view-panel="skills" hidden aria-label="Skill 目录">
         <section class="export-panel">
-          <div><h2>导出自包含 Python Skill</h2></div>
+          <div><h2>导出自包含 Python Skill</h2><p>产出执行手册，不是业务说明书。只有审核通过才能导出；每次生成独立目录，不会覆盖上一份，默认位于 dist/skills。</p></div>
           <form id="export-form"><label class="sr-only" for="skill-name">Skill 名称</label><input id="skill-name" placeholder="例如 采购订单" required /><button class="primary-button" type="submit">导出 Skill</button></form>
         </section>
         <section class="skills-board">
@@ -121,6 +121,13 @@
       </main>
 
     </div>
+
+    <aside class="manual-takeover" id="manual-takeover" role="status" aria-live="assertive" hidden>
+      <p class="eyebrow">需要人工操作</p>
+      <h2>自动操作连续失败 3 次</h2>
+      <p id="manual-takeover-reason">请直接在左侧内置浏览器完成当前页面，完成后继续。</p>
+      <button type="button" class="primary-button" id="manual-takeover-complete">我已完成，继续自动执行</button>
+    </aside>
 
     <div class="modal-backdrop" id="confirmation-modal" hidden>
       <section class="confirmation-card" role="dialog" aria-modal="true" aria-labelledby="confirmation-title">
