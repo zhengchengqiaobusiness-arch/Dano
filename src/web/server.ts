@@ -304,8 +304,9 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     const page = requirePage(request);
     const body = await readJsonBody(request);
     const result = await page.recorder.manualControl(body) as { observed?: { eventType?: string; label?: string; name?: string; text?: string; value?: unknown; selector?: string } };
+    const liveDrag = body.action === "drag" && (body.phase === "start" || body.phase === "move");
     const dragEnd = Array.isArray(body.points) ? body.points[body.points.length - 1] : undefined;
-    const observed = result.observed || (body.action === "click"
+    const observed = liveDrag ? undefined : result.observed || (body.action === "click"
       ? { eventType: "click", label: "页面", value: `${body.x},${body.y}` }
       : body.action === "drag"
         ? { eventType: "click", label: "页面", value: `${dragEnd?.x ?? body.toX ?? body.x},${dragEnd?.y ?? body.toY ?? body.y}` }

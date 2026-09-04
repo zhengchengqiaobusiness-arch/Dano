@@ -61,7 +61,7 @@ const state = {
   pollInFlight: false, frameLoading: false, frameBlobUrl: null, lastFrameAt: 0, frameEpoch: 0,
   lastStatusText: "", viewport: { width: 1440, height: 960 },
   imeComposing: false, imeBuffer: "", imeTimer: null, viewportSyncTimer: null,
-  previewDrag: null, previewPointerUsed: false
+  previewDrag: null, previewPointerUsed: false, lastFrameRect: null, dragQueue: [], dragPumping: false
 };
 
 async function api(path, options = {}) {
@@ -136,6 +136,9 @@ function resetBrowserWorkbench() {
   state.browserActive = false;
   state.previewDrag = null;
   state.previewPointerUsed = false;
+  state.lastFrameRect = null;
+  state.dragQueue = [];
+  state.dragPumping = false;
   state.recordingAction = null;
   state.pollInFlight = false;
   state.frameLoading = false;
@@ -342,6 +345,7 @@ function clearBrowserFrame() {
 
 async function refreshBrowserFrame(force = false) {
   if (!state.browserActive || state.frameLoading || document.hidden) return;
+  if (state.previewDrag) return;
   if (!force && Date.now() - state.lastFrameAt < 160) return;
   const epoch = state.frameEpoch;
   state.frameLoading = true;
@@ -475,6 +479,11 @@ function manualFeedback(command, result) {
     return;
   }
   if (command.action === "drag") {
+    if (command.phase === "start" || command.phase === "move") return;
+    if (command.tap) {
+      showToast(label ? `已记录点击：${label}` : "已记录点击，并加入当前录制");
+      return;
+    }
     showToast(label ? `已记录滑动：${label}` : "已记录滑动，并加入当前录制");
     return;
   }
@@ -487,8 +496,13 @@ function manualFeedback(command, result) {
 
 async function manualCommand(command) {
   if (!state.browserActive) return;
+  const liveDrag = command.action === "drag" && (command.phase === "start" || command.phase === "move");
   const result = await api("/api/browser/manual", { method: "POST", body: JSON.stringify(command) });
   state.sessionLive = true;
+  if (liveDrag) {
+    void refreshBrowserFrame(true);
+    return result;
+  }
   manualFeedback(command, result);
   for (const timer of state.manualRefreshTimers) clearTimeout(timer);
   state.manualRefreshTimers = [];
@@ -496,10 +510,40 @@ async function manualCommand(command) {
   for (const ms of [160, 420, 900, 1500]) {
     state.manualRefreshTimers.push(setTimeout(() => void refreshBrowserFrame(true), ms));
   }
+  return result;
 }
 
 function enqueueManualCommand(command) {
   state.manualQueue = state.manualQueue.then(() => manualCommand(command)).catch(error => showToast(error.message));
+}
+
+function enqueueDragCommand(command) {
+  if (command.phase === "move") {
+    const last = state.dragQueue[state.dragQueue.length - 1];
+    if (last?.phase === "move") state.dragQueue[state.dragQueue.length - 1] = command;
+    else state.dragQueue.push(command);
+  } else {
+    state.dragQueue.push(command);
+  }
+  void pumpDragQueue();
+}
+
+async function pumpDragQueue() {
+  if (state.dragPumping) return;
+  state.dragPumping = true;
+  try {
+    while (state.dragQueue.length) {
+      let command = state.dragQueue.shift();
+      while (command.phase === "move" && state.dragQueue[0]?.phase === "move") command = state.dragQueue.shift();
+      await manualCommand(command);
+    }
+  } catch (error) {
+    showToast(error.message);
+    state.dragQueue = [];
+  } finally {
+    state.dragPumping = false;
+    if (state.dragQueue.length) void pumpDragQueue();
+  }
 }
 
 function displayedFrameRect() {
@@ -507,28 +551,32 @@ function displayedFrameRect() {
   const box = img.getBoundingClientRect();
   const sourceWidth = img.naturalWidth;
   const sourceHeight = img.naturalHeight;
-  if (!sourceWidth || !sourceHeight || !box.width || !box.height) return null;
+  if (!sourceWidth || !sourceHeight || !box.width || !box.height) return state.lastFrameRect;
   const scale = Math.min(box.width / sourceWidth, box.height / sourceHeight);
   const width = sourceWidth * scale;
   const height = sourceHeight * scale;
-  return {
+  state.lastFrameRect = {
     left: box.left + (box.width - width) / 2,
     top: box.top + (box.height - height) / 2,
     width,
     height
   };
+  return state.lastFrameRect;
 }
 
-function browserCoordinates(event) {
+function browserCoordinates(event, clamp = false) {
   const rect = displayedFrameRect();
   if (!rect) return null;
+  const viewW = state.viewport?.width || elements.browserFrame.naturalWidth || 0;
+  const viewH = state.viewport?.height || elements.browserFrame.naturalHeight || 0;
+  if (!viewW || !viewH) return null;
+  let x = (event.clientX - rect.left) / rect.width * viewW;
+  let y = (event.clientY - rect.top) / rect.height * viewH;
+  if (clamp) {
+    return { x: Math.min(viewW, Math.max(0, x)), y: Math.min(viewH, Math.max(0, y)) };
+  }
   if (event.clientX < rect.left || event.clientX > rect.left + rect.width || event.clientY < rect.top || event.clientY > rect.top + rect.height) return null;
-  const viewW = state.viewport?.width || elements.browserFrame.naturalWidth;
-  const viewH = state.viewport?.height || elements.browserFrame.naturalHeight;
-  return {
-    x: Math.round((event.clientX - rect.left) / rect.width * viewW),
-    y: Math.round((event.clientY - rect.top) / rect.height * viewH)
-  };
+  return { x, y };
 }
 
 function composePrompt(raw) {
@@ -867,21 +915,9 @@ function focusBrowserIme(event) {
   elements.browserIme.focus();
 }
 
-function appendPreviewPoint(points, point) {
-  const last = points[points.length - 1];
-  if (last && last.x === point.x && last.y === point.y) return;
-  if (points.length >= 80) {
-    points[points.length - 1] = point;
-    return;
-  }
-  points.push(point);
-}
-
-function previewDragDistance(points) {
-  if (!points.length) return 0;
-  const first = points[0];
-  const last = points[points.length - 1];
-  return Math.hypot(last.x - first.x, last.y - first.y);
+function previewDragDistance(from, to) {
+  if (!from || !to) return 0;
+  return Math.hypot(to.x - from.x, to.y - from.y);
 }
 
 function startPreviewPointer(event) {
@@ -890,16 +926,20 @@ function startPreviewPointer(event) {
   if (!point) return;
   event.preventDefault();
   state.previewPointerUsed = true;
-  state.previewDrag = { pointerId: event.pointerId, points: [point] };
+  state.previewDrag = { pointerId: event.pointerId, start: point, last: point };
   elements.browserFrame.setPointerCapture?.(event.pointerId);
+  flushImeText();
+  enqueueDragCommand({ action: "drag", phase: "start", x: point.x, y: point.y });
 }
 
 function movePreviewPointer(event) {
   const drag = state.previewDrag;
   if (!drag || drag.pointerId !== event.pointerId) return;
   event.preventDefault();
-  const point = browserCoordinates(event);
-  if (point) appendPreviewPoint(drag.points, point);
+  const point = browserCoordinates(event, true);
+  if (!point) return;
+  drag.last = point;
+  enqueueDragCommand({ action: "drag", phase: "move", x: point.x, y: point.y });
 }
 
 function endPreviewPointer(event) {
@@ -908,15 +948,11 @@ function endPreviewPointer(event) {
   event.preventDefault();
   state.previewDrag = null;
   try { elements.browserFrame.releasePointerCapture?.(event.pointerId); } catch {}
-  const point = browserCoordinates(event);
-  if (point) appendPreviewPoint(drag.points, point);
+  const point = browserCoordinates(event, true) || drag.last;
   flushImeText();
-  if (previewDragDistance(drag.points) < 4) {
-    focusBrowserIme(event);
-    enqueueManualCommand({ action: "click", ...drag.points[0] });
-    return;
-  }
-  enqueueManualCommand({ action: "drag", points: drag.points });
+  const tap = previewDragDistance(drag.start, point) < 4;
+  enqueueDragCommand({ action: "drag", phase: "end", x: point.x, y: point.y, tap });
+  if (tap) focusBrowserIme(event);
 }
 
 elements.browserFrame.addEventListener("pointerdown", startPreviewPointer);

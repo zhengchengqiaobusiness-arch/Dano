@@ -4,10 +4,16 @@ import http from "node:http";
 import path from "node:path";
 import os from "node:os";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { BrowserRecorder } from "../src/browser/recorder.js";
+import { BrowserRecorder, dragInterpolationSteps } from "../src/browser/recorder.js";
 import { SNAPSHOT_IN_PAGE } from "../src/browser/page-script.js";
 import { readJsonl } from "../src/utils.js";
 import type { EvidenceEvent } from "../src/domain.js";
+
+test("drag interpolation keeps pointer steps small enough for step-limited sliders", () => {
+  assert.equal(dragInterpolationSteps({ x: 0, y: 0 }, { x: 0, y: 0 }), 1);
+  assert.ok(dragInterpolationSteps({ x: 40, y: 220 }, { x: 200, y: 220 }) >= 50);
+  assert.ok(dragInterpolationSteps({ x: 40, y: 220 }, { x: 48, y: 220 }) >= 3);
+});
 
 test("manual drag moves a hold-to-slide control that a click cannot finish", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-slider-drag-"));
@@ -69,6 +75,95 @@ test("manual drag moves a hold-to-slide control that a click cannot finish", asy
     await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(temporary, { recursive: true, force: true });
   }
+});
+
+function incrementalSliderPage() {
+  return `<!doctype html><html><body>
+    <div id="track" style="position:fixed;left:20px;top:200px;width:260px;height:40px;background:#ddd">
+      <div id="knob" style="position:absolute;left:0;top:0;width:40px;height:40px;background:#09f"></div>
+    </div>
+    <script>
+      const track = document.getElementById("track");
+      const knob = document.getElementById("knob");
+      let dragging = false;
+      let lastX = 0;
+      let offset = 0;
+      knob.addEventListener("mousedown", event => {
+        dragging = true;
+        lastX = event.clientX;
+      });
+      document.addEventListener("mousemove", event => {
+        if (!dragging) return;
+        const dx = event.clientX - lastX;
+        lastX = event.clientX;
+        if (Math.abs(dx) > 6) return;
+        offset = Math.max(0, Math.min(220, offset + dx));
+        knob.style.left = offset + "px";
+        document.title = "offset:" + Math.round(offset);
+      });
+      document.addEventListener("mouseup", () => { dragging = false; });
+    </script>
+  </body></html>`;
+}
+
+async function withRecorderPage(name: string, html: string, work: (recorder: BrowserRecorder) => Promise<void>) {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), `business-${name}-`));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(html);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, name);
+    await work(recorder);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+test("manual drag interpolates jumps so a step-limited slider still reaches the end", async () => {
+  await withRecorderPage("slider-jump", incrementalSliderPage(), async recorder => {
+    await recorder.manualControl({
+      action: "drag",
+      points: [
+        { x: 40, y: 220 },
+        { x: 48, y: 220 },
+        { x: 54, y: 220 },
+        { x: 200, y: 220 }
+      ]
+    });
+    const afterDrag: any = await recorder.control({ action: "snapshot" });
+    const dragOffset = Number(String(afterDrag.title || "").replace(/^offset:/, "") || 0);
+    assert.ok(dragOffset >= 140, `interpolated drag should keep a step-limited slider moving, got ${afterDrag.title}`);
+  });
+});
+
+test("live drag start/move/end keeps a hold-to-slide control under the pointer", async () => {
+  await withRecorderPage("slider-live", incrementalSliderPage(), async recorder => {
+    await recorder.manualControl({ action: "drag", phase: "start", x: 40, y: 220 });
+    await recorder.manualControl({ action: "drag", phase: "move", x: 110, y: 220 });
+    const mid: any = await recorder.control({ action: "snapshot" });
+    const midOffset = Number(String(mid.title || "").replace(/^offset:/, "") || 0);
+    assert.ok(midOffset >= 50, `live move should advance the slider before mouseup, got ${mid.title}`);
+    await recorder.manualControl({ action: "drag", phase: "end", x: 200, y: 220 });
+    const after: any = await recorder.control({ action: "snapshot" });
+    const dragOffset = Number(String(after.title || "").replace(/^offset:/, "") || 0);
+    assert.ok(dragOffset >= 140, `live drag end should finish the slider, got ${after.title}`);
+  });
 });
 
 test("manual button clicks keep their own action label and do not synthesize field changes", async () => {

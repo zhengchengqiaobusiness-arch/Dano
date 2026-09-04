@@ -156,8 +156,15 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
   assert.doesNotMatch(manualCommand, /browserMode !== "manual"/);
   assert.match(app, /flushImeText|action: "text"/);
   assert.match(app, /action: "drag"/);
-  assert.match(app, /pointerdown|startPreviewPointer/);
+  assert.match(app, /phase: "start"/);
+  assert.match(app, /phase: "move"/);
+  assert.match(app, /enqueueDragCommand|pumpDragQueue/);
+  assert.match(app, /lastFrameRect/);
+  assert.match(app, /previewDrag/);
+  assert.doesNotMatch(app, /points\.length >= 80/);
   assert.match(recorder, /action: "drag"/);
+  assert.match(recorder, /phase === "start"|phase: "start"/);
+  assert.match(recorder, /dragInterpolationSteps/);
   assert.match(css, /touch-action:\s*none/);
   assert.match(previewHandlers, /if \(!state\.browserActive\) return;/);
   assert.doesNotMatch(previewHandlers, /browserMode !== "manual"/);
