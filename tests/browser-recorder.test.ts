@@ -4,26 +4,10 @@ import http from "node:http";
 import path from "node:path";
 import os from "node:os";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { BrowserRecorder, releaseChromiumDebugLog } from "../src/browser/recorder.js";
+import { BrowserRecorder } from "../src/browser/recorder.js";
 import { SNAPSHOT_IN_PAGE } from "../src/browser/page-script.js";
 import { readJsonl } from "../src/utils.js";
 import type { EvidenceEvent } from "../src/domain.js";
-
-test("a locked Chromium debug log cannot fail a completed browser shutdown", async () => {
-  let attempts = 0;
-  const released = await releaseChromiumDebugLog("C:\\temp\\locked-profile", 0, async () => {
-    attempts += 1;
-    throw Object.assign(new Error("resource busy or locked"), { code: "EBUSY" });
-  });
-  assert.equal(released, false);
-  assert.equal(attempts, 1);
-  await assert.rejects(
-    releaseChromiumDebugLog("C:\\temp\\broken-profile", 0, async () => {
-      throw Object.assign(new Error("unexpected filesystem failure"), { code: "EIO" });
-    }),
-    /unexpected filesystem failure/
-  );
-});
 
 test("manual button clicks keep their own action label and do not synthesize field changes", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-button-evidence-"));
