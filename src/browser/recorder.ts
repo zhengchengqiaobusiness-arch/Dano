@@ -1,7 +1,7 @@
 import path from "node:path";
 import { writeFile } from "node:fs/promises";
 import { chromium, type BrowserContext, type Browser, type Request, type Response, type Page } from "playwright";
-import type { EvidenceEvent, NetworkEvidence, RecordingSession, UiEvidence } from "../domain.js";
+import type { EvidenceEvent, NetworkEvidence, OperationKind, RecordingSession, UiEvidence } from "../domain.js";
 import type { StudioConfig } from "../config.js";
 import { appendJsonl, ensureDir, id, writeJson } from "../utils.js";
 import { parsePossiblyJson, redactHeaders, redactValue } from "../security/redact.js";
@@ -10,8 +10,10 @@ import { PageActions, type PageSnapshot } from "./page-actions.js";
 import { buildManualSteps, renderManualStepsMarkdown, type ManualStep } from "../record/manual-steps.js";
 import { killCommandLineMatches, killProcessTree } from "../process-lifecycle.js";
 import { persistOriginCredentials } from "../credentials/credential-store.js";
+import { inferOperation, inferUiOperationIntent } from "../inference/heuristics.js";
 
 const FORM_ACTION_BUDGET = 3;
+const EXPECTABLE_OPERATIONS = new Set<OperationKind>(["query", "create", "update", "review", "delete", "upload", "download", "action"]);
 const DEFAULT_VIEWPORT = { width: 1440, height: 960 };
 const MAX_PREVIEW_VIEWPORT = { width: 3840, height: 2160 };
 
@@ -56,6 +58,7 @@ interface ActionGuard {
   submitFormCount: number;
   failedKeys: string[];
   followManualSteps: boolean;
+  formScopeKey?: string;
 }
 
 interface ActiveRecording {
@@ -218,7 +221,12 @@ export class BrowserRecorder {
     });
   }
 
-  async start(startUrl: string, name = "recording", viewport?: { width?: number; height?: number; scale?: number }): Promise<RecordingSession> {
+  async start(
+    startUrl: string,
+    name = "recording",
+    viewport?: { width?: number; height?: number; scale?: number },
+    expectedOperations: OperationKind[] = []
+  ): Promise<RecordingSession> {
     if (this.active) throw new Error(`Recording already active: ${this.active.session.id}`);
 
     const sessionId = id("rec");
@@ -244,7 +252,8 @@ export class BrowserRecorder {
       name,
       startedAt: new Date().toISOString(),
       startUrl,
-      eventsFile
+      eventsFile,
+      expectedOperations: [...new Set(expectedOperations)].filter(operation => EXPECTABLE_OPERATIONS.has(operation))
     };
 
     this.active = {
@@ -444,6 +453,7 @@ export class BrowserRecorder {
       failure: request.failure()?.errorText || "request failed"
     };
     await appendJsonl(active.eventsFile, event);
+    await this.rememberCorrelatedOperation(event, ui);
   }
 
   private async captureResponse(response: Response) {
@@ -494,6 +504,23 @@ export class BrowserRecorder {
       }
     };
     await appendJsonl(active.eventsFile, event);
+    await this.rememberCorrelatedOperation(event, ui);
+  }
+
+  private async rememberExpectedOperation(operation?: OperationKind) {
+    const active = this.active;
+    if (!active || !operation || !EXPECTABLE_OPERATIONS.has(operation)) return;
+    const expected = active.session.expectedOperations || [];
+    if (expected.includes(operation)) return;
+    active.session.expectedOperations = [...expected, operation];
+    await writeJson(path.join(path.dirname(active.eventsFile), "session.json"), active.session);
+  }
+
+  private async rememberCorrelatedOperation(event: NetworkEvidence, ui?: UiEvidence) {
+    if (!ui || (ui.eventType !== "click" && ui.eventType !== "submit")) return;
+    const actionableControl = ui.tag === "button" || ui.tag === "a" || ui.role === "button" || ui.role === "link" || ui.inputType === "submit";
+    if (!actionableControl) return;
+    await this.rememberExpectedOperation(inferOperation(event, ui));
   }
 
   private stabilizeUiEvent(event: UiEvidence): UiEvidence {
@@ -552,6 +579,10 @@ export class BrowserRecorder {
       active.manualEvents = [...active.manualEvents, event].slice(-200);
     }
     await appendJsonl(active.eventsFile, event);
+    if (event.eventType === "click" || event.eventType === "submit") {
+      const operation = inferUiOperationIntent(event.text || event.label, event.pageUrl);
+      await this.rememberExpectedOperation(operation);
+    }
     return event;
   }
 
@@ -595,9 +626,14 @@ export class BrowserRecorder {
     await page.evaluate(`(() => {
       const el = document.activeElement;
       if (!(el instanceof HTMLElement) || el === document.body) return;
-      el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-      if (typeof window.__bssFlushUi === "function") window.__bssFlushUi(${JSON.stringify(eventType)}, el);
+      const editable = el.matches('input:not([type="button"]):not([type="submit"]):not([type="reset"]),select,textarea,[contenteditable="true"],[role="combobox"]');
+      if (editable) {
+        el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      if (${JSON.stringify(eventType)} !== "click" && typeof window.__bssFlushUi === "function") {
+        window.__bssFlushUi(${JSON.stringify(eventType)}, el);
+      }
     })()`).catch(() => {});
     await page.waitForTimeout(40);
     return this.active?.recentUi.at(-1);
@@ -898,6 +934,27 @@ export class BrowserRecorder {
     return `${action}:${selector || ""}`;
   }
 
+  private resetActionGuard(formScopeKey?: string) {
+    if (!this.active) return;
+    this.active.guard = {
+      exerciseFormCount: 0,
+      submitFormCount: 0,
+      failedKeys: [],
+      followManualSteps: false,
+      formScopeKey
+    };
+  }
+
+  private async ensureFormScope() {
+    if (!this.active) return;
+    const formScopeKey = await this.actions.formScopeKey();
+    if (this.active.guard.formScopeKey !== formScopeKey) this.resetActionGuard(formScopeKey);
+  }
+
+  resumeAfterManualTakeover() {
+    this.resetActionGuard();
+  }
+
   private stopBecauseStuck(reason: string) {
     if (this.active) this.active.guard.followManualSteps = true;
     return {
@@ -960,6 +1017,7 @@ export class BrowserRecorder {
           } catch {
             this.pageError = `无法打开页面：${command.url}`;
           }
+          this.resetActionGuard();
           return { url: this.currentPage().url(), title: await this.withTimeout(this.currentPage().title(), 1_200, ""), pageError: this.pageError };
         case "click": {
           if (!command.selector) throw new Error("click requires selector");
@@ -1022,6 +1080,7 @@ export class BrowserRecorder {
         case "snapshot":
           return this.actions.captureSnapshot();
         case "exercise-form": {
+          await this.ensureFormScope();
           if ((this.active?.guard.exerciseFormCount || 0) >= FORM_ACTION_BUDGET) {
             return this.stopBecauseStuck(`exercise-form 已用满 ${FORM_ACTION_BUDGET} 次，禁止再循环填表。按 recordedManualSteps 或 manual-steps.md 操作，点不动就请用户切到手动录制。不要 record_stop+analyze 一次还没有成功写响应的新增/修改。`);
           }
@@ -1033,6 +1092,7 @@ export class BrowserRecorder {
           return { ...result, followManualSteps: stop };
         }
         case "submit-form": {
+          await this.ensureFormScope();
           if ((this.active?.guard.submitFormCount || 0) >= FORM_ACTION_BUDGET) {
             return this.stopBecauseStuck(`submit-form 已用满 ${FORM_ACTION_BUDGET} 次，禁止再循环提交。按 recordedManualSteps 操作，或请用户切到手动录制。不要 record_stop+analyze 一次还没有成功写响应的新增/修改。`);
           }

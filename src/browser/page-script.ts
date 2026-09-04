@@ -38,7 +38,7 @@ export const PAGE_HELPERS = String.raw`
     }
     return found.slice(0, 800);
   };
-  const FORM_ITEM_SEL = '.el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [class*="form-item"]';
+  const FORM_ITEM_SEL = '.el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [class*="form-item"]:not([class*="form-item__"]):not([class*="form-item-"])';
   const FORM_LABEL_SEL = 'label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label';
   const DIALOG_SEL = '[role="dialog"], [role="alertdialog"], .el-dialog, .el-drawer, .el-overlay-dialog, .ant-modal, .ant-drawer, .arco-modal, .arco-drawer';
   const PICKER_SEL = '.el-picker-panel, .el-select-dropdown, .el-cascader__dropdown, .el-picker__popper, .el-popper.el-date-picker, .el-date-range-picker, .el-time-panel, .ant-picker-dropdown, .ant-select-dropdown, .arco-picker-container, .arco-select-dropdown, .arco-select-popup, .arco-tree-select-popup, .arco-cascader-popup, .arco-trigger-popup, [class*="picker-panel"], [class*="picker-dropdown"], [class*="select-popup"], [class*="trigger-popup"]';
@@ -50,7 +50,7 @@ export const PAGE_HELPERS = String.raw`
   const UPLOAD_LABEL = /上传|附件|文件|图片|image|upload|attachment|file/i;
   const PLUS_ONLY = /^(＋|\+|添加|选择)$/;
   const ACTION_ONLY = /^(新增|新增一行|添加一行|加一行|添加明细|新增明细|创建|导入|导出|删除|搜索|查询|重置|提交|确定|取消|关闭|保存|返回)$/;
-  const CHROME_SEL = "nav, header, .el-menu, .ant-menu, .el-pagination, .ant-pagination, [class*='toolbar'], [class*='header-bar']";
+  const CHROME_SEL = "nav, header, .el-menu, .ant-menu, .el-pagination, .ant-pagination, [class*='toolbar'], [class*='header-bar'], [data-w-e-toolbar], [data-menu-key], [class*='w-e-bar'], [class*='editor-menu']";
   const SLOT_HOST_SEL = "[class*='process-node'], [class*='workflow-node'], [class*='user-select'], [class*='assignee'], [class*='approver'], [class*='approval-node'], [class*='flow-node'], [class*='activity'], .el-timeline-item, [class*='timeline-item'], [id*='activity-task']";
   const WIDE_SEL = DIALOG_SEL + ", form, [role='form'], body, main, header, nav, aside, footer, .el-overlay, .ant-modal-wrap, [class*='overlay']";
   const FIELD_GROUP_SEL = FORM_ITEM_SEL + ", label, dt, dd, li, [class*='form-field'], [class*='field-item'], [class*='form-row'], [class*='field-row']";
@@ -487,7 +487,7 @@ export const PAGE_HELPERS = String.raw`
 
   const isPickerSlot = (el) => {
     if (!(el instanceof HTMLElement) || !isVisible(el)) return false;
-    if (el.matches("input, textarea, select, [role=combobox]")) return false;
+    if (el.matches("input, textarea, select, [role=combobox], [role=textbox], [contenteditable=true]")) return false;
     if (chooserHostOf(el) || el.matches(".el-select__wrapper, .ant-select-selector, .arco-select-view, [class*='arco-select-view']") || el.closest(".el-select, .ant-select, .arco-select, .n-select, .el-cascader")) return false;
     if (el.closest(PICKER_SEL + ", " + CHROME_SEL)) return false;
     if (el.closest(".el-timeline-item__dot, [class*='timeline-item__dot']")) return false;
@@ -683,11 +683,15 @@ export const PAGE_HELPERS = String.raw`
     if (headingText && headingText.length <= 40 && headingText !== clean(el.textContent || "")) return headingText;
     const aria = clean(el.getAttribute("aria-label") || "");
     if (aria && !PLUS_ONLY.test(aria) && !EMPTY_VALUE.test(aria)) return aria;
-    return labelOf(el) || nearbyLabel(el) || "待选择";
+    // An empty icon/dropdown is not evidence of a business field. Global
+    // navigation avatars and rich-text toolbar buttons are common examples.
+    // Only emit picker fields when the page supplies a semantic label.
+    return labelOf(el) || nearbyLabel(el) || "";
   };
 
   const fieldFromPicker = (el) => {
     const label = slotLabel(el);
+    if (!label) return null;
     const value = selectedName(el);
     return {
       label,
@@ -1009,6 +1013,9 @@ export const UI_RECORDER_SCRIPT = `(() => {
       ? el
       : el.closest('input,select,textarea,button,[contenteditable="true"],[role="button"],[role="combobox"],[role="checkbox"],[role="switch"],[role="radio"],[role="option"],.arco-select-view,[class*="arco-select-view"],.el-select__wrapper,.ant-select-selector,a') || el;
     const formContainer = control.closest('form, [role="form"], .el-form, .ant-form, .arco-form, [data-form], [role="dialog"], [role="alertdialog"], .el-dialog, .el-drawer, .el-overlay-dialog, .ant-modal, .ant-drawer, .arco-modal, .arco-drawer') || activeScope();
+    const actionLabel = control.matches('button,a,[role="button"],[role="link"],input[type="button"],input[type="submit"]')
+      ? clean(control.getAttribute("aria-label") || control.textContent || control.getAttribute("value") || "")
+      : "";
     const payload = {
       eventType,
       pageUrl: location.href,
@@ -1016,7 +1023,7 @@ export const UI_RECORDER_SCRIPT = `(() => {
       tag: control.tagName.toLowerCase(),
       role: control.getAttribute("role") || undefined,
       text: clean(control.textContent || control.getAttribute("value") || ""),
-      label: labelOf(control) || undefined,
+      label: actionLabel || labelOf(control) || undefined,
       name: nameOf(control),
       inputType: control.getAttribute("type") || undefined,
       value: (() => {

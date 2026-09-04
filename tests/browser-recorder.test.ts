@@ -9,6 +9,45 @@ import { SNAPSHOT_IN_PAGE } from "../src/browser/page-script.js";
 import { readJsonl } from "../src/utils.js";
 import type { EvidenceEvent } from "../src/domain.js";
 
+test("manual button clicks keep their own action label and do not synthesize field changes", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-button-evidence-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body>
+      <form class="el-form-item" style="position:fixed;left:0;top:0;width:500px;height:300px">
+        <label>抄送列表选择抄送用户</label>
+        <button id="save" type="button" style="position:fixed;left:20px;top:80px;width:120px;height:40px">保存</button>
+      </form>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    const session = await recorder.start(`http://127.0.0.1:${address.port}/`, "button-evidence");
+    await recorder.manualControl({ action: "click", x: 60, y: 100 });
+    await recorder.stop();
+    const events = (await readJsonl<EvidenceEvent>(session.eventsFile)).filter(event => event.kind === "ui" && event.text === "保存");
+    assert.equal(events.filter(event => event.kind === "ui" && event.eventType === "click").length, 1, JSON.stringify(events));
+    assert.equal(events.some(event => event.kind === "ui" && ["input", "change"].includes(event.eventType)), false, JSON.stringify(events));
+    assert.equal(events.every(event => event.kind !== "ui" || event.label === "保存"), true, JSON.stringify(events));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("snapshots and controls component forms and iframes in one embedded browser", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-browser-"));
   const server = http.createServer((request, response) => {
@@ -2622,6 +2661,204 @@ test("first two exercise-form failures do not stop; third failure follows manual
     const third: any = await recorder.control({ action: "exercise-form" });
     assert.equal(third.ok, false, JSON.stringify(third));
     assert.equal(third.followManualSteps, true, JSON.stringify(third));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("a new page gets its own three-attempt form repair budget", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-form-budget-scope-"));
+  const server = http.createServer((request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    const label = request.url === "/second" ? "第二页密级" : "第一页密级";
+    response.end(`<!doctype html><html><head><title>${label}</title></head><body>
+      <form class="el-form"><div class="el-form-item is-required">
+        <label class="el-form-item__label">${label}</label>
+        <div class="el-select"><input role="combobox" readonly placeholder="请选择"></div>
+      </div></form>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    const origin = `http://127.0.0.1:${address.port}`;
+    await recorder.start(`${origin}/first`, "scoped-form-budget");
+    await recorder.control({ action: "exercise-form" });
+    await recorder.control({ action: "exercise-form" });
+    const third: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(third.followManualSteps, true, JSON.stringify(third));
+
+    await recorder.control({ action: "goto", url: `${origin}/second` });
+    const firstOnSecondPage: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(firstOnSecondPage.stopped, undefined, JSON.stringify(firstOnSecondPage));
+    assert.equal(firstOnSecondPage.followManualSteps, false, JSON.stringify(firstOnSecondPage));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("rich-text editors are fillable text fields, not empty assignee pickers", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-rich-text-field-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>通用申请</title></head><body>
+      <header class="navbar">
+        <div class="avatar-wrapper el-dropdown-selfdefine" role="button" aria-haspopup="list">
+          <img class="user-avatar" alt="" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" style="width:40px;height:40px">
+        </div>
+      </header>
+      <form class="el-form">
+        <div class="el-form-item is-required">
+          <label class="el-form-item__label">申请事由</label>
+          <div class="el-form-item__content">
+            <div class="wang-editor">
+              <div data-w-e-toolbar="true"><div class="w-e-bar"><div class="w-e-bar-item"><button type="button" class="w-e-menu-tooltip-v5" data-menu-key="bold"><svg width="14" height="14"><path d="M1 1h1"></path></svg></button></div></div></div>
+              <div class="w-e-text-container"><div id="w-e-textarea-1" role="textbox" contenteditable="true"></div></div>
+            </div>
+          </div>
+        </div>
+        <div class="el-form-item">
+          <label class="el-form-item__label">备注</label>
+          <div class="el-form-item__content"><div class="el-textarea"><textarea class="el-textarea__inner" placeholder="请输入内容"></textarea></div></div>
+        </div>
+      </form>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "rich-text-field");
+    const before: any = await recorder.control({ action: "snapshot" });
+    const reason = before.formFields.find((field: any) => field.label === "申请事由");
+    assert.equal(reason?.kind, "textarea", JSON.stringify(before.formFields));
+    assert.deepEqual(before.formFields.map((field: any) => field.label), ["申请事由", "备注"], JSON.stringify(before.formFields));
+    assert.equal(before.formFields.filter((field: any) => field.name === "w-e-textarea-1").length, 1, JSON.stringify(before.formFields));
+    assert.equal(before.formFields.some((field: any) => field.label === "待选择" && field.kind === "picker"), false, JSON.stringify(before.formFields));
+
+    const exercised: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(exercised.ok, true, JSON.stringify(exercised));
+    assert.equal(exercised.formFields.find((field: any) => field.label === "申请事由")?.filled, true, JSON.stringify(exercised));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("sidebar navigation can open another business page when no write form would be discarded", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-sidebar-navigation-"));
+  const server = http.createServer((request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    if (request.url === "/notice") {
+      response.end("<!doctype html><html><head><title>通知公告</title></head><body><h1>通知公告列表</h1></body></html>");
+      return;
+    }
+    response.end(`<!doctype html><html><head><title>工作台</title></head><body>
+      <aside><nav><a href="/notice">通知公告</a></nav></aside>
+      <main><h1>首页</h1></main>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    const origin = `http://127.0.0.1:${address.port}`;
+    await recorder.start(`${origin}/`, "sidebar-navigation");
+    const clicked: any = await recorder.control({ action: "click", selector: "text=通知公告" });
+    assert.equal(clicked.url, `${origin}/notice`, JSON.stringify(clicked));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("operation inventory spans frames and actual operations extend the session completion contract", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-operation-inventory-"));
+  const server = http.createServer((request, response) => {
+    if (request.url === "/commands/execute" && request.method === "POST") {
+      request.resume();
+      response.setHeader("content-type", "application/json");
+      response.end('{"success":true}');
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    if (request.url === "/frame") {
+      response.end('<!doctype html><button id="export">Export</button>');
+      return;
+    }
+    response.end(`<!doctype html><html><head><title>Generic operations</title></head><body>
+      <button id="search">Search</button>
+      <button id="create">Create</button>
+      <button id="update" disabled>Update</button>
+      <button id="custom" onclick="fetch('/commands/execute',{method:'POST'})">Run workflow</button>
+      <iframe src="/frame"></iframe>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    const session = await recorder.start(`http://127.0.0.1:${address.port}/`, "operation-inventory");
+    const snapshot: any = await recorder.control({ action: "snapshot" });
+    assert.deepEqual([...snapshot.availableOperations].sort(), ["create", "download", "query"], JSON.stringify(snapshot.operationInventory));
+    assert.equal(snapshot.operationInventory.some((item: any) => item.operation === "update" && item.enabled === false), true);
+    assert.equal(snapshot.operationInventory.some((item: any) => item.operation === "download" && item.frameUrl?.endsWith("/frame")), true);
+
+    await recorder.control({ action: "click", selector: "#search" });
+    await recorder.control({ action: "click", selector: "#create" });
+    await recorder.control({ action: "click", selector: "#custom" });
+    await recorder.control({ action: "wait", ms: 120 });
+
+    assert.deepEqual([...(recorder.activeSession()?.expectedOperations || [])].sort(), ["action", "create", "query"]);
+    const stored = JSON.parse(await readFile(path.join(path.dirname(session.eventsFile), "session.json"), "utf8"));
+    assert.deepEqual([...stored.expectedOperations].sort(), ["action", "create", "query"]);
   } finally {
     if (recorder.isActive()) await recorder.stop().catch(() => {});
     await new Promise<void>(resolve => server.close(() => resolve()));

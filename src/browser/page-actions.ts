@@ -1,5 +1,7 @@
 import type { Frame, Locator, Page } from "playwright";
+import type { OperationKind } from "../domain.js";
 import { MARK_LABELED_CONTROL, SNAPSHOT_FIELDS_IN_PAGE, SNAPSHOT_IN_PAGE } from "./page-script.js";
+import { inferUiOperationIntent } from "../inference/heuristics.js";
 
 export const FORM_ITEMS = ".el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [class*='form-item']";
 export const FORM_LABELS = "label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label";
@@ -43,6 +45,14 @@ export interface PageSnapshot {
   recentUserActions?: unknown[];
   recordedManualSteps?: unknown[];
   followManualSteps?: boolean;
+  availableOperations?: OperationKind[];
+  operationInventory?: Array<{
+    operation: OperationKind;
+    label: string;
+    selector?: string;
+    enabled: boolean;
+    frameUrl?: string;
+  }>;
 }
 
 export interface PageActionHost {
@@ -291,7 +301,7 @@ export class PageActions {
     return /^(label|placeholder|column)=/i.test(selector);
   }
 
-  async locate(selector: string) {
+  async locate(selector: string, options: { allowNavigation?: boolean } = {}) {
     const page = this.page();
     const deadline = Date.now() + 1_500;
     const dayOnly = this.isDayTextSelector(selector);
@@ -335,7 +345,7 @@ export class PageActions {
           const count = await found.count();
           if (count === 1) {
             const item = found.first();
-            if (textOnly && await this.isNavigationTarget(item)) continue;
+            if (textOnly && !options.allowNavigation && await this.isNavigationTarget(item)) continue;
             return item;
           }
           if (count > 1 && fieldOnly) {
@@ -345,7 +355,7 @@ export class PageActions {
           }
           if (count > 1 && textOnly && ((dialog && scope === dialog) || (await dropdown.count() && scope === dropdown))) {
             const item = found.first();
-            if (!(await this.isNavigationTarget(item))) return item;
+            if (options.allowNavigation || !(await this.isNavigationTarget(item))) return item;
           }
         }
       }
@@ -365,7 +375,16 @@ export class PageActions {
       await this.hostClick(await this.clickTarget(selector));
       return { ok: true, url: this.page().url() };
     }
-    await this.clickSafely(await this.locate(selector), "button");
+    const target = await this.locate(selector, { allowNavigation: true });
+    const navigation = await this.isNavigationTarget(target);
+    if (navigation) {
+      const snapshot = await this.captureSnapshot();
+      const hasWriteSubmit = (snapshot.controls || []).some(control => /^(提交|确定|保存|申请|审核|通过|驳回|save|submit|confirm|apply)$/i
+        .test(String(control.text || control.label || "").replace(/\s+/g, "")));
+      const hasEnteredValues = (snapshot.formFields || []).some(field => field.filled && !field.disabled && !field.skip);
+      if (hasWriteSubmit && hasEnteredValues) throw new Error("Refusing to leave a write form with entered values");
+    }
+    await this.clickSafely(target, navigation ? "navigation" : "button");
     return { ok: true, url: this.page().url() };
   }
 
@@ -444,7 +463,7 @@ export class PageActions {
     });
   }
 
-  async clickSafely(locator: Locator, intent: "field" | "option" | "button" = "button", retried = false) {
+  async clickSafely(locator: Locator, intent: "field" | "option" | "button" | "navigation" = "button", retried = false) {
     const kind = await locator.first().evaluate((el, clickIntent) => {
       const box = el.getBoundingClientRect();
       const overlayChrome = ".el-dialog,.el-drawer,.el-picker-panel,.el-select-dropdown,.el-popper,.el-date-picker,.el-select,.el-date-editor,.ant-modal,.ant-select-dropdown,.arco-modal,[role='dialog'],[role='listbox'],[role='option']";
@@ -455,8 +474,8 @@ export class PageActions {
       if (mask && !inOverlayChrome) return "mask";
       const nav = el.closest("nav, .el-menu, .ant-menu, .el-menu-item, .ant-menu-item, .el-pagination, .ant-pagination");
       const inPicker = el.closest(".el-select-dropdown,.ant-select-dropdown,.el-picker-panel,[role='listbox'],.el-dialog,[role='dialog']");
-      if (nav && !inPicker) return "nav";
-      if (el.closest("a[href]") && !inPicker && clickIntent !== "button") return "nav";
+      if (nav && !inPicker && clickIntent !== "navigation") return "nav";
+      if (el.closest("a[href]") && !inPicker && clickIntent !== "button" && clickIntent !== "navigation") return "nav";
       if (el.closest(".el-picker-panel,.el-select-dropdown,.el-cascader__dropdown,.el-popper,.ant-picker-dropdown,.ant-select-dropdown,[role='option']")) return "ok";
       const top = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
       if (top && top !== el && !el.contains(top) && !top.contains(el)) {
@@ -480,9 +499,10 @@ export class PageActions {
       const allowForce = await locator.first().evaluate((el, clickIntent) => {
         const box = el.getBoundingClientRect();
         if (box.width * box.height > 80_000) return false;
-        if (el.matches(".el-overlay,.el-overlay-dialog,.v-modal,.ant-modal-mask,.arco-modal-mask,a[href]")) return false;
-        if (el.closest("nav, .el-menu, .ant-menu") && !el.closest(".el-select-dropdown,[role='listbox'],.el-dialog,[role='dialog'],[class*='process'],[class*='workflow']")) return false;
-        return clickIntent === "field" || clickIntent === "option"
+        if (el.matches(".el-overlay,.el-overlay-dialog,.v-modal,.ant-modal-mask,.arco-modal-mask")) return false;
+        if (el.matches("a[href]") && clickIntent !== "navigation") return false;
+        if (el.closest("nav, .el-menu, .ant-menu") && clickIntent !== "navigation" && !el.closest(".el-select-dropdown,[role='listbox'],.el-dialog,[role='dialog'],[class*='process'],[class*='workflow']")) return false;
+        return clickIntent === "field" || clickIntent === "option" || clickIntent === "navigation"
           || el.matches("button, [role='button'], input, textarea, select, [type='submit'], [type='button']");
       }, intent).catch(() => intent !== "button");
       if (!allowForce) throw new Error("Click failed; not forcing a page click that can navigate away");
@@ -945,6 +965,15 @@ export class PageActions {
     };
   }
 
+  async formScopeKey() {
+    const page = this.page();
+    const dialog = await this.lastFormDialog(page.mainFrame());
+    if (!dialog) return `${page.url()}|page`;
+    const title = await dialog.locator(".el-dialog__title, .el-drawer__title, .ant-modal-title, .arco-modal-title, [class*='dialog-title'], [class*='modal-title']")
+      .filter({ visible: true }).first().innerText().catch(() => "");
+    return `${page.url()}|dialog|${title.replace(/\s+/g, " ").trim()}`;
+  }
+
   async recordFormInventory() {
     const snapshot = await this.captureFields();
     await this.host.writePageInventory(this.page(), snapshot);
@@ -953,24 +982,40 @@ export class PageActions {
 
   async captureSnapshot(): Promise<PageSnapshot> {
     const page = this.page();
-    const frames = [];
+    type FrameSnapshot = PageSnapshot & { frameUrl: string; visible: boolean; unavailable?: boolean };
+    const frames: FrameSnapshot[] = [];
     for (const frame of page.frames()) {
       if (frame !== page.mainFrame()) await frame.waitForLoadState("domcontentloaded").catch(() => {});
       try {
         const box = await frame.locator("body").boundingBox().catch(() => null);
-        const snap = await frame.locator("body").evaluate(SNAPSHOT_IN_PAGE) as PageSnapshot & { frameUrl?: string; unavailable?: boolean };
+        const snap = await frame.locator("body").evaluate(SNAPSHOT_IN_PAGE) as PageSnapshot;
         const visible = Boolean(box && box.width >= 20 && box.height >= 20);
         frames.push({ frameUrl: frame.url(), visible, ...snap });
       } catch {
         frames.push({ frameUrl: frame.url(), unavailable: true, visible: false, formFields: [] });
       }
     }
-    const main = frames[0] || {};
+    const main: FrameSnapshot = frames[0] || { frameUrl: page.url(), visible: true };
     const child = frames.slice(1).filter(frame => !frame.unavailable && (frame.visible || (frame.formFields || []).length > 0));
     const childFields = child.flatMap(frame => frame.formFields || []);
     const formFields = [...(main.formFields || []), ...childFields];
     const todoFields = formFields.filter(field => !field.skip && !field.disabled && !field.filled);
-    const snapshot = {
+    const operationInventory = [main, ...child].flatMap(frame => (frame.controls || []).flatMap(control => {
+      const actionable = control.tag === "button" || control.tag === "a" || control.role === "button" || control.role === "link" || control.type === "submit";
+      if (!actionable) return [];
+      const label = String(control.text || control.label || "").replace(/\s+/g, " ").trim();
+      const operation = inferUiOperationIntent(label, String(frame.frameUrl || frame.url || page.url()));
+      if (!operation) return [];
+      return [{
+        operation,
+        label,
+        selector: typeof control.selector === "string" ? control.selector : undefined,
+        enabled: !control.disabled,
+        frameUrl: typeof frame.frameUrl === "string" ? frame.frameUrl : undefined
+      }];
+    }));
+    const availableOperations: OperationKind[] = [...new Set(operationInventory.filter(item => item.enabled).map(item => item.operation))];
+    const snapshot: PageSnapshot = {
       ...main,
       frames: frames.slice(1),
       formFields,
@@ -978,7 +1023,9 @@ export class PageActions {
       todoCount: todoFields.length,
       recentUserActions: this.host.recentUserActions(),
       recordedManualSteps: this.host.recordedManualSteps?.() || [],
-      followManualSteps: Boolean(this.host.followManualSteps?.())
+      followManualSteps: Boolean(this.host.followManualSteps?.()),
+      availableOperations,
+      operationInventory
     };
     await this.host.writePageInventory(page, snapshot);
     return snapshot;
