@@ -17,8 +17,8 @@ function mergeVerifiedForm(previous: InputFormField[], incoming: InputFormField[
   return [...byPath.values()];
 }
 
-function applyApprovedBindings(inputForm: InputFormField[], bindings: CapabilityContract["bindings"]) {
-  for (const binding of bindings.filter(item => item.approved)) {
+function applyHumanBindings(inputForm: InputFormField[], bindings: CapabilityContract["bindings"]) {
+  for (const binding of bindings.filter(item => item.approved && item.approvalSource === "human")) {
     const field = inputForm.find(item => item.path === binding.toPath);
     if (field) {
       field.source = "binding";
@@ -30,6 +30,25 @@ function applyApprovedBindings(inputForm: InputFormField[], bindings: Capability
   return inputForm;
 }
 
+function mergeReanalyzedBindings(
+  candidate: CapabilityContract,
+  old: CapabilityContract,
+  isSessionPrimary: boolean
+) {
+  const valid = (binding: CapabilityContract["bindings"][number]) =>
+    binding.fromCapabilityId !== old.id && binding.fromCapabilityId !== candidate.id;
+  const oldBindings = (old.bindings || []).filter(valid);
+  const human = oldBindings.filter(binding => binding.approvalSource === "human");
+  const humanTargets = new Set(human.map(binding => binding.toPath));
+  const fresh = (candidate.bindings || []).filter(binding => valid(binding) && !humanTargets.has(binding.toPath));
+  const retained = isSessionPrimary ? human : oldBindings;
+  const byRoute = new Map<string, CapabilityContract["bindings"][number]>();
+  for (const binding of [...fresh, ...retained]) {
+    byRoute.set(`${binding.fromCapabilityId}|${binding.fromPath}|${binding.toPath}`, binding);
+  }
+  return [...byRoute.values()];
+}
+
 export function reanalyzeIncoming(incoming: CapabilityContract[], existing: CapabilityContract[]): CapabilityContract[] {
   const existingByTransport = new Map(existing.map(capability => [catalogTransportKey(capability), capability]));
   const sessionPrimaryKeys = new Set(
@@ -38,14 +57,13 @@ export function reanalyzeIncoming(incoming: CapabilityContract[], existing: Capa
   return incoming.map(candidate => {
     const old = existingByTransport.get(catalogTransportKey(candidate));
     if (!old) return candidate;
-    const bindings = (old.bindings || []).filter(binding =>
-      binding.fromCapabilityId !== old.id && binding.fromCapabilityId !== candidate.id
-    );
+    const isSessionPrimary = sessionPrimaryKeys.has(catalogTransportKey(candidate));
+    const bindings = mergeReanalyzedBindings(candidate, old, isSessionPrimary);
     const operation = old.editing?.operation === "manual" ? old.operation : candidate.operation;
     const sideEffect = WRITE_OPERATIONS.has(operation);
     const manualPaths = new Set(old.editing?.fieldPaths || []);
-    const keepVerified = old.validation.status === "verified" && !sessionPrimaryKeys.has(catalogTransportKey(candidate));
-    const inputForm = applyApprovedBindings(
+    const keepVerified = old.validation.status === "verified" && !isSessionPrimary;
+    const inputForm = applyHumanBindings(
       keepVerified
         ? mergeVerifiedForm(old.inputForm, candidate.inputForm)
         : candidate.inputForm.map(field => {

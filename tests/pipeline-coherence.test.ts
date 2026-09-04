@@ -191,6 +191,75 @@ test("reanalyze drops impossible self-bindings when a transport is reclassified"
   assert.equal(next?.inputForm[0]?.defaultRule, "literal:seal_apply");
 });
 
+test("reanalyze replaces stale evidence bindings on a primary while preserving explicit human bindings", () => {
+  const transport = {
+    method: "POST",
+    urlTemplate: "https://x/erp/purchase-order/create",
+    origin: "https://x",
+    pathTemplate: "/erp/purchase-order/create"
+  };
+  const old = cap({
+    id: "create-purchase-old",
+    operation: "create",
+    transport,
+    inputForm: [{
+      path: "$.discountPercent", name: "discountPercent", label: "优惠率", valueType: "number", source: "binding",
+      required: false, requiredBasis: "not-observed", systemHandled: true, sourceDetail: "旧的自动误判",
+      widget: "number", defaultRule: "from:query-tenant:$.data[*].accountCount"
+    }, {
+      path: "$.reviewerId", name: "reviewerId", label: "审核人", valueType: "integer", source: "binding",
+      required: false, requiredBasis: "manual", systemHandled: true, sourceDetail: "人工确认",
+      widget: "select", defaultRule: "from:query-user:$.data[*].id"
+    }, {
+      path: "$.items[*].unitName", name: "unitName", label: "单位", valueType: "string", source: "binding",
+      required: false, requiredBasis: "not-observed", systemHandled: true, sourceDetail: "旧带出",
+      widget: "text", defaultRule: "from:query-product:$.data[*].unitName"
+    }],
+    bindings: [{
+      id: "bad-auto", fromCapabilityId: "query-tenant", fromPath: "$.data[*].accountCount", toPath: "$.discountPercent",
+      confidence: 1, evidenceIds: ["old-tenant"], approved: true, approvalSource: "evidence"
+    }, {
+      id: "human-reviewer", fromCapabilityId: "query-user", fromPath: "$.data[*].id", toPath: "$.reviewerId",
+      confidence: 1, evidenceIds: [], approved: true, approvalSource: "human"
+    }],
+    validation: { version: 2, status: "verified", checks: [] },
+    editing: { title: "generated", description: "generated", operation: "generated", fields: "generated" }
+  });
+  const incoming = cap({
+    id: "create-purchase-new",
+    operation: "create",
+    transport,
+    inputForm: [{
+      path: "$.discountPercent", name: "discountPercent", label: "优惠率（%）", valueType: "number", source: "caller",
+      required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "真实页面输入", widget: "number"
+    }, {
+      path: "$.reviewerId", name: "reviewerId", label: "审核人", valueType: "integer", source: "system",
+      required: false, requiredBasis: "not-observed", systemHandled: true, sourceDetail: "待人工绑定", widget: "select"
+    }, {
+      path: "$.items[*].unitName", name: "unitName", label: "单位", valueType: "string", source: "binding",
+      required: false, requiredBasis: "not-observed", systemHandled: true, sourceDetail: "按产品关联带出",
+      widget: "text", defaultRule: "from:query-product:$.data[*].unitName|via:productId"
+    }],
+    bindings: [{
+      id: "fresh-unit", fromCapabilityId: "query-product", fromPath: "$.data[*].unitName", toPath: "$.items[*].unitName",
+      confidence: 1, evidenceIds: ["new-product"], approved: true, approvalSource: "evidence"
+    }],
+    validation: { version: 2, status: "candidate", checks: [] }
+  });
+
+  const [next] = reanalyzeIncoming([incoming], [old]);
+  const discount = next?.inputForm.find(field => field.path === "$.discountPercent");
+  const reviewer = next?.inputForm.find(field => field.path === "$.reviewerId");
+  const unit = next?.inputForm.find(field => field.path === "$.items[*].unitName");
+  assert.equal(discount?.source, "caller");
+  assert.equal(discount?.defaultRule, undefined);
+  assert.equal(next?.bindings.some(binding => binding.fromPath.endsWith("accountCount")), false);
+  assert.equal(reviewer?.defaultRule, "from:query-user:$.data[*].id");
+  assert.equal(next?.bindings.some(binding => binding.id === "human-reviewer"), true);
+  assert.equal(unit?.defaultRule, "from:query-product:$.data[*].unitName|via:productId");
+  assert.equal(next?.bindings.some(binding => binding.id === "fresh-unit"), true);
+});
+
 test("review follows the analyzed session instead of a newer unrelated recording", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "pipeline-review-session-"));
   const recordingsDir = path.join(temporary, "recordings");
