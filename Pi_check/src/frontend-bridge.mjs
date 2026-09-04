@@ -1,13 +1,14 @@
 /**
  * PI 是唯一语义决策者；旧录制逻辑绝不启动。
  *
- * 对接现有 PageRecorder，不改前端页面。
+ * 对接现有 PageRecorder：预览尺寸由页面送来，采集按该视口截帧，避免拉伸。
  * draft 只来自 PI 最终提交；没有能力就不能成功。
  */
 
 import { WebSocketServer } from "ws";
 import { PI_ONLY_NOTICE, logPiOnly, publicFailureMessage } from "./policy.mjs";
 import { capabilityCountFromPiResult } from "./capability-presence.mjs";
+import { shouldFlushFrame } from "./browser-capture.mjs";
 
 function send(socket, payload) {
   if (socket.readyState === 1) {
@@ -38,6 +39,10 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
       title: "",
       frameSeq: 0,
       frames: null,
+      frameBusy: false,
+      frameWanted: false,
+      flushTimer: null,
+      inputChain: Promise.resolve(),
     };
 
     const snapshot = (status, extra = {}) => {
@@ -67,14 +72,23 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
         clearInterval(session.frames);
         session.frames = null;
       }
+      if (session.flushTimer != null) {
+        clearTimeout(session.flushTimer);
+        session.flushTimer = null;
+      }
     };
 
-    const startFrames = (browser) => {
-      stopFrames();
-      session.frames = setInterval(async () => {
-        try {
+    const emitFrame = async (browser) => {
+      if (session.frameBusy) {
+        session.frameWanted = true;
+        return;
+      }
+      session.frameBusy = true;
+      try {
+        do {
+          session.frameWanted = false;
           const frame = await browser?.captureFrame?.();
-          if (!frame) return;
+          if (!frame) continue;
           session.frameSeq += 1;
           send(ws, {
             type: "frame",
@@ -83,9 +97,26 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
             width: frame.width,
             height: frame.height,
           });
-        } catch {
-          // 截帧失败不得编造能力
-        }
+        } while (session.frameWanted);
+      } catch {
+        // 截帧失败不得编造能力
+      } finally {
+        session.frameBusy = false;
+      }
+    };
+
+    const scheduleFlush = (browser) => {
+      if (session.flushTimer != null) clearTimeout(session.flushTimer);
+      session.flushTimer = setTimeout(() => {
+        session.flushTimer = null;
+        emitFrame(browser).catch(() => {});
+      }, 100);
+    };
+
+    const startFrames = (browser) => {
+      stopFrames();
+      session.frames = setInterval(() => {
+        emitFrame(browser).catch(() => {});
       }, 400);
     };
 
@@ -99,11 +130,7 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
       const type = String(message.type || "");
       try {
         if (type === "ping") {
-          if (session.recordingId) {
-            send(ws, snapshot(controller.view(session.recordingId).status === "succeeded" ? "editable" : "recording", {
-              label: "pong",
-            }));
-          }
+          send(ws, { type: "pong" });
           return;
         }
         if (type === "start") {
@@ -121,9 +148,13 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
             title: session.title,
             action: session.action,
             storageState: message.storage_state || null,
+            viewport: message.viewport || null,
           });
           session.recordingId = started.id;
           const browser = controller.browserOf?.(started.id);
+          if (message.viewport) {
+            await browser?.setViewport?.(message.viewport);
+          }
           startFrames(browser);
           logPiOnly(`PI 已启动 recording=${started.id}`);
           think("PI 已启动，开始原样采集。能力由 PI 在停止后提交。");
@@ -137,13 +168,27 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
           }));
           return;
         }
-        if (type === "input") {
+        if (type === "viewport") {
           const browser = controller.browserOf?.(session.recordingId);
           try {
-            await browser?.applyInput?.(message.event || {});
-          } catch (error) {
-            send(ws, { type: "input_error", detail: error.message || "页面操作没有执行" });
+            await browser?.setViewport?.(message);
+            await emitFrame(browser);
+          } catch {
+            // 视口调整失败不得编造能力
           }
+          return;
+        }
+        if (type === "input") {
+          const browser = controller.browserOf?.(session.recordingId);
+          session.inputChain = (session.inputChain || Promise.resolve())
+            .catch(() => {})
+            .then(async () => {
+              await browser?.applyInput?.(message.event || {});
+              if (shouldFlushFrame(message.event || {})) scheduleFlush(browser);
+            })
+            .catch((error) => {
+              send(ws, { type: "input_error", detail: error.message || "页面操作没有执行" });
+            });
           return;
         }
         if (type === "finish") {

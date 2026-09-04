@@ -88,6 +88,70 @@ export function assertPageDisplayContract(result) {
   }
 }
 
+/**
+ * 只检查身份和编排信封：编号不重复、每个能力恰好一个 execute、execute 不共用。
+ * 不判断“这场应该有几个能力”，不补能力。
+ */
+export function assertCapabilityIdentityContract(result) {
+  const capabilities = Array.isArray(result?.capabilities) ? result.capabilities : [];
+  const stepIds = new Set(
+    (Array.isArray(result?.steps) ? result.steps : [])
+      .map((step) => String(step?.step_id || "").trim())
+      .filter(Boolean),
+  );
+  const seenIds = new Set();
+  const executeOwners = new Set();
+  for (const capability of capabilities) {
+    if (!isPlainObject(capability)) {
+      throw new SubmitRejectedError("IDENTITY_CONTRACT", "每个 capability 必须是对象");
+    }
+    const capabilityId = String(capability.capability_id || "").trim();
+    if (capabilityId) {
+      if (seenIds.has(capabilityId)) {
+        throw new SubmitRejectedError(
+          "IDENTITY_CONTRACT",
+          "capability_id 不得重复。每个独立业务动作必须有自己的编号，不能把查询/撤回/删除写成同一个 id",
+        );
+      }
+      seenIds.add(capabilityId);
+    }
+    const refs = capability.request_refs;
+    if (refs == null) continue;
+    if (!Array.isArray(refs) || refs.length === 0) {
+      throw new SubmitRejectedError("IDENTITY_CONTRACT", "request_refs 必须是非空对象数组");
+    }
+    const executes = refs.filter((ref) => isPlainObject(ref) && (ref.usage || "execute") === "execute");
+    if (executes.length !== 1) {
+      throw new SubmitRejectedError(
+        "IDENTITY_CONTRACT",
+        "每个能力必须恰好一个 usage=execute 的 request_ref，不能 0 个也不能多个",
+      );
+    }
+    const executeStepId = String(executes[0].step_id || "").trim();
+    if (!executeStepId) {
+      throw new SubmitRejectedError("IDENTITY_CONTRACT", "execute 的 step_id 不能为空");
+    }
+    if (executeOwners.has(executeStepId)) {
+      throw new SubmitRejectedError(
+        "IDENTITY_CONTRACT",
+        "两个能力不能共用同一个 execute step_id。同一条接口服务新建和编辑时，必须拆成两个步骤",
+      );
+    }
+    executeOwners.add(executeStepId);
+    if (stepIds.size) {
+      for (const ref of refs) {
+        const stepId = String(ref?.step_id || "").trim();
+        if (stepId && !stepIds.has(stepId)) {
+          throw new SubmitRejectedError(
+            "IDENTITY_CONTRACT",
+            "request_refs.step_id 必须能在 steps 里找到，不能填 request_id 或不存在的步骤",
+          );
+        }
+      }
+    }
+  }
+}
+
 export class ResultGate {
   constructor(files) {
     this.files = files;
@@ -124,6 +188,7 @@ export class ResultGate {
       throw new SubmitRejectedError("EMPTY_CAPABILITIES", "PI 未提交任何能力，没有产出");
     }
     assertPageDisplayContract(result);
+    assertCapabilityIdentityContract(result);
     if (!frozen) {
       throw new SubmitRejectedError("NOT_FROZEN", "证据尚未冻结时禁止提交最终结果");
     }

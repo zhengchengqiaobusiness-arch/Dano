@@ -5,7 +5,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHarness, sampleResult } from "./helpers/harness.mjs";
-import { assertPageDisplayContract, SubmitRejectedError } from "../src/result-gate.mjs";
+import {
+  assertPageDisplayContract,
+  assertCapabilityIdentityContract,
+  SubmitRejectedError,
+} from "../src/result-gate.mjs";
 
 test("证据未冻结时提交最终结果必须失败", async () => {
   const harness = await createHarness();
@@ -157,6 +161,42 @@ test("拒收页面读不到的私有字段袋、字符串 request_refs 和键值
     (error) => error instanceof SubmitRejectedError && /字段对象数组/.test(error.message),
   );
   assert.doesNotThrow(() => assertPageDisplayContract(sampleResult()));
+  assert.doesNotThrow(() => assertCapabilityIdentityContract(sampleResult()));
+});
+
+test("拒收重复 capability_id 和共用 execute", () => {
+  assert.throws(
+    () => assertCapabilityIdentityContract({
+      capabilities: [
+        {
+          capability_id: "cap_delete_hotel_apply",
+          request_refs: [{ step_id: "step_a", usage: "execute" }],
+        },
+        {
+          capability_id: "cap_delete_hotel_apply",
+          request_refs: [{ step_id: "step_b", usage: "execute" }],
+        },
+      ],
+      steps: [{ step_id: "step_a", params: [] }, { step_id: "step_b", params: [] }],
+    }),
+    (error) => error instanceof SubmitRejectedError && /capability_id 不得重复/.test(error.message),
+  );
+  assert.throws(
+    () => assertCapabilityIdentityContract({
+      capabilities: [
+        {
+          capability_id: "cap_create",
+          request_refs: [{ step_id: "step_submit", usage: "execute" }],
+        },
+        {
+          capability_id: "cap_edit",
+          request_refs: [{ step_id: "step_submit", usage: "execute" }],
+        },
+      ],
+      steps: [{ step_id: "step_submit", params: [] }],
+    }),
+    (error) => error instanceof SubmitRejectedError && /不能共用同一个 execute/.test(error.message),
+  );
 });
 
 test("错误信封不得落盘", async () => {

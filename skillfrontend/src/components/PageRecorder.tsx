@@ -424,7 +424,26 @@ function apiOptionSourceSummary(param: FlowParam) {
   const method = safeString(source.source_method) || "GET";
   const labelKey = safeString(source.label_key) || "显示值";
   const valueKey = safeString(source.value_key) || "接口值";
-  return `取值接口：${method} ${sourceUrl}；调用方选择 ${labelKey}，Skill 自动提交 ${valueKey}`;
+  const complete = source.options_complete === false ? "本场选项未列全" : source.options_complete === true ? "本场选项已列全" : "";
+  return [`取值接口：${method} ${sourceUrl}；调用方选择 ${labelKey}，Skill 自动提交 ${valueKey}`, complete].filter(Boolean).join("。");
+}
+
+function paramHandlingLines(param: FlowParam) {
+  const source = asRecord(param.source);
+  const lines: string[] = [];
+  const formula = safeString(source.formula || source.computation || source.rule);
+  if (formula) lines.push(`计算规则：${formula}`);
+  const fromStep = safeString(source.from_step_id || source.step_id);
+  const fromPath = safeString(source.from_path || source.path);
+  if (fromStep || fromPath) {
+    const overridable = source.overridable === true || param.exposed_to_user === true
+      ? "调用方可改"
+      : "提交原样带回";
+    lines.push(`上游取值：${[fromStep, fromPath].filter(Boolean).join(" / ")}，${overridable}`);
+  }
+  const optionSummary = apiOptionSourceSummary(param);
+  if (optionSummary) lines.push(optionSummary);
+  return lines;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -683,6 +702,10 @@ export default function PageRecorder({
   const snapshotRef = useRef<WorkflowSnapshot | null>(null);
   const actionRef = useRef("");
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const previewHostRef = useRef<HTMLDivElement | null>(null);
+  const lastViewportRef = useRef("");
+  const viewportTimerRef = useRef<number | null>(null);
+  const startHostGenRef = useRef(0);
   const keyboardRef = useRef<HTMLInputElement | null>(null);
   const latestFrameRef = useRef<{ seq: number; src: string; meta: FrameMeta } | null>(null);
   const renderedFrameRef = useRef(0);
@@ -939,6 +962,36 @@ export default function PageRecorder({
   }, [connected, status]);
 
   useEffect(() => {
+    if (!connected || status !== "recording") return undefined;
+    let cancelled = false;
+    let observer: ResizeObserver | null = null;
+    const notify = () => {
+      if (viewportTimerRef.current !== null) window.clearTimeout(viewportTimerRef.current);
+      viewportTimerRef.current = window.setTimeout(() => {
+        viewportTimerRef.current = null;
+        sendPreviewViewport();
+      }, 80);
+    };
+    const attach = () => {
+      if (cancelled) return;
+      const host = previewHostRef.current;
+      if (!host) {
+        window.requestAnimationFrame(attach);
+        return;
+      }
+      observer = new ResizeObserver(notify);
+      observer.observe(host);
+      notify();
+    };
+    attach();
+    return () => {
+      cancelled = true;
+      observer?.disconnect();
+      if (viewportTimerRef.current !== null) window.clearTimeout(viewportTimerRef.current);
+    };
+  }, [connected, status, keepRecording, viewStage]);
+
+  useEffect(() => {
     const box = verificationLogRef.current;
     if (!box) return;
     box.scrollTop = box.scrollHeight;
@@ -997,6 +1050,55 @@ export default function PageRecorder({
     }
     socket.send(JSON.stringify(payload));
     return true;
+  }
+
+  function previewDeviceScale() {
+    const value = Number(window.devicePixelRatio || 1);
+    if (!Number.isFinite(value) || value <= 0) return 1;
+    return Math.min(1.5, Math.max(1, Math.round(value * 100) / 100));
+  }
+
+  function readPreviewViewport() {
+    const devicePixelRatio = previewDeviceScale();
+    const host = previewHostRef.current;
+    const width = Math.round(host?.clientWidth || 0);
+    const height = Math.round(host?.clientHeight || 0);
+    if (width >= 640 && height >= 400) return { width, height, devicePixelRatio };
+    return {
+      width: Math.max(800, Math.round(window.innerWidth - 248)),
+      height: Math.max(500, Math.round(window.innerHeight - 168)),
+      devicePixelRatio,
+    };
+  }
+
+  function sendPreviewViewport() {
+    const size = readPreviewViewport();
+    const key = `${size.width}x${size.height}@${size.devicePixelRatio}`;
+    if (lastViewportRef.current === key) return;
+    const socket = wsRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    lastViewportRef.current = key;
+    socket.send(JSON.stringify({ type: "viewport", ...size }));
+  }
+
+  function beginStartWhenPreviewReady(action: string) {
+    startHostGenRef.current += 1;
+    const generation = startHostGenRef.current;
+    const begun = performance.now();
+    const tryStart = () => {
+      if (startHostGenRef.current !== generation) return;
+      const host = previewHostRef.current;
+      const ready = Boolean(host && host.clientWidth >= 640 && host.clientHeight >= 400);
+      if (!ready && performance.now() - begun < 2000) {
+        window.requestAnimationFrame(tryStart);
+        return;
+      }
+      const init = socketInitRef.current;
+      if (init) socketInitRef.current = { ...init, viewport: readPreviewViewport() };
+      lastViewportRef.current = "";
+      openRecordingSocket(action);
+    };
+    window.requestAnimationFrame(tryStart);
   }
 
   function editIdentity(edit: DraftEdit) {
@@ -1091,10 +1193,29 @@ export default function PageRecorder({
       if (!canvas || !context) return;
       const width = Math.max(1, frame.meta.width || image.naturalWidth || 1280);
       const height = Math.max(1, frame.meta.height || image.naturalHeight || 800);
-      if (canvas.width !== width) canvas.width = width;
-      if (canvas.height !== height) canvas.height = height;
-      context.drawImage(image, 0, 0, width, height);
+      const host = previewHostRef.current;
+      const boxW = Math.max(1, Math.round(host?.clientWidth || canvas.clientWidth || width));
+      const boxH = Math.max(1, Math.round(host?.clientHeight || canvas.clientHeight || height));
+      const dpr = previewDeviceScale();
+      const pixelW = Math.max(1, Math.round(boxW * dpr));
+      const pixelH = Math.max(1, Math.round(boxH * dpr));
+      if (canvas.width !== pixelW) canvas.width = pixelW;
+      if (canvas.height !== pixelH) canvas.height = pixelH;
+      const imgW = Math.max(1, image.naturalWidth || width);
+      const imgH = Math.max(1, image.naturalHeight || height);
+      const scale = Math.max(pixelW / imgW, pixelH / imgH);
+      const dw = imgW * scale;
+      const dh = imgH * scale;
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      context.fillStyle = "#eef1f5";
+      context.fillRect(0, 0, pixelW, pixelH);
+      context.imageSmoothingEnabled = Math.abs(scale - 1) > 0.01;
+      context.imageSmoothingQuality = "high";
+      context.drawImage(image, (pixelW - dw) / 2, (pixelH - dh) / 2, dw, dh);
+      canvas.dataset.frame = `${imgW}x${imgH}`;
+      canvas.dataset.scale = String(Math.round(scale * 1000) / 1000);
       renderedFrameRef.current = frame.seq;
+      sendPreviewViewport();
       setFrameMeta((current) => current.width === width && current.height === height
         ? current
         : { width, height });
@@ -1396,9 +1517,10 @@ export default function PageRecorder({
       storage_state: parseStorageState(storageState),
       resume_action: action,
       machine_verification: machineVerificationRef.current,
+      viewport: readPreviewViewport(),
     };
 
-    openRecordingSocket(action);
+    beginStartWhenPreviewReady(action);
   }
 
   function applyViewedDraft(item: RecordingResultSummary, draft: FlowSpec | null, detail?: RecordingResultDetail | null) {
@@ -2130,9 +2252,16 @@ export default function PageRecorder({
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
     if (!rect.width || !rect.height) return null;
+    const meta = latestFrameRef.current?.meta || frameMeta;
+    const scale = Math.max(rect.width / Math.max(1, meta.width), rect.height / Math.max(1, meta.height));
+    const dw = meta.width * scale;
+    const dh = meta.height * scale;
+    const dx = (rect.width - dw) / 2;
+    const dy = (rect.height - dh) / 2;
+    if (dw <= 0 || dh <= 0) return null;
     return {
-      nx: Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)),
-      ny: Math.max(0, Math.min(1, (clientY - rect.top) / rect.height)),
+      nx: Math.max(0, Math.min(1, (clientX - rect.left - dx) / dw)),
+      ny: Math.max(0, Math.min(1, (clientY - rect.top - dy) / dh)),
     };
   }
 
@@ -2399,31 +2528,14 @@ export default function PageRecorder({
           </div>
         </Card>
         <div
+          ref={previewHostRef}
           style={{
             flex: 1,
             minHeight: 0,
             marginTop: 10,
             width: "100%",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-        <div
-          style={{
-            containerType: "size",
-            width: "100%",
             height: "100%",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-        <div
-          style={{
             position: "relative",
-            width: `min(100%, calc(100cqh * ${frameMeta.width} / ${frameMeta.height}))`,
-            height: `min(100%, calc(100cqw * ${frameMeta.height} / ${frameMeta.width}))`,
             overflow: "hidden",
             border: "1px solid #d9d9d9",
             borderRadius: 8,
@@ -2439,6 +2551,8 @@ export default function PageRecorder({
             onWheel={onWheel}
             onContextMenu={(event) => event.preventDefault()}
             style={{
+              position: "absolute",
+              inset: 0,
               display: hasFrame ? "block" : "none",
               width: "100%",
               height: "100%",
@@ -2474,8 +2588,6 @@ export default function PageRecorder({
             aria-label="录制页面键盘输入"
             style={{ position: "absolute", width: 1, height: 1, opacity: 0, left: 0, top: 0 }}
           />
-        </div>
-        </div>
         </div>
       </div>
     );
@@ -2540,9 +2652,10 @@ export default function PageRecorder({
     };
     const stepById = new Map(steps.map((step) => [step.step_id, step]));
     const refs = [...(capability.request_refs || [])].sort((left, right) => {
-      const rank = (usageRank[left.usage || "execute"] ?? 9) - (usageRank[right.usage || "execute"] ?? 9);
-      if (rank !== 0) return rank;
-      return Number(left.sequence || 0) - Number(right.sequence || 0);
+      const seqLeft = Number(left.sequence || 0);
+      const seqRight = Number(right.sequence || 0);
+      if (seqLeft !== seqRight) return seqLeft - seqRight;
+      return (usageRank[left.usage || "execute"] ?? 9) - (usageRank[right.usage || "execute"] ?? 9);
     });
     return refs.map((ref) => {
       const step = stepById.get(String(ref.step_id || ""));
@@ -2647,6 +2760,10 @@ export default function PageRecorder({
         : hasUpstreamSource ? "previous_response" : Array.isArray(enumValues) ? "static_enum" : "";
       if (matched) {
         if (looksPaginationField(matched.param)) return [];
+        if (matched.param.exposed_to_user === false) return [];
+        const sourceKind = hasOptionSource
+          ? "api_option"
+          : matched.param.source_kind || schemaSourceKind;
         return [{
           step: matched.step,
           param: {
@@ -2654,10 +2771,10 @@ export default function PageRecorder({
             key,
             path: flowPath || matched.param.path,
             label: safeString(schema.label || schema.title) || matched.param.label || key,
-            type: type || matched.param.type,
-            source_kind: hasOptionSource
-              ? "api_option"
-              : hasUpstreamSource ? "previous_response" : matched.param.source_kind || schemaSourceKind,
+            type: matched.param.type && matched.param.type !== "string"
+              ? matched.param.type
+              : type || matched.param.type,
+            source_kind: sourceKind,
             source: hasOptionSource ? optionSource : matched.param.source,
             required,
             exposed_to_user: true,
@@ -2685,14 +2802,20 @@ export default function PageRecorder({
   }
 
   function enumPreview(param: FlowParam) {
-    const values = (param.enum_options || []).slice(0, 4).map((option) => {
+    const options = param.enum_options || [];
+    const values = options.slice(0, 8).map((option) => {
       if (option && typeof option === "object") {
         const record = option as Record<string, unknown>;
-        return String(record.label || record.name || record.value || "");
+        const label = String(record.label || record.name || "");
+        const value = String(record.value ?? "");
+        if (label && value && label !== value) return `${label}=${value}`;
+        return label || value;
       }
       return String(option);
     }).filter(Boolean);
-    return values.join("、");
+    if (!values.length) return "";
+    const extra = options.length > values.length ? ` 等 ${options.length} 项` : `，共 ${options.length} 项`;
+    return `${values.join("、")}${extra}`;
   }
 
   function renderFieldSummary(
@@ -2731,13 +2854,13 @@ export default function PageRecorder({
                     {param.source_kind === "constant" && fixedValue !== undefined ? (
                       <div><Text type="secondary">{constantValueCaption(param)}：{safeString(fixedValue)}</Text></div>
                     ) : null}
-                    {apiOptionSourceSummary(param) ? (
-                      <div><Text type="secondary">{apiOptionSourceSummary(param)}</Text></div>
-                    ) : null}
+                    {paramHandlingLines(param).map((line) => (
+                      <div key={line}><Text type="secondary">{line}</Text></div>
+                    ))}
                     {preview ? (
                       <div>
                         <Text type="secondary">
-                          {param.source_kind === "api_option" ? "录制时样例" : "可选值"}：{preview}
+                          {param.source_kind === "api_option" ? "接口选项" : "页面选项"}：{preview}
                         </Text>
                       </div>
                     ) : null}
@@ -3593,7 +3716,7 @@ export default function PageRecorder({
   );
 
   return (
-    <div style={{ width: "100%", height: "100%", minWidth: 0, minHeight: 0, padding: "8px 12px", boxSizing: "border-box", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+    <div style={{ width: "100%", height: "100%", minWidth: 0, minHeight: 0, padding: viewStage === 1 ? "4px 8px" : "8px 12px", boxSizing: "border-box", display: "flex", flexDirection: "column", overflow: "hidden" }}>
       <Steps
         current={viewStage}
         onChange={(next) => {

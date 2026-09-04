@@ -36,5 +36,6 @@ test("录制中不打断 PI，冻结后只发一次最终提示，忙时改用 f
   assert.equal(session.prompts.length, 2);
   assert.match(session.prompts[1].text, /证据已冻结/);
   assert.match(session.prompts[1].text, /不要写 capabilities\[\]\.fields/);
+  assert.match(session.prompts[1].text, /台账/);
   assert.equal(session.prompts[1].options.streamingBehavior, "followUp");
 });

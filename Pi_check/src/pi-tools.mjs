@@ -179,7 +179,7 @@ export function describePiTools() {
     {
       name: SUBMIT_RECORDING_RESULT,
       label: "最终结果",
-      description: "唯一最终提交入口。只允许在证据冻结后提交完整 result。系统原样保存，不会补齐或修改。result 必须是现有录制页能直接渲染的 draft：request_refs 为 {step_id,usage} 对象；steps[].params 为含 key/path 的数组；调用方字段写在 capability.input_schema.properties；禁止只写 capabilities[].fields。",
+      description: "唯一最终提交入口。只允许在证据冻结后提交完整 result。系统原样保存，不会补齐或修改。result 必须是现有录制页能直接渲染的 draft：每个独立动作一项能力；capability_id 不重复；每个能力恰好一个不共用的 execute；request_refs 为 {step_id,usage} 对象；steps[].params 为含 key/path 的数组；调用方字段写在 capability.input_schema.properties；禁止只写 capabilities[].fields。",
       parameters: {
         type: "object",
         properties: {

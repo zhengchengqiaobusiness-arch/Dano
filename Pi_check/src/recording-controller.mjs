@@ -24,7 +24,7 @@ export class RecordingController {
     gate,
     createPi,
     createBrowser,
-    finalTimeoutMs = Number(process.env.PI_FINAL_TIMEOUT_MS || 240000),
+    finalTimeoutMs = Number(process.env.PI_FINAL_TIMEOUT_MS || 600000),
   }) {
     assertNeverStartLegacy();
     this.files = files;
@@ -82,7 +82,7 @@ export class RecordingController {
     return this.#lastCapabilityCount.get(recordingId) ?? 0;
   }
 
-  async start({ targetUrl, goal, storageState = null, title = "", action = "" }) {
+  async start({ targetUrl, goal, storageState = null, title = "", action = "", viewport = null }) {
     assertNeverStartLegacy();
     if (!String(targetUrl || "").trim()) throw new Error("必须提供目标页面地址");
     if (!String(goal || "").trim()) throw new Error("必须提供录制目标");
@@ -148,6 +148,7 @@ export class RecordingController {
         recording: {
           ...this.evidence.snapshot(session.id),
           storageState,
+          viewport,
         },
         appendEvidence,
       });

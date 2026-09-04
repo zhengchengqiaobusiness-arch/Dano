@@ -161,6 +161,7 @@ export class FakeBrowser {
       ? Promise.resolve(appendEvidence?.("network_request", {
         method: "GET",
         url: "http://fixture.local/demo",
+        resource_type: "xhr",
       }))
       : Promise.resolve();
   }
