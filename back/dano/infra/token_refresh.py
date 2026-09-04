@@ -28,19 +28,23 @@ def _sources_for(tenant: str, subsystem: str) -> list[dict]:
     return [dict(item) for item in configured if isinstance(item, dict) and item.get("enabled", True)]
 
 
-def _render(value: Any, credentials: dict[str, str]) -> Any:
+def _render(value: Any, credentials: dict[str, str], extras: dict[str, str] | None = None) -> Any:
     if isinstance(value, dict):
-        return {key: _render(item, credentials) for key, item in value.items()}
+        return {key: _render(item, credentials, extras=extras) for key, item in value.items()}
     if isinstance(value, list):
-        return [_render(item, credentials) for item in value]
+        return [_render(item, credentials, extras=extras) for item in value]
     if not isinstance(value, str):
         return value
 
+    context = dict(credentials)
+    if extras:
+        context.update(extras)
+
     def replace(match: re.Match[str]) -> str:
         key = match.group(1)
-        if key not in credentials:
+        if key not in context:
             raise ValueError(f"凭据缺少字段:{key}")
-        return str(credentials[key])
+        return str(context[key])
 
     return _PLACEHOLDER.sub(replace, value)
 
@@ -58,6 +62,57 @@ def _json_path(value: Any, path: str) -> Any:
             continue
         return None
     return current
+
+
+async def _resolve_captcha_fields(
+    source: dict,
+    tenant: str,
+    subsystem: str,
+    client: httpx.AsyncClient,
+    credentials: dict[str, str],
+) -> dict[str, str]:
+    captcha_cfg = source.get("captcha")
+    if not isinstance(captcha_cfg, dict) or not captcha_cfg.get("enabled", True):
+        return {}
+
+    captcha_credential_ref = str(captcha_cfg.get("credentials_ref") or f"vault://{tenant}/{subsystem}-captcha")
+    if "credentials_ref" in captcha_cfg:
+        credentials = {**credentials, **resolve_credentials({"captcha_credential": captcha_credential_ref})}
+
+    captcha_url = _render(captcha_cfg.get("url") or "", credentials)
+    if not captcha_url:
+        raise ValueError("captcha 配置缺少 url")
+    if urlparse(captcha_url).scheme != "https" and not captcha_cfg.get("allow_insecure_http"):
+        raise ValueError("验证码接口必须使用 HTTPS；可信内网 HTTP 需显式 allow_insecure_http=true")
+
+    method = str(captcha_cfg.get("method") or "GET").upper()
+    headers = _render(captcha_cfg.get("headers") or {}, credentials)
+    query = _render(captcha_cfg.get("query") or {}, credentials)
+    response = await client.request(method, captcha_url, headers=headers, params=query)
+    if response.status_code >= 400:
+        raise ValueError(f"验证码接口 HTTP {response.status_code}")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ValueError("验证码接口未返回 JSON") from exc
+
+    fields: dict[str, str] = {}
+    uuid = _json_path(payload, str(captcha_cfg.get("uuid_path") or "uuid"))
+    if uuid is not None:
+        fields["captcha_uuid"] = str(uuid)
+    img = _json_path(payload, str(captcha_cfg.get("img_path") or "img"))
+    if img is not None:
+        fields["captcha_img"] = str(img)
+    code = _json_path(payload, str(captcha_cfg.get("code_path") or "code"))
+    if code is not None:
+        fields["captcha_code"] = str(code)
+    extra_fields = captcha_cfg.get("fields") or {}
+    if isinstance(extra_fields, dict):
+        for key, path in extra_fields.items():
+            value = _json_path(payload, str(path))
+            if value is not None:
+                fields[str(key)] = str(value)
+    return fields
 
 
 def _is_due(record: dict | None, interval_seconds: int, now: datetime) -> bool:
@@ -104,7 +159,10 @@ async def _request_source(
     method = str(source.get("method") or "POST").upper()
     headers = _render(source.get("headers") or {}, credentials)
     query = _render(source.get("query") or {}, credentials)
-    body = _render(source.get("body") or {}, credentials)
+    dynamic: dict[str, str] = {}
+    if source.get("captcha"):
+        dynamic = await _resolve_captcha_fields(source, tenant, subsystem, client, credentials)
+    body = _render(source.get("body") or {}, credentials, extras=dynamic)
     request_kwargs: dict[str, Any] = {"headers": headers, "params": query}
     if str(source.get("encoding") or "json").lower() == "form":
         request_kwargs["data"] = body

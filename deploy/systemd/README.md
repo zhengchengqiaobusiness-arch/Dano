@@ -2,7 +2,7 @@
 
 后端通过目标网页实际调用的登录 API 获取 Token；不要抓取登录页 HTML。登录请求、凭据字段和 Token 提取路径均由 `DANO_TOKEN_REFRESH_SOURCES` 配置。
 
-最小配置示例：
+最小配置示例（如果站点不需要验证码，可直接去掉 `code/uuid` 与 `captcha` 节点）：
 
 ```dotenv
 DANO_TOKEN_REFRESH_KEY=<随机长密钥>
@@ -10,7 +10,7 @@ DANO_RUNTIME_CREDENTIALS={"aaa/A-OA-login":{"tenant_name":"点狮信息","userna
 DANO_VAULT_ADDR=https://vault.example.internal:8200
 DANO_VAULT_TOKEN=<通过部署密钥注入>
 DANO_REQUIRE_VAULT=true
-DANO_TOKEN_REFRESH_SOURCES={"aaa/A-OA":[{"type":"password_http","url":"http://admin.example:90/admin-api/system/auth/login","verify_url":"http://admin.example:90/admin-api/system/auth/get-permission-info","allow_insecure_http":true,"credentials_ref":"vault://aaa/A-OA-login","body":{"tenantName":"{{tenant_name}}","username":"{{username}}","password":"{{password}}"},"token_path":"data.accessToken","header_name":"Authorization","token_prefix":"Bearer ","interval_seconds":1800}]}
+DANO_TOKEN_REFRESH_SOURCES={"aaa/A-OA":[{"type":"password_http","url":"http://admin.example:90/prod-api/login","verify_url":"http://admin.example:90/prod-api/system/auth/get-permission-info","allow_insecure_http":true,"credentials_ref":"vault://aaa/A-OA-login","headers":{"Tenant-Id":"1"},"verify_headers":{"Tenant-Id":"1"},"body":{"tenantName":"{{tenant_name}}","username":"{{username}}","password":"{{password}}","code":"{{captcha_code}}","uuid":"{{captcha_uuid}}"},"token_path":"data.accessToken","header_name":"Authorization","token_prefix":"Bearer ","verify_success_path":"code","verify_success_values":[0],"interval_seconds":1800,"captcha":{"url":"http://admin.example:90/prod-api/captchaImage","allow_insecure_http":true,"uuid_path":"uuid","img_path":"img","method":"GET"}}]}
 ```
 
 正式环境应把账号密码放 Vault，并设置 `DANO_REQUIRE_VAULT=true` 禁止回退本地明文；`DANO_RUNTIME_CREDENTIALS` 只用于单机部署或验证。一个系统可配置多个来源，前一个失败时会自动尝试下一个。`type=http` 可用于其他无验证码 HTTP 登录/刷新接口，并支持 `method`、`headers`、`query`、`body`、`encoding=json|form`、`token_path` 或 `token_header`。
