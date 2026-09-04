@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { EvidenceEvent, UiEvidence } from "../src/domain.js";
 import { buildManualSteps, describeManualStep, renderManualStepsMarkdown } from "../src/record/manual-steps.js";
 
-function ui(partial: Partial<EvidenceEvent> & Pick<Extract<EvidenceEvent, { kind: "ui" }>, "eventType">): EvidenceEvent {
+function ui(partial: Partial<UiEvidence> & Pick<UiEvidence, "eventType">): UiEvidence {
   return {
     id: partial.id || "ui-1",
     kind: "ui",
@@ -19,7 +19,7 @@ function ui(partial: Partial<EvidenceEvent> & Pick<Extract<EvidenceEvent, { kind
     inputType: (partial as { inputType?: string }).inputType,
     scope: (partial as { scope?: "page" | "dialog" }).scope,
     form: (partial as { form?: UiEvidence["form"] }).form
-  } as EvidenceEvent;
+  };
 }
 
 test("manual steps keep click, fill, choose and submit, and skip snapshots", () => {
@@ -58,7 +58,7 @@ test("css-only clicks are dropped and form labels beat typed values", () => {
       value: "办公室",
       selector: "div.arco-form-item-content-wrapper > textarea.arco-textarea",
       form: [{ label: "职能描述", type: "textarea", value: "办公室" }]
-    } as EvidenceEvent & { form: Array<{ label: string; type: string; value: string }> }),
+    }),
     ui({
       id: "b",
       eventType: "click",

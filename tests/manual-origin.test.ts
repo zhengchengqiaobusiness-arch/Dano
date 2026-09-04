@@ -209,7 +209,7 @@ test("manual form snapshots without request names still bind Chinese labels and 
   assert.equal(fields.ywsxmc?.source, "caller");
   assert.equal(fields.ywsxmc?.label, "职能清单");
   assert.equal(fields.ssbmmc?.label, "部门名称");
-  assert.ok(fields.yyxtid?.source === "caller" || fields.yyxtid?.defaultRule?.startsWith("from:"), fields.yyxtid?.sourceDetail);
+  assert.ok(fields.yyxtid?.source === "caller" || fields.yyxtid?.defaultRule?.startsWith("from:"), fields.yyxtid?.sourceDetail || JSON.stringify(fields.yyxtid));
   assert.equal(fields.yyxtid?.label, "所属系统");
   const catalog = finalizeCapabilities(buildCapabilityCandidates(events), events);
   const verified = catalog.find(item => item.transport.pathTemplate.includes("createQzqdSl"))!;
@@ -218,9 +218,9 @@ test("manual form snapshots without request names still bind Chinese labels and 
   assert.equal(after.ssxts?.defaultRule, "literal:\"\"");
   assert.match(after.yyxtmc?.defaultRule || "", /^from:.+\|via:yyxtid$/, JSON.stringify(after.yyxtmc));
   assert.equal(after.yyxtmc?.source, "binding");
-  assert.ok(after.ssbmmc?.defaultRule?.startsWith("from:") || after.ssbmmc?.source === "caller", after.ssbmmc?.sourceDetail);
-  assert.ok(after.bmId?.defaultRule?.startsWith("from:") || after.bmId?.source === "caller", after.bmId?.sourceDetail);
-  assert.ok(after.ssbmId?.defaultRule?.startsWith("from:") || after.ssbmId?.source === "caller", after.ssbmId?.sourceDetail);
+  assert.ok(after.ssbmmc?.defaultRule?.startsWith("from:") || after.ssbmmc?.source === "caller", after.ssbmmc?.sourceDetail || JSON.stringify(after.ssbmmc));
+  assert.ok(after.bmId?.defaultRule?.startsWith("from:") || after.bmId?.source === "caller", after.bmId?.sourceDetail || JSON.stringify(after.bmId));
+  assert.ok(after.ssbmId?.defaultRule?.startsWith("from:") || after.ssbmId?.source === "caller", after.ssbmId?.sourceDetail || JSON.stringify(after.ssbmId));
   const review = reviewCatalog(catalog, events);
   assert.equal(review.status, "passed", review.summary);
 });

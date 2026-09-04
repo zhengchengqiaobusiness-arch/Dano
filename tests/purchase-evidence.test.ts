@@ -5,9 +5,14 @@ import os from "node:os";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { EvidenceEvent } from "../src/domain.js";
+import type { CapabilityContract, EvidenceEvent, InputFormField } from "../src/domain.js";
 
 const execFileAsync = promisify(execFile);
+function staticCandidateValue(field: InputFormField | undefined, label: string) {
+  return field?.candidates?.type === "static"
+    ? field.candidates.values.find(item => item.label === label)?.value
+    : undefined;
+}
 import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
 import { finalizeCapabilities } from "../src/inference/finalize-capabilities.js";
 import { exportableCapabilities, isPrimaryCapability, summarizeCatalog } from "../src/inference/export-scope.js";
@@ -213,11 +218,11 @@ test("search and create purchase order verify from mixed manual and recorded evi
   assert.equal(search.inputForm.find(field => field.name === "pageNo")?.source, "system");
   assert.equal(search.inputForm.find(field => field.name === "pageNo")?.required, false);
   assert.equal(search.inputForm.find(field => field.name === "status")?.candidates?.type, "static");
-  assert.equal(search.inputForm.find(field => field.name === "status")?.candidates?.values?.find(item => item.label === "未审核")?.value, 10);
+  assert.equal(staticCandidateValue(search.inputForm.find(field => field.name === "status"), "未审核"), 10);
   assert.equal(search.inputForm.find(field => field.name === "inStatus")?.label, "入库数量");
   assert.equal(search.inputForm.find(field => field.name === "returnStatus")?.label, "退货数量");
-  assert.equal(search.inputForm.find(field => field.name === "inStatus")?.candidates?.values?.find(item => item.label === "未入库")?.value, 0);
-  assert.equal(search.inputForm.find(field => field.name === "returnStatus")?.candidates?.values?.find(item => item.label === "未退货")?.value, 0);
+  assert.equal(staticCandidateValue(search.inputForm.find(field => field.name === "inStatus"), "未入库"), 0);
+  assert.equal(staticCandidateValue(search.inputForm.find(field => field.name === "returnStatus"), "未退货"), 0);
   assert.notEqual(search.inputForm.find(field => field.name === "no")?.candidates?.type, "static");
   assert.notEqual(search.inputForm.find(field => field.name === "remark")?.candidates?.type, "static");
   assert.notEqual(search.inputForm.find(field => field.name === "orderTime[0]")?.candidates?.type, "static");
@@ -348,7 +353,7 @@ test("nameless forms bind only uniquely evidenced fields", () => {
   assert.equal(search.inputForm.find(field => field.name === "productId")?.label, "产品");
   assert.equal(search.inputForm.find(field => field.name === "status")?.source, "caller");
   assert.equal(search.inputForm.find(field => field.name === "status")?.label, "状态");
-  assert.equal(search.inputForm.find(field => field.name === "status")?.candidates?.values?.find(item => item.label === "未审核")?.value, 10);
+  assert.equal(staticCandidateValue(search.inputForm.find(field => field.name === "status"), "未审核"), 10);
   assert.equal(search.inputForm.find(field => field.name === "inStatus")?.source, "system");
   assert.equal(search.inputForm.find(field => field.name === "returnStatus")?.source, "system");
   assert.equal(search.inputForm.find(field => field.name === "inStatus")?.defaultRule, undefined);
@@ -377,7 +382,7 @@ test("same-day date range binds start and end labels without guessing names", ()
       })
     };
   }).map(event => {
-    if (event.id !== "net-search") return event;
+    if (event.id !== "net-search" || event.kind !== "network") return event;
     return {
       ...event,
       request: {
@@ -389,7 +394,7 @@ test("same-day date range binds start and end labels without guessing names", ()
         }
       }
     };
-  });
+  }) as EvidenceEvent[];
   const search = buildCapabilityCandidates(events).find(item => item.transport.pathTemplate.includes("/purchase/order/page"))!;
   assert.equal(search.inputForm.find(field => field.name === "orderTime[0]")?.label, "开始日期");
   assert.equal(search.inputForm.find(field => field.name === "orderTime[1]")?.label, "结束日期");
@@ -424,7 +429,7 @@ test("create form filled minutes before submit still verifies", () => {
   const events = purchaseEvents().map(event => {
     if (event.id !== "ui-create-form") return event;
     return { ...event, at: "2026-09-02T03:17:10.000Z" };
-  });
+  }) as EvidenceEvent[];
   const verified = finalizeCapabilities(buildCapabilityCandidates(events), events);
   const create = verified.find(item => item.transport.pathTemplate.includes("/purchase/order/create"))!;
   assert.equal(create.validation.status, "verified");
@@ -653,7 +658,7 @@ test("live product list plus echoed page rows still verify query and create", ()
         }
       }
     };
-  });
+  }) as EvidenceEvent[];
   const verified = finalizeCapabilities(buildCapabilityCandidates(events), events);
   const create = verified.find(item => item.transport.pathTemplate.includes("/purchase/order/create"))!;
   const search = verified.find(item => item.transport.pathTemplate.includes("/purchase/order/page"))!;
@@ -671,7 +676,7 @@ test("live product list plus echoed page rows still verify query and create", ()
   assert.doesNotMatch(create.inputForm.find(field => field.name === "productUnitName")?.defaultRule || "", /purchase\/order\/page/);
   assert.ok(
     ["caller", "computed"].includes(create.inputForm.find(field => field.name === "productPrice")?.source || ""),
-    create.inputForm.find(field => field.name === "productPrice")?.sourceDetail
+    create.inputForm.find(field => field.name === "productPrice")?.sourceDetail || JSON.stringify(create.inputForm)
   );
   assert.doesNotMatch(create.inputForm.find(field => field.name === "productPrice")?.defaultRule || "", /purchase\/order\/page/);
   assert.match(create.inputForm.find(field => field.path === "$.totalPrice")?.defaultRule || "", /^computed:/);
@@ -710,13 +715,13 @@ test("validate reseals write system fields from the recorded success request", (
 test("export refuses write system fields that appeared in the request but have no recorded value", async () => {
   const events = purchaseEvents();
   const verified = finalizeCapabilities(buildCapabilityCandidates(events), events);
-  const broken = verified.map(capability =>
+  const broken: CapabilityContract[] = verified.map(capability =>
     capability.operation === "create"
       ? {
           ...capability,
           inputForm: capability.inputForm.map(field =>
             field.name === "productUnitName"
-              ? { ...field, source: "system", defaultRule: undefined, sourceDetail: "页面只读展示，由选择其它字段后自动带出。调用方不要手填" }
+              ? { ...field, source: "system" as const, defaultRule: undefined, sourceDetail: "页面只读展示，由选择其它字段后自动带出。调用方不要手填" }
               : field
           )
         }

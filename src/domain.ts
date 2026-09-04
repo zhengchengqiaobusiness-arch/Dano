@@ -18,7 +18,7 @@ export interface UiFieldSnapshot {
   type?: string;
   value?: unknown;
   required?: boolean;
-  options?: Array<{ value: string; label: string }>;
+  options?: Array<{ value: unknown; label: string }>;
   rangeIndex?: number;
 }
 
@@ -38,7 +38,7 @@ export interface UiEvidence {
   name?: string;
   inputType?: string;
   value?: unknown;
-  options?: Array<{ value: string; label: string }>;
+  options?: Array<{ value: unknown; label: string }>;
   visibleOptions?: string[];
   form?: UiFieldSnapshot[];
 }
@@ -55,7 +55,7 @@ export interface NetworkEvidence {
     url: string;
     resourceType: string;
     headers: Record<string, string>;
-    query: Record<string, string | string[]>;
+    query: Record<string, unknown>;
     body?: unknown;
   };
   response?: {

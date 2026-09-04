@@ -135,7 +135,7 @@ test("a shared display value across lookup rows still binds via the selected id"
         }
       }
     };
-  });
+  }) as EvidenceEvent[];
   const create = buildCapabilityCandidates(recorded).find(item => item.transport.pathTemplate.includes("/order/create"))!;
   const unit = create.inputForm.find(field => field.name === "unitName")!;
   assert.match(unit.defaultRule || "", /^from:.+\.unitName\|via:productId$/);

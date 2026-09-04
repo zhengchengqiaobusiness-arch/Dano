@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { EvidenceEvent } from "../src/domain.js";
+import type { EvidenceEvent, InputFormField } from "../src/domain.js";
 import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
 
 const PAGE = "http://admin.example.test/workspace/todo";
@@ -17,7 +17,7 @@ const PROCESS_OPTIONS = [
   { value: "oa_duty_leave", label: "请假申请" }
 ];
 
-function fieldByName(capability: { inputForm: Array<{ name: string }> }, name: string) {
+function fieldByName(capability: { inputForm: InputFormField[] }, name: string) {
   return capability.inputForm.find(field => field.name === name);
 }
 

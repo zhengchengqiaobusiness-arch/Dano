@@ -608,7 +608,7 @@ export class BrowserRecorder {
       type: String(field.kind || field.type || "text"),
       value: field.value,
       required: Boolean(field.required),
-      options: Array.isArray((field as { options?: unknown }).options) ? (field as { options: UiEvidence["options"] }).options : undefined,
+      options: Array.isArray(field.options) ? field.options : undefined,
       rangeIndex: typeof (field as { rangeIndex?: unknown }).rangeIndex === "number" ? (field as { rangeIndex: number }).rangeIndex : undefined
     })).filter(field => field.label || field.name);
     const form = fromFields.length ? fromFields : (snapshot.controls || []).flatMap(control => {
@@ -711,7 +711,7 @@ export class BrowserRecorder {
     if (page.isClosed()) return false;
     await this.withTimeout(page.waitForLoadState("domcontentloaded"), 2_000, undefined);
     if (this.isTransientUrl(page.url())) {
-      await this.withTimeout(page.waitForURL(url => !this.isTransientUrl(url), { timeout: 2_000 }), 2_000, undefined);
+      await this.withTimeout(page.waitForURL(url => !this.isTransientUrl(url.toString()), { timeout: 2_000 }), 2_000, undefined);
       await this.withTimeout(page.waitForLoadState("domcontentloaded"), 2_000, undefined);
     }
     if (page.isClosed() || this.isTransientUrl(page.url()) || await this.pageLooksFailed(page)) {
@@ -1190,7 +1190,7 @@ export class BrowserRecorder {
   private captureBrowserPid(context: BrowserContext) {
     this.browserLaunched = true;
     try {
-      this.browserPid = context.browser()?.process()?.pid;
+      this.browserPid = (context.browser() as Browser & { process?: () => { pid?: number } })?.process?.()?.pid;
     } catch {
       this.browserPid = undefined;
     }

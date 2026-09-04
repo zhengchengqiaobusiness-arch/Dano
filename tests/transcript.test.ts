@@ -44,5 +44,6 @@ test("clearing the transcript empties the workbench session", () => {
   assert.deepEqual(transcript.items, []);
   transcript.addUser("新录制");
   assert.equal(transcript.items.length, 1);
-  assert.equal(transcript.items[0]!.kind === "message" && transcript.items[0]!.text, "新录制");
+  const latest = transcript.items.at(0) as unknown as { kind: string; text?: string };
+  assert.equal(latest.kind === "message" && latest.text, "新录制");
 });

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { EvidenceEvent } from "../src/domain.js";
+import type { EvidenceEvent, InputFormField } from "../src/domain.js";
 import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
 import { materializeHttpRequest } from "../src/execution/http-executor.js";
 import { collectUiObservations } from "../src/inference/field-resolver.js";
@@ -21,7 +21,7 @@ const START_MS = 1_789_401_600_000;
 const END_MIDNIGHT_MS = 1_789_920_000_000;
 const END_EOD_MS = 1_790_006_399_000;
 
-function fieldByName(capability: { inputForm: Array<{ name: string }> }, name: string) {
+function fieldByName(capability: { inputForm: InputFormField[] }, name: string) {
   return capability.inputForm.find(field => field.name === name);
 }
 

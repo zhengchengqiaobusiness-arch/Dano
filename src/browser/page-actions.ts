@@ -26,7 +26,9 @@ export interface FormField {
   invalid?: boolean;
   error?: string;
   value?: string;
-  scope?: string;
+  type?: string;
+  options?: Array<{ value: unknown; label: string }>;
+  scope?: "page" | "dialog";
   rangeIndex?: number;
   groupIndex?: number;
 }
@@ -68,7 +70,7 @@ export interface PageActionHost {
     scope?: "page" | "dialog";
     value?: string;
     options: Array<{ value: unknown; label: string }>;
-  }): Promise<void>;
+  }): Promise<unknown>;
 }
 
 function escapeRegExp(value: string) {
@@ -225,8 +227,8 @@ export class PageActions {
     return root.locator(selector);
   }
 
-  private scopeRoot(root: Frame | Locator) {
-    return typeof (root as Frame).url === "function" ? (root as Frame).locator("body") : root as Locator;
+  private scopeRoot(root: Page | Frame | Locator) {
+    return typeof (root as Page | Frame).url === "function" ? (root as Page | Frame).locator("body") : root as Locator;
   }
 
   private async uniqueField(root: Frame | Locator, name: string) {
@@ -271,7 +273,7 @@ export class PageActions {
     return undefined;
   }
 
-  private async labeledControl(root: Frame | Locator, name: string) {
+  private async labeledControl(root: Page | Frame | Locator, name: string) {
     const mark = `bss-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const scope = this.scopeRoot(root);
     await scope.evaluate(() => {
@@ -427,7 +429,7 @@ export class PageActions {
         if (/(?:^|\s)(el-select__wrapper|ant-select-selector|arco-select-view)/.test(cls)) return true;
         return /(?:^|\s)(el-select|ant-select|arco-select|n-select|el-cascader|el-date-editor|ant-picker|arco-picker)(?:\s|$)/.test(cls);
       };
-      let best = el;
+      let best: Element = el;
       let node: Element | null = el.parentElement;
       for (let i = 0; i < 6 && node && node !== document.body; i += 1, node = node.parentElement) {
         if (node.matches("[class*='form-item'], [class*='form-field'], [role='group'], td, th, [class*='table-cell'], [class*='table__cell']")) break;
@@ -463,7 +465,7 @@ export class PageActions {
     });
   }
 
-  async clickSafely(locator: Locator, intent: "field" | "option" | "button" | "navigation" = "button", retried = false) {
+  async clickSafely(locator: Locator, intent: "field" | "option" | "button" | "navigation" = "button", retried = false): Promise<void> {
     const kind = await locator.first().evaluate((el, clickIntent) => {
       const box = el.getBoundingClientRect();
       const overlayChrome = ".el-dialog,.el-drawer,.el-picker-panel,.el-select-dropdown,.el-popper,.el-date-picker,.el-select,.el-date-editor,.ant-modal,.ant-select-dropdown,.arco-modal,[role='dialog'],[role='listbox'],[role='option']";
@@ -590,7 +592,7 @@ export class PageActions {
     return undefined;
   }
 
-  private async overlayState() {
+  private async overlayState(): Promise<{ dialogs: number; drops: string; dates: string }> {
     return this.page().evaluate(`(() => {
       const vis = (sel) => [...document.querySelectorAll(sel)].filter((el) => {
         if (el.hidden || el.closest("[hidden]")) return false;
@@ -613,7 +615,7 @@ export class PageActions {
         drops: drops.map(keyOf).sort().join("||"),
         dates: dates.map(keyOf).sort().join("||")
       };
-    })()`);
+    })()`) as Promise<{ dialogs: number; drops: string; dates: string }>;
   }
 
   private overlayOpened(before: { dialogs: number; drops: string; dates: string }, after: { dialogs: number; drops: string; dates: string }) {
@@ -934,7 +936,11 @@ export class PageActions {
         name: name || undefined,
         scope: dialog ? "dialog" : "page"
       };
-    }).catch(() => ({ label: "", name: undefined, scope: "page" as const }));
+    }).catch(() => ({ label: "", name: undefined, scope: "page" as const })) as {
+      label: string;
+      name?: string;
+      scope: "page" | "dialog";
+    };
     await this.host.recordSelectObservation?.({
       label: fieldMeta.label,
       name: fieldMeta.name,

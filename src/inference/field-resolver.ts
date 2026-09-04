@@ -1,4 +1,4 @@
-import type { InputFormField, NetworkEvidence, UiEvidence } from "../domain.js";
+import type { EvidenceEvent, InputFormField, NetworkEvidence, UiEvidence } from "../domain.js";
 import { ASK_KEY } from "./heuristics.js";
 import { clockFromEpoch, dateDay, recordedClock } from "./date-format.js";
 
@@ -513,10 +513,10 @@ function arraysFromBody(body: unknown): unknown[][] {
     .filter((item): item is unknown[] => Array.isArray(item) && item.some(entry => entry && typeof entry === "object" && !Array.isArray(entry)));
 }
 
-export function recordedLists(events: Array<{ response?: { body?: unknown } }>): RecordedList[] {
+export function recordedLists(events: EvidenceEvent[]): RecordedList[] {
   const lists: RecordedList[] = [];
   for (const event of events) {
-    const body = event.response?.body;
+    const body = event.kind === "network" ? event.response?.body : undefined;
     if (!body || typeof body !== "object") continue;
     for (const raw of arraysFromBody(body)) {
       const rows = raw.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item));

@@ -27,14 +27,13 @@ export function dateToMillis(value: string, clock?: string) {
     : (fromValue || (clock && /^\d{2}:\d{2}:\d{2}$/.test(clock) ? clock : "00:00:00"));
   const [year, month, date] = day.split("-").map(Number);
   const [hour, minute, second] = suffix.split(":").map(Number);
-  return Date.UTC(year, (month || 1) - 1, date || 1, hour || 0, minute || 0, second || 0) - BUSINESS_TZ_OFFSET_MS;
+  return Date.UTC(year!, (month || 1) - 1, date || 1, hour || 0, minute || 0, second || 0) - BUSINESS_TZ_OFFSET_MS;
 }
 
 export function normalizeDateString(value: string, clock?: string) {
   const raw = value.trim().replace("T", " ");
   if (DATE_ONLY.test(raw)) {
-    const suffix = clock && /^\d{2}:\d{2}:\d{2}$/.test(clock) ? clock : "00:00:00";
-    return `${raw} ${suffix}`;
+    return clock && /^\d{2}:\d{2}:\d{2}$/.test(clock) ? `${raw} ${clock}` : raw;
   }
   return value;
 }

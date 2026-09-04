@@ -58,7 +58,7 @@ function uiFieldToForm(field: NonNullable<UiEvidence["form"]>[number]): InputFor
   if (!field?.name) return undefined;
   const type = field.type || "text";
   const widget = widgetFromUiType(type);
-  const options = field.options?.map(o => ({ value: o.value, label: o.label || o.value }));
+  const options = field.options?.map(o => ({ value: o.value, label: String(o.label || o.value) }));
   return {
     path: jsonPathForName(field.name),
     name: field.name,
@@ -243,7 +243,7 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
       if (correlated?.name) {
         directUiNames.add(correlated.name);
         const observed = correlated.options?.length
-          ? correlated.options.map(o => ({ value: o.value, label: o.label || o.value }))
+          ? correlated.options.map(o => ({ value: o.value, label: String(o.label || o.value) }))
           : correlated.visibleOptions?.length
             ? correlated.visibleOptions.map(label => ({ value: label, label }))
             : undefined;

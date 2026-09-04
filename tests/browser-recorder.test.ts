@@ -1568,7 +1568,7 @@ test("exercise-form fills a search bar with selects and a leftover range calenda
   const searched: unknown[] = [];
   const server = http.createServer((request, response) => {
     if ((request.url || "").startsWith("/api/search") && request.method === "GET") {
-      searched.push(new URL(request.url, "http://127.0.0.1").search);
+      searched.push(new URL(request.url!, "http://127.0.0.1").search);
       response.setHeader("content-type", "application/json");
       response.end('{"code":0,"rows":[]}');
       return;
@@ -1899,7 +1899,7 @@ test("exercise-form clicks the visible option node and ignores table-header filt
   const searched: unknown[] = [];
   const server = http.createServer((request, response) => {
     if ((request.url || "").startsWith("/api/search") && request.method === "GET") {
-      searched.push(new URL(request.url, "http://127.0.0.1").search);
+      searched.push(new URL(request.url!, "http://127.0.0.1").search);
       response.setHeader("content-type", "application/json");
       response.end('{"code":0}');
       return;

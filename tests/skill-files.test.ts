@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isRetryableFsError, moveDirectory } from "../src/catalog/skill-files.ts";
+import { isRetryableFsError, moveDirectory } from "../src/catalog/skill-files.js";
 
 test("windows lock errors are retryable and fall back to copy", async () => {
   assert.equal(isRetryableFsError(Object.assign(new Error("EPERM"), { code: "EPERM" })), true);
