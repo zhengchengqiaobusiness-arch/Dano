@@ -216,6 +216,8 @@ test("manual form snapshots without request names still bind Chinese labels and 
   const after = fieldMap(verified);
   assert.equal(after.catalogStatus?.defaultRule, "literal:\"\"");
   assert.equal(after.ssxts?.defaultRule, "literal:\"\"");
+  assert.match(after.yyxtmc?.defaultRule || "", /^from:.+\|via:yyxtid$/, JSON.stringify(after.yyxtmc));
+  assert.equal(after.yyxtmc?.source, "binding");
   assert.ok(after.ssbmmc?.defaultRule?.startsWith("from:") || after.ssbmmc?.source === "caller", after.ssbmmc?.sourceDetail);
   assert.ok(after.bmId?.defaultRule?.startsWith("from:") || after.bmId?.source === "caller", after.bmId?.sourceDetail);
   assert.ok(after.ssbmId?.defaultRule?.startsWith("from:") || after.ssbmId?.source === "caller", after.ssbmId?.sourceDetail);

@@ -149,20 +149,21 @@ function lookupQueryHints(source: CapabilityContract | undefined) {
 }
 
 export function dataSourceOf(field: InputFormField, capabilities: CapabilityContract[]) {
-  if (field.candidates?.type !== "capability") return undefined;
-  const source = capabilities.find(capability => capability.id === field.candidates!.capabilityId);
+  const candidates = field.candidates;
+  if (candidates?.type !== "capability") return undefined;
+  const source = capabilities.find(capability => capability.id === candidates.capabilityId);
   const hints = lookupQueryHints(source);
   return {
     type: "api" as const,
-    capabilityId: field.candidates.capabilityId,
+    capabilityId: candidates.capabilityId,
     endpoint: source ? `${source.transport.origin}${source.transport.pathTemplate}` : undefined,
     method: source?.transport.method,
-    paramsFrom: field.candidates.dependsOn || [],
-    valuePath: field.candidates.valuePath,
-    labelPath: field.candidates.labelPath,
-    resultPath: resultPathOf(field.candidates.valuePath),
-    idField: field.candidates.valuePath.split(".").pop(),
-    labelField: field.candidates.labelPath.split(".").pop(),
+    paramsFrom: candidates.dependsOn || [],
+    valuePath: candidates.valuePath,
+    labelPath: candidates.labelPath,
+    resultPath: resultPathOf(candidates.valuePath),
+    idField: candidates.valuePath.split(".").pop(),
+    labelField: candidates.labelPath.split(".").pop(),
     ...hints
   };
 }

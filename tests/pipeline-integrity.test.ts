@@ -124,6 +124,50 @@ test("submit-style POST is a primary write even when the path is not CRUD", () =
   assert.equal(review.primaryCount, 1);
 });
 
+test("a recorded download is an exportable primary page operation", () => {
+  const download = cap({
+    id: "download-report",
+    operation: "download",
+    title: "Download report",
+    transport: { method: "GET", urlTemplate: "https://x/reports/export", origin: "https://x", pathTemplate: "/reports/export" }
+  });
+  assert.equal(isPrimaryCapability(download, [download]), true);
+  assert.deepEqual(exportableCapabilities([download]).map(item => item.id), [download.id]);
+  assert.equal(reviewCatalog([download], [], ["download"]).status, "passed");
+});
+
+test("review blocks a partial package when the recording expected query and create", () => {
+  const query = cap({
+    id: "query-seal-apply",
+    operation: "query",
+    title: "查询印章申请",
+    transport: { method: "GET", urlTemplate: "https://x/oa/sealApply/list", origin: "https://x", pathTemplate: "/oa/sealApply/list" }
+  });
+  const review = reviewCatalog([query], [], ["query", "create"]);
+  assert.equal(review.status, "blocked", review.summary);
+  assert.equal(review.findings.some(item => item.code === "missing-expected-operation" && item.message.includes("新建")), true, review.summary);
+});
+
+test("review blocks a capability that tries to obtain an input from itself", () => {
+  const create = cap({
+    id: "create-seal",
+    operation: "create",
+    transport: { method: "POST", urlTemplate: "https://x/oa/seal", origin: "https://x", pathTemplate: "/oa/seal" },
+    bindings: [{
+      id: "self-binding",
+      fromCapabilityId: "create-seal",
+      fromPath: "$.data.billType",
+      toPath: "$.billType",
+      confidence: 1,
+      evidenceIds: ["net-create"],
+      approved: true
+    }]
+  });
+  const review = reviewCatalog([create]);
+  assert.equal(review.status, "blocked");
+  assert.equal(review.findings.some(item => item.code === "binding-structure-valid" && item.fieldPath === "$.billType"), true, review.summary);
+});
+
 test("lookup-named API is primary only when it is the page's own query", () => {
   const balance = cap({
     id: "query-balance",
@@ -181,6 +225,26 @@ test("leftover one-to-one does not bind a hidden token to an unrelated remark", 
   const bound = bindLeftoverFields(fields, observations, { token: "hidden-token" });
   assert.notEqual(bound[0]?.source, "caller");
   assert.notEqual(bound[0]?.label, "备注");
+});
+
+test("leftover one-to-one ignores invariant discriminators and binds the remaining visible field", () => {
+  const fields = [
+    field({ name: "billType", path: "$.billType", source: "system", sourceDetail: "未解析" }),
+    field({ name: "useInfo", path: "$.useInfo", source: "system", sourceDetail: "未解析" }),
+    field({ name: "remark", path: "$.remark", label: "备注", source: "caller", systemHandled: false })
+  ];
+  const observations: UiObservation[] = [
+    { name: "w-e-textarea-1", label: "使用描述", type: "textarea", value: "同一段测试内容" },
+    { label: "备注", type: "textarea", value: "同一段测试内容" }
+  ];
+  const bound = bindLeftoverFields(fields, observations, {
+    billType: "seal_apply",
+    useInfo: "<p>同一段测试内容</p>",
+    remark: "同一段测试内容"
+  });
+  assert.equal(bound.find(item => item.name === "billType")?.source, "system");
+  assert.equal(bound.find(item => item.name === "useInfo")?.source, "caller");
+  assert.equal(bound.find(item => item.name === "useInfo")?.label, "使用描述");
 });
 
 test("a single start-date observation does not claim the end-date request field", () => {

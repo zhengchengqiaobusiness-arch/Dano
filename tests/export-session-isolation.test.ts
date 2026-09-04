@@ -54,7 +54,7 @@ function leaveEvents(): EvidenceEvent[] {
 
 async function writeSession(
   recordingsDir: string,
-  session: { id: string; startUrl: string; startedAt: string },
+  session: { id: string; startUrl: string; startedAt: string; expectedOperations?: Array<"query" | "create"> },
   events: EvidenceEvent[]
 ) {
   const dir = path.join(recordingsDir, session.id);
@@ -122,4 +122,34 @@ test("studio export of the latest todo session does not pack the previous leave 
   assert.doesNotMatch(contract, /duty-leave|submit-process/);
   assert.match(contract, /todo-page/);
   await rm(temporary, { recursive: true, force: true });
+});
+
+test("studio export rejects a session that is missing one of its requested operations", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "export-missing-operation-"));
+  const recordingsDir = path.join(temporary, "recordings");
+  const catalogDir = path.join(temporary, "catalog");
+  const todo = todoEvents();
+  const catalog = finalizeCapabilities(buildCapabilityCandidates(todo), todo);
+  try {
+    await writeJson(path.join(catalogDir, "capabilities.json"), catalog);
+    await writeSession(recordingsDir, {
+      id: "todo-now",
+      startUrl: TODO_PAGE,
+      startedAt: "2026-09-04T02:36:00.000Z",
+      expectedOperations: ["query", "create"]
+    }, todo);
+    const studio = new StudioService({
+      rootDir: temporary,
+      dataDir: temporary,
+      recordingsDir,
+      catalogDir,
+      profileDir: path.join(temporary, "profile"),
+      maxResponseBytes: 32_768,
+      headless: true,
+      openaiModel: "test"
+    });
+    await assert.rejects(studio.exportManaged("待办任务", true, "todo-now"), /要求包含「新建」/);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 });

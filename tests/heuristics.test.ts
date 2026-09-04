@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { inferOperation, normalizeUrl } from "../src/inference/heuristics.js";
+import { inferOperation, inferUiOperationIntent, normalizeUrl } from "../src/inference/heuristics.js";
 import type { NetworkEvidence } from "../src/domain.js";
 
 function event(method: string, url: string): NetworkEvidence {
@@ -56,4 +56,28 @@ test("classifies common methods", () => {
   balance.request.query = { leaveType: "1" };
   balance.response = { status: 200, headers: {}, body: { success: true, data: { remainingDays: 8 } } };
   assert.equal(inferOperation(balance), "query");
+});
+
+test("classifies the business operation the person actually selected on a page", () => {
+  assert.equal(inferUiOperationIntent("搜索", "https://x.test/oa/seal/list"), "query");
+  assert.equal(inferUiOperationIntent("新增", "https://x.test/oa/seal/list"), "create");
+  assert.equal(inferUiOperationIntent("修改", "https://x.test/oa/seal/list"), "update");
+  assert.equal(inferUiOperationIntent("删除", "https://x.test/oa/seal/list"), "delete");
+  assert.equal(inferUiOperationIntent("提交审批", "https://x.test/oa/doc/list"), "review");
+  assert.equal(inferUiOperationIntent("撤销申请", "https://x.test/oa/leave/list"), "action");
+  assert.equal(inferUiOperationIntent("保存", "https://x.test/oa/seal/form/add/seal_apply"), "create");
+  assert.equal(inferUiOperationIntent("保存", "https://x.test/oa/seal/form/edit/42"), "update");
+  assert.equal(inferUiOperationIntent("重置", "https://x.test/oa/seal/list"), undefined);
+});
+
+test("a save request from an add page stays create even when a nearby field label contains list", () => {
+  const create = event("POST", "https://x.test/prod-api/oa/sealApply");
+  create.pageUrl = "https://x.test/oa/commonApply/sealApply/form/add/seal_apply";
+  create.request.body = { billType: "seal_apply", sealId: "recorded-id" };
+  create.response = { status: 200, headers: {}, body: { code: 200, data: { id: "created-id" } } };
+  assert.equal(inferOperation(create, {
+    text: "保存",
+    label: "00抄送列表选择抄送用户",
+    pageUrl: create.pageUrl
+  } as any), "create");
 });

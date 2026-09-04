@@ -14,6 +14,31 @@ export const ASK_KEY = /^(sys_query|userQuery|question|prompt|queryText|askText)
 const READ_LAST = /^(get|select|query|search|find|list|page|load|fetch)/i;
 const READ_SUFFIX = /(?:List|Page|Search|Query|Find)$/;
 
+const UI_QUERY = /^(搜索|查询|检索|查看|详情|预览|search|query|find|view|detail)$/i;
+const UI_CREATE = /^(新增|新建|创建|创建申请|添加|add|new|create)(?:\S*)$/i;
+const UI_UPDATE = /^(修改|编辑|更新|设计表单|绑定流程|modify|edit|update)(?:\S*)$/i;
+const UI_DELETE = /^(删除|移除|作废|注销|delete|remove|destroy)(?:\S*)$/i;
+const UI_REVIEW = /^(审核|审批|提交审批|通过|驳回|拒绝|复核|approve|approval|audit|review|reject|pass)(?:\S*)$/i;
+const UI_DOWNLOAD = /^(导出|下载|export|download)(?:\S*)$/i;
+const UI_ACTION = /^(撤销|撤回|签章|反馈|跟踪|重新计算|recalculate|withdraw|revoke|sign)(?:\S*)$/i;
+const UI_COMMIT = /^(保存|提交|确定|申请|save|submit|confirm|apply)$/i;
+
+export function inferUiOperationIntent(text?: string, pageUrl = ""): OperationKind | undefined {
+  const label = String(text || "").replace(/\s+/g, "").replace(/^[^A-Za-z0-9\u4e00-\u9fff]+/, "");
+  if (!label || /^(重置|取消|关闭|返回|reset|cancel|close|back)$/i.test(label)) return undefined;
+  if (UI_QUERY.test(label)) return "query";
+  if (UI_CREATE.test(label)) return "create";
+  if (UI_UPDATE.test(label)) return "update";
+  if (UI_DELETE.test(label)) return "delete";
+  if (UI_REVIEW.test(label)) return "review";
+  if (UI_DOWNLOAD.test(label)) return "download";
+  if (UI_ACTION.test(label)) return "action";
+  if (!UI_COMMIT.test(label)) return undefined;
+  if (/(?:^|[/_-])(add|new|create)(?:[/_?-]|$)|新增|新建|创建/i.test(pageUrl)) return "create";
+  if (/(?:^|[/_-])(edit|modify|update)(?:[/_?-]|$)|修改|编辑/i.test(pageUrl)) return "update";
+  return "action";
+}
+
 function requestParams(event: NetworkEvidence) {
   const query = event.request.query && typeof event.request.query === "object" ? event.request.query : {};
   const body = event.request.body;
@@ -99,6 +124,8 @@ export function inferOperation(event: NetworkEvidence, ui?: UiEvidence): Operati
   if (DOWNLOAD.test(endpoint)) return "download";
   if (method === "GET" || method === "HEAD") return "query";
   if (CREATE.test(endpoint) || /submit-process|start-process|startProcess/i.test(endpoint)) return "create";
+  const uiIntent = inferUiOperationIntent(ui?.text || ui?.label, ui?.pageUrl || event.pageUrl || "");
+  if (uiIntent) return uiIntent;
   if (CREATE.test(actionSignal)) return "create";
   if (REVIEW.test(actionSignal) || (REVIEW.test(pageSignal) && REVIEW.test(actionSignal))) return "review";
   if (DELETE.test(actionSignal)) return "delete";

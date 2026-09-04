@@ -1,10 +1,21 @@
-import type { CapabilityContract, EvidenceEvent, ReviewFinding, ReviewNext, ReviewReport, ReviewStage } from "../domain.js";
+import type { CapabilityContract, EvidenceEvent, OperationKind, ReviewFinding, ReviewNext, ReviewReport, ReviewStage } from "../domain.js";
 import { evidenceSample, isAssembledObjectField, isExecutableRule, parseComputedRule, unsoundComputedOperands } from "../inference/field-derivation.js";
 import { queryCandidateForField } from "../inference/candidate-sources.js";
 import { flattenRequestValues, isPaginationField, looksPickerField } from "../inference/field-resolver.js";
 import { capabilitiesForSession, isCandidateSourceCapability, isNoiseCapability, sessionCatalogSlice, summarizeCatalog } from "../inference/export-scope.js";
 
 const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload", "action"]);
+const OPERATION_LABEL: Partial<Record<OperationKind, string>> = {
+  query: "查询",
+  create: "新建",
+  update: "修改",
+  review: "审核",
+  delete: "删除",
+  authenticate: "登录",
+  upload: "上传",
+  download: "下载",
+  action: "操作"
+};
 const NEXT_RANK: Record<ReviewNext, number> = { "re-record": 0, "re-analyze": 1, manual: 2, export: 3 };
 const NEXT_LABEL: Record<ReviewNext, string> = {
   "re-record": "回到页面补录",
@@ -96,7 +107,11 @@ function findingFromCheck(capability: CapabilityContract, check: CapabilityContr
   };
 }
 
-export function reviewCatalog(capabilities: CapabilityContract[], events: EvidenceEvent[] = []): ReviewReport {
+export function reviewCatalog(
+  capabilities: CapabilityContract[],
+  events: EvidenceEvent[] = [],
+  expectedOperations: OperationKind[] = []
+): ReviewReport {
   const { primary, lookups } = summarizeCatalog(capabilities);
   const neededLookups = lookups.filter(item => isCandidateSourceCapability(item, capabilities) && !isNoiseCapability(item));
   const findings: ReviewFinding[] = [];
@@ -111,7 +126,32 @@ export function reviewCatalog(capabilities: CapabilityContract[], events: Eviden
     });
   }
 
+  const actualOperations = new Set(primary.map(item => item.operation));
+  for (const operation of [...new Set(expectedOperations)].filter(item => item !== "unknown")) {
+    if (actualOperations.has(operation)) continue;
+    const label = OPERATION_LABEL[operation] || operation;
+    findings.push({
+      code: "missing-expected-operation",
+      severity: "block",
+      stage: "record",
+      next: "re-record",
+      message: `本次录制要求包含「${label}」，但没有找到对应且可验证的主能力。请回到该页面真实完成一次${label}并取得成功响应后再导出。`
+    });
+  }
+
   for (const capability of [...primary, ...neededLookups]) {
+    for (const binding of capability.bindings.filter(item => item.fromCapabilityId === capability.id)) {
+      findings.push({
+        code: "binding-structure-valid",
+        severity: "block",
+        stage: "analyze",
+        next: "re-analyze",
+        capabilityId: capability.id,
+        capabilityTitle: capability.title,
+        fieldPath: binding.toPath,
+        message: `字段 ${binding.toPath} 错误地从当前能力自身 ${binding.fromPath} 取值，执行时会形成循环依赖。请依据原始录制证据重新分析。`
+      });
+    }
     if (capability.validation.status === "verified") continue;
     const failed = capability.validation.checks.filter(check => !check.ok);
     if (failed.length) {
@@ -219,12 +259,13 @@ export function reviewNextLabel(next: ReviewNext) {
 export function reviewSession(
   catalog: CapabilityContract[],
   allEvents: EvidenceEvent[],
-  sessionEvents: EvidenceEvent[]
+  sessionEvents: EvidenceEvent[],
+  expectedOperations: OperationKind[] = []
 ) {
   const scoped = sessionCatalogSlice(catalog, allEvents, sessionEvents);
   return {
     capabilities: scoped,
-    review: reviewCatalog(scoped, allEvents)
+    review: reviewCatalog(scoped, allEvents, expectedOperations)
   };
 }
 

@@ -174,6 +174,7 @@ export class SkillLibrary {
   async invocation(name: string, goal: string) {
     const record = (await this.list()).find(item => item.name === name);
     if (!record) throw new Error("Skill 不存在");
+    if (record.status === "frozen") throw new Error("Skill 已冻结，不能调用；请先重新录制并导出完整版本，或明确解除冻结");
     if (!goal.trim()) throw new Error("请描述要完成的业务目标");
     return {
       record,

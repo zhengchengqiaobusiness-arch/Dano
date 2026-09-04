@@ -37,6 +37,12 @@ export function normalizeSkillName(value: string, capabilities: CapabilityContra
   const primary = capabilities.filter(item => isPrimaryCapability(item, capabilities));
   const resources = [...new Set(primary.map(item => resourceSlugFromPath(item.transport.pathTemplate || "")).filter(Boolean))];
   if (resources.length === 1) return resources[0]!;
+  const routes = buildApprovedRoutes(capabilities);
+  if (routes.length === 1) {
+    const target = capabilities.find(item => item.id === routes[0]!.targetCapabilityId);
+    const routeResource = target && resourceSlugFromPath(target.transport.pathTemplate || "");
+    if (routeResource) return routeResource;
+  }
   return `skill-${digest}`;
 }
 

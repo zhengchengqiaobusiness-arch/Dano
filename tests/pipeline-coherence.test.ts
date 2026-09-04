@@ -155,6 +155,42 @@ test("reanalyze keeps verified shared lookups and resets this page's primaries",
   assert.equal(next.find(item => item.transport.pathTemplate.includes("/system/user/page"))?.validation.status, "verified");
 });
 
+test("reanalyze drops impossible self-bindings when a transport is reclassified", () => {
+  const old = cap({
+    id: "query-post-seal",
+    operation: "query",
+    transport: { method: "POST", urlTemplate: "https://x/oa/seal", origin: "https://x", pathTemplate: "/oa/seal" },
+    bindings: [{
+      id: "self",
+      fromCapabilityId: "query-post-seal",
+      fromPath: "$.data.billType",
+      toPath: "$.billType",
+      confidence: 1,
+      evidenceIds: ["net-create"],
+      approved: true
+    }],
+    inputForm: [{
+      path: "$.billType", name: "billType", label: "billType", valueType: "string", source: "binding",
+      required: false, requiredBasis: "not-observed", systemHandled: true, sourceDetail: "旧的错误自绑定",
+      widget: "text", defaultRule: "from:query-post-seal:$.data.billType"
+    }]
+  });
+  const incoming = cap({
+    id: "create-post-seal",
+    operation: "create",
+    transport: old.transport,
+    inputForm: [{
+      path: "$.billType", name: "billType", label: "billType", valueType: "string", source: "system",
+      required: false, requiredBasis: "not-observed", systemHandled: true, sourceDetail: "录制常量",
+      widget: "text", defaultRule: "literal:seal_apply"
+    }]
+  });
+  const [next] = reanalyzeIncoming([incoming], [old]);
+  assert.equal(next?.operation, "create");
+  assert.deepEqual(next?.bindings, []);
+  assert.equal(next?.inputForm[0]?.defaultRule, "literal:seal_apply");
+});
+
 test("review follows the analyzed session instead of a newer unrelated recording", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "pipeline-review-session-"));
   const recordingsDir = path.join(temporary, "recordings");

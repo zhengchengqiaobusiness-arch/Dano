@@ -6,7 +6,7 @@ import { defaultSkillOutputRoot, loadConfig } from "./config.js";
 import { BrowserRecorder } from "./browser/recorder.js";
 import { id, readJson, readJsonl, writeJson } from "./utils.js";
 import { buildCapabilityCandidates } from "./inference/build-candidates.js";
-import { finalizeSessionSlice, sealWriteCapabilities, sessionExportReady } from "./inference/finalize-capabilities.js";
+import { finalizeSessionSlice, sealWriteCapabilities } from "./inference/finalize-capabilities.js";
 import { OpenAIReasoner } from "./llm/openai.js";
 import { fallbackPlan } from "./planner/fallback.js";
 import { applyPlanPolicy } from "./planner/policy.js";
@@ -56,10 +56,10 @@ export class StudioService {
     return path.join(this.config.catalogDir, "capabilities.json");
   }
 
-  async startRecording(url: string, name?: string) {
+  async startRecording(url: string, name?: string, expectedOperations: OperationKind[] = []) {
     if (this.recorder.isActive()) await this.stopRecording();
     this.sessionListCache = undefined;
-    return this.recorder.start(url, name);
+    return this.recorder.start(url, name, undefined, expectedOperations);
   }
 
   async stopRecording() {
@@ -173,7 +173,7 @@ export class StudioService {
     const extraEvents = extraIds.length
       ? (await Promise.all(extraIds.map(id => this.sessionEvents(id)))).flat()
       : [];
-    return { current, scopeEvents, events: extraEvents.length ? [...scopeEvents, ...extraEvents] : scopeEvents, catalog };
+    return { current, session, scopeEvents, events: extraEvents.length ? [...scopeEvents, ...extraEvents] : scopeEvents, catalog };
   }
 
   async capabilities(): Promise<CapabilityContract[]> {
@@ -216,12 +216,37 @@ export class StudioService {
   }
 
   async review(sessionId?: string) {
-    const { current, scopeEvents, events, catalog } = await this.scopedEvidence(sessionId);
-    await this.rememberAnalyzedSession(current);
+    let scoped = await this.scopedEvidence(sessionId);
+    await this.rememberAnalyzedSession(scoped.current);
+    let result = await this.reviewScopedEvidence(scoped);
+    const seen = new Set<string>();
+
+    // Backend interpretation failures are repaired from the authoritative recording first.
+    // This is deterministic and does not repeat a paid model call.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const repairable = result.review.findings.filter(finding => finding.next === "re-analyze");
+      if (!repairable.length || !scoped.current) break;
+      const signature = repairable.map(finding => `${finding.code}:${finding.capabilityId || ""}:${finding.fieldPath || ""}`).sort().join("|");
+      if (seen.has(signature)) break;
+      seen.add(signature);
+      await this.analyze(scoped.current, false);
+      scoped = await this.scopedEvidence(scoped.current);
+      result = await this.reviewScopedEvidence(scoped);
+    }
+    return result;
+  }
+
+  private async reviewScopedEvidence(scoped: {
+    session?: RecordingSession;
+    scopeEvents: EvidenceEvent[];
+    events: EvidenceEvent[];
+    catalog: CapabilityContract[];
+  }) {
+    const { session, scopeEvents, events, catalog } = scoped;
     const slice = sessionCatalogSlice(catalog, events, scopeEvents);
     const validated = finalizeSessionSlice(slice, events, catalog);
     if (validated !== slice) await this.writeCatalog(mergeCatalogByTransport(validated, catalog));
-    return reviewSession(validated, events, scopeEvents);
+    return reviewSession(validated, events, scopeEvents, session?.expectedOperations);
   }
 
   async sealWrites() {
@@ -234,16 +259,10 @@ export class StudioService {
   }
 
   private async exportCatalog(sessionId?: string) {
-    const { current, scopeEvents, events, catalog } = await this.scopedEvidence(sessionId);
-    await this.rememberAnalyzedSession(current);
-    const slice = sessionCatalogSlice(catalog, events, scopeEvents);
-    if (sessionExportReady(slice)) return { catalog: slice, events };
-    const finalized = finalizeSessionSlice(slice, events, catalog);
-    await this.writeCatalog(mergeCatalogByTransport(finalized, catalog));
-    return {
-      catalog: finalized,
-      events
-    };
+    const reviewed = await this.review(sessionId);
+    if (reviewed.review.status !== "passed") throw new Error(reviewed.review.summary);
+    const { events } = await this.scopedEvidence(sessionId);
+    return { catalog: reviewed.capabilities, events };
   }
 
   async routes() {

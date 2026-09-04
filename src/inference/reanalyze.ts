@@ -38,6 +38,9 @@ export function reanalyzeIncoming(incoming: CapabilityContract[], existing: Capa
   return incoming.map(candidate => {
     const old = existingByTransport.get(catalogTransportKey(candidate));
     if (!old) return candidate;
+    const bindings = (old.bindings || []).filter(binding =>
+      binding.fromCapabilityId !== old.id && binding.fromCapabilityId !== candidate.id
+    );
     const operation = old.editing?.operation === "manual" ? old.operation : candidate.operation;
     const sideEffect = WRITE_OPERATIONS.has(operation);
     const manualPaths = new Set(old.editing?.fieldPaths || []);
@@ -49,7 +52,7 @@ export function reanalyzeIncoming(incoming: CapabilityContract[], existing: Capa
           const previous = old.inputForm.find(item => item.path === field.path);
           return previous && manualPaths.has(field.path) ? { ...previous } : { ...field };
         }),
-      old.bindings || []
+      bindings
     );
     if (keepVerified) {
       return {
@@ -58,7 +61,7 @@ export function reanalyzeIncoming(incoming: CapabilityContract[], existing: Capa
         description: old.editing?.description === "manual" ? old.description : candidate.description,
         inputForm,
         evidence: mergeEvidence(old.evidence, candidate.evidence),
-        bindings: old.bindings || [],
+        bindings,
         validation: old.validation,
         editing: old.editing || candidate.editing
       };
@@ -75,7 +78,7 @@ export function reanalyzeIncoming(incoming: CapabilityContract[], existing: Capa
         reason: sideEffect ? "该操作会改变业务或文件数据" : undefined
       },
       inputForm,
-      bindings: old.bindings || [],
+      bindings,
       validation: { version: 2, status: "candidate", checks: [{ name: "reanalyze", ok: false, detail: "录制证据已重新分析，需要再次验证" }] },
       editing: old.editing || candidate.editing
     };

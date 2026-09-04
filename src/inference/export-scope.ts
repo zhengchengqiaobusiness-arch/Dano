@@ -192,6 +192,7 @@ export function reviewSessionIds(
 
 export function isPrimaryCapability(capability: CapabilityContract, catalog: CapabilityContract[] = []) {
   if (isNoiseCapability(capability)) return false;
+  if (capability.operation === "download") return true;
   if (isWriteCapability(capability)) return true;
   if (capability.operation !== "query") return false;
   const path = capability.transport.pathTemplate || capability.transport.urlTemplate || "";

@@ -283,6 +283,7 @@ test("manages export versions, freezing and recoverable deletion", async () => {
     assert.equal(first.version, 1);
     assert.match(first.name, /^orders-sk_/);
     await library.setFrozen(first.name, true, true);
+    await assert.rejects(() => library.invocation(first.name, "查询订单"), /已冻结/);
     const second = await library.export("orders", capabilities, true);
     assert.equal(second.version, 2);
     assert.notEqual(second.name, first.name);

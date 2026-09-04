@@ -73,6 +73,24 @@ export function flattenRequestValues(value: unknown, prefix = "$"): Array<{ path
   );
 }
 
+function richTextPlain(value: unknown) {
+  if (typeof value !== "string" || !/<\/?[a-z][^>]*>/i.test(value)) return undefined;
+  return value
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(?:p|div|li|tr|h[1-6])\s*>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#(?:39|x27);/gi, "'")
+    .replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_match, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function sameValue(left: unknown, right: unknown) {
   if (left === undefined || left === null || right === undefined || right === null || right === "") return false;
   if (Object.is(left, right)) return true;
@@ -95,6 +113,12 @@ export function sameValue(left: unknown, right: unknown) {
     if (leftClock && rightClock) return leftClock === rightClock;
   }
   if (typeof left === "number" || typeof right === "number") return Number(left) === Number(right);
+  const leftRich = richTextPlain(left);
+  const rightRich = richTextPlain(right);
+  if (leftRich !== undefined || rightRich !== undefined) {
+    const plain = (value: unknown, rich?: string) => rich ?? String(value).replace(/\s+/g, " ").trim();
+    return plain(left, leftRich) === plain(right, rightRich);
+  }
   return String(left) === String(right);
 }
 
@@ -704,16 +728,16 @@ function observedLabel(field: InputFormField, matched?: UiObservation) {
   return field.name;
 }
 
-function staticFromList(list: RecordedList | undefined) {
+function staticFromList(list: RecordedList | undefined): Array<{ value: unknown; label: string }> | undefined {
   if (!list || list.rows.length < 2 || list.rows.length > 40) return undefined;
   const values = list.rows
-    .map(row => {
+    .map<{ value: unknown; label: string } | undefined>(row => {
       const label = rowDisplay(row);
       const value = rowIdentity(row);
       if (label === undefined || value === undefined || value === null || value === "") return undefined;
       return { value, label: String(label) };
     })
-    .filter((item): item is { value: unknown; label: string } => Boolean(item));
+    .filter((item): item is { value: unknown; label: string } => item !== undefined);
   return values.length >= 2 ? values : undefined;
 }
 
@@ -959,7 +983,11 @@ export function bindLeftoverFields(
   owner?: UiEvidence
 ): InputFormField[] {
   const leftoverObs = leftoverEditable(fields, observations);
-  const leftoverFields = fields.filter(field => field.source !== "caller" && !PAGE_NAME.test(field.name) && !isReadonlyBound(field));
+  const leftoverFields = fields.filter(field => {
+    if (field.source === "caller" || PAGE_NAME.test(field.name) || isReadonlyBound(field)) return false;
+    const value = requestValueAt(sample, field.path);
+    return !looksInvariantConstant(field, value) || leftoverExplainsValue(field, value, observations, fields);
+  });
   if (leftoverObs.length === 1 && leftoverFields.length === 1) {
     const field = leftoverFields[0]!;
     const observation = leftoverObs[0]!;
@@ -1047,7 +1075,10 @@ export function assignUniqueFromSamples(
   samples: unknown[],
   lists: RecordedList[] = []
 ) {
-  return samples.reduce((current, sample) => assignUniqueRemaining(current, observations, sample, lists), fields);
+  return samples.reduce<InputFormField[]>(
+    (current, sample) => assignUniqueRemaining(current, observations, sample, lists),
+    fields
+  );
 }
 
 function uniqueAssignment<TField, TObs>(
@@ -1333,6 +1364,7 @@ function refineSharedCallerLabels(
     groups.set(field.label!, [...(groups.get(field.label!) || []), field]);
   }
   const relabel = new Map<string, string>();
+  const derivedCompanions = new Map<string, InputFormField>();
   for (const [label, group] of groups) {
     if (group.length < 2) continue;
     const used = new Set<string>();
@@ -1355,14 +1387,47 @@ function refineSharedCallerLabels(
     }
     const still = group.filter(field => (relabel.get(field.path) || field.label) === label);
     if (still.length > 1) {
+      const explicitlyNamed = still.filter(field => observations.some(item => item.name && uiNameMatches(item.name, field.name)));
+      const candidateBacked = still.filter(field => Boolean(field.candidates));
+      const stableIds = still.filter(field => /(?:^|[._\[])id(?:\]|$)|id$/i.test(field.name));
+      const canonical = explicitlyNamed.length === 1
+        ? explicitlyNamed[0]
+        : candidateBacked.length === 1
+          ? candidateBacked[0]
+          : stableIds.length === 1
+            ? stableIds[0]
+            : undefined;
       for (const field of still) {
+        if (field === canonical) continue;
+        const candidates = canonical?.candidates?.type === "static" ? canonical.candidates.values : [];
+        const canonicalValue = canonical ? requestValueAt(sample, canonical.path) : undefined;
+        const fieldValue = requestValueAt(sample, field.path);
+        const selected = candidates.find(option => sameValue(option.value, canonicalValue));
+        if (selected && sameValue(selected.label, fieldValue)) {
+          derivedCompanions.set(field.path, {
+            ...field,
+            source: "system",
+            systemHandled: true,
+            required: false,
+            requiredBasis: "not-observed",
+            defaultRule: undefined,
+            candidates: undefined,
+            widget: "text",
+            sourceDetail: `页面与「${label}」共用一个选择器；该伴随字段由已选项自动带出，调用方不要重复输入`
+          });
+          continue;
+        }
         const qualified = qualifySharedLabel(label, field, still);
         if (qualified && qualified !== label) relabel.set(field.path, qualified);
       }
     }
   }
-  if (!relabel.size) return fields;
-  return fields.map(field => relabel.has(field.path) ? { ...field, label: relabel.get(field.path)! } : field);
+  if (!relabel.size && !derivedCompanions.size) return fields;
+  return fields.map(field => {
+    const companion = derivedCompanions.get(field.path);
+    if (companion) return companion;
+    return relabel.has(field.path) ? { ...field, label: relabel.get(field.path)! } : field;
+  });
 }
 
 export function finalizeCallerFields(
@@ -1420,7 +1485,7 @@ export function promoteUnboundFillable(
   });
   const labelUses = new Map<string, number>();
   for (const item of matches) {
-    if (item.matching.length !== 1 || looksReadonly(item.matching[0])) continue;
+    if (item.matching.length !== 1 || looksReadonly(item.matching[0]!)) continue;
     const label = item.matching[0]!.label || "";
     if (!label) continue;
     labelUses.set(label, (labelUses.get(label) || 0) + 1);

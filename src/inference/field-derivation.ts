@@ -480,7 +480,7 @@ function buildLookupIndex(events: EvidenceEvent[], catalog: CapabilityContract[]
     index.push({
       evidenceIds,
       capability,
-      leaves: paths.map(path => ({ path })),
+      leaves: paths.map(path => ({ path, value: undefined })),
       leavesByValue: new Map(),
       isPageQuery: isPageQuery(capability),
       isPrimary: isPrimary(capability)
@@ -503,6 +503,7 @@ function fromApiMatch(
   const valueHits: LookupHit[] = [];
   for (const entry of index) {
     const { event, capability } = entry;
+    if (write && capability.id === write.id) continue;
     for (const leaf of matchingLeaves(entry, value)) {
       if (isEnvelopePath(leaf.path, field.name)) continue;
       if (leaf.value !== undefined && !sameDerivedValue(leaf.value, value)) continue;
@@ -540,6 +541,7 @@ function fromApiMatch(
 
   const affinityHits: LookupHit[] = [];
   for (const entry of index) {
+    if (write && entry.capability.id === write.id) continue;
     if (entry.isPageQuery && entry.isPrimary) continue;
     for (const leaf of entry.leaves) {
       if (isEnvelopePath(leaf.path, field.name)) continue;
