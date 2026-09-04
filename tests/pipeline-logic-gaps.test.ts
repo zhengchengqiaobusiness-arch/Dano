@@ -412,10 +412,10 @@ test("export after a passed review does not reload other-page history or rewrite
   await writeSession(recordingsDir, { id: "order-now", startUrl: ORDER_PAGE, startedAt: "2026-09-04T12:00:00.000Z" }, current);
   const studio = studioOf(temporary, recordingsDir, catalogDir);
   await studio.review("order-now");
-  const started = Date.now();
+  await rm(recordingsDir, { recursive: true, force: true });
+  await rm(path.join(catalogDir, "capabilities.json"), { force: true });
   const result = await studio.export("订单", path.join(temporary, "dist", "skills"), [], "order-now");
-  const elapsed = Date.now() - started;
   assert.ok(result.dir);
-  assert.ok(elapsed < 300, `export after review took ${elapsed}ms`);
+  await assert.rejects(readFile(path.join(catalogDir, "capabilities.json")), /ENOENT/);
   await rm(temporary, { recursive: true, force: true });
 });
