@@ -10,7 +10,6 @@ import { PageActions, type PageSnapshot } from "./page-actions.js";
 import { buildManualSteps, renderManualStepsMarkdown, type ManualStep } from "../record/manual-steps.js";
 import { killCommandLineMatches, killProcessTree } from "../process-lifecycle.js";
 import { persistOriginCredentials } from "../credentials/credential-store.js";
-import { inferOperation, inferUiOperationIntent } from "../inference/heuristics.js";
 
 const FORM_ACTION_BUDGET = 3;
 const EXPECTABLE_OPERATIONS = new Set<OperationKind>(["query", "create", "update", "review", "delete", "upload", "download", "action"]);
@@ -511,7 +510,6 @@ export class BrowserRecorder {
       failure: request.failure()?.errorText || "request failed"
     };
     await appendJsonl(active.eventsFile, event);
-    await this.rememberCorrelatedOperation(event, ui);
   }
 
   async loginPageState(): Promise<LoginPageState> {
@@ -590,23 +588,6 @@ export class BrowserRecorder {
       }
     };
     await appendJsonl(active.eventsFile, event);
-    await this.rememberCorrelatedOperation(event, ui);
-  }
-
-  private async rememberExpectedOperation(operation?: OperationKind) {
-    const active = this.active;
-    if (!active || !operation || !EXPECTABLE_OPERATIONS.has(operation)) return;
-    const expected = active.session.expectedOperations || [];
-    if (expected.includes(operation)) return;
-    active.session.expectedOperations = [...expected, operation];
-    await writeJson(path.join(path.dirname(active.eventsFile), "session.json"), active.session);
-  }
-
-  private async rememberCorrelatedOperation(event: NetworkEvidence, ui?: UiEvidence) {
-    if (!ui || (ui.eventType !== "click" && ui.eventType !== "submit")) return;
-    const actionableControl = ui.tag === "button" || ui.tag === "a" || ui.role === "button" || ui.role === "link" || ui.inputType === "submit";
-    if (!actionableControl) return;
-    await this.rememberExpectedOperation(inferOperation(event, ui));
   }
 
   private stabilizeUiEvent(event: UiEvidence): UiEvidence {
@@ -665,10 +646,6 @@ export class BrowserRecorder {
       active.manualEvents = [...active.manualEvents, event].slice(-200);
     }
     await appendJsonl(active.eventsFile, event);
-    if (event.eventType === "click" || event.eventType === "submit") {
-      const operation = inferUiOperationIntent(event.text || event.label, event.pageUrl);
-      await this.rememberExpectedOperation(operation);
-    }
     return event;
   }
 

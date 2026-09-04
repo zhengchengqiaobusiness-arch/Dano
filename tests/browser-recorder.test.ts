@@ -2849,7 +2849,7 @@ test("sidebar navigation can open another business page when no write form would
   }
 });
 
-test("operation inventory spans frames and actual operations extend the session completion contract", async () => {
+test("operation inventory spans frames without changing the caller-defined completion contract", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-operation-inventory-"));
   const server = http.createServer((request, response) => {
     if (request.url === "/commands/execute" && request.method === "POST") {
@@ -2885,7 +2885,12 @@ test("operation inventory spans frames and actual operations extend the session 
     openaiModel: "test"
   });
   try {
-    const session = await recorder.start(`http://127.0.0.1:${address.port}/`, "operation-inventory");
+    const session = await recorder.start(
+      `http://127.0.0.1:${address.port}/`,
+      "operation-inventory",
+      undefined,
+      ["query", "create"]
+    );
     const snapshot: any = await recorder.control({ action: "snapshot" });
     assert.deepEqual([...snapshot.availableOperations].sort(), ["create", "download", "query"], JSON.stringify(snapshot.operationInventory));
     assert.equal(snapshot.operationInventory.some((item: any) => item.operation === "update" && item.enabled === false), true);
@@ -2896,9 +2901,9 @@ test("operation inventory spans frames and actual operations extend the session 
     await recorder.control({ action: "click", selector: "#custom" });
     await recorder.control({ action: "wait", ms: 120 });
 
-    assert.deepEqual([...(recorder.activeSession()?.expectedOperations || [])].sort(), ["action", "create", "query"]);
+    assert.deepEqual([...(recorder.activeSession()?.expectedOperations || [])].sort(), ["create", "query"]);
     const stored = JSON.parse(await readFile(path.join(path.dirname(session.eventsFile), "session.json"), "utf8"));
-    assert.deepEqual([...stored.expectedOperations].sort(), ["action", "create", "query"]);
+    assert.deepEqual([...stored.expectedOperations].sort(), ["create", "query"]);
   } finally {
     if (recorder.isActive()) await recorder.stop().catch(() => {});
     await new Promise<void>(resolve => server.close(() => resolve()));
