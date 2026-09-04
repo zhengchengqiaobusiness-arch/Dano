@@ -70,15 +70,15 @@ button { color: inherit; }
 .browser-viewport.interactive .browser-frame { cursor: crosshair; }
 .manual-mode-hint { position: absolute; z-index: 2; top: 10px; left: 50%; transform: translateX(-50%); pointer-events: none; border: 1px solid rgba(69, 210, 173, .42); border-radius: 999px; padding: 6px 10px; background: rgba(7, 16, 14, .86); color: #bcebdc; box-shadow: 0 7px 22px rgba(0, 0, 0, .28); font-size: 9px; }
 .browser-viewport:has(.browser-frame.active) .empty-browser { display: none; }
-.empty-browser { position: absolute; inset: 0; margin: auto; height: fit-content; max-width: 510px; padding: 28px; text-align: center; }
+.empty-browser { position: absolute; inset: 0; margin: 0; height: auto; max-width: none; padding: 32px 48px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
 .orbit { width: 82px; height: 82px; margin: 0 auto 22px; display: grid; place-items: center; border: 1px solid #315548; border-radius: 50%; position: relative; }
 .orbit::before, .orbit::after { content: ""; position: absolute; inset: -9px; border: 1px solid rgba(69, 210, 173, .18); border-radius: 50%; transform: rotate(42deg) scaleY(.46); }
 .orbit::after { transform: rotate(-42deg) scaleY(.46); }
 .orbit span { color: var(--teal); font: 700 34px Georgia, serif; }
 .empty-kicker { color: var(--teal); font-size: 9px; letter-spacing: .22em; }
 .empty-browser h2 { margin: 8px 0 10px; font-size: 24px; }
-.empty-browser > p:not(.empty-kicker) { margin: 0 auto; color: var(--muted); line-height: 1.7; font-size: 13px; }
-.empty-features { margin-top: 20px; display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; }
+.empty-browser > p:not(.empty-kicker) { margin: 0 auto; max-width: 42em; color: var(--muted); line-height: 1.7; font-size: 13px; }
+.empty-features { margin-top: 20px; width: min(720px, 100%); display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; }
 .empty-features span { border: 1px solid var(--line); border-radius: 999px; padding: 6px 10px; color: #abc2b8; font-size: 10px; background: rgba(16, 29, 25, .72); }
 .agent-panel { display: grid; grid-template-rows: 42px minmax(0, 1fr) auto; overflow: hidden; }
 .session-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 14px; border-bottom: 1px solid var(--line-soft); background: #0b1613; }

@@ -6,6 +6,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { chromium } from "playwright";
 import { loadConfig } from "../config.js";
+import { formatProcessLog, killCommandLineMatches } from "../process-lifecycle.js";
 import { StudioService } from "../studio-service.js";
 import { isPageSessionId, sendEvent, WorkbenchPage } from "./workbench-page.js";
 
@@ -17,7 +18,7 @@ const sharedConfig = { ...loadConfig(), headless: true };
 const studio = new StudioService(sharedConfig);
 
 type BrowserInteractionMode = "manual" | "automatic";
-type RuntimeLogLevel = "PLAIN" | "CHECK" | "START" | "INFO" | "READY" | "BROWSER" | "PI" | "TOOL" | "WAIT" | "WARN" | "ERROR";
+type RuntimeLogLevel = "PLAIN" | "CHECK" | "START" | "INFO" | "READY" | "BROWSER" | "PI" | "TOOL" | "WAIT" | "WARN" | "ERROR" | "PROCESS";
 const pages = new Map<string, WorkbenchPage>();
 const pagesByToken = new Map<string, WorkbenchPage>();
 const secretValues = Object.entries(process.env)
@@ -106,18 +107,25 @@ function parseViewport(value: unknown) {
   return { width, height };
 }
 
+function forgetPage(page: WorkbenchPage) {
+  pages.delete(page.id);
+  pagesByToken.delete(page.browserToken);
+}
+
 function getOrCreatePage(id: string) {
   const existing = pages.get(id);
   if (existing) {
+    existing.cancelAbandon();
     existing.touch();
     void existing.ensureStarted().catch(error => {
       runtimeLog("ERROR", `Pi failed to start for ${id}: ${errorMessage(error)}`);
     });
     return existing;
   }
-  const page = new WorkbenchPage(id, sharedConfig, origin, sanitizeTranscript, runtimeLog);
+  const page = new WorkbenchPage(id, sharedConfig, origin, sanitizeTranscript, runtimeLog, gone => forgetPage(gone));
   pages.set(id, page);
   pagesByToken.set(page.browserToken, page);
+  runtimeLog("PROCESS", formatProcessLog("OPEN", "workbench-page", { page: id }));
   runtimeLog("PI", `Opened isolated workbench page ${id}.`);
   void page.ensureStarted().catch(error => {
     runtimeLog("ERROR", `Pi failed to start for ${id}: ${errorMessage(error)}`);
@@ -154,9 +162,13 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
       "Connection": "keep-alive"
     });
     response.write("retry: 1500\n\n");
+    page.cancelAbandon();
     page.clients.add(response);
     sendEvent(response, { type: "connected", pageSession: page.id });
-    request.on("close", () => page.clients.delete(response));
+    request.on("close", () => {
+      page.clients.delete(response);
+      if (page.clients.size === 0) page.scheduleAbandon("sse-disconnected");
+    });
     return;
   }
 
@@ -208,11 +220,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
   if (request.method === "POST" && pathname === "/api/skills/export") {
     const body = await readJsonBody(request);
     if (typeof body.name !== "string" || !body.name.trim()) throw new Error("请输入 Skill 名称");
-    const record = await studio.exportManaged(
-      body.name,
-      body.confirmed === true,
-      typeof body.sessionId === "string" ? body.sessionId : undefined
-    );
+    const record = await studio.exportManaged(body.name, body.confirmed === true);
     sendJson(response, 200, record);
     broadcastAll({ type: "skills_changed" });
     return;
@@ -251,7 +259,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     const page = requirePage(request);
     const body = await readJsonBody(request);
     if (body.mode !== undefined) page.setMode(parseBrowserMode(body.mode));
-    const session = await page.startRecording(parseBrowserUrl(body.url), body.name, parseViewport(body.viewport));
+    const session = await page.startRecording(parseBrowserUrl(body.url), body.name, parseViewport(body.viewport) || page.preferredViewport);
     runtimeLog("BROWSER", `${page.mode === "manual" ? "Manual" : "Pi automatic"} recording session started on ${page.id}.`);
     sendJson(response, 200, { session, state: await page.browserState() });
     page.broadcast({ type: "browser_changed" });
@@ -283,9 +291,8 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
 
   if (request.method === "POST" && pathname === "/api/browser/viewport") {
     const page = requirePage(request);
-    const size = await page.recorder.fitViewport(parseViewport(await readJsonBody(request)));
+    const size = await page.rememberViewport(parseViewport(await readJsonBody(request)));
     sendJson(response, 200, { viewport: size, state: await page.browserState() });
-    page.broadcast({ type: "browser_changed" });
     return;
   }
 
@@ -315,6 +322,14 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     return;
   }
 
+  if ((request.method === "POST" || request.method === "GET") && pathname === "/api/session/leave") {
+    const id = pageSessionIdFrom(request);
+    const page = isPageSessionId(id) ? pages.get(id) : undefined;
+    if (page) page.scheduleAbandon("page-closed");
+    sendJson(response, 200, { left: true, pageSession: id || null });
+    return;
+  }
+
   if (request.method === "POST" && pathname === "/api/chat") {
     const page = requirePage(request);
     const body = await readJsonBody(request);
@@ -330,7 +345,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
 
   if (request.method === "POST" && pathname === "/api/agent/abort") {
     const page = requirePage(request);
-    await page.pi.abort();
+    await page.abortWork("abort");
     sendJson(response, 200, { aborted: true });
     return;
   }
@@ -352,7 +367,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     const body = await readJsonBody(request);
     if (request.method === "POST" && pathname === "/internal/browser/start") {
       if (page.mode !== "automatic") throw new Error("当前是手动录制模式；请在前端切换到 Pi 自动点击后再让 Pi 启动浏览器");
-      sendJson(response, 200, await page.startRecording(parseBrowserUrl(body.url), body.name, parseViewport(body.viewport)));
+      sendJson(response, 200, await page.startRecording(parseBrowserUrl(body.url), body.name, parseViewport(body.viewport) || page.preferredViewport));
       page.broadcast({ type: "browser_changed" });
       return;
     }
@@ -421,23 +436,30 @@ const heartbeat = setInterval(() => {
 
 let shuttingDown = false;
 
-function shutdown() {
+async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
+  runtimeLog("PROCESS", formatProcessLog("CLOSE", "studio-server", { pid: process.pid, reason: "signal" }));
   clearInterval(heartbeat);
   try { broadcastAll({ type: "studio_shutdown" }); } catch { /* clients may already be gone */ }
-  for (const page of pages.values()) page.dispose();
+  await Promise.race([
+    Promise.allSettled([...pages.values()].map(page => page.dispose("studio-shutdown"))),
+    new Promise<void>(resolve => setTimeout(resolve, 8_000))
+  ]);
   pages.clear();
   pagesByToken.clear();
-  studio.recorder.disposeImmediate();
+  await studio.recorder.disposeAndKill("studio-shutdown");
+  const leftoverLog = (level: "PROCESS" | "WARN", message: string) => runtimeLog(level, message);
+  await killCommandLineMatches(sharedConfig.profileDir, leftoverLog);
+  await killCommandLineMatches(path.join(sharedConfig.rootDir, "node_modules", "@earendil-works", "pi-coding-agent"), leftoverLog);
   try { server.close(); } catch { /* already closed */ }
   process.exit(0);
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
-process.on("SIGHUP", shutdown);
-process.on("SIGBREAK", shutdown);
+process.on("SIGINT", () => { void shutdown(); });
+process.on("SIGTERM", () => { void shutdown(); });
+process.on("SIGHUP", () => { void shutdown(); });
+process.on("SIGBREAK", () => { void shutdown(); });
 
 async function packageVersion(relativePath: string) {
   try {
@@ -470,6 +492,7 @@ server.on("error", (error: NodeJS.ErrnoException) => {
 await logStartupEnvironment();
 
 server.listen(port, host, async () => {
+  runtimeLog("PROCESS", formatProcessLog("OPEN", "studio-server", { pid: process.pid }));
   runtimeLog("READY", `Pi Business Skill Studio is ready at ${origin}`);
   if (["1", "true", "yes"].includes(String(process.env.BSS_OPEN_UI || "").toLowerCase()) && process.platform === "win32") {
     spawn("cmd.exe", ["/d", "/c", "start", "", origin], {

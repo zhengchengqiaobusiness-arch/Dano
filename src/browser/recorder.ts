@@ -3,23 +3,28 @@ import { writeFile } from "node:fs/promises";
 import { chromium, type BrowserContext, type Browser, type Request, type Response, type Page } from "playwright";
 import type { EvidenceEvent, NetworkEvidence, RecordingSession, UiEvidence } from "../domain.js";
 import type { StudioConfig } from "../config.js";
-import { appendJsonl, ensureDir, id, readJsonl, writeJson } from "../utils.js";
-import { sessionBusinessPageKeys } from "../inference/export-scope.js";
+import { appendJsonl, ensureDir, id, writeJson } from "../utils.js";
 import { parsePossiblyJson, redactHeaders, redactValue } from "../security/redact.js";
 import { UI_RECORDER_SCRIPT } from "./page-script.js";
 import { PageActions, type PageSnapshot } from "./page-actions.js";
 import { buildManualSteps, renderManualStepsMarkdown, type ManualStep } from "../record/manual-steps.js";
+import { killCommandLineMatches, killProcessTree } from "../process-lifecycle.js";
 
 const FORM_ACTION_BUDGET = 3;
 const DEFAULT_VIEWPORT = { width: 1440, height: 960 };
+const MAX_PREVIEW_VIEWPORT = { width: 2560, height: 1600 };
 
 export function normalizePreviewViewport(input?: { width?: number; height?: number } | null) {
-  const width = Math.round(Number(input?.width));
-  const height = Math.round(Number(input?.height));
-  return {
-    width: Number.isFinite(width) ? Math.min(1920, Math.max(640, width)) : DEFAULT_VIEWPORT.width,
-    height: Number.isFinite(height) ? Math.min(1200, Math.max(400, height)) : DEFAULT_VIEWPORT.height
-  };
+  const rawWidth = Math.round(Number(input?.width));
+  const rawHeight = Math.round(Number(input?.height));
+  let width = Number.isFinite(rawWidth) && rawWidth >= 80 ? rawWidth : DEFAULT_VIEWPORT.width;
+  let height = Number.isFinite(rawHeight) && rawHeight >= 80 ? rawHeight : DEFAULT_VIEWPORT.height;
+  if (width > MAX_PREVIEW_VIEWPORT.width || height > MAX_PREVIEW_VIEWPORT.height) {
+    const scale = Math.min(MAX_PREVIEW_VIEWPORT.width / width, MAX_PREVIEW_VIEWPORT.height / height);
+    width = Math.max(1, Math.round(width * scale));
+    height = Math.max(1, Math.round(height * scale));
+  }
+  return { width, height };
 }
 
 const INSPECT_TARGET_IN_PAGE = new Function("el", String.raw`
@@ -64,6 +69,8 @@ const EMPTY_JPEG = Buffer.from(
 
 export class BrowserRecorder {
   private active?: ActiveRecording;
+  private browserPid?: number;
+  private browserLaunched = false;
   private actionBusy = 0;
   private readonly networkJobs = new Set<Promise<void>>();
   private previewInFlight?: Promise<Buffer>;
@@ -97,6 +104,10 @@ export class BrowserRecorder {
 
   isActive() {
     return Boolean(this.active);
+  }
+
+  browserProcessId() {
+    return this.browserPid;
   }
 
   activeSession() {
@@ -146,7 +157,7 @@ export class BrowserRecorder {
     }
     const buffer = await this.withTimeout<Buffer | undefined>(page.screenshot({
       type: "jpeg",
-      quality: 48,
+      quality: 62,
       fullPage: false,
       animations: "allow",
       caret: "hide"
@@ -234,6 +245,7 @@ export class BrowserRecorder {
       externalBrowser: false,
       guard: { exerciseFormCount: 0, submitFormCount: 0, failedKeys: [], followManualSteps: false }
     };
+    this.captureBrowserPid(context);
 
     await writeJson(path.join(dir, "session.json"), session);
     await this.instrument(context);
@@ -1022,6 +1034,15 @@ export class BrowserRecorder {
     ]).then(() => undefined);
   }
 
+  async disposeAndKill(_reason = "dispose") {
+    const closing = this.disposeImmediate();
+    await Promise.race([
+      closing,
+      new Promise<void>(resolve => setTimeout(resolve, 1_500))
+    ]);
+    await this.killBrowserProcess();
+  }
+
   async stop(): Promise<RecordingSession> {
     if (!this.active) throw new Error("No active recording");
     const active = this.active;
@@ -1036,18 +1057,42 @@ export class BrowserRecorder {
     this.layerHotUntil = 0;
     clearTimeout(this.inventoryTimer);
 
-    await this.drainNetwork();
-    active.session.stoppedAt = new Date().toISOString();
-    await this.writeManualStepsFile(active);
-    const events = await readJsonl<EvidenceEvent>(active.eventsFile);
-    active.session.pageKeys = sessionBusinessPageKeys(events, active.session.startUrl);
-    const dir = path.dirname(active.eventsFile);
-    await writeJson(path.join(dir, "session.json"), active.session);
-
-    if (!active.externalBrowser) {
-      await active.context.close().catch(() => {});
-      await active.browser?.close().catch(() => {});
+    try {
+      await this.drainNetwork();
+      active.session.stoppedAt = new Date().toISOString();
+      await this.writeManualStepsFile(active);
+      const dir = path.dirname(active.eventsFile);
+      await writeJson(path.join(dir, "session.json"), active.session);
+      if (!active.externalBrowser) {
+        await Promise.race([
+          Promise.all([
+            active.context.close().catch(() => {}),
+            active.browser?.close().catch(() => {})
+          ]),
+          new Promise<void>(resolve => setTimeout(resolve, 1_500))
+        ]);
+      }
+      return active.session;
+    } finally {
+      if (!active.externalBrowser) await this.killBrowserProcess();
     }
-    return active.session;
+  }
+
+  private captureBrowserPid(context: BrowserContext) {
+    this.browserLaunched = true;
+    try {
+      this.browserPid = context.browser()?.process()?.pid;
+    } catch {
+      this.browserPid = undefined;
+    }
+  }
+
+  private async killBrowserProcess() {
+    const pid = this.browserPid;
+    const launched = this.browserLaunched;
+    this.browserPid = undefined;
+    this.browserLaunched = false;
+    if (pid) await killProcessTree(pid);
+    if (launched) await killCommandLineMatches(this.config.profileDir);
   }
 }

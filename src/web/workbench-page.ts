@@ -2,13 +2,15 @@ import { randomBytes } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import path from "node:path";
 import { seedPageProfile, syncLoginState } from "../browser/login-profile.js";
-import { BrowserRecorder } from "../browser/recorder.js";
+import { BrowserRecorder, normalizePreviewViewport } from "../browser/recorder.js";
 import type { StudioConfig } from "../config.js";
+import { formatProcessLog } from "../process-lifecycle.js";
 import { PiRpcBridge } from "./pi-rpc.js";
 import { PiTranscript } from "./transcript.js";
 
 export type BrowserMode = "manual" | "automatic";
-export type PageLogLevel = "PLAIN" | "CHECK" | "START" | "INFO" | "READY" | "BROWSER" | "PI" | "TOOL" | "WAIT" | "WARN" | "ERROR";
+export type PageLogLevel = "PLAIN" | "CHECK" | "START" | "INFO" | "READY" | "BROWSER" | "PI" | "TOOL" | "WAIT" | "WARN" | "ERROR" | "PROCESS";
+export const PAGE_LEAVE_GRACE_MS = 3_000;
 
 const PAGE_SESSION_PATTERN = /^page_[A-Za-z0-9_-]{8,80}$/;
 
@@ -31,16 +33,20 @@ export class WorkbenchPage {
   mode: BrowserMode = "automatic";
   readonly clients = new Set<ServerResponse>();
   lastSeen = Date.now();
+  preferredViewport?: { width: number; height: number };
   private readonly sharedProfileDir: string;
   private readonly pageProfileDir: string;
   private starting?: Promise<void>;
+  private abandonTimer?: ReturnType<typeof setTimeout>;
+  private disposing?: Promise<void>;
 
   constructor(
     id: string,
     config: StudioConfig,
     origin: string,
     sanitize: (value: unknown) => unknown,
-    private readonly onLog: (level: PageLogLevel, message: unknown) => void
+    private readonly onLog: (level: PageLogLevel, message: unknown) => void,
+    private readonly onDisposed?: (page: WorkbenchPage, reason: string) => void
   ) {
     this.id = id;
     this.browserToken = randomBytes(32).toString("hex");
@@ -71,12 +77,35 @@ export class WorkbenchPage {
   async ensureStarted() {
     if (this.pi.status().ready || this.pi.status().running) return;
     if (!this.starting) {
-      this.starting = this.pi.start().catch(error => {
-        this.starting = undefined;
-        throw error;
-      });
+      this.starting = this.pi.start()
+        .then(() => {
+          const pid = this.pi.processId();
+          if (pid) this.onLog("PROCESS", formatProcessLog("OPEN", "pi-rpc", { pid, page: this.id }));
+        })
+        .catch(error => {
+          throw error;
+        })
+        .finally(() => {
+          this.starting = undefined;
+        });
     }
     await this.starting;
+  }
+
+  cancelAbandon() {
+    if (!this.abandonTimer) return;
+    clearTimeout(this.abandonTimer);
+    this.abandonTimer = undefined;
+  }
+
+  scheduleAbandon(reason: string, delayMs = PAGE_LEAVE_GRACE_MS) {
+    if (this.disposing) return;
+    this.cancelAbandon();
+    this.abandonTimer = setTimeout(() => {
+      this.abandonTimer = undefined;
+      if (this.clients.size > 0) return;
+      void this.dispose(reason);
+    }, delayMs);
   }
 
   async browserState() {
@@ -92,43 +121,101 @@ export class WorkbenchPage {
 
   async startRecording(url: string, name?: string, viewport?: { width?: number; height?: number }) {
     if (this.recorder.isActive()) {
-      await this.recorder.stop().catch(() => this.recorder.disposeImmediate());
+      const oldPid = this.recorder.browserProcessId();
+      await this.recorder.stop().catch(() => this.recorder.disposeAndKill("rerecord"));
+      this.onLog("PROCESS", formatProcessLog("CLOSE", "playwright-browser", { pid: oldPid, page: this.id, reason: "rerecord" }));
       await this.rememberLogin();
     }
     await seedPageProfile(this.sharedProfileDir, this.pageProfileDir);
-    return this.recorder.start(url, name || "web-session", viewport);
+    const size = viewport || this.preferredViewport;
+    if (size) this.preferredViewport = normalizePreviewViewport(size);
+    const session = await this.recorder.start(url, name || "web-session", this.preferredViewport);
+    this.onLog("PROCESS", formatProcessLog("OPEN", "playwright-browser", { pid: this.recorder.browserProcessId(), page: this.id }));
+    return session;
+  }
+
+  async rememberViewport(viewport?: { width?: number; height?: number }) {
+    const size = normalizePreviewViewport(viewport);
+    this.preferredViewport = size;
+    if (this.recorder.isActive()) await this.recorder.fitViewport(size);
+    return size;
   }
 
   async stopRecording() {
+    const pid = this.recorder.browserProcessId();
     const session = await this.recorder.stop();
+    this.onLog("PROCESS", formatProcessLog("CLOSE", "playwright-browser", { pid, page: this.id, reason: "stop-recording" }));
     await this.rememberLogin();
     return session;
+  }
+
+  async abortWork(reason = "abort") {
+    const pid = this.pi.processId();
+    if (this.pi.status().streaming) {
+      try {
+        await this.pi.abort(2_500);
+        if (this.pi.status().streaming) await new Promise(resolve => setTimeout(resolve, 200));
+        if (this.pi.status().streaming) throw new Error("abort did not stop streaming");
+        this.onLog("PROCESS", formatProcessLog("CLOSE", "pi-rpc-task", { pid, page: this.id, reason }));
+      } catch {
+        if (pid) {
+          await this.pi.stop();
+          this.onLog("PROCESS", formatProcessLog("CLOSE", "pi-rpc", { pid, page: this.id, reason: `${reason}-force` }));
+        }
+        await this.ensureStarted();
+      }
+    }
+    this.broadcast({ type: "agent_status", ready: this.pi.status().ready, streaming: false });
   }
 
   async reset() {
     this.epoch += 1;
     this.transcriptOpen = false;
-    if (this.recorder.isActive()) {
-      const closed = this.recorder.disposeImmediate();
+    await this.abortWork("clear");
+    if (this.recorder.isActive() || this.recorder.browserProcessId()) {
+      const pid = this.recorder.browserProcessId();
+      await this.recorder.disposeAndKill("clear");
+      this.onLog("PROCESS", formatProcessLog("CLOSE", "playwright-browser", { pid, page: this.id, reason: "clear" }));
       this.onLog("BROWSER", "Active recording was discarded so the next conversation starts clean.");
-      void Promise.resolve(closed).then(() => this.rememberLogin());
+      await this.rememberLogin();
     }
-    await this.pi.beginFreshConversation().catch(error => {
-      this.onLog("WARN", `Failed to start a new Pi session: ${error instanceof Error ? error.message : String(error)}`);
-    });
+    if (this.pi.status().ready) {
+      await this.pi.beginFreshConversation().catch(error => {
+        this.onLog("WARN", `Failed to start a new Pi session: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    } else {
+      await this.ensureStarted().catch(error => {
+        this.onLog("WARN", `Failed to restart Pi after clear: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
     this.transcript.clear();
     this.broadcast({ type: "agent_status", ready: this.pi.status().ready, streaming: false });
     this.broadcast({ type: "browser_changed" });
     this.broadcast({ type: "session_reset", epoch: this.epoch, pageSession: this.id });
   }
 
-  dispose() {
-    this.pi.stop();
-    void Promise.resolve(this.recorder.disposeImmediate()).then(() => this.rememberLogin());
+  async dispose(reason = "page-closed") {
+    if (this.disposing) return this.disposing;
+    this.disposing = this.disposeNow(reason);
+    return this.disposing;
+  }
+
+  private async disposeNow(reason: string) {
+    this.cancelAbandon();
+    this.transcriptOpen = false;
+    const piPid = this.pi.processId();
+    await this.pi.stop();
+    if (piPid) this.onLog("PROCESS", formatProcessLog("CLOSE", "pi-rpc", { pid: piPid, page: this.id, reason }));
+    const browserPid = this.recorder.browserProcessId();
+    await this.recorder.disposeAndKill(reason);
+    if (browserPid) this.onLog("PROCESS", formatProcessLog("CLOSE", "playwright-browser", { pid: browserPid, page: this.id, reason }));
+    await this.rememberLogin().catch(() => {});
     for (const client of this.clients) {
       try { client.end(); } catch { /* already closed */ }
     }
     this.clients.clear();
+    this.onLog("PROCESS", formatProcessLog("CLOSE", "workbench-page", { page: this.id, reason }));
+    this.onDisposed?.(this, reason);
   }
 
   private async rememberLogin() {

@@ -85,7 +85,8 @@ test("recording workbench can clear conversation history in one click", async ()
   assert.match(app, /studio_shutdown/);
   assert.doesNotMatch(app, /window\.close\(/);
   assert.match(server, /pathname === "\/api\/session\/clear"/);
-  assert.match(resetWorkbench, /this\.recorder\.disposeImmediate\(\)/);
+  assert.match(resetWorkbench, /this\.recorder\.disposeAndKill\("clear"\)/);
+  assert.match(resetWorkbench, /abortWork\("clear"\)/);
   assert.match(resetWorkbench, /beginFreshConversation/);
   assert.match(resetWorkbench, /this\.transcript\.clear\(\)/);
   assert.match(bridge, /async beginFreshConversation\(\)[\s\S]*type: "new_session"/);
@@ -143,11 +144,13 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
   assert.match(app, /function displayedFrameRect\(/);
   assert.match(app, /function previewPaneSize\(/);
   assert.match(app, /viewport: previewPaneSize\(\)/);
+  assert.match(app, /function rememberPaneViewport\(/);
   assert.match(app, /\/api\/browser\/viewport/);
   assert.match(app, /ResizeObserver/);
   assert.match(server, /pathname === "\/api\/browser\/viewport"/);
   assert.match(recorder, /async fitViewport\(/);
-  assert.match(page, /this\.recorder\.start\(url, name \|\| "web-session", viewport\)/);
+  assert.match(page, /this\.recorder\.start\(url, name \|\| "web-session", this\.preferredViewport\)/);
+  assert.match(css, /\.empty-browser\s*\{[^}]*max-width:\s*none/);
   assert.match(css, /\.browser-panel\s*\{[^}]*grid-template-rows:\s*40px minmax\(0,\s*1fr\)/);
   assert.doesNotMatch(css, /\.browser-footer/);
   assert.doesNotMatch(css, /\.browser-frame\s*\{[^}]*contain:\s*strict/);
@@ -239,6 +242,17 @@ test("refresh keeps a tab session while a new page starts isolated", async () =>
   assert.match(page, /seedPageProfile\(this\.sharedProfileDir, this\.pageProfileDir\)/);
   assert.match(page, /syncLoginState\(this\.pageProfileDir, this\.sharedProfileDir\)/);
   assert.match(page, /new PiRpcBridge/);
+  assert.match(page, /scheduleAbandon/);
+  assert.match(page, /async dispose\(/);
+  assert.match(page, /async abortWork\(/);
+  assert.match(server, /\/api\/session\/leave/);
+  assert.match(server, /page\.scheduleAbandon\("sse-disconnected"\)/);
+  assert.match(server, /page\.abortWork\("abort"\)/);
+  assert.match(server, /page\.dispose\("studio-shutdown"\)/);
+  assert.match(app, /function notifyPageLeave\(/);
+  assert.match(app, /navigator\.sendBeacon/);
+  assert.match(app, /pagehide/);
+  assert.doesNotMatch(app, /window\.close\(/);
 });
 
 test("skill catalog distinguishes handbook export from business spec dump", async () => {

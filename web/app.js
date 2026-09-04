@@ -56,7 +56,7 @@ const state = {
   manualQueue: Promise.resolve(), manualRefreshTimers: [], recordingAction: null, clearingSession: false,
   pollInFlight: false, frameLoading: false, frameBlobUrl: null, lastFrameAt: 0, frameEpoch: 0,
   lastStatusText: "", viewport: { width: 1440, height: 960 },
-  imeComposing: false, imeBuffer: "", imeTimer: null
+  imeComposing: false, imeBuffer: "", imeTimer: null, viewportSyncTimer: null
 };
 
 async function api(path, options = {}) {
@@ -373,15 +373,20 @@ function previewPaneSize() {
   return { width, height };
 }
 
-function syncPreviewViewport() {
+function rememberPaneViewport() {
   const size = previewPaneSize();
-  if (!size || !state.browserActive) return;
+  if (!size) return;
   const current = state.viewport;
-  if (current && Math.abs(current.width - size.width) < 8 && Math.abs(current.height - size.height) < 8) return;
+  if (current && Math.abs(current.width - size.width) < 2 && Math.abs(current.height - size.height) < 2) return;
   void api("/api/browser/viewport", { method: "POST", body: JSON.stringify(size) }).then(result => {
     if (result?.viewport) state.viewport = result.viewport;
-    void refreshBrowserFrame(true);
+    if (state.browserActive) void refreshBrowserFrame(true);
   }).catch(() => {});
+}
+
+function syncPreviewViewport() {
+  clearTimeout(state.viewportSyncTimer);
+  state.viewportSyncTimer = setTimeout(rememberPaneViewport, 160);
 }
 
 async function openBrowser(rawUrl) {
@@ -389,6 +394,7 @@ async function openBrowser(rawUrl) {
   const url = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`;
   await api("/api/browser/open", { method: "POST", body: JSON.stringify({ url, name: "web-session", mode: state.browserMode, viewport: previewPaneSize() }) });
   await pollBrowser();
+  rememberPaneViewport();
   showToast("录制已开始");
 }
 
@@ -475,6 +481,16 @@ async function abortAgent() {
   } catch (error) {
     state.agentAborting = false; renderAgentControls(); showToast(error.message);
   }
+}
+
+function notifyPageLeave() {
+  const id = pageSessionId();
+  const url = `/api/session/leave?pageSession=${encodeURIComponent(id)}`;
+  try {
+    const body = new Blob([JSON.stringify({ pageSession: id })], { type: "application/json" });
+    if (navigator.sendBeacon(url, body)) return;
+  } catch { /* fall through */ }
+  void fetch(url, { method: "POST", headers: pageHeaders(), body: "{}", keepalive: true }).catch(() => {});
 }
 
 function resetConfirmation() {
@@ -688,7 +704,7 @@ function connectEvents() {
     if (event.type === "session_patch") patchSessionItem(event);
     if (event.type === "session_replace") renderSessionItem(event.item);
     if (event.type === "ui_request") showUiRequest(event);
-    if (event.type === "browser_changed") void pollBrowser(true);
+    if (event.type === "browser_changed") void pollBrowser(true).then(() => rememberPaneViewport());
     if (event.type === "browser_mode") { state.browserMode = event.mode; renderBrowserMode(); }
     if (event.type === "skills_changed" && state.view === "skills") void loadSkills();
     if (event.type === "studio_shutdown") showToast("Studio 服务已停止，页面保留");
@@ -817,6 +833,7 @@ async function initialize() {
     elements.modelStatus.textContent = `${status.model || "由提供商选择模型"} · ${status.thinking}`;
     for (const item of status.sessionItems || []) renderSessionItem(item);
     state.browserMode = status.browser?.mode || state.browserMode; renderBrowserMode(); await pollBrowser();
+    rememberPaneViewport();
   } catch (error) { showToast(error.message); }
   connectEvents();
   if (elements.browserViewport && typeof ResizeObserver === "function") {
@@ -824,6 +841,7 @@ async function initialize() {
     observer.observe(elements.browserViewport);
   }
   window.addEventListener("resize", () => syncPreviewViewport());
+  window.addEventListener("pagehide", notifyPageLeave);
   setInterval(() => { if (!document.hidden && state.browserActive) void refreshBrowserFrame(); }, 240);
   setInterval(() => { if (!document.hidden) void pollBrowserState(); }, 2000);
 }
