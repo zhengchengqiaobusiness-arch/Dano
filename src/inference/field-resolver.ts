@@ -159,6 +159,8 @@ const SYNONYM_GROUPS = [
   /sys_query|userQuery|queryText|askText|(?:^|[^a-z])prompt(?:$|[^a-z])|(?:^|[^a-z])question(?:$|[^a-z])|问数|智能体聊天|聊天内容/i,
   /code|编码/i,
   /name|名称/i,
+  /category|classify|classification|分类|类别/i,
+  /processDefinition|processDefKey|definitionKey|所属流程|流程定义/i,
   /balance|remaining|remain|surplus|stock|inventory|quota|余额|剩余|库存/i
 ];
 
@@ -675,7 +677,7 @@ function asCaller(
     && !looksDateControl(matched || field)
     && !quantityObs
     && !picker;
-  const options = looksDateControl(matched || field) || quantityObs || picker
+  const options = looksText || looksDateControl(matched || field) || quantityObs || picker
     ? undefined
     : useStatic
       ? matched!.options!.map(item =>
@@ -1116,11 +1118,29 @@ function looksInvariantConstant(field: InputFormField, value: unknown) {
   return /^[a-z][a-z0-9_]*$/i.test(value) && /Type|Key|Code|Def/i.test(field.name);
 }
 
-function applyInvariantDefaults(fields: InputFormField[], sample: unknown): InputFormField[] {
+function leftoverExplainsValue(
+  field: InputFormField,
+  value: unknown,
+  observations: UiObservation[],
+  fields: InputFormField[]
+) {
+  if (value === undefined || value === null || value === "") return false;
+  return leftoverEditable(fields, observations).some(item =>
+    sameSynonymGroup(field, item)
+    || item.options?.some(option => sameValue(option.value, value) || sameValue(option.label, value))
+  );
+}
+
+function applyInvariantDefaults(
+  fields: InputFormField[],
+  sample: unknown,
+  observations: UiObservation[] = []
+): InputFormField[] {
   return fields.map(field => {
     if (field.source === "caller" || field.defaultRule) return field;
     const value = requestValueAt(sample, field.path);
     if (!looksInvariantConstant(field, value)) return field;
+    if (leftoverExplainsValue(field, value, observations, fields)) return field;
     return {
       ...field,
       defaultRule: literalRule(value),
@@ -1181,6 +1201,7 @@ export function bindByRecordedOptions(
   for (const field of leftoverFields) {
     const value = requestValueAt(sample, field.path);
     if (value === undefined || value === null || value === "") continue;
+    if (value === 0 || value === 1 || value === true || value === false || value === "0" || value === "1") continue;
     const hits = leftoverEditable(fields, observations).filter(item =>
       item.options?.some(option => sameValue(option.value, value) || sameValue(option.label, value))
     );
@@ -1219,7 +1240,8 @@ export function finalizeCallerFields(
     attachUnresolvedHints(relabeled, observations, sample, lists).map(field =>
       enrichFromObservations(field, observations, sample, lists)
     ),
-    sample
+    sample,
+    observations
   );
 }
 
@@ -1373,6 +1395,18 @@ function eventMatchesRequest(item: UiEvidence, sample: unknown) {
   return candidates.some(value => value !== undefined && value !== null && value !== "" && tokens.has(String(value)));
 }
 
+function formFitsRequest(form: NonNullable<UiEvidence["form"]>, sample: unknown) {
+  const requestNames = flattenRequestValues(sample).map(item => item.name);
+  const named = formNames(form);
+  const overlap = nameOverlap(form, requestNames);
+  const values = valueOverlap(form, sample);
+  if (overlap === 0 && values === 0) return false;
+  const extraNamed = named.filter(name =>
+    !requestNames.some(requestName => uiNameMatches(name, requestName) || uiNameMatches(requestName, name))
+  );
+  return extraNamed.length < 2 || overlap === named.length;
+}
+
 export function relatedUiEvents(
   event: NetworkEvidence,
   uiById: Map<string, UiEvidence>,
@@ -1388,7 +1422,8 @@ export function relatedUiEvents(
       if (item.sessionId !== event.sessionId) return false;
       if (Date.parse(item.at) > at + 500) return false;
       return belongsToOwningForm(item, owner, ownerLabels, ownerNames, event.correlatedUiEvidenceId)
-        || eventMatchesRequest(item, sample);
+        || eventMatchesRequest(item, sample)
+        || Boolean(item.form?.length && formFitsRequest(item.form, sample));
     })
     .sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
 }
