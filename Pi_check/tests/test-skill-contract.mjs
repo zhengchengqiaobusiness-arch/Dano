@@ -26,6 +26,10 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(skill, /不要按 URL 或 HTTP 方法合并/);
   assert.match(skill, /capability_id/);
   assert.match(skill, /selected_record_identity/);
+  assert.match(skill, /list_recording_index/);
+  assert.match(skill, /选择器弹层/);
+  assert.match(skill, /同一 path/);
+  assert.match(skill, /当前页可见标签/);
   assert.doesNotMatch(skill, /to_flow_spec|compile_capabilities|inferCapability/);
   const loaded = await readRecordingSkill();
   assert.equal(loaded, skill);

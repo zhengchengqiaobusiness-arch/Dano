@@ -24,6 +24,14 @@ export function createPiToolHost({
     async list_recording_manifest() {
       return evidence.snapshot(recordingId);
     },
+    async list_recording_index() {
+      const index = await evidence.index(recordingId);
+      return {
+        recording_id: recordingId,
+        count: index.count,
+        items: index.items,
+      };
+    },
     async read_evidence_delta({ after_seq = 0, limit = 20 } = {}) {
       const events = await evidence.read(recordingId, {
         afterSeq: Number(after_seq) || 0,
@@ -103,6 +111,12 @@ export function describePiTools() {
       name: "list_recording_manifest",
       label: "录制清单",
       description: "读取当前录制清单与状态。只返回已保存事实，不做业务判断。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
+      name: "list_recording_index",
+      label: "证据索引",
+      description: "按序号列出 interaction、xhr/fetch 请求和页面跳转的短摘要。只投影已有字段，不分类、不判断能力、不丢后半场。",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
     {

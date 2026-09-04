@@ -2770,13 +2770,13 @@ export default function PageRecorder({
             ...matched.param,
             key,
             path: flowPath || matched.param.path,
-            label: safeString(schema.label || schema.title) || matched.param.label || key,
+            label: safeString(matched.param.label) || safeString(schema.label || schema.title) || key,
             type: matched.param.type && matched.param.type !== "string"
               ? matched.param.type
               : type || matched.param.type,
             source_kind: sourceKind,
             source: hasOptionSource ? optionSource : matched.param.source,
-            required,
+            required: typeof matched.param.required === "boolean" ? matched.param.required : required,
             exposed_to_user: true,
           } satisfies FlowParam,
         }];

@@ -34,6 +34,7 @@ ${skillText}
 
 可用工具：
 - list_recording_manifest
+- list_recording_index
 - read_evidence_delta
 - read_evidence_item
 - read_response_blob
@@ -49,7 +50,7 @@ ${skillText}
 4. submit_recording_result 必须包含 recording_id、final=true、以及由你完整编写的 result。
 5. result.capabilities 必须是非空数组，并且包含现有录制页能直接渲染的字段合同与请求编排。
 6. 不要写 capabilities[].fields。request_refs 必须是 {step_id, usage} 对象。steps[].params 必须是含 key/path 的对象数组。调用方字段必须出现在 input_schema.properties 或这些 params 里。
-7. 先按 interaction 列出台账。每个独立业务动作都要有能力或 unresolved。capability_id 不得重复。每个能力恰好一个不共用的 execute。
+7. 先调 list_recording_index 建台账，再抽读正文。每个独立业务动作都要有能力或 unresolved。capability_id 不得重复。每个能力恰好一个不共用的 execute。
 8. 系统会原样保存 result，不会补齐、改写或生成替代能力。
 `;
 }
@@ -125,8 +126,8 @@ export class LivePiSession {
     const deadline = Date.now() + timeoutMs;
     const finalPrompt = this.#promptNow(
       `${this.#instructions}\n证据已冻结，最新 seq=${this.#latestSeq}。现在必须调用 submit_recording_result。\n` +
-        "优先读 list_recording_manifest、interaction 和 /admin-api/ 的 xhr/fetch 证据。不要逐条读 console。\n" +
-        "提交前自检：先列 interaction 台账。每个独立业务动作都要有能力或 unresolved。每个 param 必须有 reason，写清运行时怎么处理。计算字段写公式，禁止只写自动计算。接口枚举写 source_url 和本场 {label,value}，并标明是否完整。页面枚举列出当场全部选项。回填字段写 from_step_id/from_path，并写明调用方能不能改。编辑弹层白底可改字段即使本场没改也要写成可覆盖。灰底计算/自动编号/行主键不要进 input_schema。option_source 只挂本能力表单上的下拉。日期用 date/datetime。从列表行带出的 id 是系统字段。不要把分页列表刷新挂进撤回/删除。不要写 capabilities[].fields。\n" +
+        "先调 list_recording_index 看完全场 interaction 和 xhr/fetch，再抽读正文。不要逐条读 console，也不要只读前半场。\n" +
+        "提交前自检：索引里每个带确认的写入（提交/保存/撤回/删除等，看按钮不看系统名）都要有能力或 unresolved。选择器弹层不是新能力。标签用当前页控件文案。同一 path 不能既是调用方又是系统。input_schema.required 必须等于 caller params 的 required。from_path 必须能在对应响应里读到。每个 param 必须有 reason。计算字段写公式。接口枚举写 source_url 和本场 {label,value} 并标明是否完整。页面枚举列出当场全部选项。回填字段写 from_step_id/from_path 和能不能改。灰底计算/自动编号/行主键不要进 input_schema。option_source 只挂本能力表单上的下拉。日期用 date/datetime。不要把分页列表刷新挂进撤回/删除。不要写 capabilities[].fields。\n" +
         "若你已经写过 submit_recording_draft，把完整 result 立刻提交为 final=true。草稿不会自动变成结果。这是唯一结果来源。",
     );
     const timeoutTask = sleep(Math.max(1000, timeoutMs)).then(() => {
@@ -239,6 +240,7 @@ export async function createLivePiSession({ recording, tools }) {
       noTools: "builtin",
       tools: [
         "list_recording_manifest",
+        "list_recording_index",
         "read_evidence_delta",
         "read_evidence_item",
         "read_response_blob",

@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { buildEvidenceIndex } from "./evidence-index.mjs";
 
 const clone = (value) => structuredClone(value);
 
@@ -112,6 +113,12 @@ export class EvidenceStore {
     const events = await this.files.readEvidence(recordingId);
     const event = events.find((item) => item.seq === Number(seq));
     return event ? clone(event) : null;
+  }
+
+  async index(recordingId) {
+    this.require(recordingId);
+    const events = await this.files.readEvidence(recordingId);
+    return buildEvidenceIndex(events);
   }
 
   async writeBlob(recordingId, bytes) {
