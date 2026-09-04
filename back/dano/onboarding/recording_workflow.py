@@ -314,7 +314,20 @@ class SelfHealingPipeline:
             and isinstance(draft.get("meta"), dict)
             and draft["meta"].get("pi_analysis_available") is False
         )
-        machine_verification = seed.machine_verification and not pi_unavailable
+        if pi_unavailable:
+            draft["capabilities"] = []
+            context.remember_draft(draft)
+            await context.progress(
+                WorkflowStep.READY,
+                "PI 未完成，本次录制失败，没有产出能力",
+                0,
+            )
+            return PipelineOutcome(
+                status=WorkflowStatus.FAILED,
+                draft=draft,
+                error="PI 未完成，本次录制失败，没有产出能力",
+            )
+        machine_verification = seed.machine_verification
         context.machine_verification = machine_verification
         if seed.kind == "recording" and context.persist_stage_six is not None:
             await context.persist_stage_six(draft)
@@ -340,11 +353,7 @@ class SelfHealingPipeline:
             )
             await context.progress(
                 WorkflowStep.READY,
-                (
-                    "PI 不可用，录制结果已保存；未识别字段已保留录制原值"
-                    if pi_unavailable
-                    else "第 1～6 阶段已完成，尚未机器验证，Skill 未产出"
-                ),
+                "第 1～6 阶段已完成，尚未机器验证，Skill 未产出",
                 0,
             )
             return PipelineOutcome(
@@ -583,7 +592,7 @@ def _pipeline_complete_label(
             and isinstance((draft or {}).get("meta"), dict)
             and (draft or {})["meta"].get("pi_analysis_available") is False
         ):
-            return "PI 不可用，录制结果已按原值保存"
+            return "PI 未完成，本次录制失败，没有产出能力"
         if seed.machine_verification:
             return "能力已验证，Skill 未产出"
         return "第 1～6 阶段已完成，Skill 未产出"

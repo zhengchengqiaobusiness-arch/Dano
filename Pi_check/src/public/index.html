@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PI-only 录制</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <main class="wrap">
+    <p class="banner">PI 是唯一语义决策者；旧录制逻辑绝不启动。</p>
+    <h1>PI 录制控制台</h1>
+    <p class="lead">代码只采集事实。全部业务语义和最终能力必须由 PI 提交。</p>
+
+    <section class="card">
+      <label>目标页面地址
+        <input id="targetUrl" placeholder="https://example.com" />
+      </label>
+      <label>录制目标
+        <textarea id="goal" rows="4" placeholder="用自然语言说明要录制的业务动作"></textarea>
+      </label>
+      <div class="row">
+        <button id="startBtn" type="button">开始录制</button>
+        <button id="stopBtn" type="button" disabled>停止并交给 PI</button>
+        <button id="cancelBtn" type="button" class="ghost" disabled>取消录制</button>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <h2>浏览器录制状态</h2>
+        <p id="browserStatus">idle</p>
+      </article>
+      <article class="card">
+        <h2>PI 会话状态</h2>
+        <p id="piStatus">idle</p>
+      </article>
+      <article class="card">
+        <h2>已采集证据数量</h2>
+        <p id="evidenceCount">0</p>
+      </article>
+      <article class="card">
+        <h2>PI 当前处理状态</h2>
+        <p id="processStatus">未开始</p>
+      </article>
+    </section>
+
+    <section class="card">
+      <h2>结果</h2>
+      <p id="outcome" class="outcome">尚未开始</p>
+      <p id="capabilityCount">能力数量：0</p>
+      <a id="resultLink" class="hidden" href="#">查看 PI 最终提交结果</a>
+      <pre id="resultView" class="hidden"></pre>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

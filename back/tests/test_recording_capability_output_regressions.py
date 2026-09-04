@@ -2191,7 +2191,7 @@ def test_pi_unavailable_unknown_fields_preserve_exact_recorded_values() -> None:
     assert api_request["sample_inputs"] == {}
 
 
-def test_pi_unavailable_skips_requested_verification_after_saving() -> None:
+def test_pi_unavailable_fails_without_saving_capabilities() -> None:
     progress: list[str] = []
     persisted: list[dict] = []
 
@@ -2232,8 +2232,8 @@ def test_pi_unavailable_skips_requested_verification_after_saving() -> None:
         context,
     ))
 
-    assert outcome.status == WorkflowStatus.EDITABLE
-    assert outcome.error == ""
-    assert len(persisted) == 1
-    assert context.machine_verification is False
-    assert progress[-1] == "PI 不可用，录制结果已保存；未识别字段已保留录制原值"
+    assert outcome.status == WorkflowStatus.FAILED
+    assert outcome.error == "PI 未完成，本次录制失败，没有产出能力"
+    assert persisted == []
+    assert list((outcome.draft or {}).get("capabilities") or []) == []
+    assert progress[-1] == "PI 未完成，本次录制失败，没有产出能力"

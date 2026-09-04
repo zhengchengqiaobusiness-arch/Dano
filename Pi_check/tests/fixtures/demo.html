@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>PI-check fixture</title>
+</head>
+<body>
+  <h1>演示页</h1>
+  <form id="leave-form">
+    <label>天数 <input id="days" name="days" value="1" /></label>
+    <button id="submit" type="submit">提交</button>
+  </form>
+  <script>
+    document.getElementById("leave-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      await fetch("/api/leave", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ days: document.getElementById("days").value }),
+      });
+    });
+  </script>
+</body>
+</html>

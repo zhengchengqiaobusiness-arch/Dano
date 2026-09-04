@@ -52,6 +52,7 @@ STAGE_LABELS = {
     "end": "结束",
     "complete": "结束",
     "pi": "分析",
+    "pi_check": "录制",
 }
 SENSITIVE_KEY_RE = re.compile(
     r"(authorization|cookie|set-cookie|token|access_token|refresh_token|"

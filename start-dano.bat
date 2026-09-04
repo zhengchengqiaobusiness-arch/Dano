@@ -6,12 +6,16 @@ set "ROOT=%~dp0"
 set "PY=E:\python\condaEnv\dano-backend\python.exe"
 if not defined DANO_BACKEND_PORT set "DANO_BACKEND_PORT=8077"
 if not defined DANO_FRONTEND_PORT set "DANO_FRONTEND_PORT=5173"
+if not defined PI_CHECK_PORT set "PI_CHECK_PORT=18080"
 set "BACKEND_PORT=%DANO_BACKEND_PORT%"
 set "FRONTEND_PORT=%DANO_FRONTEND_PORT%"
+set "PICHECK_PORT=%PI_CHECK_PORT%"
 
 call :clear_port %BACKEND_PORT% Backend
 if errorlevel 1 goto :cleanup_failed
 call :clear_port %FRONTEND_PORT% Frontend
+if errorlevel 1 goto :cleanup_failed
+call :clear_port %PICHECK_PORT% PiCheck
 if errorlevel 1 goto :cleanup_failed
 
 echo Cleaning temporary files...
@@ -35,6 +39,15 @@ if not exist "%PY%" (
     echo ERROR: Backend Python was not found: %PY%
     goto :startup_failed
 )
+
+echo Installing PI-only recorder...
+pushd "%ROOT%Pi_check"
+if not exist node_modules call npm install
+popd
+echo Installing legacy agent packages...
+pushd "%ROOT%back\agent"
+if not exist node_modules call npm install
+popd
 
 echo Starting backend on port %BACKEND_PORT% ...
 pushd "%ROOT%back"

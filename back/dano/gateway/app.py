@@ -277,9 +277,26 @@ async def lifespan(app: FastAPI):
             "pid": os.getpid(),
             "db": db_status,
             "address": f"127.0.0.1:{os.environ.get('DANO_BACKEND_PORT') or os.environ.get('DANO_GATEWAY_PORT') or '8077'}",
+            "recording_backend": "pi_check",
         },
     )
+    from dano.onboarding.pi_check_sidecar import get_sidecar
+
+    sidecar = get_sidecar()
+    try:
+        await sidecar.ensure_started()
+    except Exception as exc:  # noqa: BLE001
+        sidecar.last_error = str(exc)
+        log.exception("pi_check.sidecar_failed", error=str(exc))
+        emit_run_event(
+            "pi_check.sidecar_failed",
+            stage="system",
+            status="failed",
+            summary="PI-only 录制没有拉起；旧录制逻辑不会回退启动",
+            details={"error": str(exc)},
+        )
     yield
+    await sidecar.stop()
     if _recording_session_registry is not None:
         await _recording_session_registry.close()
     await close_pool()
@@ -342,7 +359,15 @@ async def _auth_tenant(x_tenant_key: str | None) -> str:
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok"}
+    from dano.onboarding.pi_check_sidecar import PI_ONLY_NOTICE, get_sidecar
+
+    sidecar = get_sidecar()
+    return {
+        "status": "ok",
+        "recording_backend": "pi_check",
+        "notice": PI_ONLY_NOTICE,
+        "pi_check": sidecar.status(),
+    }
 
 
 # ── 运行配置全部走 config.py(不再有前端运行配置页 / 写入端点);仅保留只读 LLM 自检 ──
@@ -1109,232 +1134,10 @@ async def _publish_canonical_recording(
 
 @app.websocket("/onboarding/page/record")
 async def record_ws(ws: WebSocket) -> None:
-    """Thin transport for the canonical recording workflow."""
-    from dano.onboarding.recording_gateway import (
-        RecordingSessionRegistry,
-        RecordingSessionConfig,
-    )
-    from dano.onboarding.recording_pi import RecordingPiSession
+    """Existing PageRecorder still connects here. The old recording analysis chain never starts."""
+    from dano.onboarding.pi_check_sidecar import proxy_recording_websocket
 
-    await ws.accept()
-    sender = _WebSocketSendQueue(ws)
-    send_message = sender.send_json
-    session = None
-    action = ""
-    try:
-        init = await ws.receive_json()
-        command = str(init.get("type") or "")
-        resume_draft: dict | None = None
-        resume_title = ""
-        resume_result_id = None
-        resume_baseline: dict | None = None
-        resume_checkpoint: dict | None = None
-        resume_attempt_id = ""
-        reset_stage_seven = False
-        if command == "resume_verification":
-            from dano.assets.drafts import DraftStore
-            from dano.onboarding.recording_results import is_recording_result_key
-
-            result_id = str(init.get("result_id") or "").strip()
-            tenant = str(init.get("tenant") or "")
-            try:
-                saved = await DraftStore().get_draft(uuid.UUID(result_id)) if result_id else None
-            except ValueError:
-                saved = None
-            if not result_id:
-                detail = "继续分析缺少 result_id"
-            elif saved is None:
-                detail = "录制结果不存在或已删除"
-            elif saved.tenant != tenant:
-                detail = "录制结果不属于当前租户"
-            elif not is_recording_result_key(saved.asset_key):
-                detail = "该草稿不是录制结果，不能继续分析"
-            elif not isinstance(saved.body.get("flow_spec"), dict):
-                detail = "录制结果没有完整 FlowSpec，请重新录制"
-            else:
-                detail = ""
-            if detail:
-                await sender.send_json({"type": "error", "detail": detail})
-                return
-            resume_draft = saved.body["flow_spec"]
-            resume_baseline = dict(saved.body["flow_spec"])
-            resume_checkpoint = None
-            resume_attempt_id = str(init.get("attempt_id") or "")
-            reset_stage_seven = init.get("reset_stage_seven") is True
-            from dano.onboarding.recording_stage_seven import load_resumable_working_spec
-
-            working, checkpoint, block_reason = load_resumable_working_spec(
-                dict(saved.body or {}),
-                reset_stage_seven=reset_stage_seven,
-            )
-            if block_reason:
-                await sender.send_json({"type": "error", "detail": block_reason})
-                return
-            resume_draft = working
-            resume_checkpoint = None if reset_stage_seven else checkpoint
-            if not resume_attempt_id and isinstance(checkpoint, dict):
-                resume_attempt_id = str(checkpoint.get("attempt_id") or "")
-            resume_title = str(saved.body.get("title") or "")
-            resume_result_id = saved.asset_draft_id
-            action = str(saved.body.get("action") or "")
-            subsystem = saved.subsystem.value
-            # A new Pi scope avoids colliding with the original recording lock.
-            recording_id = f"recording_{uuid.uuid4().hex}"
-            resume_goal = saved.body.get("goal") if isinstance(saved.body.get("goal"), dict) else {}
-            init["goal_text"] = str(
-                init.get("goal_text") or resume_goal.get("text") or resume_goal.get("intent") or ""
-            )
-            init["start_url"] = ""
-        elif command != "start" or not init.get("start_url"):
-            await sender.send_json({
-                "type": "error",
-                "detail": "首帧须为 {type:'start', start_url, ...} 或 {type:'resume_verification', result_id}",
-            })
-            return
-        else:
-            tenant = str(init.get("tenant") or "")
-            subsystem = _recording_subsystem(
-                tenant,
-                init.get("subsystem"),
-                str(init["start_url"]),
-            )
-            requested_action = str(init.get("resume_action") or "")
-            action = (
-                requested_action
-                if re.fullmatch(r"action_[0-9a-f]{32}", requested_action)
-                else _new_recording_action()
-            )
-            requested_recording_id = str(init.get("pi_recording_id") or "")
-            recording_id = (
-                requested_recording_id
-                if re.fullmatch(r"recording_[0-9a-f]{32}", requested_recording_id)
-                else f"recording_{uuid.uuid4().hex}"
-            )
-        bind_run_context(
-            recording_id=recording_id,
-            action=action,
-            tenant=tenant,
-            subsystem=subsystem,
-        )
-        holder: dict[str, object] = {}
-
-        async def pi_factory(fresh: bool):  # noqa: ANN202
-            return await _start_recording_pi_candidate(lambda: RecordingPiSession(
-                tenant=tenant,
-                subsystem=subsystem,
-                recording_id=recording_id,
-                resume_history=not fresh,
-            ))
-
-        async def publisher(release_spec, candidate, context):  # noqa: ANN001, ANN202
-            context.ensure_active()
-            current = holder["session"]
-            capture = current.capture
-            storage_state = await capture.storage_state() if capture is not None else None
-            workflow = current.workflow
-            return await _publish_canonical_recording(
-                tenant=tenant,
-                subsystem=subsystem,
-                action=action,
-                title=(
-                    (workflow.snapshot.title if workflow is not None else "")
-                    or str(getattr(release_spec, "title", "") or "")
-                ),
-                goal=(
-                    dict((release_spec.goal or {}))
-                    if release_spec is not None else {}
-                ),
-                deploy=init.get("deploy"),
-                storage_state=storage_state,
-                run_id=str(getattr(current._pi, "run_id", "")),
-                release_flow_spec=release_spec,
-                release_candidate=candidate,
-                context=context,
-            )
-
-        global _recording_session_registry
-        if _recording_session_registry is None:
-            _recording_session_registry = RecordingSessionRegistry()
-        session_config = RecordingSessionConfig(
-            tenant=tenant,
-            subsystem=subsystem,
-            recording_id=recording_id,
-            action=action,
-            start_url=str(init.get("start_url") or ""),
-            goal_text=str(init.get("goal_text") or ""),
-            base_url=str(init.get("base_url") or ""),
-            token=str(init.get("token") or ""),
-            storage_state=init.get("storage_state") or None,
-            analysis_mode=init.get("machine_verification") is True,
-        )
-        if resume_draft is not None:
-            session = await _recording_session_registry.attach_or_resume(
-                config=session_config,
-                send=send_message,
-                pi_factory=pi_factory,
-                publisher=publisher,
-                draft=resume_draft,
-                title=resume_title,
-                result_id=resume_result_id,
-                restart=False,
-                reset_stage_seven=reset_stage_seven,
-                attempt_id=resume_attempt_id,
-                baseline=resume_baseline,
-                checkpoint=resume_checkpoint,
-            )
-        else:
-            session, _created = await _recording_session_registry.attach_or_create(
-                config=session_config,
-                send=send_message,
-                pi_factory=pi_factory,
-                publisher=publisher,
-            )
-        holder["session"] = session
-        init_title = str(init.get("title") or "").strip()
-        if init_title and session.workflow is not None:
-            await session.workflow.set_title(init_title)
-        pi_run_id = str(getattr(getattr(session, "_pi", None), "run_id", "") or "")
-        if pi_run_id:
-            bind_run_context(run_id=pi_run_id)
-        while True:
-            try:
-                message = await ws.receive_json()
-            except RuntimeError as exc:
-                if str(exc) != "WebSocket is not connected. Need to call \"accept\" first.":
-                    raise
-                raise WebSocketDisconnect(code=1006) from exc
-            if str(message.get("type") or "") == "cancel" and _recording_session_registry is not None:
-                await _recording_session_registry.abort(action)
-                break
-            try:
-                await session.dispatch(message)
-            except ValueError as exc:
-                await sender.send_json({"type": "error", "detail": str(exc)})
-                continue
-    except WebSocketDisconnect:
-        log.info("recording.websocket_disconnected", action=(session.config.action if session else ""))
-    except Exception as exc:  # noqa: BLE001
-        log.exception("recording.websocket_failed", error=str(exc))
-        try:
-            await sender.send_json({"type": "error", "detail": str(exc)})
-        except Exception:  # noqa: BLE001
-            pass
-    finally:
-        should_abort = (
-            session is not None
-            and getattr(session, "capture", None) is None
-            and getattr(session, "workflow", None) is not None
-            and session.workflow.snapshot.status.value in {"processing", "waiting_operator"}
-        )
-        if session is not None and _recording_session_registry is not None:
-            _recording_session_registry.detach(action, send_message)
-            if should_abort:
-                await _recording_session_registry.abort(action)
-        await sender.close()
-        try:
-            await ws.close()
-        except Exception:  # noqa: BLE001
-            pass
+    await proxy_recording_websocket(ws)
 
 
 def _emit_run_summary(
@@ -1712,7 +1515,16 @@ async def list_recording_results(
             key=lambda item: item.created_at or datetime.min.replace(tzinfo=timezone.utc),
             reverse=True,
         )
-    return [recording_result_summary(item) for item in drafts]
+    rows = [recording_result_summary(item) for item in drafts]
+    from dano.onboarding.pi_check_sidecar import get_sidecar
+
+    seen_actions = {str(row.get("action") or "") for row in rows}
+    seen_ids = {str(row.get("id") or "") for row in rows}
+    for extra in await get_sidecar().list_results(subsystem):
+        if extra["id"] in seen_ids or extra["action"] in seen_actions:
+            continue
+        rows.append(extra)
+    return rows
 
 
 @app.get("/v1/recording-results/{result_id}")
@@ -1726,8 +1538,16 @@ async def get_recording_result(
 
     try:
         parsed = uuid.UUID(result_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="无效的录制结果 ID") from exc
+    except ValueError:
+        from dano.onboarding.pi_check_sidecar import adapt_pi_check_summary, get_sidecar
+
+        detail = await get_sidecar().fetch_result(result_id)
+        if detail is None:
+            raise HTTPException(status_code=400, detail="无效的录制结果 ID") from None
+        summary = adapt_pi_check_summary(detail) or {}
+        summary["draft"] = detail.get("draft")
+        summary["draft_fingerprint"] = detail.get("draft_fingerprint") or result_id
+        return summary
     saved = await DraftStore().get_draft(parsed)
     if (
         saved is None
@@ -1748,8 +1568,12 @@ async def delete_recording_result(
 
     try:
         parsed = uuid.UUID(result_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="无效的录制结果 ID") from exc
+    except ValueError:
+        from dano.onboarding.pi_check_sidecar import get_sidecar
+
+        if await get_sidecar().remove_result(result_id):
+            return {"deleted": True, "id": result_id}
+        raise HTTPException(status_code=400, detail="无效的录制结果 ID") from None
     deleted = await DraftStore().delete_recording_result(parsed, tenant=tenant)
     if not deleted:
         raise HTTPException(status_code=404, detail="录制结果不存在")

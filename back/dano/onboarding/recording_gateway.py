@@ -19,10 +19,6 @@ from dano.execution.page.flow_spec import (
     flow_spec_fingerprint,
     to_flow_spec,
 )
-from dano.execution.page.flow_materialization.builder import (
-    PRESERVE_RECORDED_UNKNOWN_POLICY,
-    apply_recorded_unknown_policy,
-)
 from dano.execution.page.recorder import RecordSession
 from dano.execution.page.recording_field_identity import bind_field_evidence
 from dano.execution.page.recording_live import LiveNotebook
@@ -554,20 +550,19 @@ class RecordingGatewaySession:
         if use_live_notebook and self._live_notebook is not None:
             spec = self._live_notebook.apply_to(spec)
         if self._pi_analysis_unavailable:
-            # Pi can be intentionally disconnected. In that case the captured
-            # wire request remains authoritative and unresolved fields become
-            # system-owned recorded literals instead of blocking persistence.
+            spec.capabilities = []
             spec.meta = {
                 **(spec.meta or {}),
                 "pi_analysis_available": False,
-                "unknown_source_policy": PRESERVE_RECORDED_UNKNOWN_POLICY,
+                "capability_model": {
+                    "status": "missing_semantic_plan",
+                    "source": "skill_required",
+                },
             }
-            spec = apply_recorded_unknown_policy(spec)
+            return spec
         from dano.execution.page.capability_compiler import ensure_grounded_capability_output
 
         spec = ensure_grounded_capability_output(spec)
-        if self._pi_analysis_unavailable:
-            spec = apply_recorded_unknown_policy(spec)
         if not spec.capabilities:
             capability_model = dict((spec.meta or {}).get("capability_model") or {})
             plan = (
