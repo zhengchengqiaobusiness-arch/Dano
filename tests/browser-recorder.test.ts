@@ -48,6 +48,46 @@ test("manual button clicks keep their own action label and do not synthesize fie
   }
 });
 
+test("a login form stops the first automatic action without typing credentials", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-login-pause-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>系统登录</title></head><body>
+      <form action="/auth/login" method="post">
+        <label>账号<input name="username" autocomplete="username"></label>
+        <label>密码<input name="password" type="password" autocomplete="current-password"></label>
+        <button type="submit">登录</button>
+      </form>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    const session = await recorder.start(`http://127.0.0.1:${address.port}/login`, "login-pause");
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.loginRequired, true, JSON.stringify(result));
+    assert.equal(result.stopped, true, JSON.stringify(result));
+    await recorder.stop();
+    const events = await readJsonl<EvidenceEvent>(session.eventsFile);
+    assert.equal(events.some(event => event.kind === "ui" && ["input", "change"].includes(event.eventType)), false, JSON.stringify(events));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("snapshots and controls component forms and iframes in one embedded browser", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-browser-"));
   const server = http.createServer((request, response) => {

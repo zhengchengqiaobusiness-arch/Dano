@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
 import { isPageSessionId, WorkbenchPage } from "../src/web/workbench-page.js";
 import { PiRpcBridge } from "../src/web/pi-rpc.js";
 
@@ -42,4 +45,52 @@ test("manual takeover waits for the person and then restores automatic execution
   assert.equal(page.mode, "automatic");
   assert.equal(page.manualTakeoverState(), undefined);
   assert.equal(events.some(event => event.type === "manual_takeover_completed"), true);
+});
+
+test("starting on a login page pauses immediately until the person completes login", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bss-login-takeover-"));
+  const events: any[] = [];
+  const page = new WorkbenchPage("page_loginpause", {
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  }, "http://127.0.0.1:4310", value => value, () => {});
+  page.broadcast = payload => { events.push(payload); };
+  const recorder = page.recorder as any;
+  recorder.start = async (startUrl: string, name: string) => ({
+    id: "rec_loginpause",
+    name,
+    startedAt: new Date().toISOString(),
+    startUrl,
+    eventsFile: path.join(temporary, "events.jsonl"),
+    expectedOperations: []
+  });
+  recorder.loginPageState = async () => ({ detected: true, reason: "检测到账号密码登录页面" });
+  recorder.resumeAfterManualTakeover = () => {};
+
+  try {
+    let settled = false;
+    const starting = page.startRecording("https://example.test/login", "login-page").then(result => {
+      settled = true;
+      return result;
+    });
+    for (let attempt = 0; attempt < 20 && !page.manualTakeoverState(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+
+    assert.equal(settled, false);
+    assert.match(page.manualTakeoverState()?.reason || "", /登录/);
+    assert.equal(events.some(event => event.type === "manual_takeover_required"), true);
+
+    assert.equal(page.completeManualTakeover(page.manualTakeoverState()!.id), true);
+    assert.equal((await starting).id, "rec_loginpause");
+    assert.equal(settled, true);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 });

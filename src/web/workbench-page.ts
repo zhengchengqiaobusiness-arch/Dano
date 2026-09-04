@@ -197,6 +197,8 @@ export class WorkbenchPage {
     const session = await this.recorder.start(url, name || "web-session", this.preferredViewport, expectedOperations);
     this.lastRecordingSessionId = session.id;
     this.onLog("PROCESS", formatProcessLog("OPEN", "playwright-browser", { pid: this.recorder.browserProcessId(), page: this.id }));
+    const login = await this.recorder.loginPageState();
+    if (login.detected) await this.requestManualTakeover(login.reason || "检测到登录页面，请人工完成登录后继续");
     return session;
   }
 

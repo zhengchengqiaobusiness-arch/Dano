@@ -14,6 +14,7 @@ import { inferOperation, inferUiOperationIntent } from "../inference/heuristics.
 
 const FORM_ACTION_BUDGET = 3;
 const EXPECTABLE_OPERATIONS = new Set<OperationKind>(["query", "create", "update", "review", "delete", "upload", "download", "action"]);
+const LOGIN_BLOCKED_ACTIONS = new Set(["goto", "click", "fill", "select", "choose", "press", "exercise-form", "submit-form"]);
 const DEFAULT_VIEWPORT = { width: 1440, height: 960 };
 const MAX_PREVIEW_VIEWPORT = { width: 3840, height: 2160 };
 
@@ -39,6 +40,13 @@ export function normalizePreviewScale(input?: number | null) {
 }
 
 export type PreviewViewport = { width: number; height: number; scale: number };
+
+export interface LoginPageState {
+  detected: boolean;
+  reason?: string;
+  pageUrl?: string;
+  frameUrl?: string;
+}
 
 export function normalizePreviewViewport(input?: { width?: number; height?: number; scale?: number } | null): PreviewViewport {
   const rawWidth = Math.round(Number(input?.width));
@@ -67,6 +75,41 @@ const INSPECT_TARGET_IN_PAGE = new Function("el", String.raw`
     formAction: form ? form.getAttribute("action") || undefined : undefined
   };
 `) as (element: Element) => unknown;
+
+interface LoginPageEvidence {
+  detected: boolean;
+  href: string;
+}
+
+const DETECT_LOGIN_IN_PAGE = new Function(String.raw`
+  const visible = (element) => {
+    const style = getComputedStyle(element);
+    const box = element.getBoundingClientRect();
+    return !element.hidden && style.display !== "none" && style.visibility !== "hidden" && box.width > 0 && box.height > 0;
+  };
+  const describe = (element) => {
+    const label = (element.labels && element.labels[0] && element.labels[0].textContent) || (element.closest("label") && element.closest("label").textContent) || "";
+    return [element.type, element.name, element.id, element.autocomplete, element.placeholder, element.getAttribute("aria-label"), label]
+      .filter(Boolean).join(" ");
+  };
+  const inputs = [...document.querySelectorAll("input")].filter(visible);
+  const password = inputs.filter(element => element.type === "password");
+  const accounts = inputs.filter(element => /用户|账号|帐号|工号|手机|邮箱|username|account|email|phone|mobile/i.test(describe(element)));
+  const otp = inputs.filter(element => /验证码|动态码|短信码|one.?time|verification|captcha|otp/i.test(describe(element)));
+  const controls = [...document.querySelectorAll("button,input[type='submit'],a,[role='button'],h1,h2,h3")].filter(visible);
+  const loginText = controls.map(element => String(element.value || element.textContent || "").replace(/\s+/g, " ").trim())
+    .some(text => text.length <= 40 && /登录|登陆|登入|统一身份认证|sign\s*in|log\s*in|login/i.test(text));
+  const formAction = [...document.querySelectorAll("form")]
+    .map(form => String(form.getAttribute("action") || "") + " " + String(form.textContent || ""))
+    .some(text => /登录|登陆|登入|(?:^|[\/_-])login(?:[\/?#_-]|$)|sign[\s_-]*in/i.test(text));
+  const urlIntent = /(?:^|[\/#?&=._-])(?:login|log-in|signin|sign-in|sso)(?:$|[\/#?&=._-])/i.test(location.href);
+  const qr = [...document.querySelectorAll("canvas,img,svg")].filter(visible)
+    .some(element => /二维码|qr.?code|qrcode/i.test(String(element.id) + " " + String(element.className) + " " + String(element.getAttribute("alt") || "")));
+  return {
+    detected: (loginText || formAction || urlIntent) && (password.length > 0 || accounts.length > 0 || otp.length > 0 || qr),
+    href: location.href
+  };
+`) as () => LoginPageEvidence;
 
 interface ActionGuard {
   exerciseFormCount: number;
@@ -469,6 +512,34 @@ export class BrowserRecorder {
     };
     await appendJsonl(active.eventsFile, event);
     await this.rememberCorrelatedOperation(event, ui);
+  }
+
+  async loginPageState(): Promise<LoginPageState> {
+    if (!this.active) return { detected: false };
+    const page = this.currentPage();
+    for (const frame of page.frames()) {
+      const evidence = await this.withTimeout(frame.evaluate(DETECT_LOGIN_IN_PAGE), 900, undefined);
+      if (!evidence?.detected) continue;
+      return {
+        detected: true,
+        reason: "检测到登录页面，已暂停自动操作。请在内置浏览器完成登录后点击“我已完成，继续自动执行”。",
+        pageUrl: page.url(),
+        frameUrl: evidence.href
+      };
+    }
+    return { detected: false };
+  }
+
+  private loginPauseResult(state: LoginPageState) {
+    return {
+      ok: false,
+      stopped: true,
+      followManualSteps: false,
+      loginRequired: true,
+      reason: state.reason,
+      pageUrl: state.pageUrl,
+      frameUrl: state.frameUrl
+    };
   }
 
   private async captureResponse(response: Response) {
@@ -1012,6 +1083,10 @@ export class BrowserRecorder {
     key?: string;
     ms?: number;
   }): Promise<unknown> {
+    if (LOGIN_BLOCKED_ACTIONS.has(command.action)) {
+      const login = await this.loginPageState();
+      if (login.detected) return this.loginPauseResult(login);
+    }
     const result = await this.withAction(async () => {
       const page = this.currentPage();
       const known = new Set(this.livePages());
@@ -1120,6 +1195,8 @@ export class BrowserRecorder {
         }
       }
     });
+    const login = await this.loginPageState();
+    if (login.detected) return this.loginPauseResult(login);
     if (command.action === "click") this.watchLayerPaint();
     return result;
   }

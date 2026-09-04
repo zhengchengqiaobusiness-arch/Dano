@@ -198,11 +198,13 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.doesNotMatch(browserControl, /ctx\.ui\.confirm|Confirm real browser write/);
   assert.match(extension, /studio\.execute\(cap\.id, executionInput, cap\.confirmation\.required\)/);
   assert.doesNotMatch(extension, /Write operation cancelled by user|用户取消了 Skill 导出|Binding approval cancelled/);
-  assert.match(bridge, /Execute browser actions and business operations immediately/);
+  assert.match(bridge, /Execute ordinary browser actions and business operations immediately/);
+  assert.match(bridge, /Login is the exception:[\s\S]*do not click or fill anything and do not retry/);
   assert.doesNotMatch(bridge, /must wait for the existing explicit confirmation dialog/);
   assert.match(page, /event\.method === "confirm"[\s\S]*respondToUi\(\{ id: event\.id, confirmed: true \}\)/);
   assert.match(app, /if \(request\.method === "confirm"\) \{\s*state\.currentUiRequest = request;\s*void closeConfirmation\(true\);/s);
-  assert.match(browserSkill, /Execute click, fill, select, choose, press, submit, and navigation immediately/);
+  assert.match(browserSkill, /Login is never an automatic form attempt/);
+  assert.match(browserSkill, /Login is the exception and must pause without any automatic attempt/);
   assert.match(browserSkill, /recentUserActions/);
   assert.match(browserSkill, /#el-id-\*/);
   assert.match(browserSkill, /YYYY-MM-DD/);
