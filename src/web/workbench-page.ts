@@ -182,7 +182,8 @@ export class WorkbenchPage {
     url: string,
     name?: string,
     viewport?: { width?: number; height?: number; scale?: number },
-    expectedOperations: OperationKind[] = []
+    expectedOperations: OperationKind[] = [],
+    completeFieldCoverage = false
   ) {
     this.cancelManualTakeover("new-recording");
     if (this.recorder.isActive()) {
@@ -194,7 +195,7 @@ export class WorkbenchPage {
     await seedPageProfile(this.sharedProfileDir, this.pageProfileDir);
     const size = viewport || this.preferredViewport;
     if (size) this.preferredViewport = normalizePreviewViewport(size);
-    const session = await this.recorder.start(url, name || "web-session", this.preferredViewport, expectedOperations);
+    const session = await this.recorder.start(url, name || "web-session", this.preferredViewport, expectedOperations, completeFieldCoverage);
     this.lastRecordingSessionId = session.id;
     this.onLog("PROCESS", formatProcessLog("OPEN", "playwright-browser", { pid: this.recorder.browserProcessId(), page: this.id }));
     const login = await this.recorder.loginPageState();

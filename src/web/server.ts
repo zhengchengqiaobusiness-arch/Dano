@@ -283,7 +283,8 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
       parseBrowserUrl(body.url),
       body.name,
       parseViewport(body.viewport) || page.preferredViewport,
-      parseExpectedOperations(body.expectedOperations)
+      parseExpectedOperations(body.expectedOperations),
+      body.completeFieldCoverage === true
     );
     runtimeLog("BROWSER", `${page.mode === "manual" ? "Manual" : "Pi automatic"} recording session started on ${page.id}.`);
     sendJson(response, 200, { session, state: await page.browserState() });
@@ -412,7 +413,8 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
         parseBrowserUrl(body.url),
         body.name,
         parseViewport(body.viewport) || page.preferredViewport,
-        parseExpectedOperations(body.expectedOperations)
+        parseExpectedOperations(body.expectedOperations),
+        body.completeFieldCoverage === true
       ));
       page.broadcast({ type: "browser_changed" });
       return;

@@ -56,10 +56,10 @@ export class StudioService {
     return path.join(this.config.catalogDir, "capabilities.json");
   }
 
-  async startRecording(url: string, name?: string, expectedOperations: OperationKind[] = []) {
+  async startRecording(url: string, name?: string, expectedOperations: OperationKind[] = [], completeFieldCoverage = false) {
     if (this.recorder.isActive()) await this.stopRecording();
     this.sessionListCache = undefined;
-    return this.recorder.start(url, name, undefined, expectedOperations);
+    return this.recorder.start(url, name, undefined, expectedOperations, completeFieldCoverage);
   }
 
   async stopRecording() {
@@ -246,7 +246,7 @@ export class StudioService {
     const slice = sessionCatalogSlice(catalog, events, scopeEvents);
     const validated = finalizeSessionSlice(slice, events, catalog);
     if (validated !== slice) await this.writeCatalog(mergeCatalogByTransport(validated, catalog));
-    return reviewSession(validated, events, scopeEvents, session?.expectedOperations);
+    return reviewSession(validated, events, scopeEvents, session?.expectedOperations, session?.completeFieldCoverage);
   }
 
   async sealWrites() {

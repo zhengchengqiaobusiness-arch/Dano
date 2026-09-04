@@ -287,7 +287,8 @@ export class BrowserRecorder {
     startUrl: string,
     name = "recording",
     viewport?: { width?: number; height?: number; scale?: number },
-    expectedOperations: OperationKind[] = []
+    expectedOperations: OperationKind[] = [],
+    completeFieldCoverage = false
   ): Promise<RecordingSession> {
     if (this.active) throw new Error(`Recording already active: ${this.active.session.id}`);
 
@@ -315,7 +316,8 @@ export class BrowserRecorder {
       startedAt: new Date().toISOString(),
       startUrl,
       eventsFile,
-      expectedOperations: [...new Set(expectedOperations)].filter(operation => EXPECTABLE_OPERATIONS.has(operation))
+      expectedOperations: [...new Set(expectedOperations)].filter(operation => EXPECTABLE_OPERATIONS.has(operation)),
+      completeFieldCoverage
     };
 
     this.active = {

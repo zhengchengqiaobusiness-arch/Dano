@@ -258,6 +258,7 @@ export interface RecordingSession {
   manualStepsFile?: string;
   pageKeys?: string[];
   expectedOperations?: OperationKind[];
+  completeFieldCoverage?: boolean;
 }
 
 export type ReviewStage = "record" | "analyze" | "validate" | "export";

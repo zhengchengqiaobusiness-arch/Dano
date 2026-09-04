@@ -1270,16 +1270,38 @@ export class PageActions {
 
   private async expandRepeatableRows() {
     const addRow = /^(新增一行|添加一行|加一行|添加明细|新增明细)$/;
+    const genericAdd = /^\s*(添加|新增)\s*$/;
     const before = (await this.captureFields()).formFields || [];
     const snapshot = await this.captureSnapshot();
     const control = (snapshot.controls || []).find(item =>
       addRow.test(String(item.text || item.label || "").replace(/\s+/g, ""))
       && (!snapshot.scope || !item.scope || item.scope === snapshot.scope)
     );
-    const name = String(control?.text || control?.label || "").replace(/\s+/g, "");
-    if (!control && snapshot.scope !== "dialog") return false;
+    let contextualAdd: Locator | undefined;
+    if (!control) {
+      const candidates = this.page().locator("button, [role='button']").filter({ visible: true }).filter({ hasText: genericAdd });
+      for (let index = 0; index < await candidates.count(); index += 1) {
+        const candidate = candidates.nth(index);
+        const belongsToRepeatableSection = await candidate.evaluate((element) => {
+          let node = element.parentElement;
+          for (let depth = 0; node && depth < 7; depth += 1, node = node.parentElement) {
+            const heading = node.querySelector("h1,h2,h3,h4,h5,h6,legend,.el-card__header,.ant-card-head-title,[class*='title'],[class*='header']");
+            const context = String(heading?.textContent || node.getAttribute("aria-label") || "").replace(/\s+/g, "");
+            if (/明细|行项目|子项|条目|费用项|清单/.test(context) && !/附件|上传/.test(context)) return true;
+          }
+          return false;
+        }).catch(() => false);
+        if (belongsToRepeatableSection) {
+          contextualAdd = candidate;
+          break;
+        }
+      }
+    }
+    const name = String(control?.text || control?.label || await contextualAdd?.innerText().catch(() => "") || "").replace(/\s+/g, "");
+    if (!control && !contextualAdd && snapshot.scope !== "dialog") return false;
     try {
       if (control?.selector) await this.click(String(control.selector));
+      else if (contextualAdd) await this.clickSafely(contextualAdd, "button");
       else await this.page().getByRole("button", { name: addRow }).first().click({ timeout: 1_500 });
     } catch {
       if (!name) return false;

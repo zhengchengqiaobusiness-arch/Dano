@@ -40,9 +40,9 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
     return payload as T;
   };
 
-  const startBrowser = (url: string, name?: string, expectedOperations: any[] = []) => browserServiceUrl
-    ? browserRequest<any>("/start", { url, name, expectedOperations })
-    : studio.startRecording(url, name, expectedOperations);
+  const startBrowser = (url: string, name?: string, expectedOperations: any[] = [], completeFieldCoverage = false) => browserServiceUrl
+    ? browserRequest<any>("/start", { url, name, expectedOperations, completeFieldCoverage })
+    : studio.startRecording(url, name, expectedOperations, completeFieldCoverage);
   const stopBrowser = () => browserServiceUrl
     ? browserRequest<any>("/stop")
     : studio.stopRecording();
@@ -57,7 +57,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_record_start",
     label: "Start business recording",
-    description: "Start the embedded Playwright browser and record real UI actions plus XHR/fetch/document requests and responses. When the user names required operations, always pass every one in expectedOperations so review cannot export a partial Skill.",
+    description: "Start the embedded Playwright browser and record real UI actions plus XHR/fetch/document requests and responses. When the user names required operations, always pass every one in expectedOperations so review cannot export a partial Skill. When the user requires every field except upload/attachment, pass completeFieldCoverage=true so review also rejects blank visible fields and unexercised business detail rows.",
     parameters: parameters({
       url: { type: "string", description: "Real business-system URL" },
       name: { type: "string", description: "Optional recording name" },
@@ -65,10 +65,14 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
         type: "array",
         items: { type: "string", enum: ["query", "create", "update", "review", "delete", "upload", "download", "action"] },
         description: "Operations the user explicitly requires in this recording, for example ['query','create']."
+      },
+      completeFieldCoverage: {
+        type: "boolean",
+        description: "True only when the user requires every operable field to be filled; upload and attachment controls remain excluded."
       }
     }, ["url"]),
     async execute(_toolCallId, params: any) {
-      const session = await startBrowser(params.url, params.name, params.expectedOperations || []);
+      const session = await startBrowser(params.url, params.name, params.expectedOperations || [], params.completeFieldCoverage === true);
       if (session?.id) lastRecordingSessionId = session.id;
       return {
         content: [{ type: "text", text: `Recording started: ${session.id}. The live page is visible in the Studio browser panel.` }],

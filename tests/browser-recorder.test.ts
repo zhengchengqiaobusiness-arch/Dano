@@ -3117,7 +3117,8 @@ test("operation inventory spans frames without changing the caller-defined compl
       `http://127.0.0.1:${address.port}/`,
       "operation-inventory",
       undefined,
-      ["query", "create"]
+      ["query", "create"],
+      true
     );
     const snapshot: any = await recorder.control({ action: "snapshot" });
     assert.deepEqual([...snapshot.availableOperations].sort(), ["create", "download", "query"], JSON.stringify(snapshot.operationInventory));
@@ -3130,8 +3131,10 @@ test("operation inventory spans frames without changing the caller-defined compl
     await recorder.control({ action: "wait", ms: 120 });
 
     assert.deepEqual([...(recorder.activeSession()?.expectedOperations || [])].sort(), ["create", "query"]);
+    assert.equal(recorder.activeSession()?.completeFieldCoverage, true);
     const stored = JSON.parse(await readFile(path.join(path.dirname(session.eventsFile), "session.json"), "utf8"));
     assert.deepEqual([...stored.expectedOperations].sort(), ["create", "query"]);
+    assert.equal(stored.completeFieldCoverage, true);
   } finally {
     if (recorder.isActive()) await recorder.stop().catch(() => {});
     await new Promise<void>(resolve => server.close(() => resolve()));
@@ -3191,7 +3194,7 @@ test("exercise-form keeps official department labels, repairs phone format, and 
             <input id="lxfs" class="arco-input">
             <div class="arco-form-item-message" id="phone-error" hidden>需要座机格式区号-座机号码</div>
           </div>
-          <div id="line" hidden>
+          <section class="detail-card"><h3>职能明细信息</h3><div id="line" hidden>
             <div class="arco-form-item is-required">
               <label class="arco-form-item-label">职能清单</label>
               <input id="ywsxmc" class="arco-input">
@@ -3203,7 +3206,7 @@ test("exercise-form keeps official department labels, repairs phone format, and 
               </div>
             </div>
           </div>
-          <button type="button" id="add-row">新增一行</button>
+          <button type="button" id="add-row">添加</button></section>
           <button type="submit" id="save">提交</button>
         </form>
       </div>

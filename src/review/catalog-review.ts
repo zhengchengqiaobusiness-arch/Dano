@@ -3,6 +3,7 @@ import { evidenceSample, isAssembledObjectField, isExecutableRule, parseComputed
 import { queryCandidateForField } from "../inference/candidate-sources.js";
 import { flattenRequestValues, isPaginationField, looksPickerField } from "../inference/field-resolver.js";
 import { capabilitiesForSession, isCandidateSourceCapability, isNoiseCapability, sessionCatalogSlice, summarizeCatalog } from "../inference/export-scope.js";
+import { inferUiOperationIntent } from "../inference/heuristics.js";
 
 const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload", "action"]);
 const OPERATION_LABEL: Partial<Record<OperationKind, string>> = {
@@ -23,6 +24,8 @@ const NEXT_LABEL: Record<ReviewNext, string> = {
   manual: "需要人工改目录或平台后再验证",
   export: "可以导出"
 };
+const BUSINESS_DETAIL_COLLECTION = /(detail|item|line|entry|row|明细|清单)/i;
+const NON_BUSINESS_COLLECTION = /(attach|upload|file|image|img|cced|copy|approv|audit)/i;
 
 const CHECK_GUIDANCE: Record<string, { stage: ReviewStage; next: ReviewNext; hint: string }> = {
   "recorded-network-evidence": { stage: "record", next: "re-record", hint: "回到页面重新操作，直到该请求出现在本次录制里" },
@@ -89,6 +92,56 @@ export function unresolvedWriteFields(capability: CapabilityContract) {
   return capability.inputForm.filter(field => !fieldOriginResolved(capability, field));
 }
 
+function completeCoverageUiFields(capability: CapabilityContract, events: EvidenceEvent[]) {
+  const evidenceIds = new Set(capability.evidence.map(ref => ref.eventId));
+  const uiById = new Map(events.filter((event): event is Extract<EvidenceEvent, { kind: "ui" }> => event.kind === "ui").map(event => [event.id, event]));
+  const submissions = events.filter((event): event is Extract<EvidenceEvent, { kind: "network" }> =>
+    event.kind === "network"
+    && evidenceIds.has(event.id)
+    && Boolean(event.correlatedUiEvidenceId)
+    && Boolean(event.response && event.response.status >= 200 && event.response.status < 400)
+  ).filter(event => {
+    if (capability.operation !== "query") return true;
+    const ui = uiById.get(event.correlatedUiEvidenceId!);
+    return ui && inferUiOperationIntent(ui.text || ui.label || "", ui.pageUrl) === "query";
+  }).sort((left, right) => left.at.localeCompare(right.at));
+  const latest = submissions.at(-1);
+  return latest ? uiById.get(latest.correlatedUiEvidenceId!)?.form || [] : [];
+}
+
+function emptyCoverageValue(value: unknown) {
+  if (value === undefined || value === null) return true;
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value !== "string") return false;
+  const text = value.replace(/<[^>]+>/g, "").replace(/&nbsp;|&#160;/gi, " ").trim();
+  return !text || /^(请选择|请输入|请填写|please (select|enter|choose))$/i.test(text);
+}
+
+function blankCompleteCoverageFields(capability: CapabilityContract, events: EvidenceEvent[]) {
+  const seen = new Set<string>();
+  return completeCoverageUiFields(capability, events).filter(field => {
+    const label = String(field.label || field.name || "").trim();
+    const type = String(field.type || "");
+    if (!label || /upload|file|readonly|hidden/i.test(type) || /附件|上传/.test(label)) return false;
+    if (!emptyCoverageValue(field.value)) return false;
+    const key = `${label}:${field.rangeIndex ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function emptyBusinessCollections(capability: CapabilityContract, events: EvidenceEvent[]) {
+  if (!WRITE_OPERATIONS.has(capability.operation)) return [];
+  const sample = evidenceSample(capability, events);
+  return flattenRequestValues(sample).filter(item =>
+    Array.isArray(item.value)
+    && item.value.length === 0
+    && BUSINESS_DETAIL_COLLECTION.test(`${item.name} ${item.path}`)
+    && !NON_BUSINESS_COLLECTION.test(`${item.name} ${item.path}`)
+  );
+}
+
 function worstNext(findings: ReviewFinding[]): ReviewNext {
   if (!findings.length) return "export";
   return findings.slice().sort((left, right) => NEXT_RANK[left.next] - NEXT_RANK[right.next])[0]!.next;
@@ -110,7 +163,8 @@ function findingFromCheck(capability: CapabilityContract, check: CapabilityContr
 export function reviewCatalog(
   capabilities: CapabilityContract[],
   events: EvidenceEvent[] = [],
-  expectedOperations: OperationKind[] = []
+  expectedOperations: OperationKind[] = [],
+  completeFieldCoverage = false
 ): ReviewReport {
   const { primary, lookups } = summarizeCatalog(capabilities);
   const neededLookups = lookups.filter(item => isCandidateSourceCapability(item, capabilities) && !isNoiseCapability(item));
@@ -137,6 +191,36 @@ export function reviewCatalog(
       next: "re-record",
       message: `本次录制要求包含「${label}」，但没有找到对应且可验证的主能力。请回到该页面真实完成一次${label}并取得成功响应后再导出。`
     });
+  }
+
+  if (completeFieldCoverage) {
+    for (const capability of primary) {
+      for (const field of blankCompleteCoverageFields(capability, events)) {
+        const label = String(field.label || field.name || "字段");
+        findings.push({
+          code: "complete-field-coverage",
+          severity: "block",
+          stage: "record",
+          next: "re-record",
+          capabilityId: capability.id,
+          capabilityTitle: capability.title,
+          fieldPath: field.name,
+          message: `本次要求覆盖全部可操作字段，但提交「${capability.title}」时字段「${label}」仍为空。自动返回该页面补齐全部字段后重新提交；附件和上传控件除外。`
+        });
+      }
+      for (const collection of emptyBusinessCollections(capability, events)) {
+        findings.push({
+          code: "complete-field-coverage",
+          severity: "block",
+          stage: "record",
+          next: "re-record",
+          capabilityId: capability.id,
+          capabilityTitle: capability.title,
+          fieldPath: collection.path,
+          message: `本次要求覆盖全部可操作字段，但写请求中的业务明细集合 ${collection.path} 仍为空。自动展开页面里的添加/新增明细区域，至少真实填写并提交一行；附件和上传集合除外。`
+        });
+      }
+    }
   }
 
   for (const capability of [...primary, ...neededLookups]) {
@@ -260,12 +344,13 @@ export function reviewSession(
   catalog: CapabilityContract[],
   allEvents: EvidenceEvent[],
   sessionEvents: EvidenceEvent[],
-  expectedOperations: OperationKind[] = []
+  expectedOperations: OperationKind[] = [],
+  completeFieldCoverage = false
 ) {
   const scoped = sessionCatalogSlice(catalog, allEvents, sessionEvents);
   return {
     capabilities: scoped,
-    review: reviewCatalog(scoped, allEvents, expectedOperations)
+    review: reviewCatalog(scoped, allEvents, expectedOperations, completeFieldCoverage)
   };
 }
 

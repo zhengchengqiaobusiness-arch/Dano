@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { CapabilityContract } from "../src/domain.js";
+import type { CapabilityContract, EvidenceEvent } from "../src/domain.js";
 import { capabilitiesForSession, isPrimaryCapability, summarizeCatalog } from "../src/inference/export-scope.js";
 import { reviewCatalog } from "../src/review/catalog-review.js";
 import { mergeCatalogByTransport } from "../src/catalog/normalize.js";
@@ -143,6 +143,60 @@ test("missing successful write evidence asks to re-record", () => {
   assert.equal(review.status, "blocked");
   assert.equal(review.next, "re-record");
   assert.match(review.summary, /回到页面补录/);
+});
+
+test("complete field coverage blocks a blank visible filter and an unexercised business detail collection", () => {
+  const query = cap({
+    id: "query-seal",
+    operation: "query",
+    title: "查询公章申请",
+    transport: { method: "GET", urlTemplate: "https://x/oa/sealApply/list", origin: "https://x", pathTemplate: "/oa/sealApply/list" },
+    evidence: [{ eventId: "net-query", sessionId: "coverage", kind: "network", at: "2026-09-04T10:00:01.000Z", status: 200 }]
+  });
+  const create = cap({
+    id: "create-reimbursement",
+    operation: "create",
+    title: "新建报销申请",
+    transport: { method: "POST", urlTemplate: "https://x/oa/reimburseApply", origin: "https://x", pathTemplate: "/oa/reimburseApply" },
+    inputForm: [{
+      path: "$.oaReimburseFeeitemList", name: "oaReimburseFeeitemList", label: "报销费用明细",
+      valueType: "array", source: "fixed", required: false, requiredBasis: "not-observed", systemHandled: true,
+      sourceDetail: "录制请求中的空数组", widget: "text", defaultRule: "literal:[]"
+    }],
+    evidence: [{ eventId: "net-create", sessionId: "coverage", kind: "network", at: "2026-09-04T10:01:01.000Z", status: 200 }]
+  });
+  const events: EvidenceEvent[] = [{
+    id: "ui-query", kind: "ui", sessionId: "coverage", at: "2026-09-04T10:00:00.000Z",
+    pageUrl: "https://x/oa/sealApply", eventType: "click", text: "搜索", label: "搜索",
+    form: [
+      { label: "流程状态", type: "select", value: "未提交" },
+      { label: "公章", type: "select", value: "" }
+    ]
+  }, {
+    id: "net-query", kind: "network", sessionId: "coverage", at: "2026-09-04T10:00:01.000Z",
+    pageUrl: "https://x/oa/sealApply", correlatedUiEvidenceId: "ui-query",
+    request: { method: "GET", url: "https://x/oa/sealApply/list?status=0", resourceType: "xhr", headers: {}, query: { status: "0" } },
+    response: { status: 200, headers: {}, body: { rows: [], total: 0 } }
+  }, {
+    id: "ui-create", kind: "ui", sessionId: "coverage", at: "2026-09-04T10:01:00.000Z",
+    pageUrl: "https://x/oa/reimburseApply/form/add", eventType: "click", text: "保存", label: "保存",
+    form: [{ label: "报销缘由", type: "textarea", value: "办公费用" }]
+  }, {
+    id: "net-create", kind: "network", sessionId: "coverage", at: "2026-09-04T10:01:01.000Z",
+    pageUrl: "https://x/oa/reimburseApply/form/add", correlatedUiEvidenceId: "ui-create",
+    request: {
+      method: "POST", url: "https://x/oa/reimburseApply", resourceType: "xhr", headers: {}, query: {},
+      body: { oaReimburseFeeitemList: [] }
+    },
+    response: { status: 200, headers: {}, body: { code: 200 } }
+  }];
+
+  assert.equal(reviewCatalog([query, create], events).status, "passed", "ordinary recordings remain backward compatible");
+  const review = reviewCatalog([query, create], events, ["query", "create"], true);
+  assert.equal(review.status, "blocked");
+  assert.equal(review.next, "re-record");
+  assert.equal(review.findings.some(item => item.fieldPath === undefined && item.message.includes("公章")), true);
+  assert.equal(review.findings.some(item => item.fieldPath === "$.oaReimburseFeeitemList"), true);
 });
 
 test("analyze merge keeps create when a later session only saw the page query", () => {
