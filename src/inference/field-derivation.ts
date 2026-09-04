@@ -187,11 +187,6 @@ function lastPathName(path: string) {
   return (path.split(".").pop() || "").replace(/\[\*\]/g, "");
 }
 
-function isPrimaryListEcho(capability: CapabilityContract, catalog: CapabilityContract[], fieldName: string, fromPath: string) {
-  if (!isPageResultQuery(capability) || !isPrimaryCapability(capability, catalog)) return false;
-  return lastPathName(fromPath).toLowerCase() === fieldName.toLowerCase();
-}
-
 function responseHits(body: unknown, prefix = "$", row?: Record<string, unknown>): Array<{ path: string; value: unknown; row?: Record<string, unknown> }> {
   if (body === undefined) return [];
   if (Array.isArray(body)) {
@@ -270,40 +265,137 @@ function requestSelectsValue(event: NetworkEvidence, fieldName: string, value: u
   return Object.values(params).some(item => sameValue(item, value));
 }
 
-function lookupEvents(events: EvidenceEvent[]) {
-  return events.filter((event): event is NetworkEvidence =>
-    event.kind === "network"
-    && Boolean(event.response && event.response.status >= 200 && event.response.status < 400)
-  );
+type IndexedLeaf = { path: string; value: unknown; row?: Record<string, unknown> };
+
+type LookupIndexEntry = {
+  event: NetworkEvidence;
+  capability: CapabilityContract;
+  leaves: IndexedLeaf[];
+  leavesByValue: Map<string, IndexedLeaf[]>;
+  isPageQuery: boolean;
+  isPrimary: boolean;
+};
+
+function primitiveValueKey(value: unknown) {
+  const type = typeof value;
+  if (type === "string" || type === "number" || type === "boolean") return `${type}:${String(value)}`;
+  return undefined;
+}
+
+function dayValueKey(value: unknown) {
+  if (typeof value === "number" && value >= EPOCH_MS_MIN && value <= EPOCH_MS_MAX) {
+    return `day:${new Date(value).toISOString().slice(0, 10)}`;
+  }
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value)) return `day:${value.slice(0, 10)}`;
+  return undefined;
+}
+
+function lookupValueKeys(value: unknown) {
+  const keys = new Set<string>();
+  const primitive = primitiveValueKey(value);
+  if (primitive) keys.add(primitive);
+  const day = dayValueKey(value);
+  if (day) keys.add(day);
+  if (typeof value === "number" && Number.isFinite(value)) keys.add(`string:${value}`);
+  if (typeof value === "string" && value !== "" && Number.isFinite(Number(value))) keys.add(`number:${Number(value)}`);
+  if (value === true) {
+    keys.add("number:1");
+    keys.add("string:true");
+  }
+  if (value === false) {
+    keys.add("number:0");
+    keys.add("string:false");
+  }
+  return [...keys];
+}
+
+function addLeafKey(index: Map<string, IndexedLeaf[]>, key: string | undefined, leaf: IndexedLeaf) {
+  if (!key) return;
+  const bucket = index.get(key);
+  if (bucket) bucket.push(leaf);
+  else index.set(key, [leaf]);
+}
+
+function matchingLeaves(entry: LookupIndexEntry, value: unknown) {
+  const keys = lookupValueKeys(value);
+  if (!keys.length) return entry.leaves;
+  const seen = new Set<IndexedLeaf>();
+  const matched: IndexedLeaf[] = [];
+  for (const key of keys) {
+    for (const leaf of entry.leavesByValue.get(key) || []) {
+      if (seen.has(leaf)) continue;
+      seen.add(leaf);
+      matched.push(leaf);
+    }
+  }
+  return matched;
+}
+
+function buildLookupIndex(events: EvidenceEvent[], catalog: CapabilityContract[]) {
+  const primaryCache = new Map<string, boolean>();
+  const pageQueryCache = new Map<string, boolean>();
+  const isPrimary = (capability: CapabilityContract) => {
+    const cached = primaryCache.get(capability.id);
+    if (cached !== undefined) return cached;
+    const value = isPrimaryCapability(capability, catalog);
+    primaryCache.set(capability.id, value);
+    return value;
+  };
+  const isPageQuery = (capability: CapabilityContract) => {
+    const cached = pageQueryCache.get(capability.id);
+    if (cached !== undefined) return cached;
+    const value = isPageResultQuery(capability);
+    pageQueryCache.set(capability.id, value);
+    return value;
+  };
+  const index: LookupIndexEntry[] = [];
+  for (const event of events) {
+    if (event.kind !== "network" || !event.response || event.response.status < 200 || event.response.status >= 400) continue;
+    const capability = capabilityForEvent(event, catalog);
+    if (!capability) continue;
+    const leaves = responseHits(event.response.body);
+    const leavesByValue = new Map<string, IndexedLeaf[]>();
+    for (const leaf of leaves) {
+      addLeafKey(leavesByValue, primitiveValueKey(leaf.value), leaf);
+      addLeafKey(leavesByValue, dayValueKey(leaf.value), leaf);
+    }
+    index.push({
+      event,
+      capability,
+      leaves,
+      leavesByValue,
+      isPageQuery: isPageQuery(capability),
+      isPrimary: isPrimary(capability)
+    });
+  }
+  return index;
 }
 
 function fromApiMatch(
   field: InputFormField,
   value: unknown,
   sample: unknown,
-  events: EvidenceEvent[],
-  catalog: CapabilityContract[]
+  index: LookupIndexEntry[]
 ) {
   if (value === undefined || value === null || value === "") return undefined;
   const joins = requestJoins(sample);
   const hits: Array<{ capabilityId: string; fromPath: string; via?: string; eventId: string; method: string; pathTemplate: string }> = [];
-  for (const event of lookupEvents(events)) {
-    const capability = capabilityForEvent(event, catalog);
-    if (!capability) continue;
-    for (const leaf of responseHits(event.response?.body)) {
+  for (const entry of index) {
+    const { event, capability } = entry;
+    for (const leaf of matchingLeaves(entry, value)) {
       if (isEnvelopePath(leaf.path, field.name)) continue;
       if (!sameDerivedValue(leaf.value, value)) continue;
       // The page's own result list often repeats the field we just wrote.
       // Only keep it when that value was also a same-named filter on the list request.
-      if (isPageResultQuery(capability) && isPrimaryCapability(capability, catalog) && !requestSelectsValue(event, field.name, value)) continue;
-      if (isPrimaryListEcho(capability, catalog, field.name, leaf.path) && !requestSelectsValue(event, field.name, value)) continue;
+      if (entry.isPageQuery && entry.isPrimary && !requestSelectsValue(event, field.name, value)) continue;
+      if (entry.isPageQuery && entry.isPrimary && lastPathName(leaf.path).toLowerCase() === field.name.toLowerCase() && !requestSelectsValue(event, field.name, value)) continue;
       const query = event.request.query || {};
       const queryJoin = joins.find(item =>
         Object.entries(query).some(([key, queryValue]) => key === item.name && sameValue(queryValue, item.value))
       );
       const via = leaf.row ? pickVia(field, joins, leaf.row) : queryJoin;
       if (leaf.row && !via) {
-        const siblings = responseHits(event.response?.body).filter(item => item.path === leaf.path);
+        const siblings = entry.leaves.filter(item => item.path === leaf.path);
         if (!siblings.length || siblings.some(item => !sameDerivedValue(item.value, value))) continue;
       }
       hits.push({
@@ -596,8 +688,10 @@ export function attachDerivationRules(
   events: EvidenceEvent[],
   catalog: CapabilityContract[],
   capability: CapabilityContract,
-  mode: "write" | "query" = "write"
+  mode: "write" | "query" = "write",
+  index?: LookupIndexEntry[]
 ): { fields: InputFormField[]; bindings: DataBinding[] } {
+  const lookupIndex = index || buildLookupIndex(events, catalog);
   const bindings: DataBinding[] = [];
   let next = fields.map(field => {
     if (isAssembledObjectField(field, fields)) {
@@ -606,7 +700,7 @@ export function attachDerivationRules(
     if (shouldKeep(field, capability, fields)) return field;
     if (field.defaultRule && (mode === "write" || !field.defaultRule.startsWith("literal:"))) return field;
     const value = requestValueAt(sample, field.path);
-    const from = fromApiMatch(field, value, sample, events, catalog);
+    const from = fromApiMatch(field, value, sample, lookupIndex);
     if (from) {
       bindings.push({
         id: id("bind"),
@@ -666,7 +760,14 @@ export function attachDerivationRules(
 }
 
 export function attachCatalogDerivations(capabilities: CapabilityContract[], events: EvidenceEvent[]) {
+  const pending = capabilities.filter(capability =>
+    capability.validation?.status !== "verified"
+    && (WRITE_OPERATIONS.has(capability.operation) || capability.operation === "query")
+  );
+  if (!pending.length) return capabilities;
+  const index = buildLookupIndex(events, capabilities);
   return capabilities.map(capability => {
+    if (capability.validation?.status === "verified") return capability;
     if (!WRITE_OPERATIONS.has(capability.operation) && capability.operation !== "query") return capability;
     const sample = evidenceSample(capability, events);
     if (!sample) return capability;
@@ -676,7 +777,8 @@ export function attachCatalogDerivations(capabilities: CapabilityContract[], eve
       events,
       capabilities,
       capability,
-      WRITE_OPERATIONS.has(capability.operation) ? "write" : "query"
+      WRITE_OPERATIONS.has(capability.operation) ? "write" : "query",
+      index
     );
     const existing = new Set(capability.bindings.map(item => `${item.fromCapabilityId}|${item.fromPath}|${item.toPath}`));
     return {

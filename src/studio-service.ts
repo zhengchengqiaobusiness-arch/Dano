@@ -6,7 +6,7 @@ import { loadConfig } from "./config.js";
 import { BrowserRecorder } from "./browser/recorder.js";
 import { id, readJson, readJsonl, writeJson } from "./utils.js";
 import { buildCapabilityCandidates } from "./inference/build-candidates.js";
-import { finalizeSessionSlice, sealWriteCapabilities } from "./inference/finalize-capabilities.js";
+import { finalizeSessionSlice, sealWriteCapabilities, sessionExportReady } from "./inference/finalize-capabilities.js";
 import { OpenAIReasoner } from "./llm/openai.js";
 import { fallbackPlan } from "./planner/fallback.js";
 import { applyPlanPolicy } from "./planner/policy.js";
@@ -39,6 +39,9 @@ export class StudioService {
   readonly skillLibrary: SkillLibrary;
   private lastAnalyzedSessionId?: string;
   private state?: { lastAnalyzedSessionId?: string };
+  private sessionListCache?: RecordingSession[];
+  private eventCache = new Map<string, EvidenceEvent[]>();
+  private catalogCache?: CapabilityContract[];
 
   constructor(config = loadConfig()) {
     this.config = config;
@@ -53,14 +56,19 @@ export class StudioService {
 
   async startRecording(url: string, name?: string) {
     if (this.recorder.isActive()) await this.stopRecording();
+    this.sessionListCache = undefined;
     return this.recorder.start(url, name);
   }
 
   async stopRecording() {
-    return this.recorder.stop();
+    const session = await this.recorder.stop();
+    this.sessionListCache = undefined;
+    this.eventCache.delete(session.id);
+    return session;
   }
 
   async listSessions(): Promise<RecordingSession[]> {
+    if (this.sessionListCache) return this.sessionListCache;
     try {
       const ids = await readdir(this.config.recordingsDir);
       const sessions = await Promise.all(
@@ -69,7 +77,8 @@ export class StudioService {
           null
         ))
       );
-      return sessions.filter((s): s is RecordingSession => Boolean(s)).sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+      this.sessionListCache = sessions.filter((s): s is RecordingSession => Boolean(s)).sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+      return this.sessionListCache;
     } catch (error: any) {
       if (error?.code === "ENOENT") return [];
       throw error;
@@ -77,7 +86,11 @@ export class StudioService {
   }
 
   async sessionEvents(sessionId: string): Promise<EvidenceEvent[]> {
-    return readJsonl<EvidenceEvent>(path.join(this.config.recordingsDir, sessionId, "events.jsonl"));
+    const cached = this.eventCache.get(sessionId);
+    if (cached) return cached;
+    const events = await readJsonl<EvidenceEvent>(path.join(this.config.recordingsDir, sessionId, "events.jsonl"));
+    this.eventCache.set(sessionId, events);
+    return events;
   }
 
   async allEvents(): Promise<EvidenceEvent[]> {
@@ -104,14 +117,21 @@ export class StudioService {
     await writeJson(this.stateFile(), state);
   }
 
-  private async persistSessionPageKeys(sessionId: string, events: EvidenceEvent[]) {
-    const file = path.join(this.config.recordingsDir, sessionId, "session.json");
-    const session = await readJson<RecordingSession | null>(file, null);
-    if (!session) return;
+  private async persistSessionPageKeys(session: RecordingSession, events: EvidenceEvent[]) {
     const pageKeys = sessionBusinessPageKeys(events, session.startUrl);
     if ((session.pageKeys || []).join("\n") === pageKeys.join("\n")) return;
     session.pageKeys = pageKeys;
-    await writeJson(file, session);
+    await writeJson(path.join(this.config.recordingsDir, session.id, "session.json"), session);
+  }
+
+  private async writeCatalog(capabilities: CapabilityContract[]) {
+    this.catalogCache = normalizeCatalog(capabilities);
+    await writeJson(this.catalogFile(), this.catalogCache);
+  }
+
+  private sliceNeedsExtraEvents(slice: CapabilityContract[], events: EvidenceEvent[]) {
+    const have = new Set(events.map(event => event.id));
+    return slice.some(capability => capability.evidence.some(ref => !have.has(ref.eventId)));
   }
 
   private async resolveSessionId(sessionId?: string, sessions?: RecordingSession[]) {
@@ -127,25 +147,33 @@ export class StudioService {
     const sessions = await this.listSessions();
     const current = await this.resolveSessionId(sessionId, sessions);
     const scopeEvents = current ? await this.sessionEvents(current) : [];
-    if (current) {
-      const session = sessions.find(item => item.id === current);
-      if (session) session.pageKeys = sessionBusinessPageKeys(scopeEvents, session.startUrl);
-      await this.persistSessionPageKeys(current, scopeEvents);
-    }
+    const session = current ? sessions.find(item => item.id === current) : undefined;
+    if (session) await this.persistSessionPageKeys(session, scopeEvents);
+    const catalog = await this.capabilities();
     const ids = current ? reviewSessionIds(sessions, current, scopeEvents) : new Set<string>();
-    const events = (await Promise.all([...ids].map(id => this.sessionEvents(id)))).flat();
-    return { current, scopeEvents, events };
+    const preliminary = sessionCatalogSlice(catalog, scopeEvents, scopeEvents);
+    const extraIds = this.sliceNeedsExtraEvents(preliminary, scopeEvents)
+      ? [...ids].filter(id => id !== current)
+      : [];
+    const extraEvents = extraIds.length
+      ? (await Promise.all(extraIds.map(id => this.sessionEvents(id)))).flat()
+      : [];
+    return { current, scopeEvents, events: extraEvents.length ? [...scopeEvents, ...extraEvents] : scopeEvents, catalog };
   }
 
   async capabilities(): Promise<CapabilityContract[]> {
-    return normalizeCatalog(await readJson<CapabilityContract[]>(this.catalogFile(), []));
+    if (this.catalogCache) return this.catalogCache;
+    this.catalogCache = normalizeCatalog(await readJson<CapabilityContract[]>(this.catalogFile(), []));
+    return this.catalogCache;
   }
 
   async analyze(sessionId?: string, useLlm = true) {
-    const latest = sessionId || (await this.listSessions())[0]?.id;
+    const sessions = await this.listSessions();
+    const latest = sessionId || sessions[0]?.id;
     await this.rememberAnalyzedSession(latest);
     const events = latest ? await this.sessionEvents(latest) : [];
-    if (latest) await this.persistSessionPageKeys(latest, events);
+    const session = latest ? sessions.find(item => item.id === latest) : undefined;
+    if (session) await this.persistSessionPageKeys(session, events);
     const existing = await this.capabilities();
 
     let candidates = buildCapabilityCandidates(events);
@@ -154,9 +182,8 @@ export class StudioService {
     }
 
     candidates = reanalyzeIncoming(candidates, existing);
-    candidates = sealWriteCapabilities(candidates, events);
     candidates = mergeCatalogByTransport(candidates, existing);
-    await writeJson(this.catalogFile(), candidates);
+    await this.writeCatalog(candidates);
     return capabilitiesForSession(candidates, events, events);
   }
 
@@ -166,35 +193,32 @@ export class StudioService {
   }
 
   async review(sessionId?: string) {
-    const { current, scopeEvents, events } = await this.scopedEvidence(sessionId);
+    const { current, scopeEvents, events, catalog } = await this.scopedEvidence(sessionId);
     await this.rememberAnalyzedSession(current);
-    const existing = await this.capabilities();
-    const slice = sessionCatalogSlice(existing, events, scopeEvents);
-    const validated = finalizeSessionSlice(slice, events, existing);
-    await writeJson(this.catalogFile(), mergeCatalogByTransport(validated, existing));
+    const slice = sessionCatalogSlice(catalog, events, scopeEvents);
+    const validated = finalizeSessionSlice(slice, events, catalog);
+    if (validated !== slice) await this.writeCatalog(mergeCatalogByTransport(validated, catalog));
     return reviewSession(validated, events, scopeEvents);
   }
 
   async sealWrites() {
-    const { scopeEvents, events } = await this.scopedEvidence();
-    const existing = await this.capabilities();
-    const slice = sessionCatalogSlice(existing, events, scopeEvents);
+    const { scopeEvents, events, catalog } = await this.scopedEvidence();
+    const slice = sessionCatalogSlice(catalog, events, scopeEvents);
     const sealedSlice = sealWriteCapabilities(slice, events);
-    const sealed = mergeCatalogByTransport(sealedSlice, existing);
-    await writeJson(this.catalogFile(), sealed);
+    const sealed = mergeCatalogByTransport(sealedSlice, catalog);
+    await this.writeCatalog(sealed);
     return sealed;
   }
 
   private async exportCatalog(sessionId?: string) {
-    const { current, scopeEvents, events } = await this.scopedEvidence(sessionId);
+    const { current, scopeEvents, events, catalog } = await this.scopedEvidence(sessionId);
     await this.rememberAnalyzedSession(current);
-    const existing = await this.capabilities();
-    const slice = sessionCatalogSlice(existing, events, scopeEvents);
-    const finalized = finalizeSessionSlice(slice, events, existing);
-    const sealed = sealWriteCapabilities(finalized, events);
-    await writeJson(this.catalogFile(), mergeCatalogByTransport(sealed, existing));
+    const slice = sessionCatalogSlice(catalog, events, scopeEvents);
+    if (sessionExportReady(slice)) return { catalog: slice, events };
+    const finalized = finalizeSessionSlice(slice, events, catalog);
+    await this.writeCatalog(mergeCatalogByTransport(finalized, catalog));
     return {
-      catalog: sealed,
+      catalog: finalized,
       events
     };
   }
@@ -260,7 +284,7 @@ export class StudioService {
     }
     capability.editing.updatedAt = now;
     capability.validation = { version: 2, status: "candidate", checks: [] };
-    await writeJson(this.catalogFile(), capabilities);
+    await this.writeCatalog(capabilities);
     return capability;
   }
 
@@ -326,7 +350,7 @@ export class StudioService {
     targetField.sourceDetail = `由已确认绑定从 ${from.id}${input.fromPath} 提供`;
     targetField.defaultRule = undefined;
     to.validation = { version: 2, status: "candidate", checks: [] };
-    await writeJson(this.catalogFile(), caps);
+    await this.writeCatalog(caps);
     return to;
   }
 
@@ -365,7 +389,7 @@ export class StudioService {
     target.editing.fields = "manual";
     target.editing.fieldPaths = [...new Set([...(target.editing.fieldPaths || []), field.path])];
     target.validation = { version: 2, status: "candidate", checks: [] };
-    await writeJson(this.catalogFile(), caps);
+    await this.writeCatalog(caps);
     return target;
   }
 

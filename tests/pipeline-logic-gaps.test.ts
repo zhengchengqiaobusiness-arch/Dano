@@ -12,7 +12,8 @@ import {
   sameResource,
   sessionBusinessPageKeys
 } from "../src/inference/export-scope.js";
-import { finalizeSessionSlice } from "../src/inference/finalize-capabilities.js";
+import { finalizeCapabilities, finalizeSessionSlice } from "../src/inference/finalize-capabilities.js";
+import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
 import { buildApprovedRoutes, collectRouteIssues } from "../src/planner/routes.js";
 import { StudioService } from "../src/studio-service.js";
 import { writeJson, appendJsonl } from "../src/utils.js";
@@ -327,5 +328,88 @@ test("analyze then export finalizes this page so the query is not dropped", asyn
   assert.match(skill, /查询|新建|订单/);
   assert.match(contract, /\/order\/page|\/order\/create/);
   assert.match(contract, /"status": "verified"/);
+  await rm(temporary, { recursive: true, force: true });
+});
+
+test("from-rule matching indexes fat lookup lists instead of rescanning every field", () => {
+  const rows = Array.from({ length: 800 }, (_, index) => ({
+    id: index + 1,
+    name: `商品${index}`,
+    unitName: "件"
+  }));
+  rows[8] = { id: 9, name: "苹果", unitName: "盒" };
+  const events: EvidenceEvent[] = [{
+    id: "ui-form", kind: "ui", sessionId: "order-now", at: "2026-09-04T12:00:00.000Z",
+    pageUrl: ORDER_PAGE, eventType: "input",
+    form: [
+      { name: "productId", label: "产品", type: "select", required: true, value: "苹果" },
+      { name: "count", label: "数量", type: "number", required: true, value: 2 },
+      { name: "productPrice", label: "单价", type: "number", required: true, value: 10 },
+      { name: "unitName", label: "单位", type: "readonly", value: "盒" }
+    ]
+  }, {
+    id: "ui-submit", kind: "ui", sessionId: "order-now", at: "2026-09-04T12:00:01.000Z",
+    pageUrl: ORDER_PAGE, eventType: "click", text: "确定", label: "确定"
+  }, {
+    id: "net-product", kind: "network", sessionId: "order-now", at: "2026-09-04T12:00:00.500Z",
+    pageUrl: ORDER_PAGE,
+    request: { method: "GET", url: "https://example.test/admin-api/product/simple-list", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { success: true, data: rows } }
+  }, {
+    id: "net-create", kind: "network", sessionId: "order-now", at: "2026-09-04T12:00:02.000Z",
+    pageUrl: ORDER_PAGE, correlatedUiEvidenceId: "ui-submit",
+    request: {
+      method: "POST", url: "https://example.test/admin-api/order/create", resourceType: "xhr", headers: {}, query: {},
+      body: { productId: 9, count: 2, productPrice: 10, unitName: "盒", amount: 20 }
+    },
+    response: { status: 200, headers: {}, body: { success: true, data: 1 } }
+  }];
+  const started = Date.now();
+  const catalog = finalizeCapabilities(buildCapabilityCandidates(events), events);
+  const elapsed = Date.now() - started;
+  const create = catalog.find(item => item.transport.pathTemplate.includes("/order/create"))!;
+  assert.match(create.inputForm.find(field => field.name === "unitName")?.defaultRule || "", /^from:.+\.unitName\|via:productId$/);
+  assert.ok(elapsed < 400, `finalize on 800-row lookup took ${elapsed}ms`);
+});
+
+test("export after a passed review does not reload other-page history or rewrite the catalog", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "pipeline-export-fast-"));
+  const recordingsDir = path.join(temporary, "recordings");
+  const catalogDir = path.join(temporary, "catalog");
+  const current = [{
+    id: "ui-form", kind: "ui", sessionId: "order-now", at: "2026-09-04T12:00:00.000Z",
+    pageUrl: ORDER_PAGE, eventType: "input",
+    form: [
+      { name: "productId", label: "产品", type: "select", required: true, value: "苹果" },
+      { name: "count", label: "数量", type: "number", required: true, value: 2 },
+      { name: "unitName", label: "单位", type: "readonly", value: "盒" }
+    ]
+  }, {
+    id: "ui-submit", kind: "ui", sessionId: "order-now", at: "2026-09-04T12:00:01.000Z",
+    pageUrl: ORDER_PAGE, eventType: "click", text: "确定", label: "确定"
+  }, {
+    id: "net-product", kind: "network", sessionId: "order-now", at: "2026-09-04T12:00:00.500Z",
+    pageUrl: ORDER_PAGE,
+    request: { method: "GET", url: "https://example.test/admin-api/product/simple-list", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { success: true, data: [{ id: 9, name: "苹果", unitName: "盒" }] } }
+  }, {
+    id: "net-create", kind: "network", sessionId: "order-now", at: "2026-09-04T12:00:02.000Z",
+    pageUrl: ORDER_PAGE, correlatedUiEvidenceId: "ui-submit",
+    request: {
+      method: "POST", url: "https://example.test/admin-api/order/create", resourceType: "xhr", headers: {}, query: {},
+      body: { productId: 9, count: 2, unitName: "盒" }
+    },
+    response: { status: 200, headers: {}, body: { success: true, data: 1 } }
+  }] as EvidenceEvent[];
+  const catalog = finalizeCapabilities(buildCapabilityCandidates(current), current);
+  await writeJson(path.join(catalogDir, "capabilities.json"), catalog);
+  await writeSession(recordingsDir, { id: "order-now", startUrl: ORDER_PAGE, startedAt: "2026-09-04T12:00:00.000Z" }, current);
+  const studio = studioOf(temporary, recordingsDir, catalogDir);
+  await studio.review("order-now");
+  const started = Date.now();
+  const result = await studio.export("订单", path.join(temporary, "dist", "skills"), [], "order-now");
+  const elapsed = Date.now() - started;
+  assert.ok(result.dir);
+  assert.ok(elapsed < 300, `export after review took ${elapsed}ms`);
   await rm(temporary, { recursive: true, force: true });
 });

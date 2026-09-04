@@ -4,6 +4,7 @@ import { attachCandidateSources } from "./candidate-sources.js";
 import { attachDictEnums } from "./dict-enums.js";
 import { validateCapability } from "../validation/validator.js";
 import { attachCatalogDerivations } from "./field-derivation.js";
+import { exportableCapabilities, isCandidateSourceCapability, isPrimaryCapability } from "./export-scope.js";
 
 function hasScopedNetworkEvidence(capability: CapabilityContract, events: EvidenceEvent[]) {
   const ids = new Set(events.map(event => event.id));
@@ -15,10 +16,27 @@ export function sealWriteCapabilities(capabilities: CapabilityContract[], events
 }
 
 export function finalizeCapabilities(capabilities: CapabilityContract[], events: EvidenceEvent[]) {
-  const first = capabilities.map(capability => validateCapability(capability, events, capabilities));
+  const first = capabilities.map(capability =>
+    capability.validation.status === "verified"
+      ? capability
+      : validateCapability(capability, events, capabilities)
+  );
   const sourced = attachDictEnums(attachCandidateSources(first, events), events);
   const sealed = sealWriteCapabilities(sourced, events);
-  return sealed.map(capability => validateCapability(capability, events, sealed));
+  return sealed.map(capability => {
+    if (capability.validation.status === "verified" && capability.inputForm === first.find(item => item.id === capability.id)?.inputForm) {
+      return capability;
+    }
+    return validateCapability(capability, events, sealed);
+  });
+}
+
+export function sessionExportReady(catalog: CapabilityContract[]) {
+  if (!exportableCapabilities(catalog).length) return false;
+  return catalog.every(capability =>
+    capability.validation.status === "verified"
+    || (!isPrimaryCapability(capability, catalog) && !isCandidateSourceCapability(capability, catalog))
+  );
 }
 
 export function finalizeSessionSlice(
@@ -26,6 +44,7 @@ export function finalizeSessionSlice(
   events: EvidenceEvent[],
   existing: CapabilityContract[] = []
 ) {
+  if (sessionExportReady(slice) && existing.length) return slice;
   const finalized = finalizeCapabilities(slice, events);
   if (!existing.length) return finalized;
   const existingByKey = new Map(existing.map(capability => [catalogTransportKey(capability), capability]));
