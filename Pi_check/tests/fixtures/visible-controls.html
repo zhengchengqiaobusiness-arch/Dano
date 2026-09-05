@@ -65,19 +65,34 @@
       <input placeholder="结束日期" />
     </div>
   </div>
-  <table class="el-table">
-    <thead><tr><th>工作内容</th><th>完成进度</th></tr></thead>
-    <tbody>
-      <tr>
-        <td><input placeholder="请输入工作内容" /></td>
-        <td><input value="60" /></td>
-      </tr>
-      <tr>
-        <td><input placeholder="请输入工作内容" /></td>
-        <td><input value="30" /></td>
-      </tr>
-    </tbody>
-  </table>
+  <div class="detail-block">
+    <h3>已完成工作</h3>
+    <button type="button" class="el-button">添加行</button>
+    <table class="el-table">
+      <thead><tr><th>工作内容</th><th>完成进度</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><input placeholder="请输入工作内容" /></td>
+          <td><input value="60" /></td>
+        </tr>
+        <tr>
+          <td><input placeholder="请输入工作内容" /></td>
+          <td><input value="30" /></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <form class="el-form">
+    <div class="el-form-item">
+      <label class="el-form-item__label">补充说明</label>
+      <textarea placeholder="请输入补充说明"></textarea>
+    </div>
+  </form>
+  <div class="el-dialog" role="dialog" aria-modal="true">
+    <div class="el-dialog__header">提交意见</div>
+    <textarea placeholder="请输入提交意见"></textarea>
+    <button type="button" class="el-button">确认提交</button>
+  </div>
   <script>
     document.getElementById("expand").addEventListener("click", () => {
       document.getElementById("extra-filters").style.display = "block";

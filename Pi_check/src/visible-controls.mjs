@@ -29,6 +29,7 @@ export function projectVisibleControlSnapshot(event) {
         name: String(row.name || ""),
         label: String(row.label || ""),
         placeholder: String(row.placeholder || ""),
+        section: String(row.section || ""),
         control_kind: String(row.control_kind || ""),
         required_mark: Boolean(row.required_mark),
         readonly: Boolean(row.readonly),
@@ -82,8 +83,13 @@ export function collectVisibleControlsInPage() {
   const inSidebar = (node) => Boolean(
     node.closest?.("aside, .el-aside, .ant-layout-sider, [class*='sidebar'], [class*='sider']"),
   );
+  const dialogRoot = (node) => node.closest?.(
+    'dialog,[role="dialog"],[role="alertdialog"],[aria-modal="true"],.el-dialog,.ant-modal,.van-dialog',
+  );
+  const tableRoot = (node) => node.closest?.("table, .el-table, .ant-table, .vxe-table, tbody, thead");
   const regionOf = (node) => {
-    if (node.closest?.("table, .el-table, .ant-table, .vxe-table, tbody, thead")) return "table";
+    if (dialogRoot(node)) return "dialog";
+    if (tableRoot(node)) return "table";
     return (inFilter(node) || inSidebar(node)) ? "filter" : "form";
   };
   const firstInput = (node) => node.querySelector?.("input, textarea, select");
@@ -117,16 +123,18 @@ export function collectVisibleControlsInPage() {
   const nearbyHeading = (node) => {
     let current = node;
     for (let depth = 0; depth < 4 && current; depth += 1) {
-      const prev = current.previousElementSibling;
-      if (prev) {
+      let prev = current.previousElementSibling;
+      while (prev) {
         const text = textOf(prev);
         if (
           text
           && text.length <= 24
+          && !prev.matches?.("button, .el-button, .ant-btn, a, [role='button']")
           && !prev.querySelector?.("input, textarea, select, [role='tree'], [role='tablist']")
         ) {
           return text;
         }
+        prev = prev.previousElementSibling;
       }
       current = current.parentElement;
     }
@@ -191,8 +199,8 @@ export function collectVisibleControlsInPage() {
     const options = Array.isArray(row.options) ? row.options.map((item) => compactText(item)).filter(Boolean).slice(0, 24) : [];
     const label = compactText(row.label) || (options.length ? options.slice(0, 4).join(" / ") : "");
     if (!label && !row.name && !row.placeholder) return;
-    const next = { ...row, label, options };
-    const key = [next.region, next.name, next.label, next.placeholder, next.control_kind, next.range ? "range" : ""].join("|");
+    const next = { ...row, label, options, section: compactText(row.section) };
+    const key = [next.region, next.name, next.label, next.placeholder, next.section, next.control_kind, next.range ? "range" : ""].join("|");
     if (seen.has(key)) return;
     seen.add(key);
     out.push(next);
@@ -212,6 +220,7 @@ export function collectVisibleControlsInPage() {
       name: String(input?.name || input?.id || node.getAttribute?.("name") || extras.name || ""),
       label,
       placeholder,
+      section: compactText(extras.section || ""),
       control_kind: controlKind,
       required_mark: markRequired(node.closest?.(".el-form-item, .ant-form-item, .form-item") || node, label),
       readonly: widgetLocked(node, input, controlKind),
@@ -292,19 +301,58 @@ export function collectVisibleControlsInPage() {
     const wrap = input.closest(".el-date-editor, .el-select, .ant-picker, .ant-select") || input;
     const label = textOf(head);
     const controlKind = detectKind(wrap, label);
-    const columnKey = `${label}|${controlKind}|${String(input.placeholder || "")}`;
+    const section = nearbyHeading(table) || nearbyHeading(input);
+    const columnKey = `${label}|${controlKind}|${String(input.placeholder || "")}|${section}`;
     if (tableColumns.has(columnKey)) continue;
     tableColumns.add(columnKey);
     push({
-      region: "table",
+      region: dialogRoot(input) ? "dialog" : "table",
       name: String(input.name || input.id || ""),
       label,
       placeholder: String(input.placeholder || ""),
+      section,
       control_kind: controlKind,
       required_mark: false,
       readonly: widgetLocked(wrap, input, controlKind),
       disabled: Boolean(input.disabled),
       range: controlKind === "date" && dateRange(wrap),
+      options: [],
+    });
+  }
+
+  for (const node of document.querySelectorAll(
+    'dialog input, dialog textarea, [role="dialog"] input, [role="dialog"] textarea, [role="alertdialog"] input, [role="alertdialog"] textarea, .el-dialog input, .el-dialog textarea, .ant-modal input, .ant-modal textarea, .van-dialog input, .van-dialog textarea',
+  )) {
+    if (!visible(node)) continue;
+    if (node.closest?.(".el-form-item, .ant-form-item, .form-item")) continue;
+    const wrap = node.closest(".el-date-editor, .el-select, .ant-picker, .ant-select") || node;
+    push(describe(wrap, {
+      region: "dialog",
+      label: nearbyLabel(node) || nearbyHeading(node) || String(node.getAttribute?.("aria-label") || ""),
+      placeholder: String(node.placeholder || ""),
+    }));
+  }
+
+  const addRowPacked = /^(添加|新增|增加).{0,12}(行|项|明细|记录)$/i;
+  const addRowEnglish = /\bAdd (row|item|line)\b/i;
+  for (const btn of document.querySelectorAll("button, .el-button, .ant-btn, a, [role='button']")) {
+    if (!visible(btn)) continue;
+    const rawLabel = textOf(btn);
+    if (!addRowPacked.test(rawLabel.replace(/\s+/g, "")) && !addRowEnglish.test(rawLabel)) continue;
+    const nearTable = tableRoot(btn)
+      || btn.closest?.(".el-card, .ant-card, section, .panel")?.querySelector?.("table, .el-table, .ant-table, .vxe-table")
+      || btn.parentElement?.querySelector?.("table, .el-table, .ant-table, .vxe-table");
+    push({
+      region: dialogRoot(btn) ? "dialog" : (nearTable ? "table" : regionOf(btn)),
+      name: "",
+      label: textOf(btn),
+      placeholder: "",
+      section: nearbyHeading(btn) || nearbyHeading(nearTable),
+      control_kind: "button",
+      required_mark: false,
+      readonly: Boolean(btn.disabled),
+      disabled: Boolean(btn.disabled),
+      range: false,
       options: [],
     });
   }

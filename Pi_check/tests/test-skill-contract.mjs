@@ -52,6 +52,13 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(skill, /树、页签、分段器、单选组/);
   assert.match(skill, /不要编造本场没发出的写请求/);
   assert.match(skill, /不要把同一数组拆成多行并列字段/);
+  assert.match(skill, /可增行明细/);
+  assert.match(skill, /系统再组装成/);
+  assert.match(skill, /同名文本域不是行/);
+  assert.match(skill, /必须完整处理/);
+  assert.match(skill, /region=table/);
+  assert.match(skill, /调用系统能直接用的选项合同/);
+  assert.match(skill, /x-dano-option-source/);
   assert.doesNotMatch(skill, /登录态、Cookie、分页、流程定义 Key、单据类型/);
   assert.doesNotMatch(skill, /workItems|planItems|createTime=/);
   assert.doesNotMatch(skill, /to_flow_spec|compile_capabilities|inferCapability/);

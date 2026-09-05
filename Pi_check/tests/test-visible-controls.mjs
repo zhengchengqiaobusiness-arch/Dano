@@ -48,16 +48,23 @@ test("可见控件只投影已有字段，不判断能力", () => {
           range: true,
           placeholder: "开始日期 → 结束日期",
         },
+        {
+          region: "dialog",
+          label: "提交意见",
+          placeholder: "请输入提交意见",
+          control_kind: "textarea",
+        },
       ],
     },
   });
   assert.equal(snapshot.kind, "visible_control");
-  assert.equal(snapshot.count, 5);
+  assert.equal(snapshot.count, 6);
+  assert.equal(snapshot.controls[5].region, "dialog");
   assert.equal(snapshot.controls[1].control_kind, "date");
   assert.equal(snapshot.controls[1].required_mark, true);
   assert.deepEqual(snapshot.controls[3].options, ["研发部门", "测试部门"]);
   assert.equal(snapshot.controls[4].range, true);
-  assert.equal(summarizeVisibleControls(snapshot.controls), "标题、开始日期、附件、组织机构、统计周期");
+  assert.equal(summarizeVisibleControls(snapshot.controls), "标题、开始日期、附件、组织机构、统计周期、提交意见");
   assert.ok(!JSON.stringify(snapshot).includes("capability"));
 });
 
@@ -99,6 +106,17 @@ test("采集日期、下拉、上传和折叠筛选，日期只读输入不当�
   const progresses = controls.filter((item) => item.region === "table" && item.label === "完成进度");
   assert.equal(contents.length, 1);
   assert.equal(progresses.length, 1);
+  assert.equal(contents[0].section, "已完成工作");
+  const addRow = controls.find((item) => item.control_kind === "button" && item.label === "添加行");
+  assert.ok(addRow, "add-row button should be collected as a fact");
+  assert.equal(addRow.region, "table");
+  const note = controls.find((item) => item.label === "补充说明");
+  assert.ok(note, "form textarea should stay a separate fact from table rows");
+  assert.equal(note.region, "form");
+  assert.equal(note.control_kind, "textarea");
+  const opinion = controls.find((item) => item.placeholder === "请输入提交意见" || item.label === "提交意见");
+  assert.ok(opinion, "confirm-dialog textarea should be collected");
+  assert.equal(opinion.region, "dialog");
   assert.ok(!JSON.stringify(controls).includes("capability"));
   assert.ok(!JSON.stringify(controls).includes("work-report"));
 });
