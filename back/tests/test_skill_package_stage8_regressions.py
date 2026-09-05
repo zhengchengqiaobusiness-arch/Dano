@@ -426,6 +426,48 @@ def test_skill_docs_keep_optional_page_fields() -> None:
     assert '"inputType": "date"' in forms
 
 
+def test_skill_enum_options_match_capability_exactly() -> None:
+    plan = {
+        "name": "search_records",
+        "title": "搜索记录",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "processStatus": {
+                    "type": "string",
+                    "title": "审批状态",
+                    "enum": ["1", "2", "3"],
+                    "x-enum-options": [
+                        {"id": "1", "label": "审批中"},
+                        {"id": "2", "label": "通过"},
+                        {"id": "3", "label": "不通过"},
+                    ],
+                    "x-enum-value-map": {
+                        "审批中": "1",
+                        "通过": "2",
+                        "不通过": "3",
+                    },
+                },
+            },
+        },
+    }
+    forms = _input_forms_md([plan])
+    start = forms.index("```json") + len("```json")
+    request = json.loads(forms[start:forms.index("```", start)])
+    question = request["questions"][0]
+
+    assert question["id"] == "processStatus"
+    assert question["options"] == [
+        {"id": "1", "label": "审批中"},
+        {"id": "2", "label": "通过"},
+        {"id": "3", "label": "不通过"},
+    ]
+    assert "展示与能力契约完全一致" in forms
+    assert "不要改 `questions[]` 的 id 或 options" in forms
+    assert "禁止增加、删除、改写 options" in forms
+    assert "禁止把契约外的值传给脚本" in forms
+
+
 def test_package_semantics_rejects_unconfirmed_writes_and_missing_combo(tmp_path: Path) -> None:
     contract = {
         "capabilities": [
@@ -1210,6 +1252,9 @@ def test_rendered_package_is_executable_and_contains_no_generation_vocabulary(tm
     handbook = (folder / "SKILL.md").read_text(encoding="utf-8")
     assert "## 展示与确认" in handbook
     assert "用户眼前始终是页面字段，不是请求 JSON" in handbook
+    assert "字段和 options 必须与能力 `input_schema` 完全一致" in handbook
+    assert "禁止增加、删除、改写 options" in handbook
+    assert "也不要从原页补契约没有的项" in handbook
     assert "references/routes/查询工作记录-然后-新增工作记录.md" in handbook
     assert "确认哪些项目仍需新增" in handbook
     assert "组合行必须按该行步骤顺序执行" in handbook
@@ -1575,6 +1620,7 @@ def test_array_form_question_uses_page_label_not_json_jargon() -> None:
     assert "提供符合 schema 的 JSON" not in forms
     assert "对象数组用 `items.properties` 的 title 画成表格" in forms
     assert "删除已由当前对话提供且通过校验的字段" in forms
+    assert "禁止增加、删除、改写 options" in forms
 
 
 def test_result_then_playbook_renders_combination_route_and_readable_scripts(tmp_path: Path) -> None:
