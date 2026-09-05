@@ -21,6 +21,12 @@ _ORDER_PATTERNS = (
     re.compile(r"先(?P<left>.+?)再(?:对选中的[^做]*做)?(?P<right>.+)"),
     re.compile(r"先(?P<left>.+?)然后(?P<right>.+)"),
     re.compile(r"先(?P<left>.+?)之后(?P<right>.+)"),
+    re.compile(
+        r"先(?P<left>.+?)(?:，|,|。)?根据(?:返回|结果|查询结果|统计结果)(?:进行|再|后)?(?P<right>.+)"
+    ),
+    re.compile(
+        r"(?P<left>.+?)(?:，|,)?根据(?:返回|结果|查询结果)(?:进行|再|后)(?P<right>.+)"
+    ),
     re.compile(rf"先(?P<left>.+?){_AFTER_NOT_THEN}(?:再)?(?P<right>.+)"),
     re.compile(r"完成(?P<left>.+?)方可(?P<right>.+)"),
     re.compile(r"(?P<left>.+?)优先[，,、\s]*(?P<right>.+?)其次"),
@@ -45,6 +51,9 @@ _ORDER_PATTERNS = (
     re.compile(r"(?P<left>查询|查看|搜索|筛选|查出).{0,8}再(?P<right>.+)"),
 )
 _SEQUENCE_HINTS = (
+    "根据返回",
+    "根据结果",
+    "根据查询结果",
     "然后",
     "之后",
     "紧接着",
@@ -287,7 +296,11 @@ def description_has_explicit_sequence(text: str) -> bool:
         return True
     if re.search(r"(?:结束|完成|完毕|做完|完了).{0,4}(?:就|再|即)", raw):
         return True
-    return "先" in raw and ("再" in raw or "后" in raw)
+    if "先" in raw and any(
+        token in raw for token in ("再", "后", "根据返回", "根据结果", "根据查询结果")
+    ):
+        return True
+    return False
 
 
 def _is_sequence_connector(between: str) -> bool:

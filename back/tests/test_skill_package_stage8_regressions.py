@@ -22,6 +22,7 @@ from dano.export.skill_package.renderer import (
     _public_schema,
     _runtime_plan,
     _script_invocation,
+    _script_slug,
     _skill_description,
     _workflow_table,
     package_slug,
@@ -1177,6 +1178,9 @@ def test_rendered_package_is_executable_and_contains_no_generation_vocabulary(tm
     handbook = (folder / "SKILL.md").read_text(encoding="utf-8")
     assert "references/routes/查询工作记录-然后-新增工作记录.md" in handbook
     assert "确认哪些项目仍需新增" in handbook
+    assert "组合行必须按该行步骤顺序执行" in handbook
+    assert "不要把多条路线合并" not in handbook
+    assert "scripts/format_list.py" in handbook
 
 
 def test_business_labels_and_complete_dynamic_data_source_are_rendered() -> None:
@@ -1263,3 +1267,193 @@ def test_frontmatter_description_is_concise_and_does_not_copy_full_playbook() ->
     assert "很长的编排叙述" not in description
     assert "不用于" in description
     assert len(description) < 260
+
+
+def test_chinese_operation_names_keep_readable_script_slugs() -> None:
+    assert _script_slug("查询工作汇报统计") == "查询工作汇报统计"
+    assert _script_slug("query_records") == "query_records"
+    assert _script_slug("Query-Records") == "query_records"
+
+
+def test_options_and_input_forms_use_the_same_field_option_labels() -> None:
+    field = {
+        "type": "string",
+        "title": "统计周期",
+        "enum": ["1", "2", "3"],
+        "x-options-snapshot": [
+            {"id": "1", "label": "周期甲"},
+            {"id": "2", "label": "周期乙"},
+            {"id": "3", "label": "周期丙"},
+        ],
+    }
+    plans = [{
+        "name": "query_stats",
+        "title": "查询统计",
+        "input_schema": {
+            "type": "object",
+            "properties": {"reportType": field},
+        },
+    }]
+
+    forms = _input_forms_md(plans)
+    options = _options_md(plans)
+
+    assert "周期甲" in forms
+    assert "周期甲" in options
+    assert forms.count("周期甲") >= 1
+
+
+def test_public_schema_scrubs_implementation_and_recording_leaks() -> None:
+    schema = _public_schema({
+        "type": "object",
+        "properties": {
+            "endDate": {
+                "type": "date",
+                "format": "date",
+                "title": "结束日期",
+                "description": "用户通过日期选择器填写；提交 query.endDate。",
+            },
+            "title": {
+                "type": "string",
+                "description": "表单文本输入框，placeholder提示可选；提交 body.title。",
+            },
+            "items": {
+                "type": "array",
+                "description": "提交 body.items 数组。本场为空数组。",
+                "items": {"type": "object"},
+            },
+            "reportType": {
+                "type": "string",
+                "description": "从URL参数reportType带入，当前禁用不可改。",
+            },
+        },
+    })
+    packed = str(schema)
+
+    assert "提交 query" not in packed
+    assert "提交 body" not in packed
+    assert "本场" not in packed
+    assert "placeholder" not in packed
+    assert "URL参数" not in packed
+    assert "当前禁用" not in packed
+    assert schema["properties"]["items"]["description"] == "由调用方按当前请求提供符合 schema 的 JSON 数组。"
+    assert schema["properties"]["items"]["label"] == "明细"
+    assert schema["properties"]["endDate"]["label"] == "结束日期"
+
+
+def test_array_form_question_asks_for_schema_json_not_a_fake_control() -> None:
+    forms = _input_forms_md([{
+        "name": "create_record",
+        "title": "新增记录",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "title": "明细",
+                    "items": {
+                        "type": "object",
+                        "properties": {"content": {"type": "string", "title": "工作内容"}},
+                    },
+                },
+            },
+            "required": ["items"],
+        },
+    }])
+
+    assert "# 输入表单" in forms
+    assert "JSON 数组" in forms
+    assert "content" in forms
+
+
+def test_result_then_playbook_renders_combination_route_and_readable_scripts(tmp_path: Path) -> None:
+    spec = FlowSpec(capabilities=[
+        _cap("stats", "查询工作汇报统计", "query"),
+        _cap("create", "新增并提交工作日报", "create", required=["title"]),
+    ])
+    playbook = "先查询工作汇报统计，根据返回进行新增"
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="日报填写",
+            planning_mode=PlanningMode.DYNAMIC,
+            business_description=playbook,
+        ),
+        {"stats", "create"},
+        "result-then-render",
+    )
+    capabilities = [
+        {
+            "capability_id": "stats",
+            "name": "查询工作汇报统计",
+            "title": "查询工作汇报统计",
+            "kind": "query",
+            "input_schema": {"type": "object", "properties": {}},
+            "output_schema": {"type": "object"},
+            "requires_human_confirm": False,
+            "execution_contract": {
+                "steps": [{
+                    "step_id": "stats-step",
+                    "method": "GET",
+                    "url": "https://example.test/stats",
+                    "path": "/stats",
+                }],
+                "links": [],
+                "verification_ids": [],
+            },
+        },
+        {
+            "capability_id": "create",
+            "name": "新增并提交工作日报",
+            "title": "新增并提交工作日报",
+            "kind": "create",
+            "input_schema": {
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+                "required": ["title"],
+            },
+            "output_schema": {"type": "object"},
+            "requires_human_confirm": True,
+            "execution_contract": {
+                "steps": [{
+                    "step_id": "create-step",
+                    "method": "POST",
+                    "url": "https://example.test/create",
+                    "path": "/create",
+                    "content_type": "application/json",
+                    "body_template": {"title": "{{title}}"},
+                }],
+                "links": [],
+                "verification_ids": [],
+            },
+        },
+    ]
+    skill = SkillSpec(
+        skill_id="oa.work-report",
+        tenant="test",
+        subsystem=Subsystem("oa"),
+        action="work-report",
+        risk_level=RiskLevel.L3,
+        title="日报填写",
+        api_request={"capabilities": capabilities, "_skill_plan": plan.model_dump(mode="json")},
+        call_metadata={"skill_plan": plan.model_dump(mode="json")},
+        capabilities=capabilities,
+    )
+
+    folder = tmp_path / render_skill_package(skill, str(tmp_path), tenant="test")
+    validation = validate_skill_package(folder)
+    handbook = (folder / "SKILL.md").read_text(encoding="utf-8")
+    contract = (folder / "references" / "CONTRACT.json").read_text(encoding="utf-8")
+    scripts = {path.name for path in (folder / "scripts").glob("*.py")}
+
+    assert validation["ok"] is True, validation
+    assert playbook in handbook
+    assert "references/routes/查询工作汇报统计-然后-新增并提交工作日报.md" in handbook
+    assert "确认哪些项目仍需新增" in handbook
+    assert "name: 日报填写" in handbook
+    assert "capability_" not in "\n".join(scripts)
+    assert "查询工作汇报统计.py" in scripts
+    assert "新增并提交工作日报.py" in scripts
+    assert "提交 query" not in contract
+    assert "本场" not in contract
+    assert (folder / "references" / "routes" / "查询工作汇报统计-然后-新增并提交工作日报.md").exists()

@@ -596,7 +596,11 @@ def _route(
             prev is not None
             and not pair
             and not independent
-            and _needs_target(cap)
+            and (
+                _needs_target(cap)
+                or is_write_capability(cap, spec)
+                or _is_create(cap)
+            )
         ):
             previous_is_write = is_write_capability(prev, spec)
             create_handoff = _family(prev, spec) == "query" and _is_create(cap)

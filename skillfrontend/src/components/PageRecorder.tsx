@@ -673,7 +673,7 @@ function safeString(value: unknown) {
 }
 
 const SKILL_DESCRIPTION_PLACEHOLDER = [
-  "系统会根据阶段1—6形成的能力自动生成业务描述；你可以在这里补充或修改用户怎么开口、操作顺序、停问点和完成条件。",
+  "系统会根据已确认能力自动生成业务描述。请补充或改成：用户怎么开口、要按什么顺序办理、何时停问、怎样算完成。动态规划会把这段话编成工作流表中的一行。",
 ].join("\n");
 
 function historyLifecycleView(item: RecordingResultSummary) {

@@ -274,8 +274,8 @@ def _required_verify_scripts(root: Path) -> set[str] | None:
 
 
 def _script_slug(value: str) -> str:
-    slug = re.sub(r"_+", "_", re.sub(r"[^a-z0-9_]+", "_", str(value or "").casefold().replace("-", "_"))).strip("_")
-    return slug
+    slug = re.sub(r"_+", "_", re.sub(r"[^\w]+", "_", str(value or "").replace("-", "_"), flags=re.UNICODE)).strip("_")
+    return re.sub(r"[A-Z]+", lambda match: match.group(0).casefold(), slug)
 
 
 def _route_operation_sequence(route: dict) -> list[str]:

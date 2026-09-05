@@ -56,10 +56,18 @@ def package_slug(skill_id: str) -> str:
     return legacy_package_slug(skill_id)
 
 
+def _token_slug(value: str, *, sep: str, empty: str) -> str:
+    raw = str(value or empty)
+    prepared = raw.replace("-", sep).replace("_", sep)
+    slug = re.sub(rf"{re.escape(sep)}+", sep, re.sub(rf"[^\w{re.escape(sep)}]+", sep, prepared, flags=re.UNICODE)).strip(sep)
+    return re.sub(r"[A-Z]+", lambda match: match.group(0).casefold(), slug)
+
+
 def _script_slug(value: str) -> str:
     raw = str(value or "capability")
-    slug = re.sub(r"_+", "_", re.sub(r"[^a-z0-9_]+", "_", raw.casefold().replace("-", "_"))).strip("_")
-    slug = slug or "capability_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
+    slug = _token_slug(raw, sep="_", empty="capability")
+    if not slug or slug in {"capability"}:
+        slug = "capability_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
     if slug in sys.stdlib_module_names or slug in {"client", "wire_format", "format_list"}:
         slug = f"capability_{slug}"
     return slug
@@ -317,6 +325,10 @@ def _norm_name_token(token: str) -> str:
 
 
 def _skill_frontmatter_name(skill, plans: list[dict]) -> str:  # noqa: ANN001
+    heading = _page_object_heading(skill, plans)
+    readable = _token_slug(heading, sep="-", empty="")
+    if readable and readable not in {"skill", "action", "dano", "business", "本页业务"}:
+        return readable[:64]
     slugs = [_slug(str(plan.get("name") or "")) for plan in plans if str(plan.get("name") or "")]
     token_sets = [{_norm_name_token(part) for part in item.split("-") if part} for item in slugs]
     shared: set[str] = set.intersection(*token_sets) if token_sets else set()
@@ -334,7 +346,6 @@ def _skill_frontmatter_name(skill, plans: list[dict]) -> str:  # noqa: ANN001
     action = _slug(str(getattr(skill, "action", "") or ""))
     if action and action not in {"skill", "action"} and not re.fullmatch(r"action-[0-9a-f-]{12,}", action):
         return action[:64]
-    heading = _page_object_heading(skill, plans)
     identity = hashlib.sha256(heading.encode("utf-8")).hexdigest()[:10]
     return f"business-{identity}-operations"
 
@@ -708,9 +719,16 @@ def _clip_description(text: str, limit: int = 1024) -> str:
 def _skill_description(skill, plans: list[dict], spec) -> tuple[str, str]:  # noqa: ANN001
     heading, _generated = _business_identity(skill, plans, spec)
     actions = "、".join(_action_labels(plans)) or "已打包操作"
+    trigger = ""
+    for route in _combination_routes(skill):
+        when = _safe_text(route.get("when_to_use"))
+        if when and not _is_recording_copy(when) and len(when) <= 80:
+            trigger = when
+            break
     text = (
         f"办理{heading}的{actions}请求。"
-        "只读请求不得写入；变更请求未指定目标时，先查询并请用户选择。"
+        + (f"用户要「{trigger}」时走对应组合路线。" if trigger else "")
+        + "只读请求不得写入；变更请求未指定目标时，先查询并请用户选择。"
         "不用于其它业务对象或未打包动作。"
     )
     return heading, _clip_description(text, limit=260)
@@ -742,7 +760,15 @@ def _route_schema_fields(route: dict, plans: list[dict]) -> set[str] | None:
 
 
 def _field_label(name: str, field: dict) -> str:
-    explicit = _safe_text(field.get("title") or field.get("label") or field.get("description"))
+    explicit = _safe_text(field.get("title") or field.get("label"))
+    if not explicit:
+        raw = _safe_text(field.get("description"))
+        if (
+            raw
+            and not raw.startswith(("由调用方", "运行时"))
+            and _consumer_field_description(raw, field) == raw
+        ):
+            explicit = raw
     if explicit and explicit.casefold() != str(name).casefold():
         return explicit
     business_fallbacks = {
@@ -1207,11 +1233,34 @@ def _runtime_default(name: str, field: dict, control: str) -> str:
     return f"<调用前必须替换：{guidance}；只能使用当前请求中已确认或实时取得的有效值>"
 
 
+def _structured_value_question(name: str, field: dict) -> str:
+    label = _field_label(name, field)
+    kind = str(field.get("type") or "")
+    if kind == "array":
+        items = field.get("items") if isinstance(field.get("items"), dict) else {}
+        props = items.get("properties") if isinstance(items.get("properties"), dict) else {}
+        keys = [str(key) for key in props if str(key)][:8]
+        if keys:
+            return f"{label}（提供符合 schema 的 JSON 数组，每项可含：{'、'.join(keys)}）"
+        return f"{label}（提供符合 schema 的 JSON 数组）"
+    if kind == "object":
+        props = field.get("properties") if isinstance(field.get("properties"), dict) else {}
+        keys = [str(key) for key in props if str(key)][:8]
+        if keys:
+            return f"{label}（提供符合 schema 的 JSON 对象，可含：{'、'.join(keys)}）"
+        return f"{label}（提供符合 schema 的 JSON 对象）"
+    return label
+
+
 def _question_spec(name: str, field: dict, *, required: bool) -> dict:
     control = _field_control(name, field)
     question: dict[str, Any] = {
         "id": name,
-        "question": _field_label(name, field),
+        "question": (
+            _structured_value_question(name, field)
+            if field.get("type") in {"array", "object"}
+            else _field_label(name, field)
+        ),
         "inputType": control,
         "required": required,
         "default": _runtime_default(name, field, control),
@@ -1245,7 +1294,13 @@ def _with_toc_if_long(text: str, headings: list[str]) -> str:
     toc.extend(f"- [{title}](#{re.sub(r'\\s+', '-', title).strip('-') or 'section'})" for title in headings)
     toc.append("")
     body = text
-    marker = "## Global rules" if "## Global rules" in text else (f"## {headings[0]}" if headings else "")
+    marker = ""
+    for candidate in ("## 通用规则", "## Global rules"):
+        if candidate in text:
+            marker = candidate
+            break
+    if not marker:
+        marker = f"## {headings[0]}" if headings else ""
     if marker and marker in body:
         prefix, rest = body.split(marker, 1)
         return prefix + "\n".join(toc) + marker + rest
@@ -1311,11 +1366,11 @@ def _capability_form_section(plan: dict) -> list[str]:
 def _input_forms_bundle(plans: list[dict]) -> tuple[str, dict[str, str]]:
     """Return INPUT_FORMS.md. Keep every capability form in this file."""
     header = [
-        "# Native input forms",
+        "# 输入表单",
         "",
         "本文件只投影能力契约中的调用方字段。当前步骤缺少字段时才阅读对应能力章节。每次需要向用户提问时，必须原生调用 `ask_user_question`；禁止在普通文本、Markdown、XML 或 `<question>` 标签中模拟工具调用。",
         "",
-        "## Global rules",
+        "## 通用规则",
         "",
         "- 同一能力的相关字段尽量合并在一次 `questions[]` 中；每个 `id` 与 `input_schema.properties` 的键逐字一致。",
         "- 复制某能力的表单模板前，先删除已由当前对话提供且通过校验的字段；只询问当前步骤仍缺少的字段，不重复问有效答案。",
@@ -1485,7 +1540,11 @@ def _workflow_table(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
     lines = [
         "## 选择工作流",
         "",
-        "根据用户原话只选下表中的一行。一行就是一条路线，不要把多条路线合并成“依次调用相关脚本”。",
+        (
+            "根据用户原话只选下表中的一行。组合行必须按该行步骤顺序执行，细节只读「详情」列指向的路线文件；不要把未列入同一行的操作自行串联。"
+            if any(len(route.get("capability_sequence") or []) > 1 for route in _all_routes(skill))
+            else "根据用户原话只选下表中的一行。一行就是一条路线，不要把多条路线合并成“依次调用相关脚本”。"
+        ),
         "",
         "| 用户意图 | 路线 | 步骤顺序 | 跨步数据 | 何时停问 | 确认点 | 完成条件 | 详情 |",
         "|---|---|---|---|---|---|---|---|",
@@ -1578,6 +1637,9 @@ def _success_failure_section(skill) -> list[str]:  # noqa: ANN001
         "- 未知写入结果：停止并请人处理，不得用同一载荷重试。",
         "- 用户取消、拒绝确认或候选选择无效：停止并报告未执行。",
         "- 候选为空或多条但要求单条：停问，不得默认第一条。",
+        "- 列表或数组结果用 `scripts/format_list.py` 格式化为 Markdown 表；无数据时输出「无数据」。",
+        "- 非列表结果只报告合同输出字段，不把内部编号说成业务编号。",
+        "- 写成功只声明脚本返回成功；未配置只读回查时必须标明未回查。",
         "",
     ]
     for item in plan.get("safety_rules") or []:
@@ -1959,7 +2021,7 @@ def _options_md(plans: list[dict]) -> str:
         schema = item.get("input_schema") if isinstance(item.get("input_schema"), dict) else {}
         for name, _field_path, raw in _iter_schema_fields(schema):
             source = _option_source(raw)
-            options = [] if source else _static_field_options(raw)
+            options = [] if source else _field_options(raw)
             raw_source = raw.get("x-dano-option-source") or raw.get("x-options-source-meta")
             if not source and not options and not isinstance(raw_source, dict):
                 continue
@@ -3152,6 +3214,58 @@ def _clean_runtime_artifacts(folder: Path) -> None:
             pass
 
 
+_CONSUMER_DESC_LEAKS = (
+    "提交 query.",
+    "提交 body.",
+    "提交 query",
+    "提交 body",
+    "提交 form.",
+    "提交 form",
+    "从URL参数",
+    "从 URL 参数",
+    "URL参数",
+    "url参数",
+    "本场",
+    "当前禁用",
+    "不可改",
+    "placeholder",
+    "筛选条输入框",
+    "表单文本域",
+    "表单文本输入框",
+    "表单日期选择器",
+    "表单附件",
+    "日期区间控件",
+    "用户通过日期选择器",
+    "用户键入",
+    "重复键",
+    "按钮动态增加",
+    "页面汇报类型",
+)
+
+
+def _consumer_field_description(text: str, field: dict | None = None) -> str:
+    node = str(text or "")
+    if not node:
+        return node
+    if "接口候选选项" in node:
+        return "运行时从接口候选中选择当前有效值。"
+    if "页面枚举选项" in node:
+        return "从当前业务枚举中选择有效值。"
+    if any(marker in node for marker in ("录制", "occurrence", "样本", "预填")):
+        return "由调用方根据当前请求提供并通过输入校验。"
+    if any(marker in node for marker in _CONSUMER_DESC_LEAKS):
+        kind = str((field or {}).get("type") or "")
+        fmt = str((field or {}).get("format") or "")
+        if kind == "array":
+            return "由调用方按当前请求提供符合 schema 的 JSON 数组。"
+        if kind == "object":
+            return "由调用方按当前请求提供符合 schema 的 JSON 对象。"
+        if kind in {"date", "datetime"} or fmt in {"date", "date-time"}:
+            return "由调用方按当前请求提供，并符合声明的日期格式。"
+        return "由调用方按当前请求提供。"
+    return node
+
+
 _PRIVATE_SCHEMA_KEYS = frozenset({
     "default",
     "examples",
@@ -3194,14 +3308,20 @@ def _public_schema(node: Any, key: str = "") -> Any:
                 and (value.get("x-dano-internal") is True or value.get("x-dano-display") is False)
             )
         }
+        if result.get("description"):
+            if dynamic_options:
+                result["description"] = "运行时获取当前有效候选，不使用历史候选快照。"
+            else:
+                result["description"] = _consumer_field_description(
+                    str(result.get("description")),
+                    result,
+                )
         if (
             key
             and key not in {"properties", "patternProperties", "$defs", "definitions"}
             and any(name in result for name in ("type", "properties", "items", "format"))
         ):
             result["label"] = _field_label(key, result)
-        if dynamic_options and result.get("description"):
-            result["description"] = "运行时获取当前有效候选，不使用历史候选快照。"
         return result
     if isinstance(node, list):
         return [_public_schema(item, key) for item in node]
@@ -3211,13 +3331,8 @@ def _public_schema(node: Any, key: str = "") -> Any:
         re.I,
     ):
         return ""
-    if isinstance(node, str) and key in {"description", "reason"}:
-        if "接口候选选项" in node:
-            return "运行时从接口候选中选择当前有效值。"
-        if "页面枚举选项" in node:
-            return "从当前业务枚举中选择有效值。"
-        if any(marker in node for marker in ("录制", "occurrence", "样本", "预填")):
-            return "由调用方根据当前请求提供并通过输入校验。"
+    if isinstance(node, str) and key == "reason":
+        return _consumer_field_description(node)
     return node
 
 
