@@ -13,6 +13,12 @@ from dano.execution.page.flow_spec_core.models import (
     CapabilityRequestRef,
     FlowCapability,
     FlowStep,
+    ParamField,
+    RequestFact,
+    RequestFacts,
+)
+from dano.execution.page.flow_spec_core.request_contract import (
+    ensure_recorded_body_source,
 )
 from dano.export.skill_package.renderer import package_slug, render_skill_package
 from dano.onboarding.skill_generation.export import (
@@ -70,14 +76,14 @@ def _pi_recording_payload() -> dict:
                 "method": "POST",
                 "path": "/api/records",
                 "url": "https://example.test/api/records",
-                "body_source": '{"title":"示例"}',
                 "params": [
                     {
                         "key": "title",
                         "path": "body.title",
                         "label": "标题",
-                        "source_kind": "user",
+                        "source_kind": "user_input",
                         "exposed_to_user": True,
+                        "default_value": "示例",
                     }
                 ],
             },
@@ -129,10 +135,18 @@ def test_loading_recording_result_keeps_request_refs_and_compiles_contract() -> 
     assert api_request is not None
     capabilities = api_request["capabilities"]
     assert len(capabilities) == 2
+    create_steps = []
     for item in capabilities:
         steps = (item.get("execution_contract") or {}).get("steps") or []
         assert steps, item.get("name")
         assert all(step.get("step_id") for step in steps)
+        if item.get("capability_id") == "cap_create":
+            create_steps = steps
+    assert create_steps
+    assert any(
+        step.get("body_template") == {"title": "{{title}}"}
+        for step in create_steps
+    )
 
 
 def test_build_export_skill_spec_does_not_need_a_prior_publish() -> None:
@@ -253,3 +267,164 @@ def test_renderer_compiles_missing_execution_contract_from_recording_view(tmp_pa
     slug = render_skill_package(skill, str(tmp_path), tenant="test")
     exported = tmp_path / slug
     assert (exported / "references" / "CONTRACT.json").is_file()
+
+
+def _write_step_without_body(*, extra_params: list[ParamField] | None = None) -> FlowStep:
+    params = [
+        ParamField(
+            key="title",
+            path="body.title",
+            label="标题",
+            source_kind="user_input",
+            exposed_to_user=True,
+            default_value="示例",
+        ),
+        *(extra_params or []),
+    ]
+    return FlowStep(
+        step_id="step_create",
+        name="新增",
+        method="POST",
+        path="/api/records",
+        url="https://example.test/api/records",
+        params=params,
+    )
+
+
+def test_write_step_without_body_source_compiles_from_params() -> None:
+    spec = FlowSpec.model_validate({
+        "title": "业务办理",
+        "capabilities": [
+            {
+                "capability_id": "cap_create",
+                "name": "create_record",
+                "title": "新增记录",
+                "kind": "create",
+                "step_ids": ["step_create"],
+                "request_refs": [{"step_id": "step_create", "usage": "execute"}],
+            }
+        ],
+        "steps": [_write_step_without_body().model_dump(mode="json")],
+    })
+
+    api_request, errors = flow_spec_to_api_request(spec, _embed_capability_steps=True)
+
+    assert errors == []
+    assert api_request is not None
+    create = next(
+        step
+        for item in api_request["capabilities"]
+        for step in (item.get("execution_contract") or {}).get("steps") or []
+        if step.get("step_id") == "step_create"
+    )
+    assert create["body_template"] == {"title": "{{title}}"}
+    assert api_request.get("sample_inputs", {}).get("title") == "示例"
+
+
+def test_write_step_reconstructs_nested_body_from_params() -> None:
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="step_create",
+                name="新增",
+                method="POST",
+                path="/api/items",
+                params=[
+                    ParamField(
+                        key="name",
+                        path="body.items[0].name",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                        value="行名",
+                    ),
+                    ParamField(
+                        key="qty",
+                        path="body.items[0].qty",
+                        type="number",
+                        source_kind="constant",
+                        exposed_to_user=False,
+                        default_value=2,
+                    ),
+                ],
+            )
+        ]
+    )
+
+    prepared = ensure_recorded_body_source(spec.model_copy(deep=True))
+    body = json.loads(prepared.steps[0].body_source)
+    assert body == {"items": [{"name": "行名", "qty": 2}]}
+
+    api_request, errors = flow_spec_to_api_request(spec)
+    assert errors == []
+    assert api_request is not None
+    assert api_request["body_template"] == {"items": [{"name": "{{name}}", "qty": 2}]}
+
+
+def test_request_facts_post_data_fills_body_source_without_inventing_keys() -> None:
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="step_create",
+                name="新增",
+                method="POST",
+                path="/api/records",
+                source_meta={"request_id": "req_1"},
+                params=[
+                    ParamField(
+                        key="title",
+                        path="body.title",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                    )
+                ],
+            )
+        ],
+        request_facts=RequestFacts(
+            requests=[
+                RequestFact(
+                    request_id="req_1",
+                    method="POST",
+                    path="/api/records",
+                    post_data={"title": "captured", "extra": 1},
+                )
+            ]
+        ),
+    )
+
+    prepared = ensure_recorded_body_source(spec)
+    body = json.loads(prepared.steps[0].body_source)
+    assert body["title"] == "captured"
+    assert body["extra"] == 1
+
+
+def test_body_reconstruction_does_not_invent_unmentioned_keys() -> None:
+    spec = FlowSpec(steps=[_write_step_without_body()])
+
+    prepared = ensure_recorded_body_source(spec)
+    assert json.loads(prepared.steps[0].body_source) == {"title": "示例"}
+
+
+def test_existing_body_source_is_kept() -> None:
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="step_create",
+                name="新增",
+                method="POST",
+                path="/api/records",
+                body_source='{"title":"已有","other":9}',
+                params=[
+                    ParamField(
+                        key="title",
+                        path="body.title",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                        default_value="示例",
+                    )
+                ],
+            )
+        ]
+    )
+
+    prepared = ensure_recorded_body_source(spec)
+    assert json.loads(prepared.steps[0].body_source) == {"title": "已有", "other": 9}

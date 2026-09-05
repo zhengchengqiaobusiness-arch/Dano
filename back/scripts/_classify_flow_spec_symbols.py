@@ -394,6 +394,11 @@ PREFIX_RULES: list[tuple[str, str, str]] = [
     ("_INTERNAL_EXPOSED_PATH_RE", "stage8", "flow_release"),
     # Request contract compilation
     ("_flow_step_to_api_step", "shared", "flow_spec_core.request_contract"),
+    ("_param_recorded_value", "shared", "flow_spec_core.request_contract"),
+    ("_body_relative_path", "shared", "flow_spec_core.request_contract"),
+    ("_step_body_params", "shared", "flow_spec_core.request_contract"),
+    ("_ensure_step_body_source", "shared", "flow_spec_core.request_contract"),
+    ("ensure_recorded_body_source", "shared", "flow_spec_core.request_contract"),
     ("_flow_step_query_template", "shared", "flow_spec_core.request_contract"),
     ("_flow_step_url_template", "shared", "flow_spec_core.request_contract"),
     ("_api_params", "shared", "flow_spec_core.request_contract"),
@@ -591,6 +596,7 @@ PREFIX_RULES: list[tuple[str, str, str]] = [
     ("_field_source_configuration_advice", "stage5", "flow_materialization.field_contracts.common"),
     ("_query_key_from_param", "stage5", "flow_materialization.request_steps"),
     ("_strip_body_prefix", "shared", "flow_spec_core.normalization"),
+    ("_flow_path_assign", "shared", "flow_spec_core.normalization"),
     ("_param_has_grounded_public_name", "stage5", "flow_materialization.field_contracts.common"),
     ("_param_has_grounded_type", "stage5", "flow_materialization.field_contracts.common"),
     # Option projection

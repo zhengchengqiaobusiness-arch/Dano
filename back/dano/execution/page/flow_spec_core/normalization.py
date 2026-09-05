@@ -92,6 +92,59 @@ def _flow_path_set(node, path, value) -> bool:  # noqa: ANN001
     return True
 
 
+def _flow_path_assign(node, path, value) -> bool:  # noqa: ANN001
+    """Set a path, creating missing dict/list parents. Unlike `_flow_path_set`."""
+    tokens = _flow_path_tokens(path)
+    if not tokens:
+        return False
+    if isinstance(tokens[0], int):
+        if not isinstance(node, list):
+            return False
+    elif not isinstance(node, dict):
+        return False
+    current = node
+    for index, token in enumerate(tokens[:-1]):
+        nxt = tokens[index + 1]
+        want_list = isinstance(nxt, int)
+        placeholder: list | dict = [] if want_list else {}
+        if isinstance(token, int):
+            if not isinstance(current, list):
+                return False
+            while len(current) <= token:
+                current.append(None)
+            existing = current[token]
+            if existing is None or (
+                want_list and not isinstance(existing, list)
+            ) or (
+                not want_list and not isinstance(existing, dict)
+            ):
+                current[token] = placeholder
+            current = current[token]
+            continue
+        if not isinstance(current, dict):
+            return False
+        existing = current.get(token, _FLOW_PATH_MISSING)
+        if existing is _FLOW_PATH_MISSING or existing is None or (
+            want_list and not isinstance(existing, list)
+        ) or (
+            not want_list and not isinstance(existing, dict)
+        ):
+            current[token] = placeholder
+        current = current[token]
+    last = tokens[-1]
+    if isinstance(last, int):
+        if not isinstance(current, list):
+            return False
+        while len(current) <= last:
+            current.append(None)
+        current[last] = value
+        return True
+    if not isinstance(current, dict):
+        return False
+    current[last] = value
+    return True
+
+
 def _clean_path_prefix(path: str, prefix: str) -> str:
     if not path:
         return ""

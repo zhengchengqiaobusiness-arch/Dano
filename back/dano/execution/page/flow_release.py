@@ -57,6 +57,7 @@ from dano.execution.page.flow_spec_core.serialization import (
     flow_spec_release_payload,
 )
 from dano.execution.page.flow_spec_core.request_contract import (
+    ensure_recorded_body_source,
     flow_spec_to_api_request,
 )
 
@@ -658,6 +659,7 @@ def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
     )
 
     apply_recorded_unknown_policy(current)
+    ensure_recorded_body_source(current)
     return current
 
 

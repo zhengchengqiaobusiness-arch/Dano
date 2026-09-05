@@ -4,24 +4,31 @@ from __future__ import annotations
 from typing import Any
 import copy
 import hashlib
+import json
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 from dano.execution.page.flow_spec_core.models import (
     FlowCapability,
     FlowSpec,
     FlowStep,
     ParamField,
+    RequestFact,
     SelectBinding,
 )
 from dano.execution.page.request_capture import (
     build_api_request,
     extract_auth_headers,
+    parse_recorded_request_body,
     self_check,
     substitute,
 )
 from dano.execution.page.flow_spec_core.normalization import (
+    _FLOW_PATH_MISSING,
     _clean_path_prefix,
+    _flow_path_assign,
+    _flow_path_lookup,
     _flow_path_set,
+    _flow_path_tokens,
     _strip_body_prefix,
 )
 from dano.execution.page.flow_spec_core.owner_runtime import (
@@ -48,18 +55,40 @@ def _param_is_dynamic_array_leaf(step: FlowStep, param: ParamField) -> bool:
     )
 
 
+def _param_recorded_value(param: ParamField) -> Any:
+    if param.value not in (None, ""):
+        return copy.deepcopy(param.value)
+    if param.default_value not in (None, ""):
+        return copy.deepcopy(param.default_value)
+    if param.value is not None:
+        return copy.deepcopy(param.value)
+    if param.default_value is not None:
+        return copy.deepcopy(param.default_value)
+    return ""
+
+
 def _step_samples(step: FlowStep) -> dict:
     samples = dict(step.sample_inputs or {})
     for p in step.params:
+        recorded = _param_recorded_value(p)
         if (
             p.key
-            and p.value not in (None, "")
+            and recorded not in (None, "")
             and not _param_is_dynamic_array_leaf(step, p)
             and p.source_kind != "dynamic_structure"
             and str((p.source or {}).get("kind") or "") != "dynamic_structure_leaf"
         ):
-            samples[p.key] = p.value
+            samples[p.key] = recorded
     return samples
+
+
+def _body_relative_path(path: str) -> str:
+    raw = str(path or "").strip()
+    if raw.startswith("body."):
+        return raw[len("body."):]
+    if raw.startswith("body["):
+        return raw[len("body"):]
+    return raw
 
 
 def _step_param_map(step: FlowStep) -> dict[str, str]:
@@ -71,9 +100,178 @@ def _step_param_map(step: FlowStep) -> dict[str, str]:
         if not _param_exposed_to_caller(p):
             continue
         key = (p.key or "").strip()
-        if key:
-            out[p.path] = key
+        if not key:
+            continue
+        out[p.path] = key
+        relative = _body_relative_path(p.path)
+        if relative:
+            out.setdefault(relative, key)
+        stripped = _strip_body_prefix(p.path)
+        if stripped:
+            out.setdefault(stripped, key)
     return out
+
+
+def _step_body_params(step: FlowStep) -> list[ParamField]:
+    return [
+        param
+        for param in step.params or []
+        if str(param.path or "").strip()
+        and not str(param.path).startswith(("query.", "path."))
+    ]
+
+
+def _body_lands_params(body: Any, params: list[ParamField]) -> bool:
+    if not isinstance(body, (dict, list)):
+        return False
+    for param in params:
+        relative = _body_relative_path(param.path)
+        if not relative:
+            continue
+        if _flow_path_lookup(body, relative) is _FLOW_PATH_MISSING:
+            return False
+    return True
+
+
+def _is_prefix_tokens(parent: list, child: list) -> bool:
+    return bool(parent) and len(parent) < len(child) and child[:len(parent)] == parent
+
+
+def _assignable_body_params(params: list[ParamField]) -> list[ParamField]:
+    rels = [
+        (param, _flow_path_tokens(_body_relative_path(param.path)))
+        for param in params
+    ]
+    rels = [(param, tokens) for param, tokens in rels if tokens]
+    out: list[ParamField] = []
+    for param, tokens in rels:
+        if any(
+            other is not param and _is_prefix_tokens(tokens, other_tokens)
+            for other, other_tokens in rels
+        ):
+            continue
+        out.append(param)
+    out.sort(key=lambda item: len(_flow_path_tokens(_body_relative_path(item.path))))
+    return out
+
+
+def _empty_body_for_params(params: list[ParamField]) -> dict | list:
+    first_tokens = [
+        tokens[0]
+        for tokens in (
+            _flow_path_tokens(_body_relative_path(param.path)) for param in params
+        )
+        if tokens
+    ]
+    if first_tokens and all(isinstance(token, int) for token in first_tokens):
+        return []
+    return {}
+
+
+def _merge_missing_body_params(body: dict | list, params: list[ParamField]) -> None:
+    for param in _assignable_body_params(params):
+        relative = _body_relative_path(param.path)
+        if _flow_path_lookup(body, relative) is _FLOW_PATH_MISSING:
+            _flow_path_assign(body, relative, _param_recorded_value(param))
+
+
+def _serialize_body_source(value: Any, content_type: str) -> str:
+    if isinstance(value, str):
+        return value
+    content = str(content_type or "").lower()
+    if "x-www-form-urlencoded" in content and isinstance(value, dict):
+        if all(not isinstance(item, (dict, list)) for item in value.values()):
+            return urlencode(
+                [
+                    (str(key), "" if item is None else str(item))
+                    for key, item in value.items()
+                ],
+                doseq=True,
+            )
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _parsed_structured_body(post_data: Any, content_type: str = "") -> Any:
+    parsed = parse_recorded_request_body(post_data, content_type)
+    if parsed.get("kind") in {"json", "form", "multipart"}:
+        return parsed.get("value")
+    return None
+
+
+def _request_fact_for_step(spec: FlowSpec | None, step: FlowStep) -> RequestFact | None:
+    if spec is None or spec.request_facts is None:
+        return None
+    facts = list(spec.request_facts.requests or [])
+    if not facts:
+        return None
+    request_id = str((step.source_meta or {}).get("request_id") or "")
+    if request_id:
+        for fact in facts:
+            if str(fact.request_id or "") == request_id and fact.post_data not in (None, ""):
+                return fact
+    usage = spec.request_facts.usage or {}
+    for fact_id, item in usage.items():
+        if str(getattr(item, "materialized_step_id", "") or "") != step.step_id:
+            continue
+        for fact in facts:
+            if str(fact.request_id or "") == str(fact_id) and fact.post_data not in (None, ""):
+                return fact
+    from dano.execution.page.recording_facts import _request_path
+
+    method = (step.method or "").upper()
+    step_path = _request_path({"url": step.path or step.url})
+    matches = [
+        fact
+        for fact in facts
+        if (fact.method or "").upper() == method
+        and _request_path({"url": fact.path or fact.url}) == step_path
+        and fact.post_data not in (None, "")
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _ensure_step_body_source(step: FlowStep, spec: FlowSpec | None = None) -> None:
+    body_params = _step_body_params(step)
+    if not body_params:
+        return
+    current = _parsed_structured_body(step.body_source, step.content_type)
+    if current is not None and _body_lands_params(current, body_params):
+        return
+    body: Any = copy.deepcopy(current) if isinstance(current, (dict, list)) else None
+    fact = _request_fact_for_step(spec, step)
+    if body is None and fact is not None:
+        parsed_fact = _parsed_structured_body(
+            fact.post_data, fact.content_type or step.content_type,
+        )
+        if isinstance(parsed_fact, (dict, list)):
+            body = copy.deepcopy(parsed_fact)
+            if _body_lands_params(body, body_params):
+                if isinstance(fact.post_data, str):
+                    step.body_source = fact.post_data
+                    if fact.content_type and not step.content_type:
+                        step.content_type = fact.content_type
+                    return
+                step.body_source = _serialize_body_source(
+                    body, fact.content_type or step.content_type,
+                )
+                if fact.content_type and not step.content_type:
+                    step.content_type = fact.content_type
+                return
+    if not isinstance(body, (dict, list)):
+        body = _empty_body_for_params(body_params)
+    _merge_missing_body_params(body, body_params)
+    if not _body_lands_params(body, body_params):
+        return
+    step.body_source = _serialize_body_source(body, step.content_type)
+
+
+def ensure_recorded_body_source(spec: FlowSpec) -> FlowSpec:
+    """Fill missing write-step bodies from captured facts or declared body params."""
+    for step in spec.steps or []:
+        _ensure_step_body_source(step, spec)
+    return spec
 
 
 def _unresolved_recorded_literal_errors(step: FlowStep) -> list[str]:
@@ -589,6 +787,8 @@ def _flow_step_to_api_step(
     runtime_errors = [err for p in step.params if (err := _runtime_param_publish_error(p))]
     if runtime_errors:
         return None, runtime_errors
+    if not step.body_source:
+        _ensure_step_body_source(step)
     if not step.body_source:
         body_params = [
             param for param in step.params
