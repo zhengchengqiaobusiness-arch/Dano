@@ -259,9 +259,9 @@ test("search and create purchase order verify from mixed manual and recorded evi
       assert.match(field.sourceDetail || "", /系统默认|系统常量/, `${field.name} literal must be a default, not a recorded sample`);
     }
   }
-  assert.match(create.inputForm.find(field => field.name === "productUnitName")?.defaultRule || "", /^from:.+\.unitName\|via:productId$/);
-  assert.match(create.inputForm.find(field => field.name === "productBarCode")?.defaultRule || "", /^from:.+\.barCode\|via:productId$/);
-  assert.match(create.inputForm.find(field => field.name === "stockCount")?.defaultRule || "", /^from:.+stock.*\|via:productId$|^from:query-get-stock-get-count:\$\.data\|via:productId$/);
+  assert.match(create.inputForm.find(field => field.name === "productUnitName")?.defaultRule || "", /^from:.+\.unitName\|via:productId(?:\|fallback:.*)?$/);
+  assert.match(create.inputForm.find(field => field.name === "productBarCode")?.defaultRule || "", /^from:.+\.barCode\|via:productId(?:\|fallback:.*)?$/);
+  assert.match(create.inputForm.find(field => field.name === "stockCount")?.defaultRule || "", /^from:.+stock.*\|via:productId(?:\|fallback:.*)?$|^from:query-get-stock-get-count:\$\.data\|via:productId(?:\|fallback:.*)?$/);
   assert.match(create.inputForm.find(field => field.name === "discountPrice")?.defaultRule || "", /^computed:/);
   assert.match(create.inputForm.find(field => field.path === "$.totalPrice")?.defaultRule || "", /^computed:/);
   assert.match(create.inputForm.find(field => field.path === "$.items[*].totalPrice")?.defaultRule || "", /^computed:/);
@@ -671,8 +671,8 @@ test("live product list plus echoed page rows still verify query and create", ()
       fields: create.inputForm.map(field => `${field.name}:${field.source}:${field.defaultRule || field.sourceDetail || ""}`)
     })
   );
-  assert.match(create.inputForm.find(field => field.name === "productUnitName")?.defaultRule || "", /^from:.+\.unitName\|via:productId$/);
-  assert.match(create.inputForm.find(field => field.name === "productBarCode")?.defaultRule || "", /^from:.+\.barCode\|via:productId$/);
+  assert.match(create.inputForm.find(field => field.name === "productUnitName")?.defaultRule || "", /^from:.+\.unitName\|via:productId(?:\|fallback:.*)?$/);
+  assert.match(create.inputForm.find(field => field.name === "productBarCode")?.defaultRule || "", /^from:.+\.barCode\|via:productId(?:\|fallback:.*)?$/);
   assert.doesNotMatch(create.inputForm.find(field => field.name === "productUnitName")?.defaultRule || "", /purchase\/order\/page/);
   assert.equal(create.inputForm.find(field => field.name === "productPrice")?.source, "caller");
   assert.equal(create.inputForm.find(field => field.name === "productPrice")?.label, "产品单价");
@@ -709,8 +709,8 @@ test("validate reseals write system fields from the recorded success request", (
   }));
   const sealed = finalizeCapabilities(stale, events);
   const create = sealed.find(item => item.transport.pathTemplate.includes("/purchase/order/create"))!;
-  assert.match(create.inputForm.find(field => field.name === "productUnitName")?.defaultRule || "", /^from:.+\.unitName\|via:productId$/);
-  assert.match(create.inputForm.find(field => field.name === "productBarCode")?.defaultRule || "", /^from:.+\.barCode\|via:productId$/);
+  assert.match(create.inputForm.find(field => field.name === "productUnitName")?.defaultRule || "", /^from:.+\.unitName\|via:productId(?:\|fallback:.*)?$/);
+  assert.match(create.inputForm.find(field => field.name === "productBarCode")?.defaultRule || "", /^from:.+\.barCode\|via:productId(?:\|fallback:.*)?$/);
   assert.match(create.inputForm.find(field => field.name === "discountPrice")?.defaultRule || "", /^computed:/);
   assert.match(create.inputForm.find(field => field.name === "productUnitName")?.sourceDetail || "", /带出/);
   assert.doesNotMatch(create.inputForm.find(field => field.name === "discountPrice")?.sourceDetail || "", /不要使用录制样本/);

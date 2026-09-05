@@ -1,7 +1,7 @@
 import type { CapabilityContract, EvidenceEvent, OperationKind, ReviewFinding, ReviewNext, ReviewReport, ReviewStage } from "../domain.js";
-import { evidenceSample, isAssembledObjectField, isExecutableRule, parseComputedRule, unsoundComputedOperands } from "../inference/field-derivation.js";
+import { evidenceSample, isAssembledCollectionField, isAssembledObjectField, isExecutableRule, parseComputedRule, unsoundComputedOperands } from "../inference/field-derivation.js";
 import { queryCandidateForField } from "../inference/candidate-sources.js";
-import { flattenRequestValues, isPaginationField, looksPickerField } from "../inference/field-resolver.js";
+import { flattenRequestValues, isPaginationField, looksPickerField, realFieldName, uiNameMatches } from "../inference/field-resolver.js";
 import { capabilitiesForSession, isCandidateSourceCapability, isNoiseCapability, sessionCatalogSlice, summarizeCatalog } from "../inference/export-scope.js";
 import { inferUiOperationIntent, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
 import { applyReviewActionPolicy } from "./review-action.js";
@@ -48,10 +48,20 @@ const CHECK_GUIDANCE: Record<string, { stage: ReviewStage; next: ReviewNext; hin
   "upload-transport-executable": { stage: "validate", next: "manual", hint: "multipart 上传当前不能重放，需要改平台后再验证" }
 };
 
+function coveredByCollectionTemplate(capability: CapabilityContract, field: CapabilityContract["inputForm"][number]) {
+  if (!/整表|各行/.test(field.sourceDetail || "")) return false;
+  const match = /^(.*)\[\*\]\./.exec(field.path);
+  if (!match) return false;
+  const parent = capability.inputForm.find(item => item.path === match[1]);
+  return Boolean(parent?.defaultRule && isExecutableRule(parent.defaultRule) && parent.defaultRule.startsWith("literal:"));
+}
+
 export function fieldOriginResolved(capability: CapabilityContract, field: CapabilityContract["inputForm"][number]) {
   if (field.source === "caller" || field.source === "binding") return true;
   if (isPaginationField(field.name)) return true;
   if (isAssembledObjectField(field, capability.inputForm)) return true;
+  if (isAssembledCollectionField(field, capability.inputForm)) return true;
+  if (coveredByCollectionTemplate(capability, field)) return true;
   if (field.defaultRule && isExecutableRule(field.defaultRule)) return true;
   return false;
 }
@@ -126,12 +136,15 @@ function emptyChooserWithoutOptions(field: NonNullable<Extract<EvidenceEvent, { 
 
 function blankCompleteCoverageFields(capability: CapabilityContract, events: EvidenceEvent[]) {
   type CoverageField = NonNullable<Extract<EvidenceEvent, { kind: "ui" }>["form"]>[number];
+  const requestNames = new Set(flattenRequestValues(evidenceSample(capability, events)).map(item => item.name));
   const coverage = new Map<string, { field: CoverageField; filled: boolean }>();
   for (const field of completeCoverageUiFields(capability, events)) {
     const label = String(field.label || field.name || "").trim();
     const type = String(field.type || "");
     if (!label || /upload|file|readonly|hidden/i.test(type) || /附件|上传/.test(label)) continue;
     if (emptyChooserWithoutOptions(field)) continue;
+    const name = realFieldName(field.name);
+    if (name && ![...requestNames].some(requestName => uiNameMatches(name, requestName))) continue;
     const key = `${label}:${field.rangeIndex ?? ""}`;
     const previous = coverage.get(key);
     coverage.set(key, {
@@ -178,7 +191,7 @@ export function reviewCatalog(
   completeFieldCoverage = false
 ): ReviewReport {
   const { primary, lookups } = summarizeCatalog(capabilities);
-  const neededLookups = lookups.filter(item => isCandidateSourceCapability(item, capabilities) && !isNoiseCapability(item));
+  const neededLookups = lookups.filter(item => isCandidateSourceCapability(item, primary) && !isNoiseCapability(item));
   const rawFindings: ReviewFinding[] = [];
 
   if (!primary.length) {

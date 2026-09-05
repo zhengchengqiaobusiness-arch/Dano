@@ -53,7 +53,7 @@ test("write fields use evidenced derivations and preserve otherwise-unmatched sy
   const count = create.inputForm.find(field => field.name === "count")!;
   assert.equal(count.source, "caller");
   assert.equal(count.defaultRule, undefined);
-  assert.match(unit.defaultRule || "", /^from:.+\.unitName\|via:productId$/);
+  assert.match(unit.defaultRule || "", /^from:.+\.unitName\|via:productId(?:\|fallback:.*)?$/);
   assert.equal(unit.source, "binding");
   assert.equal(amount.defaultRule, "computed:count * productPrice");
   assert.equal(requestId.source, "system");
@@ -141,7 +141,7 @@ test("a shared display value across lookup rows still binds via the selected id"
   }) as EvidenceEvent[];
   const create = buildCapabilityCandidates(recorded).find(item => item.transport.pathTemplate.includes("/order/create"))!;
   const unit = create.inputForm.find(field => field.name === "unitName")!;
-  assert.match(unit.defaultRule || "", /^from:.+\.unitName\|via:productId$/);
+  assert.match(unit.defaultRule || "", /^from:.+\.unitName\|via:productId(?:\|fallback:.*)?$/);
 });
 
 test("create does not bind brought-out fields from the page list of existing rows", () => {
@@ -176,7 +176,7 @@ test("create does not bind brought-out fields from the page list of existing row
   }])).find(item => item.transport.pathTemplate.includes("/order/create"))!;
   const unit = create.inputForm.find(field => field.name === "unitName")!;
   const amount = create.inputForm.find(field => field.name === "amount")!;
-  assert.match(unit.defaultRule || "", /^from:.+\.unitName\|via:productId$/);
+  assert.match(unit.defaultRule || "", /^from:.+\.unitName\|via:productId(?:\|fallback:.*)?$/);
   assert.doesNotMatch(unit.defaultRule || "", /order\/page/);
   assert.equal(amount.defaultRule, "computed:count * productPrice");
   assert.doesNotMatch(amount.defaultRule || "", /from:/);
@@ -281,11 +281,11 @@ test("single-sample zero and one values use UI meaning, joins, and business form
   assert.equal(byName("discountPercent").label, "优惠率（%）");
   assert.equal(byName("depositPrice").source, "caller");
   assert.equal(byName("depositPrice").label, "支付订金");
-  assert.match(byName("productUnitName").defaultRule || "", /^from:.+\.unitName\|via:productId$/);
+  assert.match(byName("productUnitName").defaultRule || "", /^from:.+\.unitName\|via:productId(?:\|fallback:.*)?$/);
   assert.equal(byName("productUnitName").label, "单位");
-  assert.match(byName("productBarCode").defaultRule || "", /^from:.+\.barCode\|via:productId$/);
+  assert.match(byName("productBarCode").defaultRule || "", /^from:.+\.barCode\|via:productId(?:\|fallback:.*)?$/);
   assert.equal(byName("productBarCode").label, "条码");
-  assert.match(byName("stockCount").defaultRule || "", /^from:.+\.data\|via:productId$/);
+  assert.match(byName("stockCount").defaultRule || "", /^from:.+\.data\|via:productId(?:\|fallback:.*)?$/);
   assert.equal(byName("stockCount").label, "库存");
   assert.equal(byName("totalProductPrice").defaultRule, "computed:count * productPrice");
   assert.equal(byName("totalProductPrice").label, "金额");

@@ -1,5 +1,13 @@
 import type { CapabilityContract, CandidateRule, EvidenceEvent, InputFormField, UiEvidence } from "../domain.js";
-import { looksPickerField, recordedLists } from "./field-resolver.js";
+import { looksPickerField, pickerEntity, recordedLists } from "./field-resolver.js";
+
+function pathPickerEntity(path: string) {
+  if (/\/(?:dept|department)(?:\/|$)/i.test(path)) return "dept";
+  if (/\/role(?:\/|$)/i.test(path)) return "role";
+  if (/\/post(?:\/|$)/i.test(path)) return "post";
+  if (/\/user(?:\/|$)/i.test(path)) return "user";
+  return undefined;
+}
 
 function schemaNode(schema: any, jsonPath: string): any {
   const parts = jsonPath.replace(/^\$\.?/, "").split(".").filter(Boolean);
@@ -128,7 +136,12 @@ function lookupFor(field: InputFormField, catalog: CapabilityContract[], events:
     && field.candidates.values.length <= 20
     && !looksPickerField(field);
   const byPicker = looksPickerField(field)
-    ? lists.filter(item => /\/(?:user|dept|department|role|post)\/(?:page|list)$/i.test(item.transport.pathTemplate || ""))
+    ? lists.filter(item => {
+      if (!/\/(?:user|dept|department|role|post)\/(?:page|list|simple-list)$/i.test(item.transport.pathTemplate || "")) return false;
+      const fieldEntity = pickerEntity(field);
+      const listEntity = pathPickerEntity(item.transport.pathTemplate || "");
+      return Boolean(fieldEntity && listEntity && fieldEntity === listEntity);
+    })
     : [];
   if (closedEnum) return pickUnique(byTrigger) || pickUnique(byPath);
   return pickUnique(byTrigger) || pickUnique(byPath) || pickUnique(byOptions) || pickUnique(bySelected) || pickUnique(byPicker);

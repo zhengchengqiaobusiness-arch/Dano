@@ -413,7 +413,7 @@ export class StudioService {
         if (patch.valueType && !["string", "number", "integer", "boolean", "array", "object", "unknown"].includes(patch.valueType)) {
           throw new Error(`未知字段类型：${patch.valueType}`);
         }
-        if (patch.defaultRule !== undefined && patch.defaultRule && !/^(literal:.+|env:[A-Za-z_][A-Za-z0-9_]*|uuid|now:iso|from:[^|]+(?:\|via:[A-Za-z_][A-Za-z0-9_]*)?|computed:.+|copy:[A-Za-z_][A-Za-z0-9_]*)$/.test(patch.defaultRule)) {
+        if (patch.defaultRule !== undefined && patch.defaultRule && !/^(literal:.+|env:[A-Za-z_][A-Za-z0-9_]*|uuid|now:iso|from:[^|]+(?:\|via:[A-Za-z_][A-Za-z0-9_]*)?(?:\|fallback:.*)?|computed:.+|copy:[A-Za-z_][A-Za-z0-9_]*)$/.test(patch.defaultRule)) {
           throw new Error(`字段 ${patch.path} 的处理规则不可执行`);
         }
         Object.assign(field, patch, { path: field.path });

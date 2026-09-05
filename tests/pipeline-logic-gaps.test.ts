@@ -374,7 +374,7 @@ test("from-rule matching indexes fat lookup lists instead of rescanning every fi
   const catalog = finalizeCapabilities(buildCapabilityCandidates(events), events);
   const elapsed = Date.now() - started;
   const create = catalog.find(item => item.transport.pathTemplate.includes("/order/create"))!;
-  assert.match(create.inputForm.find(field => field.name === "unitName")?.defaultRule || "", /^from:.+\.unitName\|via:productId$/);
+  assert.match(create.inputForm.find(field => field.name === "unitName")?.defaultRule || "", /^from:.+\.unitName\|via:productId(?:\|fallback:.*)?$/);
   assert.ok(elapsed < 400, `finalize on 800-row lookup took ${elapsed}ms`);
 });
 

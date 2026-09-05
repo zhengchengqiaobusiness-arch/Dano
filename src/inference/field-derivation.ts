@@ -1,7 +1,7 @@
 import type { CapabilityContract, DataBinding, EvidenceEvent, InputFormField, NetworkEvidence } from "../domain.js";
 import type { SemanticConcept } from "./field-resolver.js";
 import { id } from "../utils.js";
-import { flattenRequestValues, isPaginationField, nameTokens, requestValueAt, sameSynonymGroup, sameValue, semanticConcepts } from "./field-resolver.js";
+import { collectionLeafPresentOnEveryRow, collectionLeafUniform, flattenRequestValues, isPaginationField, nameTokens, requestValueAt, sameSynonymGroup, sameValue, semanticConcepts } from "./field-resolver.js";
 import { isSuccessfulNetworkEvidence, normalizeUrl } from "./heuristics.js";
 import { evidencePageKey, isNoiseCapability, isPageResultQuery, isPrimaryCapability, relatedResource } from "./export-scope.js";
 
@@ -12,7 +12,7 @@ const QUANTITY_NAME = /count|qty|quantity|price|amount|total|percent|rate|tax|di
 const IDENTIFIER_NAME = /(?:Id|Ids|Key|Type|Status|Code)$|(?:^|[^A-Za-z])(id|type|status|code|key|userId|accountId|supplierId|creator|deptId)(?:$|[^A-Za-z])/i;
 const DURATION_NAME = /(?:^|[^a-z])(day|days|hour|hours|duration)(?:$|[^a-z])|天数|小时|时长/i;
 const ENVELOPE_LEAF = /\.(success|ok|msg|message|error|errmsg)$/i;
-const EXECUTABLE_RULE = /^(literal:.+|env:[A-Za-z_][A-Za-z0-9_]*|uuid|now:iso|from:[^|]+(?:\|via:[A-Za-z_][A-Za-z0-9_]*)?|computed:.+|copy:[A-Za-z_][A-Za-z0-9_]*)$/;
+const EXECUTABLE_RULE = /^(literal:.+|env:[A-Za-z_][A-Za-z0-9_]*|uuid|now:iso|from:[^|]+(?:\|via:[A-Za-z_][A-Za-z0-9_]*)?(?:\|fallback:.*)?|computed:.+|copy:[A-Za-z_][A-Za-z0-9_]*)$/;
 const EPOCH_MS_MIN = 1e11;
 const EPOCH_MS_MAX = 2e13;
 const SENSITIVE_FIELD = /(password|passwd|pwd|secret|token|api[-_]?key|access[-_]?key|refresh[-_]?token|session|credential)/i;
@@ -22,9 +22,9 @@ export function isExecutableRule(rule?: string) {
 }
 
 export function parseFromRule(rule: string) {
-  const match = /^from:([^:]+):(.+?)(?:\|via:([A-Za-z_][A-Za-z0-9_]*))?$/.exec(rule);
+  const match = /^from:([^:]+):(.+?)(?:\|via:([A-Za-z_][A-Za-z0-9_]*))?(?:\|fallback:(.*))?$/.exec(rule);
   if (!match) return undefined;
-  return { capabilityId: match[1]!, fromPath: match[2]!, via: match[3] };
+  return { capabilityId: match[1]!, fromPath: match[2]!, via: match[3], fallback: match[4] };
 }
 
 export function parseComputedRule(rule: string) {
@@ -848,6 +848,30 @@ export function isAssembledObjectField(field: InputFormField, fields: InputFormF
   );
 }
 
+export function isAssembledCollectionField(field: InputFormField, fields: InputFormField[]) {
+  return field.valueType === "array" && fields.some(other =>
+    other.path !== field.path && (other.path.startsWith(`${field.path}[*]`) || other.path.startsWith(`${field.path}[`))
+  );
+}
+
+function asAssembledCollection(field: InputFormField, value: unknown): InputFormField {
+  const rule = recordedLiteralRule(field, value);
+  if (!rule) {
+    return {
+      ...field,
+      source: "system",
+      systemHandled: true,
+      required: false,
+      defaultRule: undefined,
+      sourceDetail: "明细按子字段拼接；各行结构以录制成功请求为准，不把其中一行的键套到其它行"
+    };
+  }
+  return {
+    ...asRecordedSystemValue(field, rule, value),
+    sourceDetail: "系统默认按录制成功请求的整表原样补齐明细；调用方只覆盖有页面输入的单元格，不要改写各行原有结构"
+  };
+}
+
 function shouldKeep(field: InputFormField, capability: CapabilityContract, fields: InputFormField[] = capability.inputForm) {
   if (field.source === "caller") return true;
   if (PAGE_NAME.test(field.name)) return true;
@@ -859,16 +883,23 @@ function shouldKeep(field: InputFormField, capability: CapabilityContract, field
   return false;
 }
 
-function asFrom(field: InputFormField, match: NonNullable<ReturnType<typeof fromApiMatch>>, fields: InputFormField[]): InputFormField {
+function asFrom(
+  field: InputFormField,
+  match: NonNullable<ReturnType<typeof fromApiMatch>>,
+  fields: InputFormField[],
+  recordedValue?: unknown
+): InputFormField {
   const via = match.via;
-  const rule = via ? `from:${match.capabilityId}:${match.fromPath}|via:${via}` : `from:${match.capabilityId}:${match.fromPath}`;
+  let rule = via ? `from:${match.capabilityId}:${match.fromPath}|via:${via}` : `from:${match.capabilityId}:${match.fromPath}`;
+  const fallback = recordedLiteralRule(field, recordedValue);
+  if (fallback) rule += `|fallback:${fallback.slice("literal:".length)}`;
   return {
     ...field,
     source: "binding",
     systemHandled: true,
     required: false,
     defaultRule: rule,
-    sourceDetail: `选择「${viaLabel(fields, via)}」后，从已录制查询 ${match.method} ${match.pathTemplate} 的 ${match.fromPath} 带出，调用方不要手填`
+    sourceDetail: `选择「${viaLabel(fields, via)}」后，从已录制查询 ${match.method} ${match.pathTemplate} 的 ${match.fromPath} 带出；带不出时系统按录制成功请求原值补齐，调用方不要手填`
   };
 }
 
@@ -929,6 +960,7 @@ function asCopy(field: InputFormField, source: InputFormField): InputFormField {
 function uniqueCopySource(field: InputFormField, fields: InputFormField[], sample: unknown) {
   const value = requestValueAt(sample, field.path);
   if (value === undefined || value === null || value === "" || isLowInformationValue(value)) return undefined;
+  if (typeof value === "object") return undefined;
   const sameScope = fields.filter(item => item.path !== field.path && fieldScope(item.path) === fieldScope(field.path));
   const hits = sameScope.filter(item =>
     sameDerivedValue(requestValueAt(sample, item.path), value)
@@ -1069,8 +1101,21 @@ export function attachDerivationRules(
   const lookupIndex = index || buildLookupIndex(events, catalog);
   const bindings: DataBinding[] = [];
   let next = fields.map(field => {
+    if (field.path.includes("[*].") && field.source !== "caller" && !collectionLeafUniform(sample, field.path)) {
+      return {
+        ...field,
+        source: "system" as const,
+        systemHandled: true,
+        required: false,
+        defaultRule: undefined,
+        sourceDetail: "该明细列在各行结构或取值不同，由整表录制原值按行补齐，不把其中一行的值套到其它行"
+      };
+    }
     if (isAssembledObjectField(field, fields)) {
       return asAssembled(field, fields.filter(item => item.path.startsWith(`${field.path}.`) || item.path.startsWith(`${field.path}[`)));
+    }
+    if (isAssembledCollectionField(field, fields)) {
+      return asAssembledCollection(field, requestValueAt(sample, field.path));
     }
     if (shouldKeep(field, capability, fields)) return field;
     const value = requestValueAt(sample, field.path);
@@ -1088,7 +1133,7 @@ export function attachDerivationRules(
         approvedAt: new Date().toISOString(),
         note: `选择「${viaLabel(fields, from.via)}」后从录制查询响应唯一带出`
       });
-      return asFrom(field, from, fields);
+      return asFrom(field, from, fields, value);
     }
     if (field.defaultRule && (mode === "write" || !field.defaultRule.startsWith("literal:"))) return field;
     return field;
@@ -1124,6 +1169,22 @@ export function attachDerivationRules(
       return {
         ...asCallerInput(field),
         sourceDetail: "该字段在写请求前作为已录制查询的同名输入，执行时由调用方提供，不能从查询结果或录制样本猜测"
+      };
+    }
+    if (field.path.includes("[*].") && !collectionLeafUniform(sample, field.path)) {
+      if (field.source === "caller") {
+        return {
+          ...field,
+          required: field.required && collectionLeafPresentOnEveryRow(sample, field.path)
+        };
+      }
+      return {
+        ...field,
+        source: "system",
+        systemHandled: true,
+        required: false,
+        defaultRule: undefined,
+        sourceDetail: "该明细列在各行结构或取值不同，由整表录制原值按行补齐，不把其中一行的值套到其它行"
       };
     }
     const rule = recordedLiteralRule(field, value);

@@ -97,7 +97,19 @@ function schemaFieldsToForm(schema: any, prefix = "$", parentRequired = true): I
       }, ...children];
     }
     if (type === "array" && raw?.items?.type === "object" && raw.items.properties) {
-      return schemaFieldsToForm(raw.items, `${path}[*]`, false);
+      const children = schemaFieldsToForm(raw.items, `${path}[*]`, false);
+      return [{
+        path,
+        name,
+        label: raw?.title || name,
+        valueType: "array",
+        source: "system",
+        required: false,
+        requiredBasis: "not-observed",
+        systemHandled: true,
+        sourceDetail: `明细按录制成功请求的整表原样补齐；调用方只覆盖有页面输入的单元格`,
+        widget: "json"
+      }, ...children];
     }
     const widget: InputFormField["widget"] =
       type === "number" || type === "integer" ? "number" :

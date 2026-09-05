@@ -20,7 +20,8 @@ const PAGE_QUERY = /\/page$/i;
 const LIST_QUERY = /\/(?:list|search|query)$/i;
 const DETAIL_QUERY = /\/(?:get|detail|info)(?:[-_/].*)?$/i;
 
-const OPERATION_SEGMENT = /^(page|list|search|query|find|create|update|delete|save|submit|export|import|detail|info|count|get|add|edit|remove|complete|enable|disable)(?:[-_].+)?$/i;
+const OPERATION_SEGMENT = /^(page|list|search|query|find|create|update|delete|save|submit|export|import|detail|info|count|get|add|edit|remove|complete|enable|disable|statistics|statistic|stats|summary|overview|analyse|analyze)(?:[-_].+)?$/i;
+const SUMMARY_QUERY = /\/(?:statistics|statistic|stats|summary|overview|analyse|analyze|dashboard)$/i;
 const OPERATION_PREFIX = /^(get|create|update|delete|save|submit|query|list|find|add|edit|remove|enable|disable|complete)/i;
 const OPERATION_SUFFIX = /(?:List|Page|Search|Query|Find|Detail|Info|Count|Process|ById)$/i;
 
@@ -142,6 +143,8 @@ export function isPageResultQuery(capability: CapabilityContract) {
   if (PAGE_QUERY.test(path) || LIST_QUERY.test(path)) return true;
   const paging = capability.inputForm.some(field => isPaginationField(field.name));
   const collection = schemaHasRecordArray(capability.outputSchema);
+  const hasBusinessFilter = capability.inputForm.some(field => !isPaginationField(field.name));
+  if (SUMMARY_QUERY.test(path) && (hasBusinessFilter || collection || paging || hasBusinessCallerField(capability))) return true;
   if (LIST_SHAPED.test(last)) return collection || paging;
   return collection && (paging || hasBusinessCallerField(capability));
 }
@@ -232,6 +235,7 @@ export function isPrimaryCapability(capability: CapabilityContract, catalog: Cap
       return false;
     }
     if (hasBusinessCallerField(capability)) return true;
+    if (SUMMARY_QUERY.test(path) && capability.inputForm.some(field => !isPaginationField(field.name))) return true;
     const pageResults = catalog.filter(item => isPageResultQuery(item) && !PICKER_PAGE.test(item.transport.pathTemplate || ""));
     if (pageResults.length === 1) return true;
   }

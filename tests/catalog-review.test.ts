@@ -213,6 +213,83 @@ test("complete field coverage blocks a blank visible filter and an unexercised b
   assert.equal(review.findings.some(item => item.fieldPath === "$.oaReimburseFeeitemList"), true);
 });
 
+test("lookup-to-lookup bindings do not block export of already verified primaries", () => {
+  const catalog = [
+    cap({
+      id: "query-page",
+      operation: "query",
+      title: "查询单据",
+      transport: { method: "GET", urlTemplate: "https://x/oa/doc/page", origin: "https://x", pathTemplate: "/oa/doc/page" },
+      inputForm: [{ path: "$.billCode", name: "billCode", label: "单据编号", valueType: "string", source: "caller", required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面", widget: "text" }]
+    }),
+    cap({
+      id: "create-doc",
+      operation: "create",
+      title: "新建单据",
+      transport: { method: "POST", urlTemplate: "https://x/oa/doc/submit", origin: "https://x", pathTemplate: "/oa/doc/submit" }
+    }),
+    cap({
+      id: "query-approval",
+      operation: "query",
+      title: "查询审批详情",
+      transport: { method: "GET", urlTemplate: "https://x/bpm/approval-detail", origin: "https://x", pathTemplate: "/bpm/approval-detail" },
+      inputForm: [{
+        path: "$.processDefinitionId", name: "processDefinitionId", label: "流程定义", valueType: "string",
+        source: "binding", required: false, requiredBasis: "not-observed", systemHandled: true,
+        sourceDetail: "从流程图带出", widget: "text",
+        defaultRule: "from:query-bpmn:$.data.processInstance.processDefinitionId"
+      }],
+      bindings: [{
+        id: "bind-1", fromCapabilityId: "query-bpmn", fromPath: "$.data.processInstance.processDefinitionId",
+        toPath: "$.processDefinitionId", confidence: 1, evidenceIds: [], approved: true,
+        approvalSource: "evidence", approvedAt: "2026-09-05T00:00:00.000Z"
+      }]
+    }),
+    cap({
+      id: "query-bpmn",
+      operation: "query",
+      title: "查询流程图",
+      transport: { method: "GET", urlTemplate: "https://x/bpm/bpmn-model-view", origin: "https://x", pathTemplate: "/bpm/bpmn-model-view" },
+      validation: { version: 2, status: "candidate", checks: [{ name: "binding-structure-valid", ok: false, detail: "绑定引用了未知能力" }] }
+    })
+  ];
+  const review = reviewCatalog(catalog);
+  assert.equal(review.status, "passed");
+  assert.equal(review.findings.some(item => item.capabilityId === "query-bpmn"), false);
+});
+
+test("complete coverage does not demand a named empty filter that the successful request never sent", () => {
+  const query = cap({
+    id: "query-page",
+    operation: "query",
+    title: "查询单据",
+    transport: { method: "GET", urlTemplate: "https://x/oa/doc/page", origin: "https://x", pathTemplate: "/oa/doc/page" },
+    evidence: [{ eventId: "net-query", sessionId: "coverage", kind: "network", at: "2026-09-05T11:20:01.000Z", status: 200 }]
+  });
+  const events: EvidenceEvent[] = [{
+    id: "ui-query", kind: "ui", sessionId: "coverage", at: "2026-09-05T11:20:00.000Z",
+    pageUrl: "https://x/oa/doc/list", eventType: "click", text: "搜索", label: "搜索",
+    form: [
+      { name: "billCode", label: "单据编号", type: "text", value: "1" },
+      { name: "deptId", label: "申请部门", type: "select", value: "" }
+    ]
+  }, {
+    id: "net-query", kind: "network", sessionId: "coverage", at: "2026-09-05T11:20:01.000Z",
+    pageUrl: "https://x/oa/doc/list", correlatedUiEvidenceId: "ui-query",
+    request: {
+      method: "GET",
+      url: "https://x/oa/doc/page?billCode=1",
+      resourceType: "xhr",
+      headers: {},
+      query: { billCode: "1" }
+    },
+    response: { status: 200, headers: {}, body: { code: 0, data: { list: [], total: 0 } } }
+  }];
+  const review = reviewCatalog([query], events, ["query"], true);
+  assert.equal(review.status, "passed");
+  assert.equal(review.findings.some(item => String(item.message).includes("申请部门")), false);
+});
+
 test("analyze merge keeps create when a later session only saw the page query", () => {
   const existing = [
     cap({ id: "query-order", operation: "query", transport: { method: "GET", urlTemplate: "https://x/erp/purchase-order/page", origin: "https://x", pathTemplate: "/erp/purchase-order/page" } }),

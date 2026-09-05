@@ -4,6 +4,16 @@ export function schemaFromValue(value: unknown, depth = 0): JsonSchema {
   if (depth > 5) return {};
   if (value === null) return { type: ["null"] };
   if (Array.isArray(value)) {
+    const objects = value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
+    if (objects.length > 1) {
+      return {
+        type: "array",
+        items: objects.slice(1).reduce(
+          (schema, item) => mergeSchemas(schema, schemaFromValue(item, depth + 1)),
+          schemaFromValue(objects[0], depth + 1)
+        )
+      };
+    }
     const nonNull = value.find(v => v !== null);
     return {
       type: "array",

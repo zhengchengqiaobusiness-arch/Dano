@@ -94,6 +94,50 @@ def item_input_key(field: dict[str, Any]) -> str:
     return (field.get("path") or "").removeprefix("$.").replace("[*]", "")
 
 
+def parse_literal_rule(rule: Any) -> Any:
+    if not isinstance(rule, str) or not rule.startswith("literal:"):
+        return None
+    raw = rule[len("literal:"):]
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+def collection_template_rows(capability: dict[str, Any], prefix: str) -> list[dict[str, Any]] | None:
+    for field in capability.get("inputForm", []):
+        if field.get("path") != prefix:
+            continue
+        value = parse_literal_rule(field.get("defaultRule"))
+        if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+            return value
+    return None
+
+
+def apply_collection_templates(capability: dict[str, Any], prepared: dict[str, Any]) -> None:
+    for field in capability.get("inputForm", []):
+        path = field.get("path") or ""
+        if "[*]" in path:
+            continue
+        template = collection_template_rows(capability, path)
+        if not template:
+            continue
+        current = get_by_path(prepared, path)
+        if not isinstance(current, list) or not current:
+            set_by_path(prepared, path, copy.deepcopy(template))
+            continue
+        merged: list[Any] = []
+        for index, row in enumerate(template):
+            overlay = current[index] if index < len(current) else None
+            next_row = copy.deepcopy(row)
+            if isinstance(overlay, dict):
+                next_row.update(overlay)
+            merged.append(next_row)
+        if len(current) > len(template):
+            merged.extend(copy.deepcopy(item) if isinstance(item, dict) else item for item in current[len(template):])
+        set_by_path(prepared, path, merged)
+
+
 def nest_line_items(capability: dict[str, Any], supplied: dict[str, Any]) -> dict[str, Any]:
     prepared = copy.deepcopy(supplied)
     item_fields = [field for field in capability.get("inputForm", []) if "[*]" in field.get("path", "")]
@@ -188,13 +232,24 @@ def eval_computed(expr: str, prepared: dict[str, Any], item: dict[str, Any] | No
 
 
 def parse_from_rule(rule: str) -> dict[str, str] | None:
-    match = re.fullmatch(r"from:([^:]+):(.+?)(?:\|via:([A-Za-z_][A-Za-z0-9_]*))?", rule)
+    match = re.fullmatch(r"from:([^:]+):(.+?)(?:\|via:([A-Za-z_][A-Za-z0-9_]*))?(?:\|fallback:(.*))?", rule)
     if not match:
         return None
     parsed = {"capabilityId": match.group(1), "fromPath": match.group(2)}
     if match.group(3):
         parsed["via"] = match.group(3)
+    if match.group(4) is not None:
+        parsed["fallback"] = match.group(4)
     return parsed
+
+
+def parse_fallback_value(raw: str | None) -> Any:
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
 
 
 def same_join(left: Any, right: Any) -> bool:
@@ -266,9 +321,12 @@ def resolve_field_rule(
     if rule.startswith("computed:"):
         return eval_computed(rule.removeprefix("computed:"), prepared, item)
     if rule.startswith("from:"):
-        if not resolve_lookups:
-            return None
-        return resolve_from(rule, prepared, item, contract)
+        parsed = parse_from_rule(rule)
+        if resolve_lookups:
+            value = resolve_from(rule, prepared, item, contract)
+            if value is not None:
+                return value
+        return parse_fallback_value(parsed.get("fallback") if parsed else None)
     if rule:
         return resolve_rule(rule)
     return None
@@ -346,12 +404,15 @@ def coerce_present_fields(capability: dict[str, Any], prepared: dict[str, Any], 
                     raise ValueError(f"缺少调用方必填字段：{field['label']} ({field['path']})")
                 continue
             name = suffix.split(".")[-1]
-            for item in items:
+            templates = collection_template_rows(capability, prefix)
+            for index, item in enumerate(items):
                 if not isinstance(item, dict):
                     continue
                 value = item.get(name)
                 if value is None:
                     if require_missing and field.get("required") and field.get("source") == "caller":
+                        if templates is not None and index < len(templates) and name not in templates[index]:
+                            continue
                         raise ValueError(f"缺少调用方必填字段：{field['label']} ({field['path']})")
                     continue
                 item[name] = coerce(value, field.get("valueType", "unknown"), field["path"], field)
@@ -375,6 +436,7 @@ def prepare_input(
     resolve_lookups: bool = True,
 ) -> dict[str, Any]:
     prepared = hoist_named_fields(capability, nest_line_items(capability, supplied))
+    apply_collection_templates(capability, prepared)
     coerce_present_fields(capability, prepared, False)
     changed = True
     while changed:
@@ -386,8 +448,11 @@ def prepare_input(
                 if not isinstance(items, list):
                     continue
                 name = suffix.split(".")[-1]
-                for item in items:
+                templates = collection_template_rows(capability, prefix)
+                for index, item in enumerate(items):
                     if not isinstance(item, dict) or item.get(name) is not None:
+                        continue
+                    if templates is not None and index < len(templates) and name not in templates[index]:
                         continue
                     if not field.get("defaultRule"):
                         continue

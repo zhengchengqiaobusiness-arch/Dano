@@ -145,7 +145,17 @@ function resolveFieldRule(
     return prepared[name];
   }
   if (rule.startsWith("computed:")) return evalComputed(rule.slice("computed:".length), prepared, item);
-  if (rule.startsWith("from:")) return resolveFrom(rule, prepared, item, options);
+  if (rule.startsWith("from:")) {
+    const resolved = resolveFrom(rule, prepared, item, options);
+    if (resolved !== undefined) return resolved;
+    const fallback = parseFromRule(rule)?.fallback;
+    if (fallback === undefined) return undefined;
+    try {
+      return JSON.parse(fallback);
+    } catch {
+      return fallback;
+    }
+  }
   if (rule) return resolveRule(rule);
   return undefined;
 }
@@ -209,6 +219,47 @@ function hoistNamedFields(cap: CapabilityContract, supplied: Record<string, unkn
   return prepared;
 }
 
+function parseLiteralRule(rule?: string) {
+  if (!rule?.startsWith("literal:")) return undefined;
+  try {
+    return JSON.parse(rule.slice("literal:".length));
+  } catch {
+    return undefined;
+  }
+}
+
+function collectionTemplateRows(cap: CapabilityContract, prefix: string) {
+  const parent = cap.inputForm.find(field => field.path === prefix);
+  const value = parseLiteralRule(parent?.defaultRule);
+  return Array.isArray(value) && value.every(item => item && typeof item === "object" && !Array.isArray(item))
+    ? value as Record<string, unknown>[]
+    : undefined;
+}
+
+function applyCollectionTemplates(cap: CapabilityContract, prepared: Record<string, unknown>) {
+  for (const field of cap.inputForm) {
+    if (field.path.includes("[*]")) continue;
+    const template = collectionTemplateRows(cap, field.path);
+    if (!template?.length) continue;
+    const current = getByPath(prepared, field.path);
+    if (!Array.isArray(current) || !current.length) {
+      setByPath(prepared, field.path, structuredClone(template));
+      continue;
+    }
+    const merged = template.map((row, index) => {
+      const overlay = current[index];
+      if (!overlay || typeof overlay !== "object" || Array.isArray(overlay)) return structuredClone(row);
+      return { ...structuredClone(row), ...overlay };
+    });
+    if (current.length > template.length) {
+      merged.push(...current.slice(template.length).map(row => (
+        row && typeof row === "object" && !Array.isArray(row) ? { ...row } : row
+      )));
+    }
+    setByPath(prepared, field.path, merged);
+  }
+}
+
 function nestLineItems(cap: CapabilityContract, supplied: Record<string, unknown>) {
   const prepared = structuredClone(supplied);
   const itemFields = cap.inputForm.filter(field => field.path.includes("[*]"));
@@ -248,6 +299,9 @@ function coercePresentFields(cap: CapabilityContract, prepared: Record<string, u
         const value = current[name];
         if (value === undefined) {
           if (requireMissing && field.required && field.source === "caller") {
+            const templates = collectionTemplateRows(cap, prefix || "");
+            const index = items.indexOf(row);
+            if (templates?.[index] && !Object.prototype.hasOwnProperty.call(templates[index], name)) continue;
             throw new Error(`Missing caller field: ${field.label} (${field.path})`);
           }
           continue;
@@ -271,6 +325,7 @@ function coercePresentFields(cap: CapabilityContract, prepared: Record<string, u
 
 function prepareInput(cap: CapabilityContract, input: Record<string, unknown>, options?: MaterializeOptions) {
   const prepared = hoistNamedFields(cap, nestLineItems(cap, input));
+  applyCollectionTemplates(cap, prepared);
   coercePresentFields(cap, prepared, false);
   let changed = true;
   while (changed) {
@@ -282,10 +337,12 @@ function prepareInput(cap: CapabilityContract, input: Record<string, unknown>, o
         const items = getByPath(prepared, prefix || "");
         if (!Array.isArray(items)) continue;
         const name = (suffix || "").split(".").pop() || field.name;
-        for (const row of items) {
-          if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+        const templates = collectionTemplateRows(cap, prefix || "");
+        items.forEach((row, index) => {
+          if (!row || typeof row !== "object" || Array.isArray(row)) return;
           const current = row as Record<string, unknown>;
-          if (current[name] !== undefined) continue;
+          if (current[name] !== undefined) return;
+          if (templates?.[index] && !Object.prototype.hasOwnProperty.call(templates[index], name)) return;
           try {
             const value = resolveFieldRule(field, prepared, current, options);
             if (value !== undefined) {
@@ -295,7 +352,7 @@ function prepareInput(cap: CapabilityContract, input: Record<string, unknown>, o
           } catch {
             // wait for another field in a later pass
           }
-        }
+        });
         continue;
       }
       if (getByPath(prepared, field.path) !== undefined) continue;

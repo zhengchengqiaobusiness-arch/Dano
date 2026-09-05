@@ -48,8 +48,16 @@ function optionsOf(event: UiEvidence, field?: NonNullable<UiEvidence["form"]>[nu
 }
 
 function emptyPromptLabel(text?: string) {
-  const stripped = String(text || "").replace(/^(请选择|请输入|请填写|please select|please enter|please choose|select)\s*/i, "");
-  return stripped && stripped !== text ? stripped : undefined;
+  const raw = String(text || "").replace(/^样例-/, "");
+  const stripped = raw.replace(/^(请选择|请输入|请填写|please select|please enter|please choose|select)\s*/i, "");
+  return stripped && stripped !== raw ? stripped : undefined;
+}
+
+function observationLabel(item: { name?: string; label?: string; value?: unknown }) {
+  const label = String(item.label || "").trim();
+  const prompt = emptyPromptLabel(typeof item.value === "string" ? item.value : "");
+  if (prompt && (!label || /^\d+$/.test(label) || pollutedLabel({ label, value: item.value }))) return prompt;
+  return item.label;
 }
 
 function eventLabel(event: UiEvidence) {
@@ -62,6 +70,15 @@ export function flattenRequestValues(value: unknown, prefix = "$"): Array<{ path
   if (value === null || typeof value !== "object") return [{ path: prefix, name, value }];
   if (Array.isArray(value)) {
     if (!value.length) return [{ path: prefix, name, value }];
+    const objects = value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
+    if (objects.length) {
+      const keys = [...new Set(objects.flatMap(item => Object.keys(item)))];
+      const children = keys.flatMap(key => {
+        const first = objects.find(item => item[key] !== undefined);
+        return flattenRequestValues(first?.[key], `${prefix}[*].${key}`);
+      });
+      return [{ path: prefix, name, value }, ...children];
+    }
     const first = value.find(item => item !== null && item !== undefined);
     const children = flattenRequestValues(first, `${prefix}[*]`);
     return [{ path: prefix, name, value }, ...children];
@@ -307,6 +324,16 @@ function looksChoiceField(field: InputFormField) {
     || /type|status|result|kind|category|dict|assignee|user|Activity_/i.test(field.name);
 }
 
+export function pickerEntity(value: { name?: string; label?: string; path?: string }) {
+  const pathName = value.path?.split(".").pop()?.replace(/\[\*\]$/, "") || "";
+  const text = fieldText({ name: value.name || pathName, label: value.label });
+  if (/dept|department|部门/.test(text) && !/creator|userId|userIds|人员|创建人|选人|审批人/.test(text)) return "dept";
+  if (/\brole\b|角色/.test(text)) return "role";
+  if (/\bpost\b|岗位|职位/.test(text)) return "post";
+  if (/人员|创建人|选人|审批人|assignee|approver|creator|Activity_|userId|userIds|UserSelect/i.test(text)) return "user";
+  return undefined;
+}
+
 export function looksPickerField(
   field: Pick<InputFormField, "name" | "label" | "widget">,
   observation?: Pick<UiObservation, "type">
@@ -315,7 +342,7 @@ export function looksPickerField(
     return false;
   }
   if (/picker/i.test(`${observation?.type || ""} ${field.widget || ""}`)) return true;
-  return /人员|审批|创建人|选人|assignee|approver|creator|Activity_|userId|userIds|UserSelect/i.test(`${field.name || ""} ${field.label || ""}`);
+  return pickerEntity(field) === "user";
 }
 
 export function preferRequestValueType(
@@ -401,9 +428,9 @@ export function collectUiObservations(events: UiEvidence[]): UiObservation[] {
         items.push({ name: undefined, label: event.text, value: event.text, type: controlType || (choiceEvent ? "select" : undefined), disabled: eventField?.disabled });
       }
     } else if (event.name && !isGeneratedFieldName(event.name)) {
-      items.push({ name: event.name, label, value: event.value, type: controlType, disabled: eventField?.disabled, options: eventOptions });
+      items.push({ name: event.name, label: observationLabel({ name: event.name, label, value: event.value }), value: event.value, type: controlType, disabled: eventField?.disabled, options: eventOptions });
     } else if (label && !actionControl) {
-      items.push({ name: undefined, label, value: event.value, type: controlType, disabled: eventField?.disabled, options: eventOptions });
+      items.push({ name: undefined, label: observationLabel({ label, value: event.value }), value: event.value, type: controlType, disabled: eventField?.disabled, options: eventOptions });
     } else if (eventOptions?.length) {
       const matches = (event.form || []).filter(field =>
         field.label && eventOptions.some(item => String(item.label || item.value).includes(field.label!))
@@ -425,7 +452,7 @@ export function collectUiObservations(events: UiEvidence[]): UiObservation[] {
       if (field.label === "字段") continue;
       items.push({
         name: realFieldName(field.name),
-        label: field.label,
+        label: observationLabel(field),
         value: field.value,
         type: field.type,
         required: field.required,
@@ -760,10 +787,15 @@ function displayLabel(label?: string, rangeIndex?: number) {
 }
 
 function observedLabel(field: InputFormField, matched?: UiObservation) {
-  const fromMatch = displayLabel(matched?.label, matched?.rangeIndex);
+  const refined = matched ? observationLabel(matched) : undefined;
+  const fromMatch = displayLabel(refined || matched?.label, matched?.rangeIndex);
   if (fromMatch && isPromptLabel(fromMatch)) {
     if (field.label && !isPromptLabel(field.label) && field.label !== field.name) return field.label;
     return emptyPromptLabel(fromMatch) || fromMatch;
+  }
+  if (fromMatch && /^\d+$/.test(fromMatch)) {
+    const prompt = emptyPromptLabel(typeof matched?.value === "string" ? matched.value : "");
+    if (prompt) return prompt;
   }
   if (fromMatch && fromMatch !== field.name) return fromMatch;
   if (field.label && isPromptLabel(field.label)) return emptyPromptLabel(field.label) || field.label;
@@ -1167,10 +1199,14 @@ export function assignUniqueRemaining(
     if (boundPaths.has(field.path) || !looksPickerField(field)) continue;
     const value = requestValueAt(sample, field.path);
     if (value === undefined || value === null || value === "") continue;
-    const pickerObs = leftoverObs.filter(item =>
-      !bound.has(item.label || "")
-      && /picker|select|combobox/i.test(item.type || "")
-    );
+    const fieldEntity = pickerEntity(field);
+    const pickerObs = leftoverObs.filter(item => {
+      if (bound.has(item.label || "") || !/picker|select|combobox/i.test(item.type || "")) return false;
+      const observationEntity = pickerEntity(item);
+      if (fieldEntity && observationEntity && fieldEntity !== observationEntity) return false;
+      return observationCompatible(field, item, value, lists)
+        || Boolean(fieldEntity && observationEntity && fieldEntity === observationEntity && sameSynonymGroup(field, item));
+    });
     const required = pickerObs.filter(item => item.required);
     const pool = required.length ? required : pickerObs;
     if (pool.length !== 1) continue;
@@ -1644,6 +1680,32 @@ export function requestValueAt(sample: unknown, path: string) {
   if (starred.length === 1) return starred[0]!.value;
   if (starred.length > 1) return starred.map(item => item.value);
   return undefined;
+}
+
+export function collectionRowsAt(sample: unknown, collectionPath: string) {
+  const value = requestValueAt(sample, collectionPath);
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
+}
+
+export function collectionLeafPresentOnEveryRow(sample: unknown, leafPath: string) {
+  const match = /^(.*)\[\*\]\.(.+)$/.exec(leafPath);
+  if (!match) return true;
+  const rows = collectionRowsAt(sample, match[1]!);
+  if (!rows.length) return false;
+  const key = match[2]!.split(".")[0]!;
+  return rows.every(row => Object.prototype.hasOwnProperty.call(row, key));
+}
+
+export function collectionLeafUniform(sample: unknown, leafPath: string) {
+  const match = /^(.*)\[\*\]\.(.+)$/.exec(leafPath);
+  if (!match) return true;
+  const rows = collectionRowsAt(sample, match[1]!);
+  if (rows.length <= 1) return true;
+  const key = match[2]!.split(".")[0]!;
+  if (!rows.every(row => Object.prototype.hasOwnProperty.call(row, key))) return false;
+  const first = rows[0]![key];
+  return rows.every(row => Object.is(row[key], first) || sameValue(row[key], first));
 }
 
 function formNames(form: NonNullable<UiEvidence["form"]>) {
