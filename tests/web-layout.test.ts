@@ -110,6 +110,11 @@ test("starting a recording keeps the workbench conversation", async () => {
   assert.doesNotMatch(openBrowser, /工作台已清空/);
   assert.match(app, /if \(event\.type === "session_reset"\) \{\s*if \(event\.epoch != null\) state\.sessionEpoch = event\.epoch;\s*resetWorkbench\(\);/s);
   assert.doesNotMatch(server, /studio\.recorder\.control\(\{\s*action:\s*"goto"/);
+  const openRoute = server.match(/pathname === "\/api\/browser\/open"[\s\S]*?return;\s*\}/)?.[0] || "";
+  const internalStart = server.match(/pathname === "\/internal\/browser\/start"[\s\S]*?return;\s*\}/)?.[0] || "";
+  assert.doesNotMatch(openRoute, /evaluateRerecord/);
+  assert.match(internalStart, /evaluateRerecord/);
+  assert.match(internalStart, /blocked: true/);
 });
 
 test("three failed form attempts expose a non-blocking manual takeover and resume endpoint", async () => {
@@ -239,6 +244,11 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.match(bridge, /exclude-tools[\s\S]*bash|The bash tool is disabled/);
   assert.match(bridge, /sessionId from record_stop|主能力 and 字段候选接口/);
   assert.match(bridge, /审核通过|re-record|re-analyze/);
+  assert.match(bridge, /Do not call business_skill_record_start after validate unless/);
+  assert.match(bridge, /stop and report; do not analyze, validate, or record again/);
+  assert.match(extension, /session\?\.blocked/);
+  assert.match(extension, /不要再 business_skill_analyze \/ validate \/ record_start/);
+  assert.match(await readFile(path.join(root, ".pi", "skills", "business-skill-studio", "SKILL.md"), "utf8"), /do not start another analyze\/validate\/recording loop/);
   assert.match(extension, /本次识别主能力|本次录制主能力|已导出主能力/);
   assert.match(extension, /审核通过|审核未通过/);
   assert.match(await readFile(path.join(root, "src", "studio-service.ts"), "utf8"), /sessionCatalogSlice|reviewSession/);

@@ -79,12 +79,29 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       }
     }, ["url"]),
     async execute(_toolCallId, params: any) {
-      const session = await startBrowser(params.url, params.name, params.expectedOperations || [], params.completeFieldCoverage === true, params.completePageCoverage === true);
-      if (session?.id) lastRecordingSessionId = session.id;
-      return {
-        content: [{ type: "text", text: `Recording started: ${session.id}. The live page is visible in the Studio browser panel.` }],
-        details: session
-      };
+      try {
+        const session = await startBrowser(params.url, params.name, params.expectedOperations || [], params.completeFieldCoverage === true, params.completePageCoverage === true);
+        if (session?.blocked) {
+          return {
+            content: [{ type: "text", text: session.message || "上次审核未要求补录。禁止对同一业务页重新录制。" }],
+            details: session
+          };
+        }
+        if (session?.id) lastRecordingSessionId = session.id;
+        return {
+          content: [{ type: "text", text: `Recording started: ${session.id}. The live page is visible in the Studio browser panel.` }],
+          details: session
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/禁止|不要重新录制|不要 business_skill_record_start/.test(message)) {
+          return {
+            content: [{ type: "text", text: message }],
+            details: { blocked: true, started: false, message }
+          };
+        }
+        throw error;
+      }
     }
   });
 
@@ -158,16 +175,21 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_validate",
     label: "Validate business capabilities",
-    description: "Review inferred capabilities against evidence. Returns 审核通过 or 审核未通过. Export is allowed only when the review passes.",
+    description: "Review inferred capabilities against evidence. Returns 审核通过 or 审核未通过. Export is allowed only when the review passes. This tool already rebuilds interpretation problems from recorded evidence. If it returns 不要重新录制 / 根据已有成功证据重新分析 / 审核结果与上次相同, stop and report; do not call business_skill_analyze, business_skill_validate, or business_skill_record_start again.",
     parameters: parameters({
       sessionId: { type: "string" }
     }),
     async execute(_id, params: any) {
       const { capabilities, review } = await studio.review(params.sessionId || lastRecordingSessionId);
+      const gate = review.next === "re-record"
+        ? "允许补录：仅补缺失的主操作或其成功响应。"
+        : review.status === "passed"
+          ? "可以导出。"
+          : "禁止开新录制。不要再 business_skill_analyze / validate / record_start。停止并报告未通过原因。";
       return {
         content: [{
           type: "text",
-          text: review.summary
+          text: `${gate}\n${review.summary}`
         }],
         details: {
           review,
