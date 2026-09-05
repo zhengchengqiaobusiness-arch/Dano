@@ -395,8 +395,19 @@ def _verified_links(spec, step_ids: list[str]) -> list[dict]:  # noqa: ANN001
     return capability_plan_links(spec, step_ids)
 
 
+def _merge_option_metadata(target: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(target)
+    for key in _OPTION_FIELD_KEYS:
+        incoming = extra.get(key)
+        current = merged.get(key)
+        if incoming in (None, "", [], {}) or current not in (None, "", [], {}):
+            continue
+        merged[key] = deepcopy(incoming)
+    return merged
+
+
 def consume_upstream_input_schema(compiled: Any, upstream: Any) -> dict[str, Any]:
-    """Project the capability schema as-is. Do not merge compiled extras onto it."""
+    """Project the capability schema as-is. Keep option contracts from either side."""
     packed = dict(compiled) if isinstance(compiled, dict) else {}
     fact = dict(upstream) if isinstance(upstream, dict) else {}
     packed_props = packed.get("properties") if isinstance(packed.get("properties"), dict) else {}
@@ -410,6 +421,7 @@ def consume_upstream_input_schema(compiled: Any, upstream: Any) -> dict[str, Any
         }
         required_source = fact
         extra_source = fact
+        overlay = packed_props
     else:
         properties = {
             str(name): deepcopy(field) if isinstance(field, dict) else field
@@ -417,6 +429,11 @@ def consume_upstream_input_schema(compiled: Any, upstream: Any) -> dict[str, Any
         }
         required_source = packed
         extra_source = packed
+        overlay = fact_props
+    for name, field in list(properties.items()):
+        other = overlay.get(name)
+        if isinstance(field, dict) and isinstance(other, dict):
+            properties[name] = _merge_option_metadata(field, other)
     required: list[str] = []
     for field in required_source.get("required") or []:
         name = str(field)
@@ -553,9 +570,44 @@ def _capability_owned_params(spec, cap: dict) -> dict[str, Any]:  # noqa: ANN001
     return params
 
 
+_OPTION_FIELD_KEYS = (
+    "x-dano-option-source",
+    "x-options-source",
+    "x-options-source-meta",
+    "x-options",
+    "x-enum-options",
+    "x-enum-value-map",
+    "dataSource",
+    "enum",
+    "format",
+    "x-dano-tree",
+    "x-dano-business-type",
+)
+_ENUM_ID_LABEL_RE = re.compile(
+    r"(?P<id>-?\d+)\s*[=:：]\s*(?P<label>[^\s,，;；/、=：:()（）]{1,20})"
+)
+_TREE_HINT_RE = re.compile(r"树形|树选|tree(?:\s*select)?|点击[^。；;]{0,16}名称选择", re.I)
+_OPTION_TOKEN_RE = re.compile(r"[A-Za-z]+|[一-鿿]+", re.I)
+_CAMEL_TOKEN_RE = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[一-鿿]+")
+_GENERIC_OPTION_TOKENS = frozenset({
+    "id", "ids", "query", "body", "data", "list", "page", "admin", "api",
+    "system", "get", "post", "the", "and", "for", "name", "type",
+})
+
+
 def _option_source_endpoint(source: dict[str, Any] | None) -> str:
     raw = source if isinstance(source, dict) else {}
     return str(raw.get("source_url") or raw.get("endpoint") or raw.get("url") or "").strip()
+
+
+def _param_option_source(param: Any) -> dict[str, Any]:
+    source = param.source if isinstance(getattr(param, "source", None), dict) else {}
+    nested = source.get("option_source")
+    if isinstance(nested, dict) and nested:
+        merged = dict(source)
+        merged.update(nested)
+        return merged
+    return dict(source)
 
 
 def _enum_options_unlabeled(options: list[dict]) -> bool:
@@ -566,24 +618,54 @@ def _enum_options_unlabeled(options: list[dict]) -> bool:
     )
 
 
-def _apply_param_options_to_field(field: dict[str, Any], param: Any) -> None:
-    """Copy caller-visible option contract from the capability param onto the schema field."""
-    source = param.source if isinstance(getattr(param, "source", None), dict) else {}
-    source_kind = str(getattr(param, "source_kind", "") or "")
+def _field_choice_kind(field: dict[str, Any], param: Any | None) -> str:
+    source = _param_option_source(param) if param is not None else {}
+    kind = str(getattr(param, "source_kind", "") or source.get("kind") or "")
+    business = str(field.get("x-dano-business-type") or "")
+    if kind == "api_option" or business == "api_option" or _raw_option_source(field):
+        return "api_option"
+    if kind in {"page_enum", "static_enum", "manual_enum", "form_option"} or business == "single_enum":
+        return "page_enum"
+    if getattr(param, "type", None) in {"enum", "list-enum"} or field.get("type") in {"enum", "list-enum"}:
+        return "page_enum"
+    return ""
+
+
+def _looks_like_tree(field: dict[str, Any], source: dict[str, Any], param: Any | None) -> bool:
+    if source.get("children_key") or source.get("childrenField") or field.get("x-dano-tree"):
+        return True
+    blob = " ".join((
+        str(getattr(param, "reason", "") or ""),
+        str(getattr(param, "label", "") or ""),
+        str(field.get("description") or ""),
+        str(field.get("title") or ""),
+        str(field.get("label") or ""),
+    ))
+    return bool(_TREE_HINT_RE.search(blob))
+
+
+def _apply_live_option_source(field: dict[str, Any], source: dict[str, Any], param: Any | None = None) -> None:
     endpoint = _option_source_endpoint(source)
-    if source_kind == "api_option" and endpoint:
-        field["x-options-source"] = True
-        if not field.get("x-dano-option-source"):
-            field["x-dano-option-source"] = dict(source)
-        if not field.get("x-options-source-meta"):
-            field["x-options-source-meta"] = dict(source)
-        if source.get("children_key") or source.get("childrenField"):
-            field["x-dano-tree"] = True
+    if not endpoint:
         return
-    labeled = _normalize_enum_options(list(getattr(param, "enum_options", None) or []))
-    value_map = dict(getattr(param, "enum_value_map", None) or {})
-    if not value_map:
-        value_map = {
+    published = dict(source)
+    if _looks_like_tree(field, published, param) and not (
+        published.get("children_key") or published.get("childrenField")
+    ):
+        published["children_key"] = "children"
+        field["x-dano-tree"] = True
+    elif published.get("children_key") or published.get("childrenField"):
+        field["x-dano-tree"] = True
+    field["x-options-source"] = True
+    field.setdefault("x-dano-option-source", published)
+    field.setdefault("x-options-source-meta", published)
+
+
+def _apply_labeled_enum_options(field: dict[str, Any], options: list, value_map: dict | None = None) -> None:
+    labeled = _normalize_enum_options(list(options or []))
+    resolved_map = dict(value_map or {})
+    if not resolved_map:
+        resolved_map = {
             str(item["label"]): item["id"]
             for item in labeled
             if str(item.get("label")) != str(item.get("id"))
@@ -594,13 +676,178 @@ def _apply_param_options_to_field(field: dict[str, Any], param: Any) -> None:
         and bool(field.get("enum"))
         and not field.get("x-enum-value-map")
     )
-    has_labels = bool(value_map) or any(
+    has_labels = bool(resolved_map) or any(
         str(item.get("label")) != str(item.get("id")) for item in labeled
     )
     if labeled and (not existing or (existing_unlabeled and has_labels)):
-        field["x-options"] = list(param.enum_options)
-    if value_map and (not field.get("x-enum-value-map") or existing_unlabeled):
-        field["x-enum-value-map"] = value_map
+        field["x-enum-options"] = labeled
+    if resolved_map and (not field.get("x-enum-value-map") or existing_unlabeled):
+        field["x-enum-value-map"] = resolved_map
+
+
+def _enum_pairs_from_text(text: str, field: dict[str, Any]) -> list[dict[str, Any]]:
+    pairs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for match in _ENUM_ID_LABEL_RE.finditer(str(text or "")):
+        label = str(match.group("label") or "").strip()
+        raw_id = str(match.group("id") or "").strip()
+        if not label or label.isdigit() or raw_id in seen:
+            continue
+        seen.add(raw_id)
+        value: Any = raw_id
+        if field.get("type") in {"number", "integer"}:
+            try:
+                value = int(raw_id)
+            except ValueError:
+                value = raw_id
+        pairs.append({"id": value, "label": label})
+    return pairs if len(pairs) >= 2 else []
+
+
+def _option_ref_usage(ref: Any) -> str:
+    return str(getattr(ref, "usage", None) or (ref.get("usage") if isinstance(ref, dict) else "") or "")
+
+
+def _option_ref_step_id(ref: Any) -> str:
+    return str(getattr(ref, "step_id", None) or (ref.get("step_id") if isinstance(ref, dict) else "") or "")
+
+
+def _option_ref_path(ref: Any) -> str:
+    return str(
+        getattr(ref, "path", None)
+        or (ref.get("path") if isinstance(ref, dict) else "")
+        or getattr(ref, "url", None)
+        or (ref.get("url") if isinstance(ref, dict) else "")
+        or ""
+    )
+
+
+def _option_tokens(*parts: Any) -> set[str]:
+    found: set[str] = set()
+    for part in parts:
+        raw = str(part or "")
+        found.update(item.casefold() for item in _OPTION_TOKEN_RE.findall(raw) if len(item) > 1)
+        found.update(item.casefold() for item in _CAMEL_TOKEN_RE.findall(raw) if len(item) > 1)
+    return found - _GENERIC_OPTION_TOKENS
+
+
+def _option_tokens_align(field_tokens: set[str], source_tokens: set[str]) -> bool:
+    if field_tokens & source_tokens:
+        return True
+    for field_token in field_tokens:
+        if len(field_token) < 3:
+            continue
+        for source_token in source_tokens:
+            if len(source_token) < 3:
+                continue
+            if field_token in source_token or source_token in field_token:
+                return True
+    return False
+
+
+def _live_source_from_step(step: Any, ref: Any | None = None) -> dict[str, Any]:
+    method = str(
+        getattr(step, "method", None)
+        or getattr(ref, "method", None)
+        or (ref.get("method") if isinstance(ref, dict) else "")
+        or "GET"
+    )
+    endpoint = str(
+        getattr(step, "path", None)
+        or getattr(step, "url", None)
+        or _option_ref_path(ref)
+        or ""
+    ).strip()
+    return {
+        "source_method": method or "GET",
+        "source_url": endpoint,
+        "label_key": "name",
+        "value_key": "id",
+    }
+
+
+def _capability_option_refs(spec, cap: dict) -> list[Any]:  # noqa: ANN001
+    refs = list(cap.get("request_refs") or [])
+    if spec is None:
+        return [ref for ref in refs if _option_ref_usage(ref) == "option_source" and _option_ref_step_id(ref)]
+    keys = {str(cap.get("capability_id") or ""), str(cap.get("name") or "")} - {""}
+    for item in spec.capabilities or []:
+        if str(item.capability_id or "") in keys or str(item.name or "") in keys:
+            refs = list(item.request_refs or [])
+            break
+    return [ref for ref in refs if _option_ref_usage(ref) == "option_source" and _option_ref_step_id(ref)]
+
+
+def _option_source_from_refs(spec, cap: dict, name: str, field: dict[str, Any], param: Any | None) -> dict[str, Any] | None:  # noqa: ANN001
+    refs = _capability_option_refs(spec, cap)
+    if not refs:
+        return None
+    by_id = {str(step.step_id): step for step in (spec.steps or [])} if spec is not None else {}
+    param_path = str(getattr(param, "path", "") or "")
+    ref_ids = {_option_ref_step_id(ref) for ref in refs}
+    linked: list[str] = []
+    for link in (spec.links or []) if spec is not None else []:
+        source_id = str(getattr(link, "source_step_id", "") or "")
+        target_path = str(getattr(link, "target_path", "") or "")
+        if source_id not in ref_ids:
+            continue
+        if target_path == param_path or target_path.endswith(f".{name}") or target_path.endswith(name):
+            linked.append(source_id)
+    field_tokens = _option_tokens(
+        name,
+        field.get("title"),
+        field.get("label"),
+        field.get("description"),
+        getattr(param, "label", "") if param is not None else "",
+        getattr(param, "reason", "") if param is not None else "",
+    )
+    matched: list[str] = []
+    for ref in refs:
+        step_id = _option_ref_step_id(ref)
+        if linked and step_id not in linked:
+            continue
+        step = by_id.get(step_id)
+        source_tokens = _option_tokens(
+            _option_ref_path(ref),
+            getattr(step, "path", "") if step is not None else "",
+            getattr(step, "url", "") if step is not None else "",
+            getattr(step, "name", "") if step is not None else "",
+        )
+        if _option_tokens_align(field_tokens, source_tokens):
+            matched.append(step_id)
+    if len(dict.fromkeys(matched)) == 1:
+        candidates = list(dict.fromkeys(matched))
+    elif len(dict.fromkeys(linked)) == 1:
+        candidates = list(dict.fromkeys(linked))
+    elif _field_choice_kind(field, param) == "api_option" and len(refs) == 1:
+        candidates = [_option_ref_step_id(refs[0])]
+    else:
+        return None
+    step_id = str(candidates[0])
+    step = by_id.get(step_id)
+    ref = next((item for item in refs if _option_ref_step_id(item) == step_id), None)
+    source = _live_source_from_step(step, ref) if step is not None else {
+        "source_method": str(getattr(ref, "method", None) or (ref.get("method") if isinstance(ref, dict) else "") or "GET"),
+        "source_url": _option_ref_path(ref),
+        "label_key": "name",
+        "value_key": "id",
+    }
+    return source if _option_source_endpoint(source) else None
+
+
+def _apply_param_options_to_field(field: dict[str, Any], param: Any) -> None:
+    """Copy caller-visible option contract from the capability param onto the schema field."""
+    source = _param_option_source(param)
+    source_kind = str(getattr(param, "source_kind", "") or source.get("kind") or "")
+    endpoint = _option_source_endpoint(source)
+    live = source_kind == "api_option" or _field_choice_kind(field, param) == "api_option"
+    if endpoint and live:
+        _apply_live_option_source(field, source, param)
+        return
+    labeled = list(getattr(param, "enum_options", None) or [])
+    value_map = dict(getattr(param, "enum_value_map", None) or {})
+    if labeled or value_map:
+        _apply_labeled_enum_options(field, labeled, value_map)
 
 
 def _attach_capability_param_options(schema: dict[str, Any], spec, cap: dict) -> dict[str, Any]:  # noqa: ANN001
@@ -609,13 +856,29 @@ def _attach_capability_param_options(schema: dict[str, Any], spec, cap: dict) ->
     if not properties:
         return packed
     owned = _capability_owned_params(spec, cap)
-    if not owned:
-        return packed
     for _path, name, field in _iter_schema_fields(packed):
         param = owned.get(str(name))
-        if param is None:
+        if param is not None:
+            _apply_param_options_to_field(field, param)
+        if _option_source_endpoint(_raw_option_source(field) or {}):
             continue
-        _apply_param_options_to_field(field, param)
+        ref_source = _option_source_from_refs(spec, cap, str(name), field, param)
+        if ref_source:
+            _apply_live_option_source(field, ref_source, param)
+            continue
+        labeled = _capability_enum_options(field)
+        if labeled and not _enum_options_unlabeled(labeled):
+            continue
+        if field.get("type") in {"date", "datetime"} or field.get("format") in {"date", "date-time"}:
+            continue
+        text = " ".join((
+            str(field.get("description") or ""),
+            str(getattr(param, "reason", "") or "") if param is not None else "",
+            str(getattr(param, "description", "") or "") if param is not None else "",
+        ))
+        pairs = _enum_pairs_from_text(text, field)
+        if pairs:
+            _apply_labeled_enum_options(field, pairs)
     return packed
 
 
@@ -888,8 +1151,14 @@ def _field_label(name: str, field: dict) -> str:
 def _raw_option_source(field: dict) -> dict | None:
     for key in ("x-dano-option-source", "x-options-source-meta", "x-options-source", "dataSource"):
         value = field.get(key)
-        if isinstance(value, dict) and value:
-            return value
+        if not isinstance(value, dict) or not value:
+            continue
+        nested = value.get("option_source")
+        if isinstance(nested, dict) and nested and not _option_source_endpoint(value):
+            merged = dict(value)
+            merged.update(nested)
+            return merged
+        return value
     return None
 
 

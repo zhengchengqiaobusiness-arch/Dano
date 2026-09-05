@@ -1606,12 +1606,12 @@ def test_export_projects_capability_param_enum_options_without_inventing() -> No
     public_query = _public_schema(query["input_schema"])["properties"]["reportType"]
     public_write = _public_schema(write["input_schema"])["properties"]["reportType"]
 
-    assert query["input_schema"]["properties"]["reportType"]["x-options"] == [
-        {"label": "日报", "value": "1"},
-        {"label": "周报", "value": "2"},
-        {"label": "月报", "value": "3"},
+    assert query["input_schema"]["properties"]["reportType"]["x-enum-options"] == [
+        {"id": "1", "label": "日报"},
+        {"id": "2", "label": "周报"},
+        {"id": "3", "label": "月报"},
     ]
-    assert "x-options" not in write["input_schema"]["properties"]["reportType"]
+    assert "x-enum-options" not in write["input_schema"]["properties"]["reportType"]
     assert public_query["enum"] == ["1", "2", "3"]
     assert public_query["x-enum-options"][0] == {"id": "1", "label": "日报"}
     assert public_write["enum"] == ["1", "2", "3"]
@@ -2218,3 +2218,428 @@ def test_sync_schema_then_export_keeps_caller_controls() -> None:
     assert questions["deptId"]["inputType"] == "select"
     assert questions["deptId"]["dataSource"]["endpoint"] == "/system/dept/list"
     assert questions["reportType"]["options"][0] == {"id": 1, "label": "日报"}
+
+
+def test_export_projects_pi_option_contract_when_schema_is_bare() -> None:
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="stats",
+                name="查询工作汇报统计",
+                title="查询工作汇报统计",
+                kind="query",
+                step_ids=["step_dept", "step_statistics"],
+                request_refs=[
+                    CapabilityRequestRef(
+                        step_id="step_dept",
+                        usage="option_source",
+                        method="GET",
+                        path="/admin-api/system/dept/list",
+                    ),
+                    CapabilityRequestRef(
+                        step_id="step_statistics",
+                        usage="execute",
+                        method="GET",
+                        path="/oa/work-report/statistics",
+                    ),
+                ],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "deptId": {
+                            "type": "number",
+                            "title": "部门",
+                            "description": "用户在页面上点击部门名称选择部门，提交query.deptId。",
+                            "x-dano-business-type": "api_option",
+                        },
+                        "reportType": {
+                            "type": "number",
+                            "title": "汇报类型",
+                            "description": "用户在页面上切换日报/周报/月报标签页，提交query.reportType（1=日报,2=周报,3=月报）。",
+                        },
+                    },
+                },
+            ),
+        ],
+        steps=[
+            FlowStep(
+                step_id="step_dept",
+                method="GET",
+                path="/admin-api/system/dept/list",
+            ),
+            FlowStep(
+                step_id="step_statistics",
+                method="GET",
+                path="/oa/work-report/statistics",
+                params=[
+                    ParamField(
+                        path="query.deptId",
+                        key="deptId",
+                        label="部门",
+                        type="number",
+                        source_kind="api_option",
+                        exposed_to_user=True,
+                        reason="树形部门选择器，选项来自 /admin-api/system/dept/list",
+                        source={
+                            "source_url": "/admin-api/system/dept/list",
+                            "source_method": "GET",
+                            "value_key": "id",
+                            "label_key": "name",
+                        },
+                    ),
+                    ParamField(
+                        path="query.reportType",
+                        key="reportType",
+                        label="汇报类型",
+                        type="number",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                        reason="页面标签页，1=日报,2=周报,3=月报",
+                    ),
+                ],
+            ),
+        ],
+        links=[
+            FlowLink(
+                source_step_id="step_dept",
+                source_path="body.data",
+                target_step_id="step_statistics",
+                target_path="query.deptId",
+            ),
+        ],
+    )
+    api_request = {
+        "capabilities": [{
+            "capability_id": "stats",
+            "name": "查询工作汇报统计",
+            "title": "查询工作汇报统计",
+            "kind": "query",
+            "execution_contract": {
+                "steps": [{"step_id": "step_statistics", "method": "GET", "path": "/oa/work-report/statistics"}],
+            },
+            "input_schema": spec.capabilities[0].input_schema,
+        }],
+    }
+
+    plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), spec, api_request)
+    questions = {item["id"]: item for item in _form_questions(_input_forms_md(plans))}
+    public = _public_schema(plans[0]["input_schema"])["properties"]
+
+    assert questions["deptId"]["inputType"] == "treeSelect"
+    assert questions["deptId"]["dataSource"]["endpoint"] == "/admin-api/system/dept/list"
+    assert questions["deptId"]["dataSource"]["childrenField"] == "children"
+    assert questions["reportType"]["inputType"] == "select"
+    assert questions["reportType"]["options"] == [
+        {"id": 1, "label": "日报"},
+        {"id": 2, "label": "周报"},
+        {"id": 3, "label": "月报"},
+    ]
+    assert public["deptId"]["dataSource"]["endpoint"] == "/admin-api/system/dept/list"
+    assert public["reportType"]["x-enum-options"][0] == {"id": 1, "label": "日报"}
+
+
+def test_export_binds_option_source_ref_when_param_source_is_missing() -> None:
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="search",
+                name="搜索工作日报列表",
+                title="搜索工作日报列表",
+                kind="query",
+                step_ids=["step_dept", "step_search"],
+                request_refs=[
+                    CapabilityRequestRef(
+                        step_id="step_dept",
+                        usage="option_source",
+                        method="GET",
+                        path="/admin-api/system/dept/list",
+                    ),
+                    CapabilityRequestRef(
+                        step_id="step_search",
+                        usage="execute",
+                        method="GET",
+                        path="/oa/work-report/page",
+                    ),
+                ],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "deptId": {
+                            "type": "number",
+                            "title": "申请部门",
+                            "x-dano-business-type": "api_option",
+                        },
+                        "processStatus": {
+                            "type": "number",
+                            "title": "审批状态",
+                            "description": "筛选条上的审批状态下拉中选择状态（1=审批中,2=已通过,3=已拒绝）",
+                        },
+                    },
+                },
+            ),
+        ],
+        steps=[
+            FlowStep(step_id="step_dept", method="GET", path="/admin-api/system/dept/list"),
+            FlowStep(
+                step_id="step_search",
+                method="GET",
+                path="/oa/work-report/page",
+                params=[
+                    ParamField(
+                        path="query.deptId",
+                        key="deptId",
+                        label="申请部门",
+                        type="number",
+                        source_kind="api_option",
+                        exposed_to_user=True,
+                    ),
+                    ParamField(
+                        path="query.processStatus",
+                        key="processStatus",
+                        label="审批状态",
+                        type="number",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                ],
+            ),
+        ],
+    )
+    api_request = {
+        "capabilities": [{
+            "capability_id": "search",
+            "name": "搜索工作日报列表",
+            "title": "搜索工作日报列表",
+            "kind": "query",
+            "execution_contract": {
+                "steps": [{"step_id": "step_search", "method": "GET", "path": "/oa/work-report/page"}],
+            },
+            "input_schema": spec.capabilities[0].input_schema,
+        }],
+    }
+
+    plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), spec, api_request)
+    questions = {item["id"]: item for item in _form_questions(_input_forms_md(plans))}
+
+    assert questions["deptId"]["dataSource"]["endpoint"] == "/admin-api/system/dept/list"
+    assert questions["processStatus"]["options"] == [
+        {"id": 1, "label": "审批中"},
+        {"id": 2, "label": "已通过"},
+        {"id": 3, "label": "已拒绝"},
+    ]
+
+
+def test_consume_upstream_keeps_compiled_option_contract() -> None:
+    compiled = {
+        "type": "object",
+        "properties": {
+            "deptId": {
+                "type": "number",
+                "title": "部门",
+                "x-dano-option-source": {
+                    "source_url": "/admin-api/system/dept/list",
+                    "source_method": "GET",
+                    "label_key": "name",
+                    "value_key": "id",
+                    "children_key": "children",
+                },
+                "x-options-source": True,
+            },
+            "reportType": {
+                "type": "number",
+                "title": "汇报类型",
+                "x-enum-options": [{"id": 1, "label": "日报"}],
+            },
+        },
+    }
+    upstream = {
+        "type": "object",
+        "properties": {
+            "deptId": {
+                "type": "number",
+                "title": "部门",
+                "description": "用户在页面上点击部门名称选择部门，提交query.deptId。",
+            },
+            "reportType": {
+                "type": "number",
+                "title": "汇报类型",
+                "description": "用户在页面上切换日报/周报/月报标签页，提交query.reportType（1=日报,2=周报,3=月报）。",
+            },
+        },
+    }
+
+    merged = consume_upstream_input_schema(compiled, upstream)["properties"]
+
+    assert merged["deptId"]["x-dano-option-source"]["source_url"] == "/admin-api/system/dept/list"
+    assert merged["reportType"]["x-enum-options"][0] == {"id": 1, "label": "日报"}
+
+
+def test_export_recovers_pi_caller_controls_after_option_sources_are_stripped() -> None:
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="stats",
+                name="查询工作汇报统计",
+                title="查询工作汇报统计",
+                kind="query",
+                step_ids=["step_statistics"],
+                request_refs=[
+                    CapabilityRequestRef(
+                        step_id="step_dept",
+                        usage="option_source",
+                        method="GET",
+                        path="/admin-api/system/dept/list",
+                    ),
+                    CapabilityRequestRef(
+                        step_id="step_statistics",
+                        usage="execute",
+                        method="GET",
+                        path="/admin-api/oa/work-report/statistics",
+                    ),
+                ],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "deptId": {
+                            "type": "number",
+                            "title": "部门",
+                            "description": "用户在页面上点击部门名称选择部门，提交query.deptId。",
+                        },
+                        "reportType": {
+                            "type": "number",
+                            "title": "汇报类型",
+                            "description": "用户在页面上切换日报/周报/月报标签页，提交query.reportType（1=日报,2=周报,3=月报）。",
+                        },
+                    },
+                },
+            ),
+        ],
+        steps=[
+            FlowStep(step_id="step_dept", method="GET", path="/admin-api/system/dept/list"),
+            FlowStep(
+                step_id="step_statistics",
+                method="GET",
+                path="/admin-api/oa/work-report/statistics",
+                params=[
+                    ParamField(
+                        path="query.deptId",
+                        key="deptId",
+                        label="部门",
+                        type="number",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                    ParamField(
+                        path="query.reportType",
+                        key="reportType",
+                        label="汇报类型",
+                        type="number",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                ],
+            ),
+        ],
+    )
+    api_request = {
+        "capabilities": [{
+            "capability_id": "stats",
+            "name": "查询工作汇报统计",
+            "title": "查询工作汇报统计",
+            "kind": "query",
+            "request_refs": [
+                {
+                    "step_id": "step_dept",
+                    "usage": "option_source",
+                    "method": "GET",
+                    "path": "/admin-api/system/dept/list",
+                },
+            ],
+            "execution_contract": {
+                "steps": [{
+                    "step_id": "step_statistics",
+                    "method": "GET",
+                    "path": "/admin-api/oa/work-report/statistics",
+                }],
+            },
+            "input_schema": spec.capabilities[0].input_schema,
+        }],
+    }
+
+    plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), spec, api_request)
+    questions = {item["id"]: item for item in _form_questions(_input_forms_md(plans))}
+    options = _options_md(plans)
+    public = _public_schema(plans[0]["input_schema"])["properties"]
+
+    assert questions["deptId"]["inputType"] == "treeSelect"
+    assert questions["deptId"]["dataSource"]["endpoint"] == "/admin-api/system/dept/list"
+    assert questions["deptId"]["dataSource"]["labelField"] == "name"
+    assert "options" not in questions["deptId"]
+    assert questions["reportType"]["inputType"] == "select"
+    assert questions["reportType"]["options"] == [
+        {"id": 1, "label": "日报"},
+        {"id": 2, "label": "周报"},
+        {"id": 3, "label": "月报"},
+    ]
+    assert public["deptId"]["dataSource"]["endpoint"] == "/admin-api/system/dept/list"
+    assert public["reportType"]["x-enum-options"][0] == {"id": 1, "label": "日报"}
+    assert "GET /admin-api/system/dept/list" in options
+    assert "| 日报 | `1` |" in options
+
+
+def test_export_recovers_option_controls_from_compiled_refs_without_flow_spec() -> None:
+    api_request = {
+        "capabilities": [{
+            "capability_id": "stats",
+            "name": "查询工作汇报统计",
+            "title": "查询工作汇报统计",
+            "kind": "query",
+            "request_refs": [
+                {
+                    "step_id": "step_dept",
+                    "usage": "option_source",
+                    "method": "GET",
+                    "path": "/admin-api/system/dept/list",
+                },
+            ],
+            "execution_contract": {
+                "steps": [{
+                    "step_id": "step_statistics",
+                    "method": "GET",
+                    "path": "/admin-api/oa/work-report/statistics",
+                    "query_template": {
+                        "deptId": "{{deptId}}",
+                        "reportType": "{{reportType}}",
+                    },
+                    "params": ["deptId", "reportType"],
+                    "selects": [],
+                }],
+            },
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "deptId": {
+                        "type": "number",
+                        "title": "部门",
+                        "description": "用户在页面上点击部门名称选择部门，提交query.deptId。",
+                    },
+                    "reportType": {
+                        "type": "number",
+                        "title": "汇报类型",
+                        "description": "用户在页面上切换日报/周报/月报标签页，提交query.reportType（1=日报,2=周报,3=月报）。",
+                    },
+                },
+            },
+        }],
+    }
+
+    plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), None, api_request)
+    questions = {item["id"]: item for item in _form_questions(_input_forms_md(plans))}
+
+    assert questions["deptId"]["inputType"] == "treeSelect"
+    assert questions["deptId"]["dataSource"]["endpoint"] == "/admin-api/system/dept/list"
+    assert questions["reportType"]["options"] == [
+        {"id": 1, "label": "日报"},
+        {"id": 2, "label": "周报"},
+        {"id": 3, "label": "月报"},
+    ]
