@@ -75,16 +75,65 @@ export function shouldFlushFrame(event) {
   return false;
 }
 
+function actionScopes(page) {
+  const scopes = [];
+  const seen = new Set();
+  const frames = typeof page?.frames === "function" ? page.frames() : [];
+  for (const scope of [page, ...frames]) {
+    if (!scope || seen.has(scope)) continue;
+    seen.add(scope);
+    scopes.push(scope);
+  }
+  return scopes;
+}
+
+async function firstVisibleInFrames(page, build, { exactFirst = false, limit = 12 } = {}) {
+  const builders = exactFirst
+    ? [
+      (scope) => build(scope, true),
+      (scope) => build(scope, false),
+    ]
+    : [(scope) => build(scope, false)];
+  for (const make of builders) {
+    for (const scope of actionScopes(page)) {
+      let loc;
+      try {
+        loc = make(scope);
+      } catch {
+        continue;
+      }
+      const count = await loc.count().catch(() => 0);
+      for (let index = 0; index < Math.min(count, limit); index += 1) {
+        const item = loc.nth(index);
+        if (await item.isVisible().catch(() => false)) return item;
+      }
+    }
+  }
+  return null;
+}
+
+async function clickInFrames(page, build, timeout, options = {}) {
+  const item = await firstVisibleInFrames(page, build, options);
+  if (!item) throw new Error("页面动作没有找到目标");
+  await item.click({ timeout });
+}
+
+async function fillInFrames(page, build, value, timeout, options = {}) {
+  const item = await firstVisibleInFrames(page, build, options);
+  if (!item) throw new Error("页面动作没有找到目标");
+  await item.fill(value, { timeout });
+}
+
 async function clickFirstVisible(page, texts, timeout = 1200) {
   for (const text of texts) {
-    const loc = page.getByText(text, { exact: false });
-    const count = await loc.count().catch(() => 0);
-    for (let index = 0; index < Math.min(count, 6); index += 1) {
-      const item = loc.nth(index);
-      if (!(await item.isVisible().catch(() => false))) continue;
-      await item.click({ timeout }).catch(() => {});
-      return true;
-    }
+    const item = await firstVisibleInFrames(
+      page,
+      (scope, exact) => scope.getByText(text, { exact }),
+      { exactFirst: true, limit: 6 },
+    );
+    if (!item) continue;
+    await item.click({ timeout }).catch(() => {});
+    return true;
   }
   return false;
 }
@@ -92,40 +141,42 @@ async function clickFirstVisible(page, texts, timeout = 1200) {
 async function exerciseListPage(page) {
   await clickFirstVisible(page, ["展开筛选", "高级搜索", "展开"]);
   await page.waitForTimeout(300);
-  const selects = page.locator(
-    ".el-form .el-select, .el-form .ant-select, form .el-select, .search-form .el-select, .ant-pro-table-search .ant-select, .el-table-filter",
-  );
-  const selectCount = await selects.count().catch(() => 0);
-  for (let index = 0; index < Math.min(selectCount, 12); index += 1) {
-    await selects.nth(index).click({ timeout: 800 }).catch(() => {});
-    await page.waitForTimeout(450);
-    const option = page.locator(
-      ".el-select-dropdown:visible .el-select-dropdown__item, .ant-select-dropdown:visible .ant-select-item-option",
-    ).first();
-    if (await option.isVisible().catch(() => false)) {
-      await option.click({ timeout: 800 }).catch(() => {});
-    } else {
+  for (const scope of actionScopes(page)) {
+    const selects = scope.locator(
+      ".el-form .el-select, .el-form .ant-select, form .el-select, .search-form .el-select, .ant-pro-table-search .ant-select, .el-table-filter",
+    );
+    const selectCount = await selects.count().catch(() => 0);
+    for (let index = 0; index < Math.min(selectCount, 12); index += 1) {
+      await selects.nth(index).click({ timeout: 800 }).catch(() => {});
+      await page.waitForTimeout(450);
+      const option = scope.locator(
+        ".el-select-dropdown:visible .el-select-dropdown__item, .ant-select-dropdown:visible .ant-select-item-option",
+      ).first();
+      if (await option.isVisible().catch(() => false)) {
+        await option.click({ timeout: 800 }).catch(() => {});
+      } else {
+        await page.keyboard.press("Escape").catch(() => {});
+      }
+      await page.waitForTimeout(150);
+    }
+    const dates = scope.locator(".el-date-editor, .ant-picker");
+    const dateCount = await dates.count().catch(() => 0);
+    for (let index = 0; index < Math.min(dateCount, 4); index += 1) {
+      await dates.nth(index).click({ timeout: 800 }).catch(() => {});
+      await page.waitForTimeout(350);
       await page.keyboard.press("Escape").catch(() => {});
     }
-    await page.waitForTimeout(150);
-  }
-  const dates = page.locator(".el-date-editor, .ant-picker");
-  const dateCount = await dates.count().catch(() => 0);
-  for (let index = 0; index < Math.min(dateCount, 4); index += 1) {
-    await dates.nth(index).click({ timeout: 800 }).catch(() => {});
-    await page.waitForTimeout(350);
-    await page.keyboard.press("Escape").catch(() => {});
-  }
-  const inputs = page.locator(
-    ".el-form input.el-input__inner, .search-form input, .ant-pro-table-search input:not([readonly]), form input[type='text']",
-  );
-  const inputCount = await inputs.count().catch(() => 0);
-  for (let index = 0; index < Math.min(inputCount, 8); index += 1) {
-    const box = inputs.nth(index);
-    if (!(await box.isVisible().catch(() => false))) continue;
-    const readonly = await box.getAttribute("readonly").catch(() => null);
-    if (readonly !== null) continue;
-    await box.fill("1", { timeout: 800 }).catch(() => {});
+    const inputs = scope.locator(
+      ".el-form input.el-input__inner, .search-form input, .ant-pro-table-search input:not([readonly]), form input[type='text']",
+    );
+    const inputCount = await inputs.count().catch(() => 0);
+    for (let index = 0; index < Math.min(inputCount, 8); index += 1) {
+      const box = inputs.nth(index);
+      if (!(await box.isVisible().catch(() => false))) continue;
+      const readonly = await box.getAttribute("readonly").catch(() => null);
+      if (readonly !== null) continue;
+      await box.fill("1", { timeout: 800 }).catch(() => {});
+    }
   }
   await clickFirstVisible(page, ["搜索", "查询"]);
   await page.waitForTimeout(800);
@@ -197,26 +248,28 @@ async function waitForPageReady(page) {
 const routeSnapshotTimers = new WeakMap();
 
 async function revealCollapsedFilters(page) {
-  try {
-    await page.evaluate(() => {
-      const expandRe = /^(展开|展开筛选|高级搜索|高级|更多筛选|Expand|Advanced)$/i;
-      const roots = document.querySelectorAll(
-        ".search-form, .ant-pro-table-search, .el-form--inline, .filter-container, .table-search, .vxe-grid--form-wrapper, [class*='search-form'], [class*='table-search'], [class*='filter-bar'], [class*='search-bar'], [class*='filter-form'], [class*='query-form']",
-      );
-      for (const root of roots) {
-        for (const btn of root.querySelectorAll("button, a, .el-button, .ant-btn, span, [role='button']")) {
-          const text = String(btn.innerText || btn.textContent || "").replace(/\s+/g, "");
-          if (!expandRe.test(text) && !/展开筛选|高级搜索/.test(text)) continue;
-          try {
-            btn.click();
-          } catch {
-            // ignore
+  for (const scope of actionScopes(page)) {
+    try {
+      await scope.evaluate(() => {
+        const expandRe = /^(展开|展开筛选|高级搜索|高级|更多筛选|Expand|Advanced)$/i;
+        const roots = document.querySelectorAll(
+          ".search-form, .ant-pro-table-search, .el-form--inline, .filter-container, .table-search, .vxe-grid--form-wrapper, [class*='search-form'], [class*='table-search'], [class*='filter-bar'], [class*='search-bar'], [class*='filter-form'], [class*='query-form']",
+        );
+        for (const root of roots) {
+          for (const btn of root.querySelectorAll("button, a, .el-button, .ant-btn, span, [role='button']")) {
+            const text = String(btn.innerText || btn.textContent || "").replace(/\s+/g, "");
+            if (!expandRe.test(text) && !/展开筛选|高级搜索/.test(text)) continue;
+            try {
+              btn.click();
+            } catch {
+              // ignore
+            }
           }
         }
-      }
-    });
-  } catch {
-    // ignore
+      });
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -233,13 +286,16 @@ async function snapshotVisibleControls(page, handle, append, reason) {
   if (!page || page.isClosed?.() || handle.closed) return;
   await revealCollapsedFilters(page);
   await page.waitForTimeout(250).catch(() => {});
-  let controls = [];
-  try {
-    controls = await page.evaluate(collectVisibleControlsInPage);
-  } catch {
-    return;
+  const controls = [];
+  for (const scope of actionScopes(page)) {
+    try {
+      const rows = await scope.evaluate(collectVisibleControlsInPage);
+      if (Array.isArray(rows) && rows.length) controls.push(...rows);
+    } catch {
+      // iframe 未就绪时跳过，不得因此丢掉其它 frame 的控件
+    }
   }
-  if (!Array.isArray(controls) || !controls.length) return;
+  if (!controls.length) return;
   await append("visible_control", {
     page_id: handle.pageIds.get(page) || "",
     url: page.url(),
@@ -344,19 +400,47 @@ export class PlaywrightBrowser {
     const loc = String(selector || "").trim();
     const value = String(text || "");
     if (kind === "click_text" && value) {
-      await page.getByText(value, { exact: false }).first().click({ timeout });
+      await clickInFrames(
+        page,
+        (scope, exact) => scope.getByText(value, { exact }),
+        timeout,
+        { exactFirst: true },
+      );
+    } else if (kind === "click_role" && value) {
+      await clickInFrames(
+        page,
+        (scope) => scope.getByRole(loc || "button", { name: value, exact: true }),
+        timeout,
+      );
     } else if (kind === "click" && loc) {
-      await page.locator(loc).first().click({ timeout });
+      await clickInFrames(page, (scope) => scope.locator(loc), timeout);
     } else if (kind === "fill" && loc) {
-      await page.locator(loc).first().fill(value, { timeout });
+      await fillInFrames(page, (scope) => scope.locator(loc), value, timeout);
     } else if (kind === "fill_placeholder" && loc) {
-      await page.getByPlaceholder(loc, { exact: false }).first().fill(value, { timeout });
+      await fillInFrames(
+        page,
+        (scope, exact) => scope.getByPlaceholder(loc, { exact }),
+        value,
+        timeout,
+        { exactFirst: true },
+      );
     } else if (kind === "press" && value) {
       await page.keyboard.press(value);
     } else if (kind === "wait") {
       await page.waitForTimeout(Number(timeout) || 800);
     } else if (kind === "exercise_list") {
       await exerciseListPage(page);
+    } else if (kind === "evaluate" && value) {
+      const results = [];
+      for (const scope of actionScopes(page)) {
+        try {
+          results.push({ url: scope.url(), value: await scope.evaluate(value) });
+        } catch (error) {
+          results.push({ url: scope.url(), error: error.message || String(error) });
+        }
+      }
+      await page.waitForTimeout(200);
+      return { url: this.livePage()?.url() || "", results };
     } else {
       throw new Error(`不支持的页面动作: ${kind || "(empty)"}`);
     }

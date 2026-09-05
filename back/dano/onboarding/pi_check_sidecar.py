@@ -113,6 +113,11 @@ def sidecar_base_url() -> str:
     return f"http://127.0.0.1:{sidecar_port()}"
 
 
+def sidecar_http_client(timeout: float) -> httpx.AsyncClient:
+    """Talk to 127.0.0.1 directly. Windows system proxy must not intercept it."""
+    return httpx.AsyncClient(timeout=timeout, trust_env=False)
+
+
 def sidecar_ws_url() -> str:
     parsed = urlparse(sidecar_base_url())
     scheme = "wss" if parsed.scheme == "https" else "ws"
@@ -438,7 +443,7 @@ class PiCheckSidecar:
 
     async def healthy(self) -> bool:
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
+            async with sidecar_http_client(2.0) as client:
                 response = await client.get(f"{sidecar_base_url()}/health")
             if response.status_code != 200:
                 return False
@@ -451,7 +456,7 @@ class PiCheckSidecar:
         if not self.ready:
             return []
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            async with sidecar_http_client(3.0) as client:
                 response = await client.get(
                     f"{sidecar_base_url()}/v1/recording-results",
                     params={"subsystem": subsystem} if subsystem else None,
@@ -474,7 +479,7 @@ class PiCheckSidecar:
         if not key or not self.ready:
             return False
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            async with sidecar_http_client(3.0) as client:
                 response = await client.delete(f"{sidecar_base_url()}/v1/recording-results/{key}")
             return response.status_code == 200
         except Exception:  # noqa: BLE001
@@ -575,7 +580,7 @@ async def fetch_pi_check_detail(result_id: str) -> dict[str, Any] | None:
     if not key:
         return None
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        async with sidecar_http_client(3.0) as client:
             response = await client.get(f"{sidecar_base_url()}/v1/recording-results/{key}")
         if response.status_code != 200:
             return None

@@ -14,6 +14,7 @@ from dano.onboarding.pi_check_sidecar import (
     should_adopt_existing,
     sidecar_child_env,
     sidecar_enabled,
+    sidecar_http_client,
 )
 
 
@@ -51,6 +52,13 @@ def test_orphan_health_is_not_adopted() -> None:
 
 def test_pytest_does_not_auto_start_sidecar() -> None:
     assert sidecar_enabled() is False
+
+
+def test_sidecar_http_bypasses_system_proxy() -> None:
+    client = sidecar_http_client(2.0)
+    assert client._trust_env is False
+    source = inspect.getsource(sidecar_http_client)
+    assert "trust_env=False" in source
 
 
 def test_record_ws_does_not_start_legacy_gateway() -> None:

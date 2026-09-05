@@ -60,7 +60,11 @@ export class RecordingController {
     const browser = this.browserOf(recordingId);
     if (!browser) throw new Error("录制浏览器未启动");
     const applied = await browser.act(command || {});
-    return { ...this.view(recordingId), pageUrl: applied?.url || "" };
+    return {
+      ...this.view(recordingId),
+      pageUrl: applied?.url || "",
+      results: applied?.results,
+    };
   }
 
   snapshot(recordingId) {

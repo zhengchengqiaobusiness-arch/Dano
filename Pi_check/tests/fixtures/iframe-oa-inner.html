@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>业务页</title>
+</head>
+<body>
+  <form class="search-form" id="filter">
+    <label>申请部门 <input name="dept" placeholder="请选择申请部门" /></label>
+    <label>单据编号 <input name="no" placeholder="请输入单据编号" /></label>
+    <button type="button" id="search">搜索</button>
+  </form>
+  <button type="button" id="add">新增</button>
+  <div id="dialog" hidden>
+    <h2>选择办公用品</h2>
+    <label><input type="checkbox" id="item" /> 笔</label>
+    <button type="button" id="confirm">确认</button>
+  </div>
+  <script>
+    document.getElementById("add").addEventListener("click", () => {
+      document.getElementById("dialog").hidden = false;
+    });
+    document.getElementById("confirm").addEventListener("click", () => {
+      document.body.dataset.confirmed = "1";
+      document.getElementById("dialog").hidden = true;
+    });
+    document.getElementById("search").addEventListener("click", () => {
+      document.body.dataset.searched = document.querySelector("[name=no]").value;
+    });
+  </script>
+</body>
+</html>

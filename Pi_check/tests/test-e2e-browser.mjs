@@ -173,3 +173,46 @@ test("同页跳转和新窗口都会成为当前录制页", async (t) => {
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(handle.livePage(), first);
 });
+
+test("录制动作和可见控件都进入 iframe 业务页", async (t) => {
+  process.env.PI_CHECK_AUTO_LOGIN = "0";
+  const shell = await readFile(path.join(ROOT, "tests", "fixtures", "iframe-oa.html"));
+  const inner = await readFile(path.join(ROOT, "tests", "fixtures", "iframe-oa-inner.html"));
+  const fixture = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(req.url?.startsWith("/inner") ? inner : shell);
+  });
+  const port = await listen(fixture);
+  const events = [];
+  const appendEvidence = async (kind, payload) => {
+    events.push({ kind, payload });
+    return { seq: events.length };
+  };
+  appendEvidence.saveBlob = async (bytes) => ({ blobId: "blob_iframe", byteLength: bytes.byteLength });
+  const handle = await createPlaywrightBrowser({
+    recording: { id: "rec_iframe_oa", targetUrl: `http://127.0.0.1:${port}/` },
+    appendEvidence,
+  });
+  t.after(async () => {
+    try {
+      await handle.close();
+    } catch {
+      // ignore
+    }
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+
+  const controls = events.find((event) => event.kind === "visible_control")?.payload?.controls || [];
+  assert.ok(controls.some((item) => String(item.label || "").includes("申请部门")), JSON.stringify(controls));
+
+  await handle.act({ action: "fill_placeholder", selector: "单据编号", text: "SQ-1" });
+  await handle.act({ action: "click_text", text: "搜索" });
+  await handle.act({ action: "click_text", text: "新增" });
+  await handle.act({ action: "click", selector: "#item" });
+  await handle.act({ action: "click_role", selector: "button", text: "确认" });
+
+  const frame = handle.page.frames().find((item) => item.url().includes("/inner"));
+  assert.ok(frame);
+  assert.equal(await frame.locator("body").getAttribute("data-searched"), "SQ-1");
+  assert.equal(await frame.locator("body").getAttribute("data-confirmed"), "1");
+});
