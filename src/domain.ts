@@ -20,6 +20,7 @@ export interface UiFieldSnapshot {
   required?: boolean;
   disabled?: boolean;
   options?: Array<{ value: unknown; label: string }>;
+  visibleOptions?: string[];
   rangeIndex?: number;
 }
 

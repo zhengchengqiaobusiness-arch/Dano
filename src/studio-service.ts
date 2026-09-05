@@ -1,6 +1,6 @@
 import path from "node:path";
 import { readdir } from "node:fs/promises";
-import type { CapabilityContract, EvidenceEvent, ExecutionPlan, InputFormField, OperationKind, RecordingSession } from "./domain.js";
+import type { CapabilityContract, EvidenceEvent, ExecutionPlan, InputFormField, OperationKind, RecordingSession, ReviewNext } from "./domain.js";
 import type { StudioConfig } from "./config.js";
 import { defaultSkillOutputRoot, loadConfig } from "./config.js";
 import { BrowserRecorder } from "./browser/recorder.js";
@@ -12,11 +12,12 @@ import { fallbackPlan } from "./planner/fallback.js";
 import { applyPlanPolicy } from "./planner/policy.js";
 import { exportSkill } from "./export/skill-exporter.js";
 import { executeCapability } from "./execution/http-executor.js";
-import { capabilitiesForSession, relatedLookupCapabilities, sessionBusinessPageKeys, sessionCatalogSlice } from "./inference/export-scope.js";
+import { capabilitiesForSession, evidencePageKey, sessionBusinessPageKeys, sessionCatalogSlice, usableRelatedLookups } from "./inference/export-scope.js";
 import { mergeCatalogByTransport, normalizeCatalog } from "./catalog/normalize.js";
 import { attachCatalogDerivations } from "./inference/field-derivation.js";
 import { reanalyzeIncoming } from "./inference/reanalyze.js";
 import { reviewSession } from "./review/catalog-review.js";
+import { rerecordBlockedMessage, reviewFindingSignature, sameReviewPage } from "./review/review-action.js";
 import { SkillLibrary } from "./catalog/skill-library.js";
 import { buildApprovedRoutes } from "./planner/routes.js";
 import { materializeSkillCredentials, requiredCredentialOrigins } from "./credentials/credential-store.js";
@@ -40,7 +41,18 @@ export class StudioService {
   readonly reasoner: OpenAIReasoner;
   readonly skillLibrary: SkillLibrary;
   private lastAnalyzedSessionId?: string;
-  private state?: { lastAnalyzedSessionId?: string };
+  private state?: {
+    lastAnalyzedSessionId?: string;
+    lastReview?: {
+      sessionId?: string;
+      status: "passed" | "blocked";
+      next: ReviewNext;
+      allowRerecord: boolean;
+      pageKeys: string[];
+      startUrl?: string;
+      signature: string;
+    };
+  };
   private sessionListCache?: RecordingSession[];
   private eventCache = new Map<string, EvidenceEvent[]>();
   private catalogCache?: CapabilityContract[];
@@ -63,6 +75,8 @@ export class StudioService {
     completeFieldCoverage = false,
     completePageCoverage = false
   ) {
+    const gate = await this.evaluateRerecord(url);
+    if (!gate.allowed) throw new Error(gate.message);
     if (this.recorder.isActive()) await this.stopRecording();
     this.sessionListCache = undefined;
     return this.recorder.start(url, name, undefined, expectedOperations, completeFieldCoverage, completePageCoverage);
@@ -112,7 +126,7 @@ export class StudioService {
   }
 
   private async studioState() {
-    if (!this.state) this.state = await readJson<{ lastAnalyzedSessionId?: string }>(this.stateFile(), {});
+    if (!this.state) this.state = await readJson<NonNullable<StudioService["state"]>>(this.stateFile(), {});
     return this.state;
   }
 
@@ -201,15 +215,18 @@ export class StudioService {
     candidates = reanalyzeIncoming(candidates, existing);
     candidates = mergeCatalogByTransport(candidates, existing);
     const scoped = capabilitiesForSession(candidates, events, events);
-    const related = relatedLookupCapabilities(candidates, scoped);
+    const related = usableRelatedLookups(candidates, scoped, events);
     const extra = await this.eventsFromRefs([...scoped, ...related], events);
+    const allEvents = extra.length ? [...events, ...extra] : events;
     const derived = attachCatalogDerivations(
       [...scoped, ...related.filter(item => !scoped.some(current => current.id === item.id))],
-      [...events, ...extra]
+      allEvents
     );
     candidates = mergeCatalogByTransport(derived, candidates);
-    await this.writeCatalog(candidates);
-    return capabilitiesForSession(candidates, events, events);
+    const slice = sessionCatalogSlice(candidates, allEvents, events);
+    const finalized = finalizeSessionSlice(slice, allEvents, candidates);
+    await this.writeCatalog(mergeCatalogByTransport(finalized, candidates));
+    return sessionCatalogSlice(this.catalogCache || candidates, allEvents, events);
   }
 
   async validate(sessionId?: string) {
@@ -220,22 +237,98 @@ export class StudioService {
   async review(sessionId?: string) {
     let scoped = await this.scopedEvidence(sessionId);
     await this.rememberAnalyzedSession(scoped.current);
-    let result = await this.reviewScopedEvidence(scoped);
-    const seen = new Set<string>();
+    let result = await this.reviewScopedEvidence(scoped, false);
+    const state = await this.studioState();
+    const signature = reviewFindingSignature(result.review.findings);
+    const alreadySettled = Boolean(
+      result.review.status === "blocked"
+      && state.lastReview
+      && state.lastReview.sessionId === scoped.session?.id
+      && state.lastReview.signature === signature
+    );
 
-    // Backend interpretation failures are repaired from the authoritative recording first.
-    // This is deterministic and does not repeat a paid model call.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const repairable = result.review.findings.filter(finding => finding.next === "re-analyze");
-      if (!repairable.length || !scoped.current) break;
-      const signature = repairable.map(finding => `${finding.code}:${finding.capabilityId || ""}:${finding.fieldPath || ""}`).sort().join("|");
-      if (seen.has(signature)) break;
-      seen.add(signature);
-      await this.analyze(scoped.current, false);
-      scoped = await this.scopedEvidence(scoped.current);
-      result = await this.reviewScopedEvidence(scoped);
+    if (!alreadySettled && scoped.current) {
+      result = await this.reviewScopedEvidence(scoped, true);
+      const seen = new Set<string>();
+      const steps = [
+        () => this.repairSessionContracts(scoped),
+        () => this.analyze(scoped.current!, false)
+      ];
+      for (const step of steps) {
+        const repairable = result.review.findings.filter(finding => finding.next === "re-analyze");
+        if (!repairable.length) break;
+        const repairSignature = reviewFindingSignature(repairable);
+        if (seen.has(repairSignature)) break;
+        seen.add(repairSignature);
+        await step();
+        scoped = await this.scopedEvidence(scoped.current);
+        result = await this.reviewScopedEvidence(scoped, true);
+      }
+    } else if (alreadySettled && result.review.next !== "re-record") {
+      result = {
+        ...result,
+        review: {
+          ...result.review,
+          summary: `审核结果与上次相同，已停止自动修复。不要再分析、不要开新录制。\n${result.review.summary}`
+        }
+      };
     }
+    await this.rememberReview(scoped.session, result.review);
     return result;
+  }
+
+  private async rememberReview(
+    session: RecordingSession | undefined,
+    review: { status: "passed" | "blocked"; next: ReviewNext; findings: Array<{ code: string; capabilityId?: string; fieldPath?: string }> }
+  ) {
+    const state = await this.studioState();
+    state.lastReview = {
+      sessionId: session?.id,
+      status: review.status,
+      next: review.next,
+      allowRerecord: review.status === "blocked" && review.next === "re-record",
+      pageKeys: session?.pageKeys?.length
+        ? session.pageKeys
+        : session?.startUrl
+          ? [evidencePageKey(session.startUrl)]
+          : [],
+      startUrl: session?.startUrl,
+      signature: reviewFindingSignature(review.findings)
+    };
+    await writeJson(this.stateFile(), state);
+  }
+
+  async evaluateRerecord(url: string) {
+    const state = await this.studioState();
+    const last = state.lastReview;
+    if (!last || last.status !== "blocked" || last.allowRerecord) return { allowed: true as const };
+    const page = evidencePageKey(url);
+    const samePage = last.pageKeys.includes(page)
+      || sameReviewPage(last.startUrl, url)
+      || last.pageKeys.some(key => sameReviewPage(key, url));
+    if (!samePage) return { allowed: true as const };
+    return { allowed: false as const, message: rerecordBlockedMessage(last.next) };
+  }
+
+  private async repairSessionContracts(scoped: {
+    scopeEvents: EvidenceEvent[];
+    events: EvidenceEvent[];
+  }) {
+    const catalog = await this.capabilities();
+    const slice = sessionCatalogSlice(catalog, scoped.events, scoped.scopeEvents);
+    const extra = this.sliceNeedsExtraEvents(slice, scoped.events)
+      ? await this.eventsFromRefs(slice, scoped.events)
+      : [];
+    const events = extra.length ? [...scoped.events, ...extra] : scoped.events;
+    const related = usableRelatedLookups(catalog, slice, scoped.scopeEvents);
+    const derived = attachCatalogDerivations(
+      [...slice, ...related.filter(item => !slice.some(current => current.id === item.id))],
+      events
+    );
+    const merged = mergeCatalogByTransport(derived, catalog);
+    const nextSlice = sessionCatalogSlice(merged, events, scoped.scopeEvents);
+    const finalized = finalizeSessionSlice(nextSlice, events, merged);
+    await this.writeCatalog(mergeCatalogByTransport(finalized, merged));
   }
 
   private async reviewScopedEvidence(scoped: {
@@ -243,11 +336,11 @@ export class StudioService {
     scopeEvents: EvidenceEvent[];
     events: EvidenceEvent[];
     catalog: CapabilityContract[];
-  }) {
+  }, persist = true) {
     const { session, scopeEvents, events, catalog } = scoped;
     const slice = sessionCatalogSlice(catalog, events, scopeEvents);
     const validated = finalizeSessionSlice(slice, events, catalog);
-    if (validated !== slice) await this.writeCatalog(mergeCatalogByTransport(validated, catalog));
+    if (persist && validated !== slice) await this.writeCatalog(mergeCatalogByTransport(validated, catalog));
     return reviewSession(validated, events, scopeEvents, session?.expectedOperations, session?.completeFieldCoverage);
   }
 
@@ -261,10 +354,15 @@ export class StudioService {
   }
 
   private async exportCatalog(sessionId?: string) {
+    const scoped = await this.scopedEvidence(sessionId);
+    const state = await this.studioState();
+    if (state.lastReview?.status === "passed" && state.lastReview.sessionId === scoped.session?.id) {
+      const checked = await this.reviewScopedEvidence(scoped, false);
+      if (checked.review.status === "passed") return { catalog: checked.capabilities, events: scoped.events };
+    }
     const reviewed = await this.review(sessionId);
     if (reviewed.review.status !== "passed") throw new Error(reviewed.review.summary);
-    const { events } = await this.scopedEvidence(sessionId);
-    return { catalog: reviewed.capabilities, events };
+    return { catalog: reviewed.capabilities, events: scoped.events };
   }
 
   async routes() {
