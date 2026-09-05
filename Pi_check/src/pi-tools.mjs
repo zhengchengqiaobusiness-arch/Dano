@@ -5,6 +5,8 @@
  */
 
 import { SUBMIT_RECORDING_RESULT } from "./result-gate.mjs";
+import { logPiOnly } from "./policy.mjs";
+import { summarizeToolArgs, summarizeToolResult } from "./pi-trace.mjs";
 
 function toolText(payload) {
   return {
@@ -208,7 +210,7 @@ export function describePiTools() {
   ];
 }
 
-export function wrapPiToolsForSdk(host, defineTool, Type) {
+export function wrapPiToolsForSdk(host, defineTool, Type, trace = null) {
   const specs = describePiTools();
   return specs.map((spec) => defineTool({
     name: spec.name,
@@ -216,7 +218,23 @@ export function wrapPiToolsForSdk(host, defineTool, Type) {
     description: spec.description,
     promptSnippet: spec.description,
     parameters: toTypeBox(spec.parameters, Type),
-    execute: async (_id, params) => toolText(await host[spec.name](params || {})),
+    execute: async (_id, params) => {
+      const args = params || {};
+      const started = Date.now();
+      logPiOnly(`[PI分析] 调用 ${spec.name} ${summarizeToolArgs(spec.name, args)}`);
+      try {
+        const result = await host[spec.name](args);
+        const summary = summarizeToolResult(spec.name, result);
+        if (trace) trace.recordTool(spec.name, args, summary, true);
+        else logPiOnly(`[PI分析] 工具完成 ${spec.name} ${Date.now() - started}ms → ${summary}`);
+        return toolText(result);
+      } catch (error) {
+        const message = error?.message || String(error);
+        if (trace) trace.recordTool(spec.name, args, message, false);
+        else logPiOnly(`[PI分析] 工具失败 ${spec.name} ${Date.now() - started}ms → ${message}`);
+        throw error;
+      }
+    },
   }));
 }
 

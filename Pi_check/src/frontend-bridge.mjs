@@ -239,7 +239,7 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
       } catch (error) {
         stopFrames();
         const reason = error?.message || String(error);
-        logPiOnly(`录制失败：${reason}`);
+        logPiOnly(`[PI分析] 录制失败：${reason}`);
         send(ws, snapshot("failed", {
           label: publicFailureMessage(),
           error: publicFailureMessage(),

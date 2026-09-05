@@ -98,7 +98,14 @@ async function exerciseListPage(page) {
   for (let index = 0; index < Math.min(selectCount, 12); index += 1) {
     await selects.nth(index).click({ timeout: 800 }).catch(() => {});
     await page.waitForTimeout(450);
-    await page.keyboard.press("Escape").catch(() => {});
+    const option = page.locator(
+      ".el-select-dropdown:visible .el-select-dropdown__item, .ant-select-dropdown:visible .ant-select-item-option",
+    ).first();
+    if (await option.isVisible().catch(() => false)) {
+      await option.click({ timeout: 800 }).catch(() => {});
+    } else {
+      await page.keyboard.press("Escape").catch(() => {});
+    }
     await page.waitForTimeout(150);
   }
   const dates = page.locator(".el-date-editor, .ant-picker");

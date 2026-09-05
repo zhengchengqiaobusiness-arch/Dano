@@ -3,7 +3,11 @@ from uuid import uuid4
 import pytest
 
 from dano.execution.page.flow_spec_core.models import FlowCapability, FlowSpec, FlowStep, ParamField
-from dano.onboarding.skill_generation.export import SkillExportError, export_recording_skill
+from dano.onboarding.skill_generation.export import (
+    SkillExportError,
+    _incomplete_export_reasons,
+    export_recording_skill,
+)
 from dano.onboarding.skill_generation.export_view import list_unconfirmed_write_fields
 from dano.onboarding.skill_generation.models import SkillGenerationRequest
 
@@ -74,17 +78,26 @@ async def test_export_blocks_pi_unresolved() -> None:
         )
 
 
-@pytest.mark.asyncio
-async def test_export_blocks_unknown_write_source() -> None:
+def test_export_ignores_field_source_unresolved() -> None:
     spec = _spec_with_unknown_write()
-    with pytest.raises(SkillExportError, match="写入字段来源未确认"):
-        await export_recording_skill(
-            result_id=uuid4(),
-            body={"flow_spec": spec.model_dump(mode="json")},
-            tenant="test",
-            request=SkillGenerationRequest(
-                title="残缺示例",
-                business_description="保存一条记录",
-                out_dir="out",
-            ),
-        )
+    spec.steps[0].params[0].value = "录制原值"
+    reasons = _incomplete_export_reasons(
+        {
+            "flow_spec": spec.model_dump(mode="json"),
+            "unresolved": ["工作项进度默认值来源未确认", "筛选条上下拉的完整枚举未展开"],
+        },
+        spec,
+    )
+    assert reasons == []
+
+
+def test_export_keeps_unknown_write_as_recorded_literal() -> None:
+    spec = _spec_with_unknown_write()
+    spec.steps[0].params[0].value = "录制原值"
+    reasons = _incomplete_export_reasons({"flow_spec": spec.model_dump(mode="json")}, spec)
+    assert reasons == []
+    param = spec.steps[0].params[0]
+    assert param.source_kind == "constant"
+    assert param.exposed_to_user is False
+    assert param.default_value == "录制原值"
+    assert (param.source or {}).get("kind") == "recorded_literal"

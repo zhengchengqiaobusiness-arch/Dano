@@ -38,5 +38,7 @@ test("录制中不打断 PI，冻结后只发一次最终提示，忙时改用 f
   assert.match(session.prompts[1].text, /不要写 capabilities\[\]\.fields/);
   assert.match(session.prompts[1].text, /list_recording_index/);
   assert.match(session.prompts[1].text, /台账/);
+  assert.doesNotMatch(session.prompts[1].text, /现有录制页实际读取的合同/);
+  assert.doesNotMatch(session.prompts[1].text, /先建动作台账/);
   assert.equal(session.prompts[1].options.streamingBehavior, "followUp");
 });

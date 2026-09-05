@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import shutil
 import time
 from collections.abc import Awaitable, Callable
@@ -14,11 +15,11 @@ from uuid import UUID
 import structlog
 from pydantic import BaseModel, Field
 
+from dano.execution.page.flow_materialization.builder import apply_recorded_unknown_policy
 from dano.execution.page.flow_spec_core.models import FlowSpec
 from dano.onboarding.skill_generation.catalog import capability_ref
 from dano.onboarding.skill_generation.export_view import (
     build_export_view,
-    list_unconfirmed_write_fields,
     promote_unconfirmed_write_fields,
 )
 from dano.onboarding.skill_generation.models import (
@@ -262,12 +263,18 @@ def _pi_unresolved(body: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+_FIELD_SOURCE_UNRESOLVED = re.compile(
+    r"enum_options|来源未|默认值来源|字段来源|快捷选项|下拉的完整|写入字段来源|无独立来源"
+)
+
+
+def _is_field_source_gap(text: str) -> bool:
+    return bool(_FIELD_SOURCE_UNRESOLVED.search(str(text or "")))
+
+
 def _incomplete_export_reasons(body: dict[str, Any], spec: FlowSpec) -> list[str]:
-    reasons = _pi_unresolved(body)
-    reasons.extend(
-        f"写入字段来源未确认：{item}"
-        for item in list_unconfirmed_write_fields(spec)
-    )
+    apply_recorded_unknown_policy(spec)
+    reasons = [item for item in _pi_unresolved(body) if not _is_field_source_gap(item)]
     return list(dict.fromkeys(item for item in reasons if item))
 
 

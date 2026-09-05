@@ -33,6 +33,12 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(skill, /不要编 `enum_options`/);
   assert.match(skill, /附件、审批进度是 `fact_check`/);
   assert.match(skill, /筛选条上看得见的输入框/);
+  assert.match(skill, /不要追求每个字段都有一套来源规则/);
+  assert.match(skill, /无独立来源，按录制请求原值提交/);
+  assert.match(skill, /核对的是\*\*处理逻辑\*\*/);
+  assert.match(skill, /不要另编一份/);
+  assert.match(skill, /不绑定任何具体业务页、系统名或字段名/);
+  assert.doesNotMatch(skill, /workItems|planItems|createTime=/);
   assert.doesNotMatch(skill, /to_flow_spec|compile_capabilities|inferCapability/);
   const loaded = await readRecordingSkill();
   assert.equal(loaded, skill);

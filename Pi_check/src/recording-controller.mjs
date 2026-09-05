@@ -194,9 +194,10 @@ export class RecordingController {
       await slot.pi.requestFinalAnalysis({ timeoutMs: this.finalTimeoutMs });
     } catch (error) {
       const message = String(error.message || error);
+      logPiOnly(`最终分析失败 recording=${recordingId} ${message}`);
       await this.#fail(
         recordingId,
-        message.includes("超时") ? "PI 最终分析超时" : message,
+        message.includes("超时") ? message : message,
       );
       throw new RecordingFailedError(publicFailureMessage());
     }

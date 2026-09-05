@@ -72,4 +72,4 @@ const unresolved = stopped.result?.unresolved || [];
 if (unresolved.length) {
   console.log(`unresolved=${JSON.stringify(unresolved)}`);
 }
-console.log(JSON.stringify({ id, capabilityCount: caps.length, unresolved }, null, 2));
+console.log(`RESULT_JSON ${JSON.stringify({ id, capabilityCount: caps.length, unresolved })}`);

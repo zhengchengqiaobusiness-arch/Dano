@@ -388,32 +388,8 @@ def _field_issues(spec: FlowSpec, capability: FlowCapability, compiled: dict) ->
         if step is None:
             continue
         for param in step.params:
-            if param.source_kind == "unknown":
-                source_kind_hint = str((param.source or {}).get("kind") or "")
-                # Fields whose source is genuinely ambiguous but not session-dependent
-                # (unresolved / unresolved_query) are routed to the operator so the
-                # human can declare "user_input" or "constant" without requiring Pi
-                # to collect machine evidence that may not exist.  Session-dependent
-                # kinds (selected_entity_id, session_literal, heuristic,
-                # readonly_control) need machine evidence — they route to
-                # collect_evidence as before.
-                _OPERATOR_RESOLVABLE = frozenset({"unresolved", "unresolved_query"})
-                resolver = (
-                    "operator"
-                    if source_kind_hint in _OPERATOR_RESOLVABLE
-                    else "collect_evidence"
-                )
-                issues.append(ReleaseIssue(
-                    check_code="field_source_unknown",
-                    message=f"字段 `{step_id}:{param.path}` 来源为 unknown",
-                    resolver=resolver,
-                    capability_id=capability.capability_id,
-                    step_id=step_id,
-                    field_id=str(param.field_id or ""),
-                    wire_path=str(param.path or ""),
-                    evidence_refs=_param_evidence_refs(param),
-                    suggested_operations=("set_param_source",),
-                ))
+            if str(param.source_kind or "").strip().lower() in {"", "unknown", "ambiguous"}:
+                continue
             normalized_path = str(param.path or "").removeprefix("body.")
             if (
                 step_id in execute_step_ids
