@@ -192,9 +192,9 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
   assert.doesNotMatch(css, /\.browser-frame\s*\{[^}]*object-fit:\s*fill/);
   assert.match(app, /function displayedFrameRect\(/);
   assert.match(app, /function previewPaneSize\(/);
-  assert.match(app, /viewport: previewPaneSize\(\)/);
+  assert.doesNotMatch(app, /viewport: previewPaneSize\(\)/);
   assert.match(app, /function rememberPaneViewport\(/);
-  assert.match(app, /\/api\/browser\/viewport/);
+  assert.doesNotMatch(app, /\/api\/browser\/viewport/);
   assert.match(app, /ResizeObserver/);
   assert.match(server, /pathname === "\/api\/browser\/viewport"/);
   assert.match(recorder, /async fitViewport\(/);

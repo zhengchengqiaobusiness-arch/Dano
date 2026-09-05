@@ -477,19 +477,8 @@ function previewPaneSize() {
 }
 
 function rememberPaneViewport() {
-  const size = previewPaneSize();
-  if (!size) return;
-  const current = state.viewport;
-  if (
-    current
-    && Math.abs(current.width - size.width) < 2
-    && Math.abs(current.height - size.height) < 2
-    && Math.abs((current.scale || 1) - size.scale) < 0.05
-  ) return;
-  void api("/api/browser/viewport", { method: "POST", body: JSON.stringify(size) }).then(result => {
-    if (result?.viewport) state.viewport = result.viewport;
-    if (state.browserActive) void refreshBrowserFrame(true);
-  }).catch(() => {});
+  if (!previewPaneSize()) return;
+  if (state.browserActive) void refreshBrowserFrame(true);
 }
 
 function syncPreviewViewport() {
@@ -500,7 +489,7 @@ function syncPreviewViewport() {
 async function openBrowser(rawUrl) {
   const value = rawUrl.trim(); if (!value) return;
   const url = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`;
-  await api("/api/browser/open", { method: "POST", body: JSON.stringify({ url, name: "web-session", mode: state.browserMode, viewport: previewPaneSize() }) });
+  await api("/api/browser/open", { method: "POST", body: JSON.stringify({ url, name: "web-session", mode: state.browserMode }) });
   await pollBrowser();
   rememberPaneViewport();
   showToast("录制已开始");
@@ -620,8 +609,8 @@ function displayedFrameRect() {
 function browserCoordinates(event, clamp = false) {
   const rect = displayedFrameRect();
   if (!rect) return null;
-  const viewW = state.viewport?.width || elements.browserFrame.naturalWidth || 0;
-  const viewH = state.viewport?.height || elements.browserFrame.naturalHeight || 0;
+  const viewW = elements.browserFrame.naturalWidth || state.viewport?.width || 0;
+  const viewH = elements.browserFrame.naturalHeight || state.viewport?.height || 0;
   if (!viewW || !viewH) return null;
   let x = (event.clientX - rect.left) / rect.width * viewW;
   let y = (event.clientY - rect.top) / rect.height * viewH;

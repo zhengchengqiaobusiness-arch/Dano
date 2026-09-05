@@ -18,6 +18,7 @@ const FORM_ACTION_BUDGET = 3;
 const EXPECTABLE_OPERATIONS = new Set<OperationKind>(["query", "create", "update", "review", "delete", "upload", "download", "action"]);
 const LOGIN_BLOCKED_ACTIONS = new Set(["goto", "next-page", "click", "fill", "select", "choose", "press", "exercise-form", "submit-form"]);
 const DEFAULT_VIEWPORT = { width: 1440, height: 960 };
+const MIN_PAGE_VIEWPORT = { width: 1440, height: 900 };
 const MAX_PREVIEW_VIEWPORT = { width: 3840, height: 2160 };
 const OPERATION_LABEL: Partial<Record<OperationKind, string>> = {
   query: "查询", create: "新增", update: "修改", review: "审核", delete: "删除",
@@ -163,10 +164,14 @@ export function normalizePreviewViewport(input?: { width?: number; height?: numb
   const rawHeight = Math.round(Number(input?.height));
   let width = Number.isFinite(rawWidth) && rawWidth >= 80 ? rawWidth : DEFAULT_VIEWPORT.width;
   let height = Number.isFinite(rawHeight) && rawHeight >= 80 ? rawHeight : DEFAULT_VIEWPORT.height;
+  if (width < MIN_PAGE_VIEWPORT.width || height < MIN_PAGE_VIEWPORT.height) {
+    width = DEFAULT_VIEWPORT.width;
+    height = DEFAULT_VIEWPORT.height;
+  }
   if (width > MAX_PREVIEW_VIEWPORT.width || height > MAX_PREVIEW_VIEWPORT.height) {
     const down = Math.min(MAX_PREVIEW_VIEWPORT.width / width, MAX_PREVIEW_VIEWPORT.height / height);
-    width = Math.max(1, Math.round(width * down));
-    height = Math.max(1, Math.round(height * down));
+    width = Math.max(MIN_PAGE_VIEWPORT.width, Math.round(width * down));
+    height = Math.max(MIN_PAGE_VIEWPORT.height, Math.round(height * down));
   }
   return { width, height, scale: 1 };
 }
