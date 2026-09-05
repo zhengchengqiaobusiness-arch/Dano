@@ -1181,6 +1181,8 @@ def test_rendered_package_is_executable_and_contains_no_generation_vocabulary(tm
     ):
         assert marker not in packed
     handbook = (folder / "SKILL.md").read_text(encoding="utf-8")
+    assert "## 展示与确认" in handbook
+    assert "用户眼前始终是页面字段，不是请求 JSON" in handbook
     assert "references/routes/查询工作记录-然后-新增工作记录.md" in handbook
     assert "确认哪些项目仍需新增" in handbook
     assert "组合行必须按该行步骤顺序执行" in handbook
@@ -1521,7 +1523,7 @@ def test_public_schema_scrubs_implementation_and_recording_leaks() -> None:
     assert schema["properties"]["endDate"]["label"] == "结束日期"
 
 
-def test_array_form_question_asks_for_schema_json_not_a_fake_control() -> None:
+def test_array_form_question_uses_page_label_not_json_jargon() -> None:
     forms = _input_forms_md([{
         "name": "create_record",
         "title": "新增记录",
@@ -1542,8 +1544,9 @@ def test_array_form_question_asks_for_schema_json_not_a_fake_control() -> None:
     }])
 
     assert "# 输入表单" in forms
-    assert "JSON 数组" in forms
-    assert "content" in forms
+    assert '"question": "明细"' in forms
+    assert "提供符合 schema 的 JSON" not in forms
+    assert "对象数组用 `items.properties` 的 title 画成表格" in forms
 
 
 def test_result_then_playbook_renders_combination_route_and_readable_scripts(tmp_path: Path) -> None:

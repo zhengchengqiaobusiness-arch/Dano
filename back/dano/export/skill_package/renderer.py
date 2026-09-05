@@ -1316,7 +1316,10 @@ def _runtime_default(name: str, field: dict, control: str) -> str:
     elif control == "date":
         guidance = f"根据当前业务意图生成“{label}”，并符合 dateFormat"
     elif field.get("type") in {"array", "object"}:
-        guidance = f"根据当前用户意图生成符合 schema 的 JSON {field.get('type')}"
+        guidance = (
+            f"按页面上的“{label}”收集；"
+            "对象数组用其属性 title 做成表格给用户看，不要展示 JSON 原文"
+        )
     elif field.get("type") in {"number", "integer"}:
         guidance = f"从当前用户语义提取“{label}”数值，不得任意使用 0"
     else:
@@ -1324,34 +1327,11 @@ def _runtime_default(name: str, field: dict, control: str) -> str:
     return f"<调用前必须替换：{guidance}；只能使用当前请求中已确认或实时取得的有效值>"
 
 
-def _structured_value_question(name: str, field: dict) -> str:
-    label = _field_label(name, field)
-    kind = str(field.get("type") or "")
-    if kind == "array":
-        items = field.get("items") if isinstance(field.get("items"), dict) else {}
-        props = items.get("properties") if isinstance(items.get("properties"), dict) else {}
-        keys = [str(key) for key in props if str(key)][:8]
-        if keys:
-            return f"{label}（提供符合 schema 的 JSON 数组，每项可含：{'、'.join(keys)}）"
-        return f"{label}（提供符合 schema 的 JSON 数组）"
-    if kind == "object":
-        props = field.get("properties") if isinstance(field.get("properties"), dict) else {}
-        keys = [str(key) for key in props if str(key)][:8]
-        if keys:
-            return f"{label}（提供符合 schema 的 JSON 对象，可含：{'、'.join(keys)}）"
-        return f"{label}（提供符合 schema 的 JSON 对象）"
-    return label
-
-
 def _question_spec(name: str, field: dict, *, required: bool) -> dict:
     control = _field_control(name, field)
     question: dict[str, Any] = {
         "id": name,
-        "question": (
-            _structured_value_question(name, field)
-            if field.get("type") in {"array", "object"}
-            else _field_label(name, field)
-        ),
+        "question": _field_label(name, field),
         "inputType": control,
         "required": required,
         "default": _runtime_default(name, field, control),
@@ -1464,12 +1444,15 @@ def _input_forms_bundle(plans: list[dict]) -> tuple[str, dict[str, str]]:
         "## 通用规则",
         "",
         "- 同一能力的相关字段尽量合并在一次 `questions[]` 中；每个 `id` 与 `input_schema.properties` 的键逐字一致。",
+        "- `question` 只用页面标签。禁止附加「JSON 数组」「JSON 对象」或类型名。",
+        "- 向用户展示和确认时必须与页面字段一致：全部调用方字段都要出现；枚举显示选项 label；对象数组用 `items.properties` 的 title 画成表格。空表写「暂无数据」。",
+        "- 同一数组若对应多张页面表，按各表的页面列分别展示，不要收成一段 JSON 文本。线格式只在调用脚本前组装。",
         "- 复制某能力的表单模板前，先删除已由当前对话提供且通过校验的字段；只询问当前步骤仍缺少的字段，不重复问有效答案。",
         "- 下列 `default` 是运行时占位符，调用前必须替换为结合当前用户意图、当前时间和实时候选得到的非空推荐值；不得把占位符本身传给工具。",
         "- 用户回答后，先按 schema 的 `type`、`format`、`enum`、`pattern` 和边界转换为接口线格式。可无歧义转换时自动转换（例如数字文本转 number、日期语义转声明格式、候选 label 转稳定 id）。",
         "- 无法无歧义转换或语义不合法时，只对错误字段发起一次**单字段纠错**表单，说明期望格式并给出新的运行时推荐默认值；不要重问已经有效的字段。",
-        "- 能力契约要求执行前确认时，整理完参数后另起一次调用 `ask_user_question({\"confirm\": true, \"formIds\": [\"<answered.formId>\"]})`。确认调用不得带 `title`、`questions`、`options` 或 `multiple`。",
-        "- 写操作的字段若已全部在当前对话中给出、因而没有可确认的 formId，先用这些已校验值发起一次预填的分组复核表单；取得 `answered.formId` 后再单独确认。这是变更复核，不把已知字段说成缺失字段。",
+        "- 能力契约要求执行前确认时，先保证上一次表单已按页面字段和表格展示，再调用 `ask_user_question({\"confirm\": true, \"formIds\": [\"<answered.formId>\"]})`。确认调用不得带 `title`、`questions`、`options` 或 `multiple`，因此不能先把数组收成 JSON 再拿去确认。",
+        "- 写操作的字段若已全部在当前对话中给出、因而没有可确认的 formId，先用这些已校验值发起一次预填的分组复核表单（对象数组的 default 必须是表格，不是 JSON）；取得 `answered.formId` 后再单独确认。这是变更复核，不把已知字段说成缺失字段。",
         "- 固定值、系统值和上一步已确认绑定值不重复询问。",
         "",
     ]
@@ -1701,8 +1684,25 @@ def _composition_rules(skill) -> list[str]:  # noqa: ANN001
     return lines
 
 
+def _caller_display_rules() -> list[str]:
+    return [
+        "## 展示与确认",
+        "",
+        "向用户收集或核对时，展示必须跟能力契约里的页面字段一致，不要另做一套线格式界面。",
+        "",
+        "- 标签只用 `input_schema` 的 title/label，以及对象数组 `items.properties` 的 title。禁止在问句、确认框或表头里附加「JSON 数组」「JSON 对象」或类型名。",
+        "- 该能力全部调用方字段都要出现，包括枚举、日期和附件；不要因为值已有或结构复杂就省略。",
+        "- 枚举显示选项 label，提交时再转稳定 id。",
+        "- 对象数组按 `items.properties` 的 title 画成 Markdown 表。同一数组对应多张页面表时，按各表列分别展示。",
+        "- 空表写「暂无数据」。附件按页面附件列表展示。",
+        "- 线格式只在调用脚本前组装；用户眼前始终是页面字段，不是请求 JSON。",
+        "",
+    ]
+
+
 def _execution_protocol() -> list[str]:
     return [
+        *_caller_display_rules(),
         "## 执行协议",
         "",
         "1. 根据用户原话选择唯一工作流；无法唯一选择时先澄清。",
@@ -1713,7 +1713,7 @@ def _execution_protocol() -> list[str]:
         "   Done when: 当前步骤必填已齐，或用户取消。",
         "4. 按合同处理绑定或人工交接，不猜测跨步字段，不默认第一条候选。",
         "   Done when: 下一步输入已确认，或已停止并说明原因。",
-        "5. 所有变更操作先展示目标、关键字段和影响，获得确认后再执行带 `--confirm` 的脚本；只读操作收集齐输入后直接执行。",
+        "5. 所有变更操作先按「展示与确认」核对全部调用方字段，获得确认后再执行带 `--confirm` 的脚本；只读操作收集齐输入后直接执行。",
         "   Done when: 已按契约确认或跳过确认，脚本返回成功，或用户拒绝后未执行。",
         "6. 按路线完成条件验证结果；失败或结果未知时停止，不得静默重试写入。",
         "   Done when: 已按完成条件判定成功、失败或未知。",
