@@ -136,6 +136,12 @@ def _safe_text(value: Any) -> str:
     return str(_scrub(str(value or ""))).replace("\r", " ").strip()
 
 
+def _handbook_text(value: Any) -> str:
+    text = _safe_text(value)
+    text = text.replace("该步骤仍缺的调用方字段", "该步骤仍缺的字段")
+    return text.replace("调用方字段", "当前步骤仍缺的字段")
+
+
 def _flow_spec(skill):  # noqa: ANN001, ANN202
     release = dict((skill.api_request or {}).get("_release_snapshot") or {})
     raw = release.get("flow_spec")
@@ -1466,7 +1472,7 @@ def _cross_step_label(route: dict) -> str:
 def _ask_when_label(route: dict, plans: list[dict] | None = None) -> str:
     checks = [item for item in (route.get("checkpoints") or []) if isinstance(item, dict)]
     if checks:
-        return "；".join(str(item.get("prompt") or "上一步完成后请用户选定目标") for item in checks)
+        return "；".join(_handbook_text(item.get("prompt") or "上一步完成后请用户选定目标") for item in checks)
     allowed = _route_schema_fields(route, plans or [])
     fields = [
         str(name)
@@ -1579,9 +1585,9 @@ def _workflow_table(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
 def _composition_rules(skill) -> list[str]:  # noqa: ANN001
     plan = _skill_plan_payload(skill)
     notes = [
-        _safe_text(item)
+        _handbook_text(item)
         for item in (plan.get("composition_notes") or [])
-        if _safe_text(item) and not _is_recording_copy(item)
+        if _handbook_text(item) and not _is_recording_copy(item)
     ]
     lines = [
         "## 组合与交接规则",
@@ -2175,7 +2181,7 @@ def _route_file_md(route: dict, plans: list[dict]) -> str:
     if checks:
         for item in checks:
             lines.append(
-                f"- 人工交接：{item.get('prompt') or '请用户选定下一步目标'}。"
+                f"- 人工交接：{_handbook_text(item.get('prompt') or '请用户选定下一步目标')}。"
                 f"取消时{item.get('on_cancel') or '停止并报告未执行'}。"
             )
     if not route.get("bindings") and not checks:
@@ -3512,7 +3518,7 @@ def _consumer_route(route: dict, plans: list[dict]) -> dict:
     ]
     checkpoints = [
         {
-            "prompt": item.get("prompt") or "请用户选定下一步目标",
+            "prompt": _handbook_text(item.get("prompt") or "请用户选定下一步目标"),
             "required_fields": list(item.get("required_fields") or []),
             "choice_source": item.get("choice_source") or "previous_result",
             "selection_mode": item.get("selection_mode") or "single",

@@ -17,6 +17,7 @@ from dano.export.skill_package.renderer import (
     _consumer_contract,
     _field_label,
     _format_list_py,
+    _handbook_text,
     _input_forms_md,
     _options_md,
     _public_schema,
@@ -1269,6 +1270,11 @@ def test_frontmatter_description_is_concise_and_does_not_copy_full_playbook() ->
     assert "很长的编排叙述" not in description
     assert "不用于" in description
     assert len(description) < 260
+
+
+def test_consumer_handbook_does_not_say_caller_fields() -> None:
+    assert _handbook_text("以及该步骤仍缺的调用方字段") == "以及该步骤仍缺的字段"
+    assert "调用方" not in _handbook_text("补齐调用方字段")
 
 
 def test_chinese_operation_names_keep_readable_script_slugs() -> None:
