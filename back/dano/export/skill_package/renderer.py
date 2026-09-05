@@ -1297,7 +1297,7 @@ def _field_control(name: str, field: dict) -> str:
         return "treeSelect" if field.get("x-dano-tree") else "select"
     if configured in {"text", "textarea", "date", "radio", "checkbox", "select", "treeSelect"}:
         return configured
-    if field.get("format") in {"date", "date-time"}:
+    if field.get("type") in {"date", "datetime"} or field.get("format") in {"date", "date-time"}:
         return "date"
     if field.get("type") == "boolean":
         return "radio"
@@ -1352,7 +1352,11 @@ def _question_spec(name: str, field: dict, *, required: bool) -> dict:
     if control == "date":
         question["dateFormat"] = str(
             field.get("dateFormat")
-            or ("yyyy-MM-dd HH:mm" if field.get("format") == "date-time" else "yyyy-MM-dd")
+            or (
+                "yyyy-MM-dd HH:mm"
+                if field.get("type") == "datetime" or field.get("format") == "date-time"
+                else "yyyy-MM-dd"
+            )
         )
     return question
 
@@ -1445,14 +1449,13 @@ def _input_forms_bundle(plans: list[dict]) -> tuple[str, dict[str, str]]:
         "",
         "- 同一能力的相关字段尽量合并在一次 `questions[]` 中；每个 `id` 与 `input_schema.properties` 的键逐字一致。",
         "- `question` 只用页面标签。禁止附加「JSON 数组」「JSON 对象」或类型名。",
-        "- 向用户展示和确认时必须与页面字段一致：全部调用方字段都要出现；枚举显示选项 label；对象数组用 `items.properties` 的 title 画成表格。空表写「暂无数据」。",
-        "- 同一数组若对应多张页面表，按各表的页面列分别展示，不要收成一段 JSON 文本。线格式只在调用脚本前组装。",
-        "- 复制某能力的表单模板前，先删除已由当前对话提供且通过校验的字段；只询问当前步骤仍缺少的字段，不重复问有效答案。",
+        "- 展示跟页面走：枚举显示选项 label；对象数组用 `items.properties` 的 title 画成表格。空表写「暂无数据」。不要把请求 JSON 给用户看。",
+        "- 复制某能力的表单模板前，先删除已由当前对话提供且通过校验的字段；只询问当前步骤仍缺少的字段，不重复问有效答案。不要改 `questions[]` 的 id，也不要另编一套字段。",
         "- 下列 `default` 是运行时占位符，调用前必须替换为结合当前用户意图、当前时间和实时候选得到的非空推荐值；不得把占位符本身传给工具。",
         "- 用户回答后，先按 schema 的 `type`、`format`、`enum`、`pattern` 和边界转换为接口线格式。可无歧义转换时自动转换（例如数字文本转 number、日期语义转声明格式、候选 label 转稳定 id）。",
         "- 无法无歧义转换或语义不合法时，只对错误字段发起一次**单字段纠错**表单，说明期望格式并给出新的运行时推荐默认值；不要重问已经有效的字段。",
-        "- 能力契约要求执行前确认时，先保证上一次表单已按页面字段和表格展示，再调用 `ask_user_question({\"confirm\": true, \"formIds\": [\"<answered.formId>\"]})`。确认调用不得带 `title`、`questions`、`options` 或 `multiple`，因此不能先把数组收成 JSON 再拿去确认。",
-        "- 写操作的字段若已全部在当前对话中给出、因而没有可确认的 formId，先用这些已校验值发起一次预填的分组复核表单（对象数组的 default 必须是表格，不是 JSON）；取得 `answered.formId` 后再单独确认。这是变更复核，不把已知字段说成缺失字段。",
+        "- 能力契约要求执行前确认时，整理完参数后另起一次调用 `ask_user_question({\"confirm\": true, \"formIds\": [\"<answered.formId>\"]})`。确认调用不得带 `title`、`questions`、`options` 或 `multiple`。",
+        "- 写操作的字段若已全部在当前对话中给出、因而没有可确认的 formId，先用这些已校验值发起一次预填的分组复核表单；取得 `answered.formId` 后再单独确认。这是变更复核，不把已知字段说成缺失字段。",
         "- 固定值、系统值和上一步已确认绑定值不重复询问。",
         "",
     ]
@@ -1479,12 +1482,33 @@ def _required_fields(plan: dict) -> list[str]:
     return [str(name) for name in (schema.get("required") or []) if str(name)]
 
 
+def _caller_field_names(plan: dict) -> list[str]:
+    schema = plan.get("input_schema") if isinstance(plan.get("input_schema"), dict) else {}
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    return [
+        str(name)
+        for name, raw in properties.items()
+        if str(name) and isinstance(raw, dict) and _is_caller_field(raw)
+    ]
+
+
+def _caller_input_label(plan: dict) -> str:
+    required = set(_required_fields(plan))
+    names = _caller_field_names(plan)
+    if not names:
+        return "无"
+    return "、".join(
+        f"`{name}`" if name in required else f"`{name}`（可选）"
+        for name in names
+    )
+
+
 def _script_invocation(plan: dict) -> str:
     schema = plan.get("input_schema") if isinstance(plan.get("input_schema"), dict) else {}
     properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
     payload = {
         name: _example_input_value(name, properties.get(name) or {})
-        for name in _required_fields(plan)
+        for name in _caller_field_names(plan)
     }
     command = (
         f"python scripts/{plan['script']}.py "
@@ -1541,6 +1565,19 @@ def _ask_when_label(route: dict, plans: list[dict] | None = None) -> str:
     checks = [item for item in (route.get("checkpoints") or []) if isinstance(item, dict)]
     if checks:
         return "；".join(_handbook_text(item.get("prompt") or "上一步完成后请用户选定目标") for item in checks)
+    names: list[str] = []
+    seen: set[str] = set()
+    for cap_id in route.get("capability_sequence") or []:
+        item = _plan_by_ref(plans or []).get(str(cap_id))
+        if not item:
+            continue
+        for name in _caller_field_names(item):
+            if name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+    if names:
+        return "按输入表单展示该步骤全部页面字段：" + "、".join(f"`{name}`" for name in names)
     allowed = _route_schema_fields(route, plans or [])
     fields = [
         str(name)
@@ -1548,9 +1585,9 @@ def _ask_when_label(route: dict, plans: list[dict] | None = None) -> str:
         if str(name) and (allowed is None or str(name) in allowed)
     ]
     if fields:
-        return "只补当前步骤缺少的输入：" + "、".join(f"`{name}`" for name in fields)
+        return "按输入表单展示该步骤全部页面字段：" + "、".join(f"`{name}`" for name in fields)
     if route.get("required_user_inputs") and allowed is not None:
-        return "按已有契约收集当前步骤缺少的输入"
+        return "按输入表单展示该步骤全部页面字段"
     return "输入已齐则不问"
 
 
@@ -1691,10 +1728,8 @@ def _caller_display_rules() -> list[str]:
         "向用户收集或核对时，展示必须跟能力契约里的页面字段一致，不要另做一套线格式界面。",
         "",
         "- 标签只用 `input_schema` 的 title/label，以及对象数组 `items.properties` 的 title。禁止在问句、确认框或表头里附加「JSON 数组」「JSON 对象」或类型名。",
-        "- 该能力全部调用方字段都要出现，包括枚举、日期和附件；不要因为值已有或结构复杂就省略。",
-        "- 枚举显示选项 label，提交时再转稳定 id。",
-        "- 对象数组按 `items.properties` 的 title 画成 Markdown 表。同一数组对应多张页面表时，按各表列分别展示。",
-        "- 空表写「暂无数据」。附件按页面附件列表展示。",
+        "- 表单以 `references/INPUT_FORMS.md` 里该能力的 `questions[]` 为准，按页面字段展示；枚举显示选项 label。",
+        "- 对象数组按 `items.properties` 的 title 画成 Markdown 表。空表写「暂无数据」。",
         "- 线格式只在调用脚本前组装；用户眼前始终是页面字段，不是请求 JSON。",
         "",
     ]
@@ -1709,11 +1744,11 @@ def _execution_protocol() -> list[str]:
         "   Done when: 选出恰好一条路线，或已提出一个可回答的澄清问题。",
         "2. 组合路线按详情指针读取对应路线文件；原子路线只在需要调用时读取 `references/CAPABILITIES.md` 对应行。缺少输入时再读取当前能力的输入表单。",
         "   Done when: 只打开当前路线和当前步骤真正需要的资源。",
-        "3. 只收集当前路线当前步骤缺少的输入。固定值、系统值和已确认绑定不重复询问。",
+        "3. 按当前能力输入表单收集仍缺的输入。固定值、系统值和已确认绑定不重复询问。",
         "   Done when: 当前步骤必填已齐，或用户取消。",
         "4. 按合同处理绑定或人工交接，不猜测跨步字段，不默认第一条候选。",
         "   Done when: 下一步输入已确认，或已停止并说明原因。",
-        "5. 所有变更操作先按「展示与确认」核对全部调用方字段，获得确认后再执行带 `--confirm` 的脚本；只读操作收集齐输入后直接执行。",
+        "5. 所有变更操作先按「展示与确认」核对页面字段，获得确认后再执行带 `--confirm` 的脚本；只读操作收集齐输入后直接执行。",
         "   Done when: 已按契约确认或跳过确认，脚本返回成功，或用户拒绝后未执行。",
         "6. 按路线完成条件验证结果；失败或结果未知时停止，不得静默重试写入。",
         "   Done when: 已按完成条件判定成功、失败或未知。",
@@ -1751,7 +1786,7 @@ def _on_demand_resources(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
     lines = [
         "## 按需读取资源",
         "",
-        "- 当前操作缺少必填字段时，读取 `references/INPUT_FORMS.md` 中对应能力的章节。",
+        "- 当前操作缺少输入时，读取 `references/INPUT_FORMS.md` 中对应能力的章节，按其中 `questions[]` 提问。",
         "- 字段需要动态候选，或候选为空/多条时，读取 `references/OPTIONS.md`。",
         "- 原子路线需要调用命令，或需要判断能力输入输出边界时，读取 `references/CAPABILITIES.md` 对应行。",
         "- 不要在开始前读取 references 下的全部文件。",
@@ -1852,16 +1887,12 @@ def _recorded_order(plans: list[dict]) -> list[str]:
 
 def _operation_collect_hint(plan: dict) -> str:
     title = _safe_text(plan.get("title") or plan.get("name"))
-    required = _required_fields(plan)
+    fields = _caller_input_label(plan)
     if plan.get("requires_confirmation"):
-        if required:
-            fields = "、".join(f"`{name}`" for name in required)
-            return f"{title}：收集契约中的必填字段（{fields}），执行前确认。"
-        return f"{title}：收集该操作字段，执行前确认。"
-    if required:
-        fields = "、".join(f"`{name}`" for name in required)
-        return f"{title}：收集契约中的必填字段（{fields}）。"
-    return f"{title}：只收集用户本次给出的字段。"
+        return f"{title}：按输入表单收集全部页面字段（{fields}），执行前确认。"
+    if fields != "无":
+        return f"{title}：按输入表单收集全部页面字段（{fields}）。"
+    return f"{title}：按输入表单收集该操作字段。"
 
 
 def _title_for_plan_ref(plans: list[dict], cap_id: str) -> str:
@@ -1991,11 +2022,11 @@ def _planning_skill_md_sections(skill, plans: list[dict], spec=None) -> list[str
         "", "## 操作路由", "",
         "先把用户意图映射到下表中的一条操作，或「能力关系」里的一条组合路线。",
         "",
-        "| 用户意图 | 操作 | 脚本 | 必填输入 | 写前确认 | 写后验证 |",
+        "| 用户意图 | 操作 | 脚本 | 页面字段 | 写前确认 | 写后验证 |",
         "|---|---|---|---|---|---|",
     ])
     for item in plans:
-        required = ", ".join(f"`{name}`" for name in _required_fields(item)) or "无"
+        required = _caller_input_label(item)
         lines.append(
             f"| {_intent_for_plan(skill, item)} | "
             f"`{item['name']}` | `python scripts/{item['script']}.py` | {required} | "
@@ -2091,13 +2122,13 @@ def _capabilities_md(skill, plans: list[dict]) -> str:  # noqa: ANN001
         "",
         "只在需要判断某个能力的输入输出边界时阅读本文件。不要把这里当成路线说明书。",
         "",
-        "| 能力 | 何时使用 | 类型 | 调用入口 | 必要输入概况 | 关键输出概况 | 完成判断 | 主要风险 |",
+        "| 能力 | 何时使用 | 类型 | 调用入口 | 输入概况 | 关键输出概况 | 完成判断 | 主要风险 |",
         "|---|---|---|---|---|---|---|---|",
     ]
     for item in plans:
         write = bool(item.get("is_write"))
         confirm = bool(item.get("requires_confirmation"))
-        required = "、".join(f"`{name}`" for name in _required_fields(item)) or "无必填"
+        required = _caller_input_label(item)
         if confirm:
             risk = "执行前必须确认；结果未知不得重试" if write else "执行前必须确认"
         elif write:

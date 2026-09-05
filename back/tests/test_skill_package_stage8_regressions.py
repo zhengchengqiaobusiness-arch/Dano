@@ -399,6 +399,33 @@ def test_documented_script_input_keeps_nested_json_shape() -> None:
     assert command.endswith(" --confirm")
 
 
+def test_skill_docs_keep_optional_page_fields() -> None:
+    plan = {
+        "name": "查询统计",
+        "title": "查询统计",
+        "script": "查询统计",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "deptId": {"type": "number", "title": "部门"},
+                "startDate": {"type": "date", "title": "开始日期"},
+                "endDate": {"type": "date", "title": "结束日期"},
+                "reportType": {"type": "string", "title": "汇报类型"},
+            },
+            "required": ["startDate", "endDate", "reportType"],
+        },
+    }
+
+    command = _script_invocation(plan)
+    forms = _input_forms_md([plan])
+
+    assert '"deptId":"<number:deptId>"' in command
+    assert '"endDate":"<endDate>"' in command
+    assert '"id": "deptId"' in forms
+    assert '"question": "部门"' in forms
+    assert '"inputType": "date"' in forms
+
+
 def test_package_semantics_rejects_unconfirmed_writes_and_missing_combo(tmp_path: Path) -> None:
     contract = {
         "capabilities": [
@@ -1547,6 +1574,7 @@ def test_array_form_question_uses_page_label_not_json_jargon() -> None:
     assert '"question": "明细"' in forms
     assert "提供符合 schema 的 JSON" not in forms
     assert "对象数组用 `items.properties` 的 title 画成表格" in forms
+    assert "删除已由当前对话提供且通过校验的字段" in forms
 
 
 def test_result_then_playbook_renders_combination_route_and_readable_scripts(tmp_path: Path) -> None:
