@@ -89,19 +89,24 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 2. **摊开 execute 请求形状**：把这条请求的每个 query/body 键列出来。同一键出现几次就建几个 param，共用这个 path。一个数组只建一个数组 path；行差别写在行内字段。
 3. **摊开当前页控件**：读该动作所在页的 `visible_control` 和点过的 interaction。每个控件看 `region`（filter/form/table）、`label`/`placeholder`/`name`、`control_kind`（input/select/date/textarea/upload/readonly）、`required_mark`、`readonly`。
 4. **逐键对上控件，决定调用方还是系统**：
-   - 对得上**可改**控件（input/select/date/textarea/upload，且非 readonly）→ **调用方**。即使本场没改、这次 query/body 没带这个键，也留下可选调用方字段。`path` 用控件 `name` 或同页已发出请求里的同义键。对不上 path 就写入 `unresolved`，不要假装控件不存在。
-   - 对得上灰框 / readonly / 自动编号 → **系统**。
+   - 对得上**可改**控件（input/select/date/textarea/upload，以及树、页签、分段器、单选组，且非只读灰框）→ **调用方**。即使本场没改、这次 query/body 没带这个键，也留下可选调用方字段。`path` 用控件 `name` 或同页已发出请求里的同义键。对不上 path 就写入 `unresolved`，不要假装控件不存在。
+   - 一个可见**日期区间**（`range=true` 或一个控件里两个起止输入）对上两个请求键时，两个键都是调用方，不要把起止收成系统。
+   - 页面因切换类型/页签自动改了日期，只要日期控件仍能点，仍是调用方，不要当成计算公式。
+   - 入口 URL / 上一页带入的默认值：本页看得到对应下拉/日期/树，即使本场被锁成默认，仍是调用方，`source_kind=page_default`。
+   - 对得上灰框 / 自动编号 / 只读姓名单位 → **系统**。
    - 请求里有、控件上没有：登录用户/组织且初始加载请求就自动带上 → **系统**，`source_kind=current_user`，reason 写「运行时取当前登录身份」，**禁止**把本场的用户 ID、公司 ID 写成永远不变的 `constant` 固定值。
    - 请求里有、控件上没有：行类型判别、行序号、前端行键、前端时间戳 → **系统**，`source_kind=constant`，`default_value` = 本场请求原值。
    - 空数组/空对象：有对应可改控件（上传、选人、可增行）→ **调用方**，即使本场是空；没有对应控件 → **系统**，按请求原值。
-   - 上一页跳转带进本页 query、本页仍有可改控件 → **调用方**，`source_kind=page_default`，不要因为本场没再搜就收成系统。
+   - 上一页跳转带进本页 query、本页仍有对应控件 → **调用方**，`source_kind=page_default`，不要因为本场没再搜就收成系统。
    - 确认弹层、二次确认框里的说明/意见：只有写进了该能力 execute 的 query/body 才建模；没进请求不要写进 params 或 `input_schema`。
-   - 其余对不上的请求键 → **系统**，按请求原值提交，不要猜公式。
+   - 其余对不上的 **query/body** 键 → **系统**，按请求原值提交，不要猜公式。不要把 Cookie、Authorization 或其它请求头编成业务字段。
 
-禁止把 `visible_control` 里看得见的日期、下拉、附件写成「不可见 / 不可改 / 系统固定」。  
+禁止把 `visible_control` 里看得见的日期、下拉、树、页签、附件写成「不可见 / 不可改 / 系统固定」。  
 点「添加××行」或工具栏加行产生的行类型码不是调用方控件，不要放进 `input_schema`（包括数组 `items.properties`）。  
 `input_schema`（含数组 `items.properties`）的每个 key 必须对应某个 `exposed_to_user=true` 的 param.key。params 标系统的 key 禁止再出现在 schema。  
-execute 请求里没有的键，禁止写进 params 或 schema。  
+**每个** `exposed_to_user=true` 的 param 都必须出现在该能力 `input_schema.properties`；只写在 params 里等于调用方字段丢失。数组只出现数组自己的 key，行内调用方写在 `items.properties`。  
+execute 的 query/body 没有、当前页也没有对应可改控件的键，禁止写进 params 或 schema。可见可改控件即使本场没带，仍要留下调用方可选字段。  
+不要编造本场没发出的写请求，也不要把同一数组拆成多行并列字段。  
 分页只留在真正执行查询的那个能力的系统字段。
 
 ## 字段必须出现在页面能读到的两个位置
@@ -147,7 +152,7 @@ execute 请求里没有的键，禁止写进 params 或 schema。
 
 看页面上的控件，不看业务名：
 
-- 白底可改的输入、日期、数字、下拉、单选、附件 → 调用方。编辑弹层里同样可改的字段，即使本场只改了备注，仍是调用方；来源用 `page_default` / `previous_response` / `api_option`（上游默认，可修改）。
+- 白底可改的输入、日期、数字、下拉、单选、页签、分段器、树、附件 → 调用方。编辑弹层里同样可改的字段，即使本场只改了备注，仍是调用方；来源用 `page_default` / `previous_response` / `api_option`（上游默认，可修改）。
 - 灰底只读、保存时自动生成的单号、合计行、金额/税额/优惠后金额这类算出来的格子 → 系统。来源 `computed` / `generated` / `previous_response`。不要标成“自动计算，可修改”，也不要放进 `input_schema`。
 - 列表行点进查看/编辑/删除/审批时带出的主键、明细行 ID、流程实例 ID → `selected_record_identity` 或 `previous_response`，**系统**。不要放进 `input_schema`。
 - 选项接口顺便带回的显示名、条码、库存、单位等，人不能单独填 → 系统，`selected_option_field` / `previous_response`。
@@ -168,10 +173,11 @@ execute 请求里没有的键，禁止写进 params 或 schema。
 必须按本场**实际发出的那条 execute 请求的形状**建模，不要另编一份看起来更整齐、但执行时发不出去的结构。换任何页面都只认这几条形状规则：
 
 - **重复键**：同一个 query/body 键在请求里出现多次，就建同样多个 param，共用这个 `path`，归属相同，执行时仍发这个重复键。不要丢掉第 2 次及以后，也不要改成线上没有的新键名。
-- **数组**：请求体里是一个数组，就只建这一个数组 path。行与行的差别写在行内字段上，不要把一种行拆成另一个调用方数组去抢同一 path。
-- **行内字段**：行里对应可填/可选控件的是调用方；行里没有独立来源的判别码、序号、前端行键是系统，按请求原样带上。
-- **键名**：execute 的 `path` / `key` 必须能在实际请求里找到。请求没有的键不要编进去；请求有的键不要改名。
+- **数组**：请求体里是一个数组，就只建这一个数组 path，`input_schema` 也只出现这一个数组 key。行与行的差别写在行内字段上，不要把每行的内容/进度拆成并列调用方字段，也不要把一种行拆成另一个调用方数组去抢同一 path。
+- **行内字段**：行里对应可填/可选控件的是调用方，写进该数组的 `items.properties`；行里没有独立来源的判别码、序号、前端行键是系统，只留在 params，不要进 schema。
+- **键名**：execute 的 `path` / `key` 必须能在实际 **query/body** 里找到，或能对上当前页可见控件。请求和控件都没有的键不要编进去；请求有的键不要改名。不要把请求头写成 `query.*` / `body.*`。
 - **样例值**：`default_value` 只固定无来源字段怎么提交，不是下次执行必须填的业务值。
+- **编排**：`request_refs` / `steps` 只能引用本场真实发出的请求。不要把没发过的 create/update/save 编进执行顺序。
 
 完整性：
 
@@ -201,8 +207,9 @@ execute 请求里没有的键，禁止写进 params 或 schema。
 9. **同一 path 只能有一种归属**。禁止同一个 `query.xxx` / `body.xxx` 既写成调用方又写成系统。重复键可以对应多个 param，但归属必须相同，执行时仍发原键。禁止把一个数组 path 拆成多个调用方字段。
 10. **系统主键不要进 `input_schema`**：单据 id、流程实例 id、行 id。即使标了 `exposed_to_user=false`，也不要再放进 `properties`。
 11. **确认弹层里的说明**：写进了该能力 execute 的 query/body 才建模；没进请求不要写进 params 或 schema。
-12. **`input_schema` 与 params 必须同归属**：schema（含 `items.properties`）只能出现 `exposed_to_user=true` 的 key。系统字段只留在 params。
-13. **跳转带入仍可改**：从上一页带进本页 query 的键，只要本页 `visible_control` 仍能改，就是调用方，不要收成系统。
+12. **`input_schema` 与 params 必须同归属**：schema（含 `items.properties`）只能出现 `exposed_to_user=true` 的 key。每个调用方 param 都必须有同名 schema key。系统字段只留在 params。
+13. **跳转带入仍可改**：从上一页带进本页 query 的键，只要本页 `visible_control` 看得到对应控件，就是调用方，不要收成系统。
+14. **树 / 页签 / 分段器 / 单选组**：按可改选择控件处理。选项用当场看到的文案做 `page_enum`，或用树/下拉接口做 `api_option`。不要因为快照以前漏过就标系统。
 
 ## 编排
 
@@ -315,7 +322,7 @@ execute 请求里没有的键，禁止写进 params 或 schema。
 3. 每个能力的 `request_refs` 都是 `{step_id, usage}` 对象，并能在 `steps` 里找到同名 `step_id`。
 4. 每个 step 的 `params` 都是数组，数组元素都有 `key` 和 `path`。
 5. 结果里没有 `capabilities[].fields`。
-6. 人能填/能选的筛选、表单、下拉、日期、附件都在调用方字段里，并且都在 `input_schema`；`visible_control` 里可改的控件没有被写成系统。灰框/计算/自动编号/行主键/行类型码只在 params 且 `exposed_to_user=false`。
+6. 人能填/能选的筛选、表单、下拉、树、页签、日期、附件都在调用方字段里，并且都在 `input_schema`；`visible_control` 里可改的控件没有被写成系统。每个 `exposed_to_user=true` 的 param 都能在 schema 里找到同名 key。灰框/计算/自动编号/行主键/行类型码只在 params 且 `exposed_to_user=false`。
 7. 从列表行或上一步响应带出的主键/流程实例 ID 是系统字段，不是调用方输入，不要写进 `input_schema`。
 8. 登录态和分页只出现在真正执行查询的那个能力的系统字段里，不要污染撤回/删除。
 9. 写过“还做了查看/编辑/进度”却没有对应能力，就是失败，必须补能力或写入 `unresolved`。
@@ -329,17 +336,18 @@ execute 请求里没有的键，禁止写进 params 或 schema。
 17. `option_source` 只对应本能力可见下拉。附件/审批/流程定义不是 option_source。
 18. 没打开过的下拉里没有编造的 `enum_options`。
 19. GET 详情 execute 没有把响应展示字段写成请求 `body.*`。
-20. 已对照 `visible_control`：可改日期/下拉/附件都在调用方；登录身份是 `current_user` 不是写死数字；行类型码/行键只在系统 params，且没有出现在 schema（含 `items.properties`）。
-21. `input_schema`（含数组 `items.properties`）的每个 key 都能对上某个 `exposed_to_user=true` 的 param；系统 key 没有进 schema。
-22. execute 请求里没有的键没有写进 params 或 schema。确认弹层说明没进 execute 就没有被建模。
+20. 已对照 `visible_control`：可改日期/下拉/树/页签/附件都在调用方；一个区间日期对上的起止键都在调用方；登录身份是 `current_user` 不是写死数字；行类型码/行键只在系统 params，且没有出现在 schema（含 `items.properties`）。
+21. `input_schema`（含数组 `items.properties`）的每个 key 都能对上某个 `exposed_to_user=true` 的 param；每个调用方 param 都在 schema 里；系统 key 没有进 schema。
+22. execute 的 query/body 没有、当前页也没有对应可改控件的键没有写进 params 或 schema。确认弹层说明没进 execute 就没有被建模。请求头没有被写成业务字段。
 23. 空数组/空对象若有对应上传、选人或可增行控件，已标调用方，没有因为本场是空就收成系统。
-24. 跳转带入但本页仍可改的筛选，已标调用方。
+24. 跳转带入但本页看得到对应控件的筛选，已标调用方。
+25. 数组保持一个 path，没有把每行拆成并列字段。编排里没有本场没发出的写请求。
 
 ## 泛化
 
 - 本 Skill 不绑定任何具体业务页、系统名或字段名。上面的例子只说明形状，不是某页的补丁。
 - 只根据本场点击、输入、请求、响应、`visible_control`、截图判断。
-- 换一个页面也走同一套台账 / 切分 / 编排 / 字段形状规则：先摊请求形状，再摊可见控件，对得上可改控件就是调用方；空容器有上传/选人控件仍是调用方；确认弹层没进 execute 就不建模；无控件的请求键按身份或原值交给系统。
+- 换一个页面也走同一套台账 / 切分 / 编排 / 字段形状规则：先摊请求形状，再摊可见控件，对得上可改控件就是调用方且必须进 schema；树/页签/区间日期同样是调用方；数组保持一个 path；空容器有上传/选人控件仍是调用方；确认弹层没进 execute 就不建模；无控件的 query/body 键按身份或原值交给系统。
 - 最终 `result` 必须完整、可编排、可执行：每个点过的独立动作都在，关联和顺序能执行，字段处理逻辑与真实请求一致。
 - 证据不够、台账对不齐、点过的独立动作做不成能力时：写入 `unresolved`，不要猜测成看似可用的残缺能力。导出层只拒绝这种能力缺口。
 - 字段来源写不出时：标系统自动处理，`default_value` 用请求原值。不要猜测来源，也不要因此阻止导出。

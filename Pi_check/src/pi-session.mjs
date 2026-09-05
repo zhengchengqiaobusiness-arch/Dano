@@ -66,7 +66,7 @@ export function buildFinalAnalysisPrompt(latestSeq) {
   return (
     `证据已冻结，最新 seq=${Number(latestSeq) || 0}。现在必须调用 submit_recording_result。\n` +
     "先调 list_recording_index 建台账，看 interaction、xhr/fetch、network_response 和 visible_control。读关键 execute 请求正文；响应在 network_response 或读请求时附带的 response.body。\n" +
-    "先读各页 visible_control，再对 execute 每个键。可改控件一律调用方，即使本场没改、请求没带。禁止把看得见的日期/下拉/附件写成不可见或系统固定。空数组若有上传/选人控件仍是调用方。确认弹层说明没进 execute 就不要写。schema（含数组 items）不得包含系统字段或 execute 里没有的键。跳转带入但本页可改的筛选仍是调用方。登录身份用 current_user，不要写死本场数字。\n" +
+    "先读各页 visible_control，再对 execute 每个 query/body 键。树/页签/分段器/单选组/日期区间都是可改选择。可改控件一律调用方，即使本场没改、请求没带，也必须写进 input_schema。一个区间日期对上起止两个键，都是调用方。数组只建一个数组 path，行内调用方写在 items.properties，行类型码不要进 schema。每个 exposed_to_user=true 的 param 都必须出现在 schema。禁止编造 execute query/body 和可见控件都没有的键，禁止编造没发过的写请求，禁止把请求头当业务字段。空数组若有上传/选人控件仍是调用方。确认弹层说明没进 execute 就不要写。登录身份用 current_user，不要写死本场数字。\n" +
     "read_response_blob 只接受 body.blob_id（blob_ 开头）。不要把 request_id 当 blob_id，也不要读 screenshot 去找接口正文。\n" +
     "看完关键请求立刻把完整 result 作为 submit_recording_result 的工具参数提交。不要把 JSON 写在对话里。不要写 capabilities[].fields。request_refs 必须是 {step_id, usage}。steps[].params 必须是含 key/path 的对象数组。\n" +
     "若已有 submit_recording_draft，立刻 final=true 提交。草稿不会自动变成结果。"

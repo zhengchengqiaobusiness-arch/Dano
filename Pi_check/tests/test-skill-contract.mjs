@@ -47,7 +47,11 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(skill, /空数组\/空对象/);
   assert.match(skill, /跳转带进本页 query/);
   assert.match(skill, /input_schema.*items\.properties/);
-  assert.match(skill, /execute 请求里没有的键/);
+  assert.match(skill, /execute 的 query\/body 没有/);
+  assert.match(skill, /每个.*exposed_to_user=true.*param/);
+  assert.match(skill, /树、页签、分段器、单选组/);
+  assert.match(skill, /不要编造本场没发出的写请求/);
+  assert.match(skill, /不要把同一数组拆成多行并列字段/);
   assert.doesNotMatch(skill, /登录态、Cookie、分页、流程定义 Key、单据类型/);
   assert.doesNotMatch(skill, /workItems|planItems|createTime=/);
   assert.doesNotMatch(skill, /to_flow_spec|compile_capabilities|inferCapability/);

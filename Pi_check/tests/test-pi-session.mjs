@@ -45,7 +45,8 @@ test("录制中不打断 PI，冻结后只发一次最终提示，忙时改用 f
   assert.match(session.prompts[1].text, /visible_control/);
   assert.match(session.prompts[1].text, /current_user/);
   assert.match(session.prompts[1].text, /确认弹层说明没进 execute/);
-  assert.match(session.prompts[1].text, /schema（含数组 items）不得包含系统字段/);
+  assert.match(session.prompts[1].text, /每个 exposed_to_user=true 的 param 都必须出现在 schema/);
+  assert.match(session.prompts[1].text, /树\/页签\/分段器\/单选组\/日期区间/);
   assert.equal(session.prompts[1].options.streamingBehavior, "followUp");
 });
 

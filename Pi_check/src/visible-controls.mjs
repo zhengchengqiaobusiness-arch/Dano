@@ -21,6 +21,9 @@ export function projectVisibleControlSnapshot(event) {
     count: controls.length,
     controls: controls.map((item) => {
       const row = item && typeof item === "object" ? item : {};
+      const options = Array.isArray(row.options)
+        ? row.options.map((option) => compact(option)).filter(Boolean).slice(0, 24)
+        : [];
       return {
         region: String(row.region || ""),
         name: String(row.name || ""),
@@ -30,12 +33,15 @@ export function projectVisibleControlSnapshot(event) {
         required_mark: Boolean(row.required_mark),
         readonly: Boolean(row.readonly),
         disabled: Boolean(row.disabled),
+        range: Boolean(row.range),
+        options,
       };
     }),
   };
 }
 
 export function collectVisibleControlsInPage() {
+  const compactText = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 80);
   const filterRoot =
     ".search-form, .ant-pro-table-search, .el-form--inline, .filter-container, .table-search, .vxe-grid--form-wrapper, [class*='search-form'], [class*='table-search'], [class*='filter-bar'], [class*='search-bar'], [class*='filter-form'], [class*='query-form']";
   const expandRe = /^(展开|展开筛选|高级搜索|高级|更多筛选|Expand|Advanced)$/i;
@@ -73,9 +79,12 @@ export function collectVisibleControlsInPage() {
     }
     return false;
   };
+  const inSidebar = (node) => Boolean(
+    node.closest?.("aside, .el-aside, .ant-layout-sider, [class*='sidebar'], [class*='sider']"),
+  );
   const regionOf = (node) => {
     if (node.closest?.("table, .el-table, .ant-table, .vxe-table, tbody, thead")) return "table";
-    return inFilter(node) ? "filter" : "form";
+    return (inFilter(node) || inSidebar(node)) ? "filter" : "form";
   };
   const firstInput = (node) => node.querySelector?.("input, textarea, select");
   const widgetLocked = (root, input, kind) => {
@@ -105,6 +114,48 @@ export function collectVisibleControlsInPage() {
     }
     return "";
   };
+  const nearbyHeading = (node) => {
+    let current = node;
+    for (let depth = 0; depth < 4 && current; depth += 1) {
+      const prev = current.previousElementSibling;
+      if (prev) {
+        const text = textOf(prev);
+        if (
+          text
+          && text.length <= 24
+          && !prev.querySelector?.("input, textarea, select, [role='tree'], [role='tablist']")
+        ) {
+          return text;
+        }
+      }
+      current = current.parentElement;
+    }
+    return "";
+  };
+  const optionTexts = (node) => {
+    const out = [];
+    const seen = new Set();
+    const add = (text) => {
+      const value = compactText(text);
+      if (!value || seen.has(value) || value.length > 24) return;
+      seen.add(value);
+      out.push(value);
+    };
+    for (const item of node.querySelectorAll?.(
+      "[role='treeitem'], [role='tab'], [role='radio'], .el-radio-button, .el-radio, .el-segmented__item, .ant-segmented-item, .ant-radio-wrapper, .el-tabs__item",
+    ) || []) {
+      add(item.getAttribute?.("aria-label") || textOf(item));
+    }
+    return out.slice(0, 24);
+  };
+  const dateRange = (node) => {
+    const inputs = [...(node.querySelectorAll?.("input") || [])];
+    return Boolean(
+      node.matches?.(".el-range-editor, .ant-picker-range")
+      || node.querySelector?.(".el-range-separator, .ant-picker-range, .el-range-input")
+      || inputs.length >= 2,
+    );
+  };
   const markRequired = (item, label) => (
     Boolean(
       item?.classList?.contains("is-required")
@@ -123,7 +174,11 @@ export function collectVisibleControlsInPage() {
       || node.querySelector?.(".el-date-editor, .el-range-editor, .ant-picker, input[type='date'], input[type='datetime-local'], input[type='month']")
     ) return "date";
     if (
-      node.matches?.(".el-select, .ant-select, select, [role='combobox'], .el-radio-group, .ant-radio-group, [role='radiogroup']")
+      node.matches?.("[role='tree'], .el-tree, .ant-tree, .el-tree-select")
+      || node.querySelector?.("[role='tree'], [role='treeitem']")
+    ) return "select";
+    if (
+      node.matches?.(".el-select, .ant-select, select, [role='combobox'], .el-radio-group, .ant-radio-group, [role='radiogroup'], .el-segmented, .ant-segmented, [role='tablist'], .el-tabs, .ant-tabs")
       || node.querySelector?.(".el-select, .ant-select, select, [role='combobox'], .el-radio-group, .ant-radio-group, [role='radiogroup']")
     ) return "select";
     if (node.matches?.("textarea") || node.querySelector?.("textarea")) return "textarea";
@@ -133,11 +188,37 @@ export function collectVisibleControlsInPage() {
   const seen = new Set();
   const out = [];
   const push = (row) => {
-    const key = [row.region, row.name, row.label, row.placeholder, row.control_kind].join("|");
+    const options = Array.isArray(row.options) ? row.options.map((item) => compactText(item)).filter(Boolean).slice(0, 24) : [];
+    const label = compactText(row.label) || (options.length ? options.slice(0, 4).join(" / ") : "");
+    if (!label && !row.name && !row.placeholder) return;
+    const next = { ...row, label, options };
+    const key = [next.region, next.name, next.label, next.placeholder, next.control_kind, next.range ? "range" : ""].join("|");
     if (seen.has(key)) return;
-    if (!row.label && !row.name && !row.placeholder) return;
     seen.add(key);
-    out.push(row);
+    out.push(next);
+  };
+  const describe = (node, extras = {}) => {
+    const input = firstInput(node) || (node.matches?.("input, textarea, select") ? node : null);
+    const inputs = [...(node.querySelectorAll?.("input") || [])];
+    const options = extras.options || optionTexts(node);
+    const label = extras.label || nearbyLabel(node) || nearbyHeading(node) || String(node.getAttribute?.("aria-label") || "");
+    const controlKind = extras.control_kind || detectKind(node, `${label} ${extras.placeholder || ""}`);
+    const range = controlKind === "date" && dateRange(node);
+    const placeholder = range
+      ? inputs.map((item) => item.placeholder).filter(Boolean).join(" → ") || String(input?.placeholder || extras.placeholder || "")
+      : String(input?.placeholder || node.getAttribute?.("placeholder") || extras.placeholder || "");
+    return {
+      region: extras.region || regionOf(node),
+      name: String(input?.name || input?.id || node.getAttribute?.("name") || extras.name || ""),
+      label,
+      placeholder,
+      control_kind: controlKind,
+      required_mark: markRequired(node.closest?.(".el-form-item, .ant-form-item, .form-item") || node, label),
+      readonly: widgetLocked(node, input, controlKind),
+      disabled: Boolean(input?.disabled),
+      range,
+      options,
+    };
   };
 
   for (const item of document.querySelectorAll(".el-form-item, .ant-form-item, .form-item, form label")) {
@@ -146,47 +227,37 @@ export function collectVisibleControlsInPage() {
     const label = nearbyLabel(item)
       || textOf(item.querySelector(".el-form-item__label, .ant-form-item-label"))
       || textOf(item.matches?.("label") ? item : item.querySelector("label"));
-    const input = firstInput(item);
-    const controlKind = detectKind(item, label);
-    const readonly = widgetLocked(item, input, controlKind);
-    push({
-      region: regionOf(item),
-      name: String(input?.name || input?.id || ""),
-      label,
-      placeholder: String(input?.placeholder || ""),
-      control_kind: controlKind,
-      required_mark: markRequired(item, label),
-      readonly,
-      disabled: Boolean(input?.disabled),
-    });
+    push(describe(item, { label }));
   }
 
   const widgetSelectors = [
     ".el-date-editor, .el-range-editor, .ant-picker, input[type='date'], input[type='datetime-local'], input[type='month']",
     ".el-select, .ant-select, select, [role='combobox']",
     ".el-upload, .ant-upload, .ant-upload-wrapper, input[type='file']",
-    ".el-radio-group, .ant-radio-group, .el-segmented, [role='tablist'], .el-tabs, .ant-tabs",
+    ".el-radio-group, .ant-radio-group, .el-segmented, .ant-segmented, [role='radiogroup'], [role='tablist'], .el-tabs, .ant-tabs",
   ];
   for (const selector of widgetSelectors) {
     for (const node of document.querySelectorAll(selector)) {
       if (!visible(node)) continue;
       if (node.closest?.(".el-form-item, .ant-form-item, .form-item")) continue;
-      const input = firstInput(node) || (node.matches?.("input, textarea, select") ? node : null);
-      const label = nearbyLabel(node) || String(node.getAttribute?.("aria-label") || "").replace(/\s+/g, " ").trim().slice(0, 80);
-      const placeholder = String(input?.placeholder || node.getAttribute?.("placeholder") || "");
-      const controlKind = detectKind(node, `${label} ${placeholder}`);
-      const readonly = widgetLocked(node, input, controlKind);
-      push({
-        region: regionOf(node),
-        name: String(input?.name || input?.id || node.getAttribute?.("name") || ""),
-        label,
-        placeholder,
-        control_kind: controlKind,
-        required_mark: markRequired(node.closest?.(".el-form-item, .ant-form-item") || node, label),
-        readonly,
-        disabled: Boolean(input?.disabled),
-      });
+      push(describe(node));
     }
+  }
+
+  for (const node of document.querySelectorAll("[role='tree'], .el-tree, .ant-tree")) {
+    if (!visible(node)) continue;
+    if (node.closest?.(".el-select-dropdown, .ant-select-dropdown, .el-tree-select, .ant-select")) continue;
+    const host = node.closest?.("aside, .el-aside, .ant-layout-sider, [class*='sidebar'], [class*='sider']") || node.parentElement;
+    const search = host?.querySelector?.("input[placeholder]");
+    const hostTitle = textOf(host?.querySelector?.(":scope > .title, :scope > h1, :scope > h2, :scope > h3, :scope > h4"));
+    const options = optionTexts(node);
+    push(describe(node, {
+      label: nearbyLabel(node) || nearbyHeading(node) || hostTitle || String(search?.placeholder || ""),
+      placeholder: String(search?.placeholder || ""),
+      control_kind: "select",
+      region: inSidebar(node) || inFilter(node) ? "filter" : regionOf(node),
+      options,
+    }));
   }
 
   for (const btn of document.querySelectorAll("button, .el-button, .ant-btn, a, [role='button']")) {
@@ -203,9 +274,12 @@ export function collectVisibleControlsInPage() {
       required_mark: markRequired(wrap, nearbyLabel(wrap) || label),
       readonly: widgetLocked(wrap, firstInput(wrap), "upload"),
       disabled: Boolean(btn.disabled),
+      range: false,
+      options: [],
     });
   }
 
+  const tableColumns = new Set();
   for (const input of document.querySelectorAll(".el-table input, .el-table textarea, .ant-table input, .ant-table textarea, table input, table textarea")) {
     if (!visible(input)) continue;
     const cell = input.closest("td, th");
@@ -216,16 +290,22 @@ export function collectVisibleControlsInPage() {
       ? table?.querySelector?.(`thead th:nth-child(${index + 1}), thead td:nth-child(${index + 1})`)
       : null;
     const wrap = input.closest(".el-date-editor, .el-select, .ant-picker, .ant-select") || input;
-    const controlKind = detectKind(wrap, textOf(head));
+    const label = textOf(head);
+    const controlKind = detectKind(wrap, label);
+    const columnKey = `${label}|${controlKind}|${String(input.placeholder || "")}`;
+    if (tableColumns.has(columnKey)) continue;
+    tableColumns.add(columnKey);
     push({
       region: "table",
       name: String(input.name || input.id || ""),
-      label: textOf(head),
+      label,
       placeholder: String(input.placeholder || ""),
       control_kind: controlKind,
       required_mark: false,
       readonly: widgetLocked(wrap, input, controlKind),
       disabled: Boolean(input.disabled),
+      range: controlKind === "date" && dateRange(wrap),
+      options: [],
     });
   }
 

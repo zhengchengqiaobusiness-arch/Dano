@@ -193,7 +193,7 @@ export function describePiTools() {
     {
       name: "list_recording_index",
       label: "证据索引",
-      description: "按序号列出 interaction、xhr/fetch、network_response、visible_control、截图和页面跳转。visible_control 是当前页看得见的筛选/表单/表格控件事实，含日期、下拉、上传。只投影已有字段，不分类、不判断能力。",
+      description: "按序号列出 interaction、xhr/fetch、network_response、visible_control、截图和页面跳转。visible_control 是当前页看得见的筛选/表单/表格控件事实，含日期区间、下拉、树、页签、分段器、上传。只投影已有字段，不分类、不判断能力。",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
     {

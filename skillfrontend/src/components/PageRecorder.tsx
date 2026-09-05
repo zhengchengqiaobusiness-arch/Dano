@@ -390,6 +390,33 @@ function nestedSchemaPath(parentPath: string, key: string, rawPath: unknown) {
   return `${parentPath}.${explicit}`;
 }
 
+function callerFieldKeys(param: { key?: string; path?: string }) {
+  return [
+    safeString(param.key),
+    normalizedFieldPath(param.path),
+    pathWithoutLocation(param.path),
+  ].filter(Boolean);
+}
+
+function schemaItemLabels(schema: Record<string, unknown>) {
+  return Object.entries(asRecord(asRecord(schema.items).properties)).map(([key, raw]) => {
+    const row = asRecord(raw);
+    return safeString(row.title || row.label) || key;
+  }).filter(Boolean);
+}
+
+function coveredByShownPath(param: { key?: string; path?: string }, shown: Set<string>) {
+  const keys = callerFieldKeys(param);
+  if (keys.some((key) => shown.has(key))) return true;
+  const path = pathWithoutLocation(param.path);
+  if (!path) return false;
+  return [...shown].some((item) => (
+    path === item
+    || path.startsWith(`${item}.`)
+    || path.startsWith(`${item}[`)
+  ));
+}
+
 function paramSourceTagColor(param: FlowParam) {
   const kind = param.source_kind || "";
   if (["api_option", "page_enum", "static_enum", "manual_enum", "form_option"].includes(kind)) {
@@ -2765,8 +2792,9 @@ export default function PageRecorder({
         const schema = asRecord(rawSchema);
         const flowPath = nestedSchemaPath(parentPath, key, schema["x-flow-path"]);
         const itemSchema = asRecord(schema.items);
-        if (Object.keys(asRecord(itemSchema.properties)).length) {
-          collectSchemaFields(itemSchema, `${flowPath}[0]`);
+        const itemProperties = asRecord(itemSchema.properties);
+        if (schema.type === "array" || (Object.keys(itemProperties).length && !Object.keys(asRecord(schema.properties)).length)) {
+          schemaFields.push({ key, path: flowPath, required: required.has(key), schema });
           return;
         }
         if (Object.keys(asRecord(schema.properties)).length) {
@@ -2779,7 +2807,7 @@ export default function PageRecorder({
 
     collectSchemaFields(inputSchema);
 
-    return schemaFields.flatMap(({ key, path: flowPath, required, schema }) => {
+    const fromSchema = schemaFields.flatMap(({ key, path: flowPath, required, schema }) => {
       const optionSource = asRecord(schema["x-dano-option-source"]);
       const externalSource = asRecord(schema["x-dano-external-source"]);
       const sourceCapability = safeString(schema["x-dano-source-capability"]);
@@ -2788,10 +2816,12 @@ export default function PageRecorder({
       const snapshot = schema["x-options-snapshot"];
       const enumValues = schema.enum;
       let type = safeString(schema.type) || "string";
+      const itemLabels = schemaItemLabels(schema);
       if (businessType === "single_enum") type = "enum";
       else if (businessType === "multi_enum") type = "list-enum";
       else if (format === "date") type = "date";
       else if (format === "date-time") type = "datetime";
+      else if (itemLabels.length && type === "string") type = "array";
       if (looksPaginationField({ key, path: flowPath })) return [];
       const normalizedSchemaPath = normalizedFieldPath(flowPath);
       const schemaPathWithoutLocation = pathWithoutLocation(flowPath);
@@ -2823,6 +2853,7 @@ export default function PageRecorder({
         const sourceKind = hasOptionSource
           ? "api_option"
           : matched.param.source_kind || schemaSourceKind;
+        const matchedSource = hasOptionSource ? optionSource : asRecord(matched.param.source);
         return [{
           step: matched.step,
           param: {
@@ -2834,7 +2865,7 @@ export default function PageRecorder({
               ? matched.param.type
               : type || matched.param.type,
             source_kind: sourceKind,
-            source: hasOptionSource ? optionSource : matched.param.source,
+            source: itemLabels.length ? { ...matchedSource, item_labels: itemLabels } : matchedSource,
             required: typeof matched.param.required === "boolean" ? matched.param.required : required,
             exposed_to_user: true,
           } satisfies FlowParam,
@@ -2848,7 +2879,7 @@ export default function PageRecorder({
           label: safeString(schema.label || schema.title) || key,
           type,
           source_kind: schemaSourceKind || "user_input",
-          source: optionSource,
+          source: itemLabels.length ? { ...optionSource, item_labels: itemLabels } : optionSource,
           exposed_to_user: true,
           required,
           reason: safeString(schema.description),
@@ -2858,6 +2889,13 @@ export default function PageRecorder({
         } satisfies FlowParam,
       }];
     });
+    const shown = new Set(fromSchema.flatMap(({ param }) => callerFieldKeys(param)));
+    const extras = stepParams.filter(({ param }) => (
+      paramIsCallerInput(param)
+      && !looksPaginationField(param)
+      && !coveredByShownPath(param, shown)
+    ));
+    return [...fromSchema, ...extras];
   }
 
   function enumPreview(param: FlowParam) {
@@ -2912,6 +2950,13 @@ export default function PageRecorder({
                     </Space>
                     {param.source_kind === "constant" && fixedValue !== undefined ? (
                       <div><Text type="secondary">{constantValueCaption(param)}：{safeString(fixedValue)}</Text></div>
+                    ) : null}
+                    {param.type === "array" && Array.isArray(asRecord(param.source).item_labels) && (asRecord(param.source).item_labels as unknown[]).length ? (
+                      <div>
+                        <Text type="secondary">
+                          行内调用方：{(asRecord(param.source).item_labels as unknown[]).map((item) => String(item)).join("、")}
+                        </Text>
+                      </div>
                     ) : null}
                     {paramHandlingLines(param).map((line) => (
                       <div key={line}><Text type="secondary">{line}</Text></div>

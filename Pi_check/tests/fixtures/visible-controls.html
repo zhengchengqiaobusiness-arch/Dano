@@ -45,6 +45,39 @@
       <input placeholder="请选择日期" />
     </div>
   </div>
+  <aside class="el-aside">
+    <div class="title">组织机构</div>
+    <input placeholder="请输入部门名称" />
+    <div role="tree" class="el-tree">
+      <div role="treeitem">研发部门</div>
+      <div role="treeitem">测试部门</div>
+    </div>
+  </aside>
+  <div class="page-filters">
+    <div class="el-radio-group" role="radiogroup">
+      <label class="el-radio-button">日报</label>
+      <label class="el-radio-button">周报</label>
+      <label class="el-radio-button">月报</label>
+    </div>
+    <span class="label">统计周期</span>
+    <div class="el-date-editor el-range-editor">
+      <input placeholder="开始日期" />
+      <input placeholder="结束日期" />
+    </div>
+  </div>
+  <table class="el-table">
+    <thead><tr><th>工作内容</th><th>完成进度</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><input placeholder="请输入工作内容" /></td>
+        <td><input value="60" /></td>
+      </tr>
+      <tr>
+        <td><input placeholder="请输入工作内容" /></td>
+        <td><input value="30" /></td>
+      </tr>
+    </tbody>
+  </table>
   <script>
     document.getElementById("expand").addEventListener("click", () => {
       document.getElementById("extra-filters").style.display = "block";

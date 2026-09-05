@@ -35,14 +35,29 @@ test("可见控件只投影已有字段，不判断能力", () => {
         { region: "form", name: "title", label: "标题", placeholder: "请输入标题", control_kind: "input" },
         { region: "form", name: "", label: "开始日期", control_kind: "date", required_mark: true },
         { region: "form", name: "", label: "附件", control_kind: "upload" },
+        {
+          region: "filter",
+          label: "组织机构",
+          control_kind: "select",
+          options: ["研发部门", "测试部门"],
+        },
+        {
+          region: "filter",
+          label: "统计周期",
+          control_kind: "date",
+          range: true,
+          placeholder: "开始日期 → 结束日期",
+        },
       ],
     },
   });
   assert.equal(snapshot.kind, "visible_control");
-  assert.equal(snapshot.count, 3);
+  assert.equal(snapshot.count, 5);
   assert.equal(snapshot.controls[1].control_kind, "date");
   assert.equal(snapshot.controls[1].required_mark, true);
-  assert.equal(summarizeVisibleControls(snapshot.controls), "标题、开始日期、附件");
+  assert.deepEqual(snapshot.controls[3].options, ["研发部门", "测试部门"]);
+  assert.equal(snapshot.controls[4].range, true);
+  assert.equal(summarizeVisibleControls(snapshot.controls), "标题、开始日期、附件、组织机构、统计周期");
   assert.ok(!JSON.stringify(snapshot).includes("capability"));
 });
 
@@ -70,6 +85,20 @@ test("采集日期、下拉、上传和折叠筛选，日期只读输入不当�
   assert.equal(find("开始日期", "date")?.readonly, false);
   assert.ok(controls.some((item) => item.control_kind === "upload"));
   assert.ok(controls.some((item) => item.control_kind === "date" && (item.placeholder === "请选择日期" || item.label === "截止日期")));
+  const tree = controls.find((item) => item.control_kind === "select" && (item.label === "组织机构" || item.placeholder === "请输入部门名称" || (item.options || []).includes("研发部门")));
+  assert.ok(tree, "sidebar tree should be collected as a select fact");
+  assert.equal(tree.region, "filter");
+  assert.ok((tree.options || []).includes("测试部门"));
+  const tabs = controls.find((item) => item.control_kind === "select" && (item.options || []).includes("日报") && (item.options || []).includes("周报"));
+  assert.ok(tabs, "page-level radio/tab group should be collected even without a form-item");
+  const period = controls.find((item) => item.control_kind === "date" && (item.label === "统计周期" || item.range));
+  assert.ok(period, "visible date range should be collected as one date control");
+  assert.equal(period.range, true);
+  assert.match(String(period.placeholder || ""), /开始日期/);
+  const contents = controls.filter((item) => item.region === "table" && item.label === "工作内容");
+  const progresses = controls.filter((item) => item.region === "table" && item.label === "完成进度");
+  assert.equal(contents.length, 1);
+  assert.equal(progresses.length, 1);
   assert.ok(!JSON.stringify(controls).includes("capability"));
   assert.ok(!JSON.stringify(controls).includes("work-report"));
 });
