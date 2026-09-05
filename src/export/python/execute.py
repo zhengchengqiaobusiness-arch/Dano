@@ -278,6 +278,14 @@ def coerce(value: Any, value_type: str, field_path: str, field: dict[str, Any] |
     if value is None:
         return value
     value = apply_candidate(field or {}, value)
+    date_clocks = (field or {}).get("dateClocks") or []
+    if value_type == "array" and isinstance(value, list) and len(date_clocks) == len(value):
+        return [
+            normalize_date_string(item, date_clocks[index])
+            if isinstance(item, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2})?", item.strip())
+            else item
+            for index, item in enumerate(value)
+        ]
     if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2})?", value.strip()):
         if value_type in {"integer", "number"}:
             return date_to_millis(value)

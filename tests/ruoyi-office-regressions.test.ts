@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import type { CapabilityContract, EvidenceEvent, NetworkEvidence, UiEvidence } from "../src/domain.js";
 import { BrowserRecorder, recordingStopReadiness } from "../src/browser/recorder.js";
 import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
@@ -363,6 +363,582 @@ test("submit-form continues through a newly opened confirmation dialog and recor
     assert.equal(submitted.submitStages, 2, JSON.stringify(submitted));
     assert.match(submittedOpinion, /^样例-/);
     assert.ok(Date.now() - startedAt < 9_000, `nested submit should not wait for a request timeout: ${Date.now() - startedAt}ms`);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("generic resource chooser with several filters selects a real radio row and returns to the owning form", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "generic-resource-chooser-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body>
+      <form class="arco-form">
+        <div class="arco-form-item">
+          <label class="arco-form-item-label">车辆</label>
+          <div class="arco-input-wrapper"><input id="vehicle" readonly placeholder="请选择车辆"></div>
+        </div>
+        <button type="button">搜索</button>
+      </form>
+      <div id="picker" class="arco-modal" role="dialog" style="display:none;position:fixed;inset:20px;background:white">
+        <div class="arco-modal-title">选择车辆</div>
+        <div class="arco-form-item"><label class="arco-form-item-label">车牌号</label><input placeholder="请输入车牌号"></div>
+        <div class="arco-form-item"><label class="arco-form-item-label">品牌型号</label><input placeholder="请输入品牌型号"></div>
+        <div class="arco-form-item"><label class="arco-form-item-label">车型</label><input role="combobox" readonly placeholder="请选择车型"></div>
+        <div class="arco-form-item"><label class="arco-form-item-label">车辆分类</label><input role="combobox" readonly placeholder="请选择车辆分类"></div>
+        <table><tbody><tr><td><input id="vehicle-radio" type="radio" name="vehicle-row" value="鲁AB13555"></td><td>鲁AB13555</td><td>腾势D9</td></tr></tbody></table>
+        <button id="confirm" type="button">确 认</button>
+      </div>
+      <script>
+        const field = document.getElementById("vehicle");
+        const picker = document.getElementById("picker");
+        field.addEventListener("click", () => { picker.style.display = "block"; });
+        document.getElementById("confirm").addEventListener("click", () => {
+          const selected = document.querySelector('input[name="vehicle-row"]:checked');
+          if (!selected) return;
+          field.value = selected.value;
+          field.dispatchEvent(new Event("input", { bubbles: true }));
+          field.dispatchEvent(new Event("change", { bubbles: true }));
+          picker.style.display = "none";
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "generic-resource-chooser", undefined, ["query"], true);
+    const before: any = await recorder.control({ action: "snapshot" });
+    assert.equal(before.formFields.find((field: any) => field.label === "车辆")?.kind, "picker", JSON.stringify(before.formFields));
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.scope, "page", JSON.stringify(result));
+    assert.equal(result.formFields.find((field: any) => field.label === "车辆")?.value, "鲁AB13555", JSON.stringify(result.formFields));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("complete field coverage cannot be bypassed with direct single-field actions", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "whole-form-enforcement-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body>
+      <form class="el-form">
+        <div class="el-form-item"><label class="el-form-item__label">单据编号</label><input name="billCode" placeholder="请输入单据编号"></div>
+        <div class="el-form-item"><label class="el-form-item__label">申请人</label><input name="applicant" placeholder="请输入申请人"></div>
+        <button type="button">搜索</button>
+      </form>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "whole-form-enforcement", undefined, ["query"], true);
+    const direct: any = await recorder.control({ action: "fill", selector: "placeholder=请输入单据编号", value: "ONLY-ONE" });
+    assert.equal(direct.ok, false, JSON.stringify(direct));
+    assert.equal(direct.requiresWholeForm, true, JSON.stringify(direct));
+    const afterDirect: any = await recorder.control({ action: "snapshot" });
+    assert.equal(afterDirect.formFields.find((field: any) => field.label === "单据编号")?.value, "", JSON.stringify(afterDirect.formFields));
+    const exercised: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(exercised.ok, true, JSON.stringify(exercised));
+    assert.equal(exercised.formFields.every((field: any) => field.skip || field.disabled || field.filled), true, JSON.stringify(exercised.formFields));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("menu controls use their own accessible name instead of the preceding menu item label", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "menu-selector-regression-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body><nav role="menu">
+      <a role="menuitem" href="/first">第一页</a>
+      <a role="menuitem" href="/second">第二页</a>
+      <a role="menuitem" href="/third">第三页</a>
+      <div style="display:none"><a role="menuitem" href="/collapsed">折叠页</a></div>
+    </nav>
+    <header><input name="globalSearch" placeholder="全局搜索"><button type="button">搜索</button></header>
+    <main><div class="table-toolbar"><button type="button">新增</button></div></main>
+    <div class="pager-footer"><span>共 2 条记录</span><div role="combobox" aria-label="共 2 条记录">20条/页</div></div>
+    <div data-slot="form-item"><label data-slot="form-label" for="category-control">系统分类</label>
+      <div data-slot="form-control" class="ant-select" name="category"><div class="ant-select-selector">
+        <input id="category-control" role="combobox" readonly><span class="ant-select-selection-placeholder">请选择系统分类</span>
+      </div></div>
+    </div>
+    <div data-slot="form-item"><label data-slot="form-label" for="bill-control">单据编号</label>
+      <div data-slot="form-control"><input id="bill-control" name="billCode" placeholder="请输入单据编号"><button type="button" class="clear-icon"></button></div>
+    </div>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "menu-selectors");
+    const snapshot: any = await recorder.control({ action: "snapshot" });
+    const menu = snapshot.controls.filter((control: any) => control.role === "menuitem");
+    assert.deepEqual(menu.map((control: any) => control.selector), [
+      'role=menuitem[name="第一页"]',
+      'role=menuitem[name="第二页"]',
+      'role=menuitem[name="第三页"]'
+    ]);
+    assert.deepEqual(snapshot.navigationInventory.map((item: any) => item.label), ["第一页", "第二页", "第三页", "折叠页"]);
+    assert.equal(snapshot.formFields.some((field: any) => /条记录|条\/页/.test(`${field.label} ${field.value}`)), false, JSON.stringify(snapshot.formFields));
+    assert.equal(snapshot.formFields.some((field: any) => field.name === "globalSearch" || field.label === "全局搜索"), false, JSON.stringify(snapshot.formFields));
+    assert.equal(snapshot.formFields.some((field: any) => field.label === "系统分类" && field.kind === "select"), true, JSON.stringify(snapshot.formFields));
+    assert.equal(snapshot.formFields.filter((field: any) => /单据编号/.test(field.label)).length, 1, JSON.stringify(snapshot.formFields));
+    assert.equal(snapshot.availableOperations.includes("query"), false, JSON.stringify(snapshot.operationInventory));
+    assert.equal(snapshot.availableOperations.includes("create"), true, JSON.stringify(snapshot.operationInventory));
+    assert.equal(snapshot.operationInventory.some((item: any) => item.operation === "create" && item.label === "新增"), true, JSON.stringify(snapshot.operationInventory));
+    await assert.rejects(() => recorder.control({ action: "submit-form" }), /No submit\/search button/);
+    await recorder.control({ action: "fill", selector: "placeholder=请输入单据编号", value: "BILL-1" });
+    const afterFill: any = await recorder.control({ action: "snapshot" });
+    assert.equal(afterFill.formFields.some((field: any) => field.label === "单据编号" && field.name === "billCode"), true, JSON.stringify(afterFill.formFields));
+    assert.equal(afterFill.formFields.some((field: any) => field.label === "请输入单据编号"), false, JSON.stringify(afterFill.formFields));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("nested component form items do not duplicate the same physical date-range controls", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "nested-form-item-regression-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body><form class="ant-form">
+      <div class="ant-form-item">
+        <div class="ant-form-item-label"><label>发起时间</label></div>
+        <div class="ant-form-item-control">
+          <div data-slot="form-item">
+            <div class="ant-picker ant-picker-range" data-field="createTime">
+              <input id="generated-start" placeholder="开始时间">
+              <input id="generated-end" placeholder="结束时间">
+            </div>
+          </div>
+        </div>
+      </div>
+      <button type="button">搜索</button>
+    </form></body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "nested-form-items");
+    const snapshot: any = await recorder.control({ action: "snapshot" });
+    const dates = snapshot.formFields.filter((field: any) => field.kind === "date");
+    assert.equal(dates.length, 2, JSON.stringify(snapshot.formFields));
+    assert.deepEqual(dates.map((field: any) => field.label), ["开始时间", "结束时间"]);
+    assert.deepEqual(dates.map((field: any) => field.rangeIndex), [0, 1]);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("complete page coverage follows grounded menu URLs and blocks stop until every discovered page is visited", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "page-coverage-regression-"));
+  const server = http.createServer((request, response) => {
+    if ((request.url || "").startsWith("/api/")) {
+      response.setHeader("content-type", "application/json; charset=utf-8");
+      response.end('{"code":0,"data":{"list":[],"total":0}}');
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    const current = request.url === "/second" ? "第二页" : "第一页";
+    const pageKey = request.url === "/second" ? "second" : "first";
+    response.end(`<!doctype html><html><head><title>${current}</title></head><body>
+      <nav role="menu">
+        <a role="menuitem" href="/">第一页</a>
+        <a role="menuitem" href="/second">第二页</a>
+      </nav>
+      <main><h1>${current}</h1><button id="search">搜索</button></main>
+      <script>document.getElementById("search").addEventListener("click", () => fetch("/api/${pageKey}/page?pageNo=1"));</script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "page-coverage", undefined, ["query"], false, true);
+    const first: any = await recorder.control({ action: "snapshot" });
+    assert.deepEqual(first.navigationCoverage, {
+      discovered: 2,
+      visited: 1,
+      remaining: 1,
+      unvisited: [{ label: "第二页", selector: 'role=menuitem[name="第二页"]', url: `http://127.0.0.1:${address.port}/second` }]
+    });
+    const invented: any = await recorder.control({ action: "goto", url: `http://127.0.0.1:${address.port}/invented` });
+    assert.equal(invented.ok, false, JSON.stringify(invented));
+    assert.equal(invented.requiresGroundedNavigation, true, JSON.stringify(invented));
+    assert.equal(invented.followManualSteps, false, JSON.stringify(invented));
+    assert.equal((await recorder.state() as any).url, `http://127.0.0.1:${address.port}/`);
+    const blocked: any = await recorder.stopReadiness();
+    assert.equal(blocked.ready, false, JSON.stringify(blocked));
+    assert.equal(blocked.missingPages.length, 1, JSON.stringify(blocked));
+    await recorder.control({ action: "click", selector: 'role=button[name="搜索"]' });
+    const next: any = await recorder.control({ action: "next-page" });
+    assert.equal(next.ok, true, JSON.stringify(next));
+    assert.equal(next.snapshot.title, "第二页", JSON.stringify(next));
+    assert.equal(next.navigationCoverage.remaining, 0, JSON.stringify(next));
+    const missingSecondQuery: any = await recorder.stopReadiness();
+    assert.equal(missingSecondQuery.ready, false, JSON.stringify(missingSecondQuery));
+    assert.deepEqual(missingSecondQuery.missingPageOperations.map((item: any) => ({ url: item.url, operations: item.operations })), [
+      { url: `http://127.0.0.1:${address.port}/second`, operations: ["query"] }
+    ]);
+    await recorder.control({ action: "click", selector: 'role=button[name="搜索"]' });
+    const ready: any = await recorder.stopReadiness();
+    assert.equal(ready.ready, true, JSON.stringify(ready));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("a stable page snapshot clears a transient query control instead of trapping page coverage", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "transient-query-regression-"));
+  const server = http.createServer((request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body>
+      <nav role="menu"><a role="menuitem" href="/">首页</a><a role="menuitem" href="/second">第二页</a></nav>
+      <main><button id="search">搜索</button><button id="hide" onclick="document.getElementById('search').remove()">切换视图</button></main>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "transient-query", undefined, ["query"], false, true);
+    const first: any = await recorder.control({ action: "snapshot" });
+    assert.equal(first.availableOperations.includes("query"), true, JSON.stringify(first.operationInventory));
+    await recorder.control({ action: "click", selector: "#hide" });
+    const stable: any = await recorder.control({ action: "snapshot" });
+    assert.equal(stable.availableOperations.includes("query"), false, JSON.stringify(stable.operationInventory));
+    const next: any = await recorder.control({ action: "next-page" });
+    assert.equal(next.ok, true, JSON.stringify(next));
+    assert.match(next.target.url, /\/second$/);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("recording start reloads one stuck application splash instead of exposing it as a clickable business page", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "startup-splash-regression-"));
+  let visits = 0;
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    visits += 1;
+    response.end(visits === 1
+      ? '<!doctype html><html><head><title>业务系统</title></head><body><div class="loading"><div class="title">业务系统加载中</div></div></body></html>'
+      : '<!doctype html><html><head><title>业务系统</title></head><body><nav><a role="menuitem" href="/list">业务列表</a></nav><main><button>搜索</button></main></body></html>');
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "startup-splash");
+    const snapshot: any = await recorder.control({ action: "snapshot" });
+    assert.deepEqual(snapshot.navigationInventory.map((item: any) => item.label), ["业务列表"]);
+    assert.match(snapshot.text, /搜索/);
+    assert.equal(snapshot.controls.some((control: any) => control.text === "业务系统加载中"), false);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("readonly controlled date ranges are selected through the real picker and reach the query request", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "controlled-date-range-"));
+  const iso = (offset: number) => {
+    const date = new Date();
+    date.setDate(date.getDate() + offset);
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  };
+  const dates = [iso(0), iso(1), iso(2), iso(3)];
+  let query = "";
+  const server = http.createServer((request, response) => {
+    if ((request.url || "").startsWith("/api/page")) {
+      query = request.url || "";
+      response.setHeader("content-type", "application/json; charset=utf-8");
+      response.end('{"code":0,"data":{"list":[],"total":0}}');
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body>
+      <form class="ant-form">
+        <div class="ant-form-item">
+          <label class="ant-form-item-label">发起时间</label>
+          <div class="ant-picker ant-picker-range">
+            <div class="ant-picker-input"><input id="start" readonly placeholder="开始时间"></div>
+            <div class="ant-picker-input"><input id="end" readonly placeholder="结束时间"></div>
+          </div>
+        </div>
+        <button id="search" type="button">搜索</button>
+      </form>
+      <div id="calendar" class="ant-picker-dropdown" style="display:none;position:fixed;inset:40px;background:white">
+        <table><tbody>${dates.map(value => `<tr><td class="ant-picker-cell" title="${value}"><div class="ant-picker-cell-inner">${Number(value.slice(-2))}</div></td></tr>`).join("")}</tbody></table>
+        <button id="calendar-ok" type="button">确 定</button>
+      </div>
+      <script>
+        const state = { start: "", end: "" };
+        let active = "start";
+        let pending = "";
+        const calendar = document.getElementById("calendar");
+        const start = document.getElementById("start");
+        const end = document.getElementById("end");
+        document.querySelector(".ant-picker-range").addEventListener("click", event => {
+          active = event.target.id === "end" ? "end" : "start";
+          calendar.style.display = "block";
+        });
+        calendar.addEventListener("click", event => {
+          const cell = event.target.closest("td[title]");
+          if (!cell) return;
+          pending = cell.title;
+        });
+        document.getElementById("calendar-ok").addEventListener("click", () => {
+          state[active] = pending;
+          document.getElementById(active).value = pending;
+          calendar.style.display = "none";
+        });
+        document.getElementById("search").addEventListener("click", () => {
+          if (!state.start || !state.end) { start.value = state.start; end.value = state.end; }
+          fetch("/api/page?start=" + encodeURIComponent(state.start) + "&end=" + encodeURIComponent(state.end));
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "controlled-date-range", undefined, ["query"], true);
+    const exercised: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(exercised.ok, true, JSON.stringify(exercised));
+    const submitted: any = await recorder.control({ action: "submit-form" });
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    assert.match(query, /start=\d{4}-\d{2}-\d{2}&end=\d{4}-\d{2}-\d{2}/, query);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("business account configuration with login-name and password fields is not treated as an application login page", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-account-login-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>邮箱账号设置</title></head><body>
+      <main><h1>邮箱账号设置</h1><form class="ant-form">
+        <label>邮箱地址<input name="email"></label>
+        <label>登录名<input name="loginName"></label>
+        <label>授权码/密码<input name="password" type="password"></label>
+        <button type="button">保存</button>
+      </form></main>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/mail/account`, "mail-account");
+    assert.equal((await recorder.loginPageState()).detected, false);
+    const snapshot: any = await recorder.control({ action: "snapshot" });
+    assert.equal(snapshot.loginRequired, undefined, JSON.stringify(snapshot));
+    assert.equal(snapshot.formFields.some((field: any) => /授权码|密码/.test(String(field.label || ""))), true, JSON.stringify(snapshot.formFields));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("HTTP 200 business code 401 pauses for login immediately without consuming three repair attempts", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-login-expired-"));
+  let queryCount = 0;
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/query" && request.method === "POST") {
+      queryCount += 1;
+      response.setHeader("content-type", "application/json; charset=utf-8");
+      response.end(JSON.stringify({ code: 401, msg: "账号未登录" }));
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body><form>
+      <div class="form-item"><label>关键词</label><input name="keyword" value="合同"></div>
+      <button type="button" onclick="fetch('/api/query',{method:'POST',headers:{'content-type':'application/json'},body:'{}'})">搜索</button>
+    </form></body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "business-login-expired");
+    const result: any = await recorder.control({ action: "submit-form" });
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.stopped, true, JSON.stringify(result));
+    assert.equal(result.loginRequired, true, JSON.stringify(result));
+    assert.equal(result.automaticAttempts, 1, JSON.stringify(result));
+    assert.match(result.reason, /登录状态失效/);
+    assert.equal(queryCount, 1);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("a direct business click also pauses immediately when its response says login expired", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "click-login-expired-"));
+  let requestCount = 0;
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/action") {
+      requestCount += 1;
+      response.setHeader("content-type", "application/json; charset=utf-8");
+      response.end(JSON.stringify({ code: "401", message: "登录已过期" }));
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body><main>
+      <button type="button" onclick="fetch('/api/action')">办理</button>
+    </main></body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "click-login-expired");
+    const result: any = await recorder.control({ action: "click", selector: 'role=button[name="办理"]' });
+    const recorded = await readFile(path.join(temporary, "data", "recordings", recorder.activeSession()!.id, "events.jsonl"), "utf8");
+    assert.equal(requestCount, 1);
+    assert.equal(result.stopped, true, JSON.stringify({ result, recorded }));
+    assert.equal(result.loginRequired, true, JSON.stringify(result));
+    assert.match(result.reason, /登录状态失效/);
   } finally {
     if (recorder.isActive()) await recorder.stop().catch(() => {});
     await new Promise<void>(resolve => server.close(() => resolve()));

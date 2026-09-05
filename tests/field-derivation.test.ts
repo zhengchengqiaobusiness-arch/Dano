@@ -43,7 +43,7 @@ test("sameValue does not treat arbitrary text as boolean true", () => {
   assert.equal(sameValue(3, "3"), true);
 });
 
-test("write fields get a unique origin rule instead of a frozen sample", () => {
+test("write fields use evidenced derivations and preserve otherwise-unmatched system values", () => {
   const create = buildCapabilityCandidates(events()).find(item => item.transport.pathTemplate.includes("/order/create"))!;
   const unit = create.inputForm.find(field => field.name === "unitName")!;
   const amount = create.inputForm.find(field => field.name === "amount")!;
@@ -55,7 +55,8 @@ test("write fields get a unique origin rule instead of a frozen sample", () => {
   assert.match(unit.defaultRule || "", /^from:.+\.unitName\|via:productId$/);
   assert.equal(unit.source, "binding");
   assert.equal(amount.defaultRule, "computed:count * productPrice");
-  assert.equal(requestId.defaultRule, "uuid");
+  assert.equal(requestId.source, "system");
+  assert.equal(requestId.defaultRule, "literal:550e8400-e29b-41d4-a716-446655440000");
   assert.equal(token.defaultRule, undefined);
   assert.doesNotMatch(unit.sourceDetail || "", /录制成功请求写入/);
   assert.doesNotMatch(amount.sourceDetail || "", /literal:20|写入 20/);
@@ -115,7 +116,8 @@ test("the same value in two queries is not a unique from rule", () => {
   }])).find(item => item.transport.pathTemplate.includes("/order/create"))!;
   const unit = create.inputForm.find(field => field.name === "unitName")!;
   assert.equal(unit.defaultRule?.startsWith("from:") ?? false, false);
-  assert.match(unit.sourceDetail || "", /不能把录制样本当成固定值/);
+  assert.equal(unit.source, "system");
+  assert.equal(unit.defaultRule, "literal:盒");
 });
 
 test("a shared display value across lookup rows still binds via the selected id", () => {
@@ -179,7 +181,7 @@ test("create does not bind brought-out fields from the page list of existing row
   assert.doesNotMatch(amount.defaultRule || "", /from:/);
 });
 
-test("an overwritten editable number stays caller when no lookup uniquely explains it", () => {
+test("an unobserved number stays system-owned when no lookup uniquely explains it", () => {
   const recorded = events().map(event => {
     if (event.id === "ui-form" && event.kind === "ui") {
       return {
@@ -202,9 +204,9 @@ test("an overwritten editable number stays caller when no lookup uniquely explai
   });
   const create = buildCapabilityCandidates(recorded).find(item => item.transport.pathTemplate.includes("/order/create"))!;
   const price = create.inputForm.find(field => field.name === "productPrice")!;
-  assert.equal(price.source, "caller");
-  assert.equal(price.defaultRule, undefined);
-  assert.match(price.sourceDetail || "", /调用方提供/);
+  assert.equal(price.source, "system");
+  assert.equal(price.defaultRule, "literal:1");
+  assert.match(price.sourceDetail || "", /系统执行时原样补齐/);
 });
 
 test("single-sample zero and one values use UI meaning, joins, and business formulas instead of coincidences", () => {
@@ -325,4 +327,87 @@ test("semantic UI labels derive a verified amount formula when request keys are 
   assert.equal(create.inputForm.find(field => field.name === "q")?.source, "caller");
   assert.equal(create.inputForm.find(field => field.name === "p")?.source, "caller");
   assert.equal(create.inputForm.find(field => field.name === "a")?.defaultRule, "computed:q * p");
+});
+
+test("unmatched write fields preserve the successful request value as system input", () => {
+  const recorded: EvidenceEvent[] = [{
+    id: "ui-work-report", kind: "ui", sessionId: "s", at: "2026-09-05T01:51:10.000Z",
+    pageUrl: "https://example.test/work-report/info", eventType: "input",
+    form: [
+      { name: "title", label: "标题", type: "text", value: "1" },
+      { name: "todayContent", label: "工作总结", type: "textarea", value: "1" }
+    ]
+  }, {
+    id: "ui-submit", kind: "ui", sessionId: "s", at: "2026-09-05T01:51:11.000Z",
+    pageUrl: "https://example.test/work-report/info", eventType: "click", text: "确认提交", label: "确认提交"
+  }, {
+    id: "net-submit", kind: "network", sessionId: "s", at: "2026-09-05T01:51:12.119Z",
+    correlatedUiEvidenceId: "ui-submit",
+    request: {
+      method: "POST", url: "https://example.test/admin-api/oa/work-report/submit", resourceType: "xhr", headers: {}, query: {},
+      body: {
+        creator: "1",
+        attachments: [],
+        title: "1",
+        todayContent: "1",
+        items: [{ content: "1", _X_ROW_KEY: "row_272", sort: 0 }],
+        startUserSelectAssignees: {}
+      }
+    },
+    response: { status: 200, headers: {}, body: { code: 0, data: 17, msg: "" } }
+  }];
+
+  const create = buildCapabilityCandidates(recorded).find(item => item.transport.pathTemplate.endsWith("/work-report/submit"))!;
+  const byPath = (path: string) => create.inputForm.find(field => field.path === path)!;
+
+  assert.equal(byPath("$.title").source, "caller");
+  assert.equal(byPath("$.todayContent").source, "caller");
+  for (const [path, rule] of [
+    ["$.startUserSelectAssignees", "literal:{}"],
+    ["$.creator", "literal:\"1\""],
+    ["$.attachments", "literal:[]"],
+    ["$.items[*]._X_ROW_KEY", "literal:row_272"],
+    ["$.items[*].sort", "literal:0"]
+  ] as const) {
+    const field = byPath(path);
+    assert.equal(field.source, "system", `${path}: ${JSON.stringify(field)}`);
+    assert.equal(field.systemHandled, true, `${path}: ${JSON.stringify(field)}`);
+    assert.equal(field.defaultRule, rule, `${path}: ${JSON.stringify(field)}`);
+  }
+});
+
+test("an unrelated detail response cannot become a write-field source by equal sample values", () => {
+  const recorded: EvidenceEvent[] = [{
+    id: "ui-open-submit", kind: "ui", sessionId: "s", at: "2026-09-05T01:51:10.000Z",
+    pageUrl: "https://example.test/work-report/info", eventType: "click", text: "提交", label: "提交", tag: "button", role: "button"
+  }, {
+    id: "net-approval-detail", kind: "network", sessionId: "s", at: "2026-09-05T01:51:10.500Z",
+    correlatedUiEvidenceId: "ui-open-submit",
+    request: {
+      method: "GET", url: "https://example.test/admin-api/bpm/process-instance/get-approval-detail", resourceType: "xhr", headers: {}, query: {}
+    },
+    response: {
+      status: 200, headers: {},
+      body: { code: 0, data: { status: -1, activityNodes: [{ candidateUsers: [{ deptId: 103, deptName: "研发部门" }] }] } }
+    }
+  }, {
+    id: "ui-confirm", kind: "ui", sessionId: "s", at: "2026-09-05T01:51:11.000Z",
+    pageUrl: "https://example.test/work-report/info", eventType: "click", text: "确认提交", label: "确认提交", tag: "button", role: "button"
+  }, {
+    id: "net-submit", kind: "network", sessionId: "s", at: "2026-09-05T01:51:12.119Z",
+    correlatedUiEvidenceId: "ui-confirm",
+    request: {
+      method: "POST", url: "https://example.test/admin-api/oa/work-report/submit", resourceType: "xhr", headers: {}, query: {},
+      body: { deptId: 103, deptName: "研发部门", processStatus: -1 }
+    },
+    response: { status: 200, headers: {}, body: { code: 0, data: 17, msg: "" } }
+  }];
+
+  const create = buildCapabilityCandidates(recorded).find(item => item.transport.pathTemplate.endsWith("/work-report/submit"))!;
+  assert.deepEqual(create.bindings, []);
+  for (const [name, rule] of [["deptId", "literal:103"], ["deptName", "literal:研发部门"], ["processStatus", "literal:-1"]] as const) {
+    const field = create.inputForm.find(item => item.name === name)!;
+    assert.equal(field.source, "system", JSON.stringify(field));
+    assert.equal(field.defaultRule, rule, JSON.stringify(field));
+  }
 });

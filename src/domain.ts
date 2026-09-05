@@ -108,6 +108,7 @@ export interface InputFormField {
   widget: "text" | "number" | "boolean" | "select" | "multiselect" | "json" | "textarea" | "date";
   defaultRule?: string;
   dateClock?: string;
+  dateClocks?: string[];
   candidates?: CandidateRule;
 }
 
@@ -259,6 +260,10 @@ export interface RecordingSession {
   pageKeys?: string[];
   expectedOperations?: OperationKind[];
   completeFieldCoverage?: boolean;
+  completePageCoverage?: boolean;
+  discoveredPages?: string[];
+  visitedPages?: string[];
+  pageOperations?: Array<{ url: string; label: string; operations: OperationKind[] }>;
 }
 
 export type ReviewStage = "record" | "analyze" | "validate" | "export";

@@ -122,7 +122,8 @@ test("ask recording produces one query skill and keeps purchase create out of th
   assert.equal(appid?.operation, "query");
   assert.equal(chat!.inputForm.find(field => field.name === "sys_query")?.source, "caller", JSON.stringify(chat!.inputForm.map(field => `${field.name}:${field.source}:${field.label}:${field.defaultRule || ""}`)));
   assert.match(chat!.inputForm.find(field => field.name === "sys_query")?.label || "", /数据智能体|问数|聊天/);
-  assert.equal(chat!.inputForm.find(field => field.name === "wybs")?.defaultRule, "uuid");
+  assert.equal(chat!.inputForm.find(field => field.name === "wybs")?.source, "system");
+  assert.equal(chat!.inputForm.find(field => field.name === "wybs")?.defaultRule, "literal:51e561cb-49e9-4f96-817a-2d0a7e2a4360");
   assert.match(chat!.inputForm.find(field => field.name === "conversation_id")?.defaultRule || "", /from:.+conversation_id/);
   assert.match(chat!.inputForm.find(field => field.name === "appCode")?.defaultRule || "", /from:.+getappid.+/);
   assert.equal(isPrimaryCapability(chat!, catalog), true);

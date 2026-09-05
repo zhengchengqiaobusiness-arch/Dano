@@ -25,6 +25,7 @@ const UI_COMMIT = /^(保存|提交|确定|申请|save|submit|confirm|apply)$/i;
 const FORM_COMMIT = /^(?:(?:确认)?(?:保存|提交)(?:草稿|申请|审批)?|保存并提交|提交申请|确定|确认|申请|save|submit|confirm|apply)$/i;
 const BUSINESS_FAILURE = /失败|错误|异常|不能为空|不正确|无权限|未登录|登录失效|无效|拒绝|invalid|error|fail(?:ed|ure)?|denied|required|unauthori[sz]ed|forbidden/i;
 const FAILURE_CODE = /^(?:fail(?:ed|ure)?|error|invalid|denied|unauthori[sz]ed|forbidden)$/i;
+const LOGIN_FAILURE = /未登录|请(?:先|重新)?登录|登录(?:失效|过期|超时)|会话(?:失效|过期|超时)|(?:access|auth|refresh)[-_ ]?token(?:\s+is)?\s*(?:invalid|expired)|unauthenticated|login\s*(?:required|expired)/i;
 
 export function inferUiOperationIntent(text?: string, pageUrl = ""): OperationKind | undefined {
   const label = String(text || "").replace(/\s+/g, "").replace(/^[^A-Za-z0-9\u4e00-\u9fff]+/, "");
@@ -72,6 +73,24 @@ export function businessResponseFailureReason(response?: { status: number; body?
     if (nonemptyError(record[key])) return `${key}=${typeof record[key] === "string" ? record[key] : "非空"}`;
   }
   return BUSINESS_FAILURE.test(message) ? message : undefined;
+}
+
+export function authenticationFailureReason(response?: { status: number; body?: unknown }): string | undefined {
+  if (!response) return undefined;
+  if (response.status === 401) return "HTTP 401：登录状态无效";
+  const body = response.body;
+  if (typeof body === "string") return LOGIN_FAILURE.test(body) ? body.slice(0, 500) : undefined;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const record = body as Record<string, unknown>;
+  const message = [record.msg, record.message, record.detail, record.error_description]
+    .filter(value => typeof value === "string")
+    .join(" ");
+  for (const key of ["code", "statusCode", "errorCode"]) {
+    const value = record[key];
+    const numeric = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value.trim()) ? Number(value) : undefined;
+    if (numeric === 401) return `${key}=${String(value)}${message ? `：${message}` : ""}`;
+  }
+  return LOGIN_FAILURE.test(message) ? message : undefined;
 }
 
 export function businessFailureReason(event: NetworkEvidence): string | undefined {

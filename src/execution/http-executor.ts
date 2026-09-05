@@ -82,7 +82,12 @@ function expandUrl(cap: CapabilityContract, input: Record<string, unknown>) {
       continue;
     }
     consumed.add(resolved.path);
-    url.searchParams.set(key, String(actual));
+    if (Array.isArray(actual)) {
+      url.searchParams.delete(key);
+      for (const item of actual) url.searchParams.append(key, String(item));
+    } else {
+      url.searchParams.set(key, String(actual));
+    }
   }
 
   return { url, consumed };
@@ -163,6 +168,13 @@ function applyCandidate(field: InputFormField, value: unknown) {
 function coerceFieldValue(value: unknown, field: InputFormField) {
   if (value === undefined || value === null) return value;
   let next = applyCandidate(field, value);
+  if (field.valueType === "array" && Array.isArray(next) && field.dateClocks?.length === next.length) {
+    return next.map((item, index) =>
+      typeof item === "string" && isDateInput(item.trim())
+        ? normalizeDateString(item, field.dateClocks![index])
+        : item
+    );
+  }
   if (typeof next === "string" && isDateInput(next.trim())) {
     if (field.valueType === "integer" || field.valueType === "number") return dateToMillis(next, field.dateClock);
     if (field.valueType === "string") return normalizeDateString(next, field.dateClock);

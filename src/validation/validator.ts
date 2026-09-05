@@ -144,7 +144,7 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
       ok: unresolved.length === 0,
       detail: unresolved.length === 0
         ? "写操作非调用方字段均有唯一来源规则"
-        : `无法唯一推断来源：${unresolved.map(field => field.name).join("、")}。已有写请求和带出查询时重新分析绑定，不要重开录制，不要冻录制样本`
+        : `缺少可执行来源且没有可安全透传原值：${unresolved.map(field => field.name).join("、")}。重新分析真实证据，不要制造绑定`
     });
     const unsound = unsoundFormulaFields(cap);
     checks.push({

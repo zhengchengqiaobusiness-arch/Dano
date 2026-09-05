@@ -130,11 +130,7 @@ function forgetPage(page: WorkbenchPage) {
 function getOrCreatePage(id: string) {
   const existing = pages.get(id);
   if (existing) {
-    existing.cancelAbandon();
     existing.touch();
-    void existing.ensureStarted().catch(error => {
-      runtimeLog("ERROR", `Pi failed to start for ${id}: ${errorMessage(error)}`);
-    });
     return existing;
   }
   const page = new WorkbenchPage(id, sharedConfig, origin, sanitizeTranscript, runtimeLog, gone => forgetPage(gone));
@@ -142,9 +138,6 @@ function getOrCreatePage(id: string) {
   pagesByToken.set(page.browserToken, page);
   runtimeLog("PROCESS", formatProcessLog("OPEN", "workbench-page", { page: id }));
   runtimeLog("PI", `Opened isolated workbench page ${id}.`);
-  void page.ensureStarted().catch(error => {
-    runtimeLog("ERROR", `Pi failed to start for ${id}: ${errorMessage(error)}`);
-  });
   return page;
 }
 
@@ -284,7 +277,8 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
       body.name,
       parseViewport(body.viewport) || page.preferredViewport,
       parseExpectedOperations(body.expectedOperations),
-      body.completeFieldCoverage === true
+      body.completeFieldCoverage === true,
+      body.completePageCoverage === true
     );
     runtimeLog("BROWSER", `${page.mode === "manual" ? "Manual" : "Pi automatic"} recording session started on ${page.id}.`);
     sendJson(response, 200, { session, state: await page.browserState() });
@@ -349,6 +343,11 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
 
   if (request.method === "POST" && pathname === "/api/browser/stop") {
     const page = requirePage(request);
+    const readiness = await page.recorder.stopReadiness();
+    if (!readiness.ready) {
+      sendJson(response, 409, { error: readiness.message, ...readiness, stopped: false });
+      return;
+    }
     const session = await page.stopRecording();
     runtimeLog("BROWSER", "Recording session stopped and evidence was saved.");
     sendJson(response, 200, session);
@@ -377,6 +376,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     const body = await readJsonBody(request);
     const messageText = typeof body.message === "string" ? body.message.trim() : "";
     if (!messageText) throw new Error("A message is required");
+    await page.ensureStarted();
     page.transcriptOpen = true;
     const userEvent = page.transcript.addUser(messageText);
     page.broadcastSession(userEvent);
@@ -414,7 +414,8 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
         body.name,
         parseViewport(body.viewport) || page.preferredViewport,
         parseExpectedOperations(body.expectedOperations),
-        body.completeFieldCoverage === true
+        body.completeFieldCoverage === true,
+        body.completePageCoverage === true
       ));
       page.broadcast({ type: "browser_changed" });
       return;
@@ -435,7 +436,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
       return;
     }
     if (request.method === "POST" && pathname === "/internal/browser/control") {
-      if (page.mode !== "automatic" && new Set(["goto", "click", "fill", "select", "choose", "press", "exercise-form", "submit-form"]).has(String(body.action))) {
+      if (page.mode !== "automatic" && new Set(["goto", "next-page", "click", "fill", "select", "choose", "press", "exercise-form", "submit-form"]).has(String(body.action))) {
         throw new Error("当前是手动录制模式；Pi 只能读取页面，不能自动点击或输入");
       }
       const result = await page.recorder.control(body) as {

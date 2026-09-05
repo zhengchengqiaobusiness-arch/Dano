@@ -1,18 +1,19 @@
 import type { Frame, Locator, Page } from "playwright";
 import type { OperationKind } from "../domain.js";
 import { MARK_LABELED_CONTROL, SNAPSHOT_FIELDS_IN_PAGE, SNAPSHOT_IN_PAGE } from "./page-script.js";
-import { businessResponseFailureReason, inferUiOperationIntent } from "../inference/heuristics.js";
+import { authenticationFailureReason, businessResponseFailureReason, inferUiOperationIntent } from "../inference/heuristics.js";
 
-export const FORM_ITEMS = ".el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [class*='form-item']";
-export const FORM_LABELS = "label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label";
+export const FORM_ITEMS = ".el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [data-slot='form-item'], [class*='form-item']";
+export const FORM_LABELS = "label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label, [data-slot='form-label']";
 export const DIALOGS = "[role='dialog']:visible, [role='alertdialog']:visible, .el-dialog:visible, .el-drawer:visible, .ant-modal:visible, .ant-drawer-content:visible, .arco-modal:visible, .arco-drawer:visible";
 export const DROPDOWNS = ".el-select-dropdown:visible, .el-select__popper:visible, .el-popper.el-select__popper:visible, .el-cascader__dropdown:visible, .el-autocomplete-suggestion:visible, .ant-select-dropdown:visible, .arco-select-dropdown:visible, .arco-select-popup:visible, .arco-tree-select-popup:visible, .arco-cascader-popup:visible, .arco-trigger-popup:visible, [class*='select-popup']:visible, [class*='tree-select-popup']:visible, [class*='cascader-popup']:visible, [class*='trigger-popup']:visible, [role='listbox']:visible";
 export const DATE_PANELS = ".el-picker-panel:visible, .el-popper.el-date-picker:visible, .el-picker__popper:visible, .el-date-range-picker:visible, .el-time-panel:visible, .ant-picker-dropdown:visible, .arco-picker-container:visible, [class*='picker-dropdown']:visible, [class*='picker-panel']:visible";
+const ACTIVE_DATE_OVERLAYS = ".ant-picker-dropdown:visible, .el-picker__popper:visible, .el-popper.el-date-picker:visible, .el-date-range-picker:visible, .el-date-picker:visible, .arco-picker-container:visible, [class*='picker-dropdown']:visible";
 const PICKER_DIALOG = /picker-panel|picker-dropdown|picker__popper|el-date-picker|el-date-range-picker|el-time-panel|el-time-picker|ant-picker-dropdown|arco-picker-container|datepicker/i;
 export const OPTION_ITEMS = "[role='option'], [role='treeitem'], .el-select-dropdown__item, .el-cascader-node, .el-tree-node__content, .el-autocomplete-suggestion__list li, .ant-select-item-option, .ant-select-tree-title, .ant-cascader-menu-item, .arco-select-option, .arco-tree-node-title, .arco-cascader-option, .n-base-select-option";
 export const DIALOG_CHOICES = "[role='option'], [role='treeitem'], [role='listitem'], [role='row'], tbody tr, .el-table__body .el-table__row, .el-tree-node__content, .el-cascader-node, [role='radio'], .el-checkbox";
 export const WIDGET_SURFACES = "xpath=ancestor-or-self::*[contains(@class,'el-select__wrapper') or contains(@class,'el-input__wrapper') or contains(@class,'el-date-editor') or contains(@class,'ant-select-selector') or contains(@class,'ant-picker') or contains(@class,'arco-select-view') or contains(@class,'arco-picker') or contains(@class,'picker-range') or contains(@class,'date-editor')][1]";
-export const BUSY_SPINNERS = ".el-loading-mask:visible, .el-overlay.is-loading:visible, .nprogress-busy:visible, .ant-spin-spinning:visible, .arco-spin-loading:visible, [aria-busy='true']:visible";
+export const BUSY_SPINNERS = "body > .loading:visible, .el-loading-mask:visible, .el-overlay.is-loading:visible, .nprogress-busy:visible, .ant-spin-spinning:visible, .arco-spin-loading:visible, [aria-busy='true']:visible";
 
 export interface FormField {
   label: string;
@@ -55,6 +56,18 @@ export interface PageSnapshot {
     enabled: boolean;
     frameUrl?: string;
   }>;
+  navigationInventory?: Array<{
+    label: string;
+    selector: string;
+    url: string;
+    visited?: boolean;
+  }>;
+  navigationCoverage?: {
+    discovered: number;
+    visited: number;
+    remaining: number;
+    unvisited: Array<{ label: string; selector: string; url: string }>;
+  };
 }
 
 export interface PageActionHost {
@@ -122,6 +135,15 @@ export class PageActions {
     await this.host.drainNetwork?.(Math.max(timeout, 1_200));
   }
 
+  async isStartupSplash() {
+    return this.page().evaluate(() => {
+      const rootLoading = document.querySelector("body > .loading, body > [class*='loading'], #app:empty") !== null;
+      const interactive = document.querySelector("button,a[href],input,select,textarea,[role='button'],[role='menuitem']") !== null;
+      const text = String(document.body?.innerText || "").replace(/\s+/g, " ").trim();
+      return !interactive && text.length <= 300 && (rootLoading || /加载中|正在加载|loading|starting/i.test(text));
+    }).catch(() => false);
+  }
+
   async nudgeOverlayFrames() {
     await this.page().evaluate(() => {
       for (const iframe of document.querySelectorAll("iframe")) {
@@ -178,8 +200,9 @@ export class PageActions {
       const formItems = el.querySelectorAll(".el-form-item, .ant-form-item, .arco-form-item").length;
       const rows = el.querySelectorAll("tbody tr, .el-table__row, .el-tree-node").length;
       const confirm = [...el.querySelectorAll("button, [role='button']")].some(btn => /^(确定|确认|选择|ok|confirm)$/i.test(String(btn.textContent || "").replace(/\s+/g, "")));
-      if (/选择(用户|人员|员工|审批|部门|项目|角色|岗位|成员|产品|供应商|商品|客户|物料|仓库|账户)|选人|选部门|(用户|人员|产品|供应商)选择/.test(title) && formItems <= 8) return true;
       const tree = el.querySelectorAll(".el-tree, [role='tree'], .el-tree-node").length;
+      const selectionTitle = /(?:^|[：:\-—])(请选择|选择|挑选|选取)|^(请选择|选择|挑选|选取)|(?:选择|挑选|选取)$|\b(?:choose|select|picker)\b/i.test(title);
+      if (selectionTitle && confirm && (rows >= 1 || tree >= 1) && formItems <= 12) return true;
       if (tree >= 1 && confirm && formItems <= 8) return true;
       return rows >= 1 && formItems <= 3 && confirm;
     }).catch(() => false);
@@ -546,10 +569,17 @@ export class PageActions {
       .or(root.locator(OPTION_ITEMS).filter({ hasText: exact }));
   }
 
-  async pickCalendarDay(dayText: string) {
+  async pickCalendarDay(dayText: string, isoDate?: string) {
     if (!(await this.hasDatePanel())) throw new Error("Refusing to click a bare day number on the page; open the date field first");
     const page = this.page();
-    const panel = page.locator(DATE_PANELS).last();
+    const panel = this.datePanel().last();
+    if (isoDate) {
+      const dated = panel.locator(`[title="${isoDate}"]:not(.ant-picker-cell-disabled), [data-date="${isoDate}"], [aria-label="${isoDate}"]`).filter({ visible: true }).last();
+      if (await dated.count()) {
+        await this.clickSafely(dated, "option");
+        return;
+      }
+    }
     const day = String(Number(dayText));
     const exact = panel.getByRole("gridcell", { name: day, exact: true })
       .or(panel.locator("[role='gridcell'], .el-date-table-cell__text, .el-date-table-cell, td.available .cell, td.available, .ant-picker-cell-inner")
@@ -565,14 +595,14 @@ export class PageActions {
   }
 
   private datePanel() {
-    return this.page().locator(DATE_PANELS);
+    return this.page().locator(ACTIVE_DATE_OVERLAYS);
   }
 
   private async closeDatePanel() {
     const panel = this.datePanel();
     if (!(await panel.count())) return;
     const current = panel.last();
-    const confirm = current.locator("button, [role='button']").filter({ hasText: /^(确定|确认|ok|apply)$/i }).first();
+    const confirm = current.locator("button, [role='button']").filter({ hasText: /^\s*(确\s*定|确\s*认|完\s*成|应\s*用|ok|apply|done)\s*$/i }).first();
     if (await confirm.count()) await this.clickSafely(confirm, "button").catch(() => {});
     else await this.page().keyboard.press("Tab").catch(() => {});
     await current.waitFor({ state: "hidden", timeout: 500 }).catch(() => {});
@@ -701,7 +731,7 @@ export class PageActions {
   private async alignDatePanel(isoDate: string) {
     const [year, month] = isoDate.split("-").map(Number);
     if (!year || !month) return;
-    const panel = this.page().locator(DATE_PANELS).last();
+    const panel = this.datePanel().last();
     for (let step = 0; step < 36; step += 1) {
       const header = await panel.locator(".el-date-picker__header, .el-picker-panel__icon-btn, .ant-picker-header, .arco-picker-header").first().evaluate(el => {
         const host = el.closest(".el-picker-panel, .el-date-picker, .ant-picker-dropdown, .arco-picker-container") || el.parentElement;
@@ -799,19 +829,39 @@ export class PageActions {
       const readonly = await dateField.target.evaluate(el => (
         el instanceof HTMLInputElement && (el.readOnly || el.hasAttribute("readonly"))
       )).catch(() => false);
-      if (!readonly) {
-        await dateField.target.fill(filled, { timeout: 800 }).catch(async () => {
-          await dateField.target.fill(filled, { force: true, timeout: 600 });
-        });
-      }
-      await this.commitValue(dateField.target, filled);
+      const managed = await dateField.host.evaluate(el => /ant-picker|el-date-editor|arco-picker|n-date-picker/i.test(String(el.className || ""))).catch(() => false);
       let current = await dateField.target.inputValue().catch(() => "");
-      if (!current.includes(filled.slice(0, 10))) {
-        await this.clickSafely(await this.clickTarget(selector), "field");
+      let usedRealPanel = false;
+      if (managed && !current.includes(filled.slice(0, 10))) {
+        if (!(await this.hasDatePanel())) await this.clickSafely(dateField.target, "field").catch(() => {});
         if (await this.hasDatePanel()) {
+          usedRealPanel = true;
           await this.alignDatePanel(filled.slice(0, 10));
-          await this.pickCalendarDay(String(Number(filled.slice(8, 10))));
+          await this.pickCalendarDay(String(Number(filled.slice(8, 10))), filled.slice(0, 10));
+          await this.page().waitForTimeout(100);
+          current = await dateField.target.inputValue().catch(() => "");
+          if (!current.includes(filled.slice(0, 10)) && await this.hasDatePanel()) {
+            const panel = this.datePanel().last();
+            const confirm = panel.locator("button, [role='button']")
+              .filter({ hasText: /^\s*(确\s*定|完\s*成|应\s*用|ok|apply|done)\s*$/i })
+              .filter({ visible: true })
+              .last();
+            if (await confirm.count() && await confirm.isEnabled().catch(() => true)) {
+              await this.clickSafely(confirm, "button");
+              await this.page().waitForTimeout(120);
+              current = await dateField.target.inputValue().catch(() => "");
+            }
+          }
+          if (!current.includes(filled.slice(0, 10))) throw new Error("Date picker did not commit the selected value");
         }
+      }
+      if (!usedRealPanel && !current.includes(filled.slice(0, 10))) {
+        if (!readonly) {
+          await dateField.target.fill(filled, { timeout: 800 }).catch(async () => {
+            await dateField.target.fill(filled, { force: true, timeout: 600 });
+          });
+        }
+        await this.commitValue(dateField.target, filled);
         current = await dateField.target.inputValue().catch(() => "");
         if (!current.includes(filled.slice(0, 10))) await this.commitValue(dateField.target, filled);
       }
@@ -1019,6 +1069,7 @@ export class PageActions {
     const formFields = [...(main.formFields || []), ...childFields];
     const todoFields = formFields.filter(field => !field.skip && !field.disabled && !field.filled);
     const operationInventory = [main, ...child].flatMap(frame => (frame.controls || []).flatMap(control => {
+      if (control.chrome) return [];
       const actionable = control.tag === "button" || control.tag === "a" || control.role === "button" || control.role === "link" || control.type === "submit";
       if (!actionable) return [];
       const label = String(control.text || control.label || "").replace(/\s+/g, " ").trim();
@@ -1033,6 +1084,7 @@ export class PageActions {
       }];
     }));
     const availableOperations: OperationKind[] = [...new Set(operationInventory.filter(item => item.enabled).map(item => item.operation))];
+    const navigationInventory = [main, ...child].flatMap(frame => frame.navigationInventory || []);
     const snapshot: PageSnapshot = {
       ...main,
       frames: frames.slice(1),
@@ -1043,7 +1095,8 @@ export class PageActions {
       recordedManualSteps: this.host.recordedManualSteps?.() || [],
       followManualSteps: Boolean(this.host.followManualSteps?.()),
       availableOperations,
-      operationInventory
+      operationInventory,
+      navigationInventory
     };
     await this.host.writePageInventory(page, snapshot);
     return snapshot;
@@ -1079,9 +1132,9 @@ export class PageActions {
   }
 
   private async pickChooserRow(dialog: Locator) {
-    const checkbox = dialog.locator("tbody .el-checkbox, .el-table__body .el-checkbox, tbody [role='checkbox'], tbody input[type='checkbox'], .el-table__row .el-checkbox, .el-table__body .el-checkbox__input").first();
-    if (await checkbox.count()) {
-      await checkbox.click({ force: true, timeout: 800 }).catch(() => this.clickSafely(checkbox, "option"));
+    const selection = dialog.locator("tbody input[type='radio']:not(:disabled), tbody [role='radio']:not([aria-disabled='true']), tbody input[type='checkbox']:not(:disabled), tbody [role='checkbox']:not([aria-disabled='true']), tbody .el-radio:not(.is-disabled), tbody .arco-radio:not(.arco-radio-disabled), tbody .ant-radio:not(.ant-radio-disabled), tbody .el-checkbox:not(.is-disabled), tbody .arco-checkbox:not(.arco-checkbox-disabled), tbody .ant-checkbox:not(.ant-checkbox-disabled), .el-table__body input[type='radio']:not(:disabled), .el-table__body input[type='checkbox']:not(:disabled), .el-table__body .el-radio:not(.is-disabled), .el-table__body .el-checkbox:not(.is-disabled)").filter({ visible: true }).first();
+    if (await selection.count()) {
+      await selection.click({ force: true, timeout: 800 }).catch(() => this.clickSafely(selection, "option"));
       return;
     }
     const people = () => dialog.locator("tbody tr, .el-table__body .el-table__row, .el-table__body tr")
@@ -1366,6 +1419,7 @@ export class PageActions {
     const scope = snapshot.scope;
     const controls = (snapshot.controls || []).filter(control => !scope || !control.scope || control.scope === scope);
     const scored = controls.flatMap(control => {
+      if (control.chrome) return [];
       const text = String(control.text || control.label || "").replace(/\s+/g, "");
       if (!text || CANCEL_LABEL.test(text)) return [];
       const button = control.tag === "button" || control.role === "button" || control.type === "submit";
@@ -1463,7 +1517,7 @@ export class PageActions {
       ok,
       scope: after.scope,
       filled,
-      failed,
+      failed: leftoverFailed,
       errors: after.errors || [],
       todoFields: after.todoFields || [],
       todoCount: after.todoCount ?? (after.todoFields || []).length,
@@ -1514,6 +1568,7 @@ export class PageActions {
     const formResponse = outcome.kind === "response" ? outcome.response : undefined;
     const sawRequest = Boolean(formResponse);
     const businessFailure = formResponse ? businessResponseFailureReason(formResponse) : undefined;
+    const authenticationFailure = formResponse ? authenticationFailureReason(formResponse) : undefined;
     await this.waitForPageQuiet();
     const after = await this.captureSnapshot();
     if (write && !sawRequest && after.scope === "dialog" && before.scope !== "dialog" && stage < 2) {
@@ -1533,7 +1588,9 @@ export class PageActions {
     const ok = write
       ? Boolean(sawRequest && !businessFailure && leftoverErrors.length === 0 && (closed || (!invalid && leftoverTodos.length === 0)))
       : closed || Boolean(sawRequest && leftoverErrors.length === 0 && !invalid && leftoverTodos.length === 0);
-    const businessRepair = businessFailure ? await this.repairBusinessFailure(businessFailure, startUrl).catch(() => undefined) : undefined;
+    const businessRepair = businessFailure && !authenticationFailure
+      ? await this.repairBusinessFailure(businessFailure, startUrl).catch(() => undefined)
+      : undefined;
     return {
       ok,
       submitted: button.text,
@@ -1541,6 +1598,8 @@ export class PageActions {
       sawRequest,
       response: formResponse ? { status: formResponse.status, url: formResponse.url, method: formResponse.method } : undefined,
       businessFailure,
+      loginRequired: Boolean(authenticationFailure),
+      loginReason: authenticationFailure,
       businessRepair,
       retryReady: Boolean(businessRepair),
       errors: leftoverErrors,

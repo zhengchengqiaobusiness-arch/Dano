@@ -38,8 +38,8 @@ export const PAGE_HELPERS = String.raw`
     }
     return found.slice(0, 800);
   };
-  const FORM_ITEM_SEL = '.el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [class*="form-item"]:not([class*="form-item__"]):not([class*="form-item-"])';
-  const FORM_LABEL_SEL = 'label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label';
+  const FORM_ITEM_SEL = '.el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [data-slot="form-item"], [class*="form-item"]:not([class*="form-item__"]):not([class*="form-item-"])';
+  const FORM_LABEL_SEL = 'label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label, [data-slot="form-label"]';
   const DIALOG_SEL = '[role="dialog"], [role="alertdialog"], .el-dialog, .el-drawer, .el-overlay-dialog, .ant-modal, .ant-drawer, .arco-modal, .arco-drawer';
   const PICKER_SEL = '.el-picker-panel, .el-select-dropdown, .el-cascader__dropdown, .el-picker__popper, .el-popper.el-date-picker, .el-date-range-picker, .el-time-panel, .ant-picker-dropdown, .ant-select-dropdown, .arco-picker-container, .arco-select-dropdown, .arco-select-popup, .arco-tree-select-popup, .arco-cascader-popup, .arco-trigger-popup, [class*="picker-panel"], [class*="picker-dropdown"], [class*="select-popup"], [class*="trigger-popup"]';
   const CHOOSER_TITLE = /选择(用户|人员|员工|审批|部门|项目|角色|岗位|成员|产品|供应商|商品|客户|物料|仓库|账户)|选人|选部门|(用户|人员|产品|供应商)选择/;
@@ -50,7 +50,12 @@ export const PAGE_HELPERS = String.raw`
   const UPLOAD_LABEL = /上传|附件|图片|image|upload|attachment/i;
   const PLUS_ONLY = /^(＋|\+|添加|选择)$/;
   const ACTION_ONLY = /^(新增|新增一行|添加一行|加一行|添加明细|新增明细|创建|导入|导出|删除|搜索|查询|重置|提交|确定|取消|关闭|保存|返回)$/;
-  const CHROME_SEL = "nav, header, .el-menu, .ant-menu, .el-pagination, .ant-pagination, [class*='toolbar'], [class*='header-bar'], [data-w-e-toolbar], [data-menu-key], [class*='w-e-bar'], [class*='editor-menu']";
+  // A generic toolbar class is frequently used by business tables for their
+  // create/import/export buttons. Treating every toolbar as application chrome
+  // hides real operations from the capability inventory. Only exclude structural
+  // navigation, pagination, and toolbars whose semantics are unambiguously global
+  // or editor-specific.
+  const CHROME_SEL = "nav, header, .el-menu, .ant-menu, .el-pagination, .ant-pagination, .arco-pagination, [class*='pagination'], [class*='header-bar'], [role='toolbar'][aria-label*='导航'], [role='toolbar'][aria-label*='navigation' i], [data-w-e-toolbar], [data-menu-key], [class*='w-e-bar'], [class*='editor-menu']";
   const SLOT_HOST_SEL = "[class*='process-node'], [class*='workflow-node'], [class*='user-select'], [class*='assignee'], [class*='approver'], [class*='approval-node'], [class*='flow-node'], [class*='activity'], .el-timeline-item, [class*='timeline-item'], [id*='activity-task']";
   const WIDE_SEL = DIALOG_SEL + ", form, [role='form'], body, main, header, nav, aside, footer, .el-overlay, .ant-modal-wrap, [class*='overlay']";
   const FIELD_GROUP_SEL = FORM_ITEM_SEL + ", label, dt, dd, li, [class*='form-field'], [class*='field-item'], [class*='form-row'], [class*='field-row']";
@@ -197,6 +202,13 @@ export const PAGE_HELPERS = String.raw`
       const name = clean(el.getAttribute("aria-label") || el.textContent || "");
       if (name && name.length <= 40 && !generatedName(name) && !PLUS_ONLY.test(name)) {
         return "role=" + (actionRole || "button") + "[name=\"" + name + "\"]";
+      }
+    }
+    if (el.matches("a[href]") || actionRole === "link" || actionRole === "menuitem") {
+      const name = clean(el.getAttribute("aria-label") || el.textContent || "");
+      const role = actionRole || "link";
+      if (name && name.length <= 80 && !generatedName(name) && !PLUS_ONLY.test(name)) {
+        return "role=" + role + "[name=\"" + name + "\"]";
       }
     }
     const placeholder = identityPlaceholder(el) || "";
@@ -745,7 +757,7 @@ export const PAGE_HELPERS = String.raw`
       return [el];
     });
     const fields = uniqueControls(promoted.filter((el) => !el.closest(PICKER_SEL) && isFieldControl(el) && !isChooserFilter(el)));
-    const slots = [...item.querySelectorAll("button, [role=button], [class*='add-user'], [class*='user-select'], [class*='plus'], [class*='avatar']")].filter(isPickerSlot);
+    const slots = fields.length ? [] : [...item.querySelectorAll("button, [role=button], [class*='add-user'], [class*='user-select'], [class*='plus'], [class*='avatar']")].filter(isPickerSlot);
     return [...fields, ...slots];
   };
 
@@ -756,19 +768,20 @@ export const PAGE_HELPERS = String.raw`
       return host && host !== el ? fieldFromControl(host, item) : null;
     }
     if (!isVisible(el) && !(chooserHostOf(el) && isVisible(chooserHostOf(el)))) return null;
-    if (el.closest(PICKER_SEL + ", .el-pagination, .ant-pagination, .arco-pagination, thead, .el-table__header, .el-table__header-wrapper, .ant-table-thead")) return null;
+    if (el.closest(PICKER_SEL + ", " + CHROME_SEL + ", thead, .el-table__header, .el-table__header-wrapper, .ant-table-thead")) return null;
     const type = (el.getAttribute("type") || "").toLowerCase();
     if (/hidden|submit|button|reset|image/.test(type)) return null;
     const official = formItemLabel(item) || labelOf(el) || nearbyLabel(el) || tableHeaderOf(el) || nameOf(el) || "";
     const label = distinctLabel(el, official, 0, 1);
     if (!label) return null;
-    const kind = widgetKind(item, el, label);
     const value = displayValue(el);
+    if (/共\s*\d+\s*条(?:记录)?|每\s*页|条\s*\/\s*页/i.test(label + " " + value)) return null;
+    const kind = widgetKind(item, el, label);
     const required = Boolean(item?.classList?.contains("is-required") || el.hasAttribute("required") || el.getAttribute("aria-required") === "true" || el.closest(".is-required"));
     const numericZero = kind === "number" && /^(0+|0*\.0+)$/.test(clean(value));
     const syntheticChoice = (kind === "select" || kind === "picker") && /^样例(?:-|$)/.test(clean(value));
     const filled = !isEmptyValue(value) && !syntheticChoice && !(required && numericZero);
-    const errorNode = item?.querySelector?.(".el-form-item__error, .ant-form-item-explain-error, .arco-form-item-message");
+    const errorNode = item?.querySelector?.(".el-form-item__error, .ant-form-item-explain-error, .arco-form-item-message, [data-slot='form-message']");
     const error = errorNode && isVisible(errorNode) ? clean(errorNode.textContent || "") : "";
     const invalid = Boolean(error);
     return {
@@ -821,13 +834,19 @@ export const PAGE_HELPERS = String.raw`
       fields.push(field);
     };
     for (const item of queryDeep(root, FORM_ITEM_SEL)) {
-      if (item.closest(PICKER_SEL + ", .el-pagination, .ant-pagination, .arco-pagination")) continue;
+      if (item.closest(PICKER_SEL + ", .el-pagination, .ant-pagination, .arco-pagination, [class*='pagination']")) continue;
       const range = rangeInputsOf(item);
       const controls = itemControls(item);
       const prop = range.length >= 2 ? nameOf(range[0]) : undefined;
       const drafted = controls.map((el) => isPickerSlot(el) ? null : fieldFromControl(el, item));
-      const labels = groupLabels(controls, drafted.map((field) => field?.label || ""));
+      const fieldEntries = controls.map((el, index) => ({ el, field: drafted[index] })).filter((entry) => entry.field);
+      const semanticLabels = groupLabels(fieldEntries.map((entry) => entry.el), fieldEntries.map((entry) => entry.field.label || ""));
+      const labelByControl = new Map(fieldEntries.map((entry, index) => [entry.el, semanticLabels[index]]));
       controls.forEach((el, index) => {
+        // Component libraries often nest a helper form-item inside the owning
+        // form-item (date ranges are a common example). The same physical
+        // control must remain one field even when several wrappers match.
+        if (seenEls.has(el)) return;
         if (isPickerSlot(el)) {
           seenEls.add(el);
           add(fieldFromPicker(el));
@@ -836,7 +855,7 @@ export const PAGE_HELPERS = String.raw`
         const field = drafted[index];
         if (!field) return;
         seenEls.add(el);
-        const label = labels[index] || field.label;
+        const label = labelByControl.get(el) || field.label;
         const identity = identityPlaceholder(el);
         add({
           ...field,
@@ -912,6 +931,10 @@ export const PAGE_HELPERS = String.raw`
     }
     return fields.filter((field, index, all) => {
       const base = String(field.label || "").replace(/-\d+$/, "");
+      const semantic = (value) => clean(value).replace(/^(请选择|请输入|请填写|please\s+(?:select|choose|enter))\s*/i, "");
+      if (field.kind === "picker" && all.some((other, otherIndex) =>
+        otherIndex !== index && other.kind !== "picker" && semantic(other.label) === semantic(field.label)
+      )) return false;
       return !all.some((other, otherIndex) =>
         otherIndex !== index
         && other.value
@@ -935,8 +958,30 @@ export const PAGE_HELPERS = String.raw`
     value: el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement ? String(el.value || "") : undefined,
     filled: !isEmptyValue(displayValue(el)),
     text: clean(el.textContent || el.value || "").slice(0, 300),
-    scope: scopeName(el)
+    scope: scopeName(el),
+    chrome: Boolean(el.closest(CHROME_SEL))
   }));
+
+  const collectNavigation = () => {
+    const items = [];
+    const seen = new Set();
+    for (const el of queryDeep(document.body, "a[href], [role='menuitem']")) {
+      if (el.hidden || el.closest("[hidden]")) continue;
+      const menu = el.closest("nav, aside, [role='menu'], .el-menu, .ant-menu, .arco-menu, [class*='sidebar'], [class*='side-menu'], [class*='sider']");
+      if (!menu && el.getAttribute("role") !== "menuitem") continue;
+      const raw = String(el.getAttribute("href") || "").trim();
+      if (!raw || /^(?:javascript:|mailto:|tel:|#?$)/i.test(raw)) continue;
+      let url;
+      try { url = new URL(raw, location.href); } catch { continue; }
+      if (url.origin !== location.origin) continue;
+      const label = clean(el.getAttribute("aria-label") || el.textContent || "");
+      if (!label || label.length > 100 || seen.has(url.href)) continue;
+      seen.add(url.href);
+      items.push({ label, selector: selectorOf(el), url: url.href });
+      if (items.length >= 500) break;
+    }
+    return items;
+  };
 
   const formSnapshot = (container) => {
     if (!(container instanceof HTMLElement)) return undefined;
@@ -978,6 +1023,7 @@ export const PAGE_HELPERS = String.raw`
       text: pageText(scope, formFields),
       scope: scopeName(scope),
       controls: collectControls(scope),
+      navigationInventory: collectNavigation(),
       formFields,
       todoFields,
       todoCount: todoFields.length,

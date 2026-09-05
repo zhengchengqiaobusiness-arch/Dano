@@ -51,6 +51,8 @@ export class WorkbenchPage {
   private abandonTimer?: ReturnType<typeof setTimeout>;
   private disposing?: Promise<void>;
   private manualTakeover?: ManualTakeover;
+  private coverageContinuationPending = false;
+  private coverageContinuations = 0;
 
   constructor(
     id: string,
@@ -87,7 +89,11 @@ export class WorkbenchPage {
   }
 
   async ensureStarted() {
-    if (this.pi.status().ready || this.pi.status().running) return;
+    if (this.pi.status().ready) return;
+    if (this.starting) {
+      await this.starting;
+      return;
+    }
     if (!this.starting) {
       this.starting = this.pi.start()
         .then(() => {
@@ -183,8 +189,11 @@ export class WorkbenchPage {
     name?: string,
     viewport?: { width?: number; height?: number; scale?: number },
     expectedOperations: OperationKind[] = [],
-    completeFieldCoverage = false
+    completeFieldCoverage = false,
+    completePageCoverage = false
   ) {
+    this.coverageContinuations = 0;
+    this.coverageContinuationPending = false;
     this.cancelManualTakeover("new-recording");
     if (this.recorder.isActive()) {
       const oldPid = this.recorder.browserProcessId();
@@ -195,12 +204,44 @@ export class WorkbenchPage {
     await seedPageProfile(this.sharedProfileDir, this.pageProfileDir);
     const size = viewport || this.preferredViewport;
     if (size) this.preferredViewport = normalizePreviewViewport(size);
-    const session = await this.recorder.start(url, name || "web-session", this.preferredViewport, expectedOperations, completeFieldCoverage);
+    const session = await this.recorder.start(url, name || "web-session", this.preferredViewport, expectedOperations, completeFieldCoverage, completePageCoverage);
     this.lastRecordingSessionId = session.id;
     this.onLog("PROCESS", formatProcessLog("OPEN", "playwright-browser", { pid: this.recorder.browserProcessId(), page: this.id }));
     const login = await this.recorder.loginPageState();
     if (login.detected) await this.requestManualTakeover(login.reason || "检测到登录页面，请人工完成登录后继续");
     return session;
+  }
+
+  private scheduleCoverageContinuation() {
+    if (this.coverageContinuationPending || this.manualTakeover || this.mode !== "automatic") return;
+    const session = this.recorder.activeSession();
+    if (!session?.completePageCoverage) return;
+    this.coverageContinuationPending = true;
+    setTimeout(() => {
+      void (async () => {
+        try {
+          if (this.pi.status().streaming || this.manualTakeover || !this.recorder.activeSession()?.completePageCoverage) return;
+          const readiness = await this.recorder.stopReadiness();
+          const remaining = readiness.pageCoverage?.remaining || 0;
+          const missingOperations = readiness.missingPageOperations || [];
+          if (!remaining && !missingOperations.length) return;
+          const continuationLimit = Math.max(24, (readiness.pageCoverage?.discovered || 0) * 2);
+          if (this.coverageContinuations >= continuationLimit) {
+            this.onLog("ERROR", `Full-page recording still has ${remaining} unvisited pages and ${missingOperations.length} page operations after ${continuationLimit} automatic continuations.`);
+            this.broadcast({ type: "agent_error", message: `全页面录制还有 ${remaining} 个菜单页面未访问、${missingOperations.length} 个页面能力未取得成功响应，自动续跑次数已达到 ${continuationLimit}。` });
+            return;
+          }
+          this.coverageContinuations += 1;
+          this.onLog("PI", `Continuing full-page recording automatically; ${remaining} discovered pages and ${missingOperations.length} page operations remain.`);
+          const missing = missingOperations.slice(0, 8).map(item => `${item.label}（${item.operations.join("、")}）`).join("、");
+          await this.pi.prompt(`继续当前同一录制，不要总结、不要重启录制。还有 ${remaining} 个已发现菜单页面未访问，${missingOperations.length} 个页面缺少成功能力证据${missing ? `：${missing}` : ""}。先完成当前页的 snapshot、完整字段 exercise-form 和适用的 submit-form；任何 ok=false 必须在当前页修复。然后持续调用 next-page，直到 done=true；保持输出简短。`);
+        } catch (error) {
+          this.onLog("WARN", `Automatic full-page continuation failed: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          this.coverageContinuationPending = false;
+        }
+      })();
+    }, 200);
   }
 
   async rememberViewport(viewport?: { width?: number; height?: number; scale?: number }) {
@@ -255,10 +296,6 @@ export class WorkbenchPage {
       await this.pi.beginFreshConversation().catch(error => {
         this.onLog("WARN", `Failed to start a new Pi session: ${error instanceof Error ? error.message : String(error)}`);
       });
-    } else {
-      await this.ensureStarted().catch(error => {
-        this.onLog("WARN", `Failed to restart Pi after clear: ${error instanceof Error ? error.message : String(error)}`);
-      });
     }
     this.transcript.clear();
     this.broadcast({ type: "agent_status", ready: this.pi.status().ready, streaming: false });
@@ -312,6 +349,7 @@ export class WorkbenchPage {
       if (event.type === "agent_settled") {
         this.broadcast({ type: "agent_status", ready: true, streaming: false });
         this.onLog("PI", `Natural-language task completed on page ${this.id}.`);
+        this.scheduleCoverageContinuation();
       }
       if (event.type === "extension_ui_request") {
         if (!this.transcriptOpen) {

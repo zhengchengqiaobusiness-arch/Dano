@@ -356,8 +356,8 @@ test("nameless forms bind only uniquely evidenced fields", () => {
   assert.equal(staticCandidateValue(search.inputForm.find(field => field.name === "status"), "未审核"), 10);
   assert.equal(search.inputForm.find(field => field.name === "inStatus")?.source, "system");
   assert.equal(search.inputForm.find(field => field.name === "returnStatus")?.source, "system");
-  assert.equal(search.inputForm.find(field => field.name === "inStatus")?.defaultRule, undefined);
-  assert.equal(search.inputForm.find(field => field.name === "returnStatus")?.defaultRule, undefined);
+  assert.equal(search.inputForm.find(field => field.name === "inStatus")?.defaultRule, "literal:0");
+  assert.equal(search.inputForm.find(field => field.name === "returnStatus")?.defaultRule, "literal:0");
   assert.equal(search.inputForm.find(field => field.name === "orderTime[0]")?.source, "caller");
   assert.equal(search.inputForm.find(field => field.name === "orderTime[1]")?.source, "caller");
   assert.equal(create.inputForm.find(field => field.name === "productId")?.label, "产品名称");

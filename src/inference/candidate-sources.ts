@@ -185,7 +185,7 @@ export function describeFieldHandling(field: InputFormField) {
     return `后台自动处理：${field.sourceDetail}`;
   }
   if (field.defaultRule?.startsWith("literal:")) {
-    return `系统默认值 ${field.defaultRule.slice("literal:".length)}，调用方未提供时使用，不是某次录制的业务样本`;
+    return field.sourceDetail || `系统自动补齐 ${field.defaultRule.slice("literal:".length)}，调用方不必提供`;
   }
   if (field.source === "computed") return field.sourceDetail || "由请求内其它字段自动计算，调用方不要手填";
   if (field.source === "generated") return `后台自动生成，调用方不要手填`;

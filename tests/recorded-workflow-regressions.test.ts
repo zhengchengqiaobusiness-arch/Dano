@@ -136,7 +136,8 @@ test("page-load helpers and future list responses cannot become write field sour
   assert.equal(byName("billType").defaultRule, "literal:hotel_apply");
   assert.equal(byName("userCount").source, "caller");
   assert.equal(byName("userCount").defaultRule, undefined);
-  assert.equal(byName("roomType").defaultRule, undefined);
+  assert.equal(byName("roomType").source, "system");
+  assert.equal(byName("roomType").defaultRule, "literal:\"1\"");
   assert.equal(byName("totalAmt").defaultRule, "literal:0");
   assert.equal(byName("feeItems").defaultRule, "literal:[]");
   assert.deepEqual(create.bindings, []);

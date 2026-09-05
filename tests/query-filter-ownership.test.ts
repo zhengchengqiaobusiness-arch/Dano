@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { EvidenceEvent, InputFormField } from "../src/domain.js";
 import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
+import { validateCapability } from "../src/validation/validator.js";
+import { materializeHttpRequest } from "../src/execution/http-executor.js";
 
 const PAGE = "http://admin.example.test/workspace/todo";
 const API = "http://admin.example.test/admin-api/bpm/task/todo-page";
@@ -144,6 +146,44 @@ test("a text search box does not inherit a nearby enum list", () => {
   assert.equal(name.candidates, undefined);
   assert.equal(category.source, "caller");
   assert.equal(category.widget, "select");
+});
+
+test("repeated query keys bind one array field to the ordered date controls", () => {
+  const events: EvidenceEvent[] = [{
+    id: "ui-search", kind: "ui", sessionId: "range", at: "2026-09-04T05:00:00.000Z",
+    pageUrl: PAGE, eventType: "click", text: "搜索", label: "搜索",
+    form: [
+      { name: "generated-range[0]", label: "开始时间", type: "date", value: "2026-09-05 00:00:00" },
+      { name: "generated-range[1]", label: "结束时间", type: "date", value: "2026-09-06 23:59:59" }
+    ]
+  }, {
+    id: "net-range", kind: "network", sessionId: "range", at: "2026-09-04T05:00:01.000Z",
+    pageUrl: PAGE, correlatedUiEvidenceId: "ui-search",
+    request: {
+      method: "GET",
+      url: `${API}?pageNo=1&pageSize=20&createTime=2026-09-05%2000%3A00%3A00&createTime=2026-09-06%2023%3A59%3A59`,
+      resourceType: "xhr", headers: {},
+      query: { pageNo: "1", pageSize: "20", createTime: ["2026-09-05 00:00:00", "2026-09-06 23:59:59"] }
+    },
+    response: { status: 200, headers: {}, body: { code: 0, data: { list: [], total: 0 } } }
+  }];
+
+  const capability = buildCapabilityCandidates(events).find(item => item.transport.pathTemplate.includes("todo-page"))!;
+  const range = fieldByName(capability, "createTime")!;
+  assert.equal(range.valueType, "array");
+  assert.equal(range.source, "caller");
+  assert.equal(range.systemHandled, false);
+  assert.equal(range.widget, "date");
+  assert.equal(range.label, "开始时间 / 结束时间");
+  assert.match(range.sourceDetail, /按页面顺序/);
+  assert.match(range.sourceDetail, /00:00:00、23:59:59/);
+  assert.deepEqual(range.dateClocks, ["00:00:00", "23:59:59"]);
+  assert.equal(validateCapability(capability, events, [capability]).validation.status, "verified");
+  const request = materializeHttpRequest(capability, { createTime: ["2026-10-01", "2026-10-03"] });
+  assert.deepEqual(new URL(request.url).searchParams.getAll("createTime"), [
+    "2026-10-01 00:00:00",
+    "2026-10-03 23:59:59"
+  ]);
 });
 
 test("write-only process keys still freeze when they never appear on the page", () => {

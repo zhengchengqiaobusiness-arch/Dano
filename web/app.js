@@ -50,8 +50,6 @@ function pageHeaders(extra = {}) {
   return { "Content-Type": "application/json", "X-Bss-Page-Session": pageSessionId(), ...extra };
 }
 
-let pendingPrompt = "";
-
 const state = {
   view: "recording", browserActive: false, browserMode: "automatic", agentReady: false, agentStreaming: false, agentAborting: false,
   currentUiRequest: null, localConfirmation: null, invokeSkill: null, manualTakeover: null, manualTakeoverCompleting: false,
@@ -255,7 +253,9 @@ function patchSessionItem(event) {
 
 function renderAgentControls() {
   const working = state.agentStreaming;
-  elements.sendPrompt.disabled = !state.agentReady;
+  // Idle or restored tabs do not need their own Pi process. The server starts
+  // it on the first task, so the composer must remain usable before ready.
+  elements.sendPrompt.disabled = state.agentAborting;
   elements.prompt.disabled = false;
   if (elements.abortPrompt) {
     elements.abortPrompt.disabled = !working || state.agentAborting;
@@ -272,11 +272,6 @@ function updateAgentStatus(ready, streaming) {
   state.agentReady = Boolean(ready); state.agentStreaming = Boolean(streaming);
   if (!state.agentStreaming) state.agentAborting = false;
   renderAgentControls();
-  if (state.agentReady && pendingPrompt) {
-    const queued = pendingPrompt;
-    pendingPrompt = "";
-    void submitPrompt(queued);
-  }
 }
 
 function renderBrowserMode() {
@@ -591,11 +586,6 @@ async function submitPrompt(message) {
   const text = composePrompt(message);
   if (!text) return;
   elements.prompt.value = "";
-  if (!state.agentReady) {
-    pendingPrompt = text;
-    showToast("Pi 还在启动，消息将在就绪后发送");
-    return;
-  }
   state.sessionLive = true;
   state.sessionFollow = true;
   followSessionIfWanted();

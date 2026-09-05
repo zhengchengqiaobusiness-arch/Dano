@@ -12,11 +12,10 @@ const QUANTITY_NAME = /count|qty|quantity|price|amount|total|percent|rate|tax|di
 const IDENTIFIER_NAME = /(?:Id|Ids|Key|Type|Status|Code)$|(?:^|[^A-Za-z])(id|type|status|code|key|userId|accountId|supplierId|creator|deptId)(?:$|[^A-Za-z])/i;
 const DURATION_NAME = /(?:^|[^a-z])(day|days|hour|hours|duration)(?:$|[^a-z])|天数|小时|时长/i;
 const ENVELOPE_LEAF = /\.(success|ok|msg|message|error|errmsg)$/i;
-const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const ISO_VALUE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 const EXECUTABLE_RULE = /^(literal:.+|env:[A-Za-z_][A-Za-z0-9_]*|uuid|now:iso|from:[^|]+(?:\|via:[A-Za-z_][A-Za-z0-9_]*)?|computed:.+|copy:[A-Za-z_][A-Za-z0-9_]*)$/;
 const EPOCH_MS_MIN = 1e11;
 const EPOCH_MS_MAX = 2e13;
+const SENSITIVE_FIELD = /(password|passwd|pwd|secret|token|api[-_]?key|access[-_]?key|refresh[-_]?token|session|credential)/i;
 
 export function isExecutableRule(rule?: string) {
   return Boolean(rule && EXECUTABLE_RULE.test(rule));
@@ -449,6 +448,23 @@ function pickVia(field: InputFormField, joins: ReturnType<typeof requestJoins>, 
   return matched.length === 1 ? matched[0] : undefined;
 }
 
+function hasExplicitWriteCause(
+  entry: LookupIndexEntry,
+  via: ReturnType<typeof pickVia> | undefined,
+  write: CapabilityContract | undefined,
+  field: InputFormField
+) {
+  if (entry.triggeredByFieldChoice) return true;
+  if (via && write?.inputForm.some(item => item.name === via.name && item.source === "caller")) return true;
+  if (entry.capability.sideEffect && isJoinFieldName(field.name) && write
+    && relatedResource(write.transport.pathTemplate, entry.capability.transport.pathTemplate)) return true;
+  if (/(?:Id|Ids|Name|Names|Type|Status|Code|Key)$/i.test(field.name)) return false;
+  const generic = /^(id|name|type|status|code|key|process|item|data)$/i;
+  const fieldTokens = nameTokens(`${field.name} ${field.label}`).filter(token => !generic.test(token));
+  const endpointTokens = new Set(nameTokens(entry.capability.transport.pathTemplate));
+  return fieldTokens.some(token => endpointTokens.has(token));
+}
+
 function requestContainsFieldValue(event: NetworkEvidence, fieldName: string, value: unknown) {
   const body = event.request.body;
   const params = {
@@ -676,6 +692,7 @@ function fromApiMatch(
       const exactLeafName = lastPathName(leaf.path).toLowerCase() === field.name.toLowerCase();
       if (isLowInformationValue(value) && !entry.triggeredByFieldChoice && !exactLeafName) continue;
       const via = leaf.row ? pickVia(field, joins, leaf.row) : causalLookupVia(field, joins, entry);
+      if (mode === "write" && !hasExplicitWriteCause(entry, via, write, field)) continue;
       if (leaf.row && !via) {
         const siblings = entry.leaves.filter(item => item.path === leaf.path);
         if (!siblings.length || siblings.some(item => !sameDerivedValue(item.value, value))) continue;
@@ -709,6 +726,7 @@ function fromApiMatch(
     if (entry.isPageQuery && entry.isPrimary) continue;
     const via = causalLookupVia(field, joins, entry);
     if (!via) continue;
+    if (!hasExplicitWriteCause(entry, via, write, field)) continue;
     for (const leaf of entry.leaves) {
       if (isEnvelopePath(leaf.path, field.name)) continue;
       const leafName = lastPathName(leaf.path);
@@ -716,7 +734,10 @@ function fromApiMatch(
         || namesRelated(field, leafName);
       const sameBusinessResource = Boolean(write && relatedResource(write.transport.pathTemplate, entry.capability.transport.pathTemplate));
       const valuesAgree = leaf.value !== undefined && sameDerivedValue(leaf.value, value);
-      const causallySupported = strongFieldSemantics && (entry.triggeredByFieldChoice || sameBusinessResource);
+      const causallySupported = !isJoinFieldName(field.name)
+        && strongFieldSemantics
+        && hasExplicitWriteCause(entry, via, write, field)
+        && (entry.triggeredByFieldChoice || sameBusinessResource || entry.capability.transport.pathTemplate.includes(lastPathName(leaf.path)));
       if (!valuesAgree && !causallySupported) continue;
       if (isLowInformationValue(value) && !entry.triggeredByFieldChoice && !causallySupported) continue;
       const score = lookupAffinityScore(field, leaf.path, entry.capability, write);
@@ -733,31 +754,6 @@ function fromApiMatch(
     }
   }
   return pickUniqueHit(associated);
-}
-
-function emptyDefault(field: InputFormField, value: unknown) {
-  if (/balance|stock|库存|余额/i.test(`${field.name} ${field.label}`)) return undefined;
-  if (field.sourceDetail?.includes("只读")) return undefined;
-  if (Array.isArray(value) && value.length === 0) return "literal:[]";
-  if (value === "") return "literal:\"\"";
-  if (value === 0) return "literal:0";
-  if (value === false) return "literal:false";
-  return undefined;
-}
-
-function looksInvariantConstant(field: InputFormField, value: unknown) {
-  if (typeof value !== "string" || /^[a-f0-9]{16,}$/i.test(value)) return false;
-  return /^[a-z][a-z0-9_]*$/i.test(value) && /Type|Key|Code|Def/i.test(field.name);
-}
-
-function generatedRule(field: InputFormField, value: unknown) {
-  if (typeof value === "string" && UUID_VALUE.test(value)) {
-    return { rule: "uuid", detail: "请求值是 UUID，执行时现场生成，不能冻成录制样本" };
-  }
-  if (typeof value === "string" && ISO_VALUE.test(value) && /time|date|At$|created|updated/i.test(`${field.name} ${field.label}`)) {
-    return { rule: "now:iso", detail: "请求值是时间戳，执行时取当前时间，不能冻成录制样本" };
-  }
-  return undefined;
 }
 
 function headerAggregates(items: Record<string, unknown>[], known: Set<string>) {
@@ -796,6 +792,38 @@ function computedForField(field: InputFormField, sample: unknown, known: Set<str
   if (semantic) return semantic;
   const duration = durationFormulas(field.name, value, others);
   return duration.length === 1 ? duration[0] : undefined;
+}
+
+function containsRedactedValue(value: unknown): boolean {
+  if (value === "[REDACTED]") return true;
+  if (Array.isArray(value)) return value.some(containsRedactedValue);
+  if (value && typeof value === "object") return Object.values(value as Record<string, unknown>).some(containsRedactedValue);
+  return false;
+}
+
+function recordedLiteralRule(field: InputFormField, value: unknown) {
+  if (value === undefined || SENSITIVE_FIELD.test(field.name) || containsRedactedValue(value)) return undefined;
+  if (typeof value !== "string") return `literal:${JSON.stringify(value)}`;
+  if (value === "") return "literal:\"\"";
+  try {
+    return JSON.stringify(JSON.parse(value)) === JSON.stringify(value)
+      ? `literal:${value}`
+      : `literal:${JSON.stringify(value)}`;
+  } catch {
+    return `literal:${value}`;
+  }
+}
+
+function asRecordedSystemValue(field: InputFormField, rule: string, value: unknown): InputFormField {
+  const shown = typeof value === "string" ? JSON.stringify(value) : JSON.stringify(value);
+  return {
+    ...field,
+    source: "system",
+    systemHandled: true,
+    required: false,
+    defaultRule: rule,
+    sourceDetail: `没有页面输入、已证实关联或计算证据；系统执行时原样补齐录制成功请求中的值 ${shown}，调用方不必提供`
+  };
 }
 
 function isLowInformationValue(value: unknown) {
@@ -850,17 +878,6 @@ function asComputed(field: InputFormField, expr: string): InputFormField {
   };
 }
 
-function asDefault(field: InputFormField, rule: string, detail: string): InputFormField {
-  return {
-    ...field,
-    source: "fixed",
-    systemHandled: true,
-    required: false,
-    defaultRule: rule,
-    sourceDetail: detail
-  };
-}
-
 function asCallerInput(field: InputFormField): InputFormField {
   return {
     ...field,
@@ -901,17 +918,6 @@ function asCopy(field: InputFormField, source: InputFormField): InputFormField {
     required: false,
     defaultRule: `copy:${source.name}`,
     sourceDetail: `与「${source.label}」在请求中唯一同值，执行时从该字段拷贝，调用方不要手填`
-  };
-}
-
-function asGenerated(field: InputFormField, rule: string, detail: string): InputFormField {
-  return {
-    ...field,
-    source: "generated",
-    systemHandled: true,
-    required: false,
-    defaultRule: rule,
-    sourceDetail: detail
   };
 }
 
@@ -1019,8 +1025,8 @@ function unexplained(field: InputFormField): InputFormField {
     ...field,
     defaultRule: undefined,
     sourceDetail: field.sourceDetail?.includes("只读")
-      ? "页面只读展示，但已录制查询里没有唯一带出路径，不能把录制样本当成固定值"
-      : "请求中出现但未能唯一对应到页面输入、其它接口或计算公式，不能把录制样本当成固定值"
+      ? "页面只读展示，但没有唯一带出路径，且录制成功请求中没有可安全透传的原值"
+      : "没有页面输入、已证实关联或计算证据，且录制成功请求中没有可安全透传的原值"
   };
 }
 
@@ -1052,7 +1058,6 @@ export function attachDerivationRules(
       return asAssembled(field, fields.filter(item => item.path.startsWith(`${field.path}.`) || item.path.startsWith(`${field.path}[`)));
     }
     if (shouldKeep(field, capability, fields)) return field;
-    if (field.defaultRule && (mode === "write" || !field.defaultRule.startsWith("literal:"))) return field;
     const value = requestValueAt(sample, field.path);
     const from = fromApiMatch(field, value, sample, lookupIndex, capability, mode, targetAt);
     if (from) {
@@ -1070,6 +1075,7 @@ export function attachDerivationRules(
       });
       return asFrom(field, from, fields);
     }
+    if (field.defaultRule && (mode === "write" || !field.defaultRule.startsWith("literal:"))) return field;
     return field;
   });
 
@@ -1099,20 +1105,15 @@ export function attachDerivationRules(
   next = next.map(field => {
     if (shouldKeep(field, capability, next) || field.defaultRule) return field;
     const value = requestValueAt(sample, field.path);
-    const generated = generatedRule(field, value);
-    if (generated) return asGenerated(field, generated.rule, generated.detail);
-    if (mode === "query") return field;
-    if (observedAsLookupInput(field, value, lookupIndex, targetAt)) {
+    if (mode === "write" && observedAsLookupInput(field, value, lookupIndex, targetAt)) {
       return {
         ...asCallerInput(field),
         sourceDetail: "该字段在写请求前作为已录制查询的同名输入，执行时由调用方提供，不能从查询结果或录制样本猜测"
       };
     }
-    if (looksInvariantConstant(field, value) && value !== undefined && value !== null && value !== "") {
-      return asDefault(field, `literal:${value}`, `请求中观察到的系统常量 ${value}，按该值补齐，调用方不要手填`);
-    }
-    const rule = emptyDefault(field, value);
-    if (rule) return asDefault(field, rule, `系统默认空值 ${rule.slice("literal:".length)}，调用方未提供时使用，不是某次录制的业务样本`);
+    const rule = recordedLiteralRule(field, value);
+    if (rule) return asRecordedSystemValue(field, rule, value);
+    if (mode === "query") return field;
     return asUnresolved(field);
   });
 

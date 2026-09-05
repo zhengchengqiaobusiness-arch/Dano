@@ -12,11 +12,11 @@ import { killCommandLineMatches, killProcessTree } from "../process-lifecycle.js
 import { persistOriginCredentials } from "../credentials/credential-store.js";
 import { buildCapabilityCandidates } from "../inference/build-candidates.js";
 import { summarizeCatalog } from "../inference/export-scope.js";
-import { businessFailureReason, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
+import { authenticationFailureReason, businessFailureReason, inferUiOperationIntent, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
 
 const FORM_ACTION_BUDGET = 3;
 const EXPECTABLE_OPERATIONS = new Set<OperationKind>(["query", "create", "update", "review", "delete", "upload", "download", "action"]);
-const LOGIN_BLOCKED_ACTIONS = new Set(["goto", "click", "fill", "select", "choose", "press", "exercise-form", "submit-form"]);
+const LOGIN_BLOCKED_ACTIONS = new Set(["goto", "next-page", "click", "fill", "select", "choose", "press", "exercise-form", "submit-form"]);
 const DEFAULT_VIEWPORT = { width: 1440, height: 960 };
 const MAX_PREVIEW_VIEWPORT = { width: 3840, height: 2160 };
 const OPERATION_LABEL: Partial<Record<OperationKind, string>> = {
@@ -24,7 +24,40 @@ const OPERATION_LABEL: Partial<Record<OperationKind, string>> = {
   upload: "上传", download: "导出/下载", action: "业务动作"
 };
 
-export function recordingStopReadiness(events: EvidenceEvent[], expectedOperations: OperationKind[] = []) {
+interface NavigationCoverage {
+  discovered: number;
+  visited: number;
+  remaining: number;
+  unvisited: Array<{ label: string; selector: string; url: string }>;
+  operationRequirements?: Array<{ url: string; label: string; operations: OperationKind[] }>;
+}
+
+function normalizeNavigationUrl(rawUrl: string, baseUrl?: string) {
+  try {
+    const url = new URL(rawUrl, baseUrl);
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^(?:utm_.+|_t|t|timestamp|cacheBust)$/i.test(key)) url.searchParams.delete(key);
+    }
+    if (url.hash.includes("?")) {
+      const split = url.hash.slice(1).split("?");
+      const route = split.shift() || "";
+      const params = new URLSearchParams(split.join("?"));
+      for (const key of [...params.keys()]) {
+        if (/^(?:utm_.+|_t|t|timestamp|cacheBust)$/i.test(key)) params.delete(key);
+      }
+      url.hash = params.size ? `${route}?${params}` : route;
+    }
+    return url.href;
+  } catch {
+    return rawUrl;
+  }
+}
+
+export function recordingStopReadiness(
+  events: EvidenceEvent[],
+  expectedOperations: OperationKind[] = [],
+  pageCoverage?: NavigationCoverage
+) {
   const byId = new Map(events.map(event => [event.id, event]));
   const candidates = buildCapabilityCandidates(events);
   const primary = summarizeCatalog(candidates).primary;
@@ -34,18 +67,57 @@ export function recordingStopReadiness(events: EvidenceEvent[], expectedOperatio
   })).map(capability => capability.operation));
   const expected = [...new Set(expectedOperations)].filter(operation => EXPECTABLE_OPERATIONS.has(operation));
   const missingOperations = expected.filter(operation => !successfulOperations.has(operation));
+  const missingPages = pageCoverage?.unvisited || [];
+  const eventIndex = new Map(events.map((event, index) => [event.id, index]));
+  const requirements = pageCoverage?.operationRequirements || [];
+  const requirementByUrl = new Map(requirements.map(item => [normalizeNavigationUrl(item.url), item]));
+  const successfulByPage = new Map<string, Set<OperationKind>>();
+  const credit = (url: string | undefined, operation: OperationKind) => {
+    if (!url || operation === "unknown" || !EXPECTABLE_OPERATIONS.has(operation)) return;
+    const key = normalizeNavigationUrl(url);
+    if (!requirementByUrl.has(key)) return;
+    const operations = successfulByPage.get(key) || new Set<OperationKind>();
+    operations.add(operation);
+    successfulByPage.set(key, operations);
+  };
+  for (const capability of primary) {
+    for (const ref of capability.evidence) {
+      const network = byId.get(ref.eventId);
+      if (network?.kind !== "network" || !isSuccessfulNetworkEvidence(network)) continue;
+      credit(network.pageUrl, capability.operation);
+      const before = eventIndex.get(network.id) ?? events.length;
+      for (let index = before - 1; index >= 0; index -= 1) {
+        const event = events[index];
+        if (event?.kind !== "ui" || event.sessionId !== network.sessionId) continue;
+        const intent = inferUiOperationIntent(`${event.text || ""} ${event.label || ""}`, event.pageUrl);
+        if (intent !== capability.operation) continue;
+        const key = normalizeNavigationUrl(event.pageUrl);
+        if (!requirementByUrl.has(key)) continue;
+        credit(key, capability.operation);
+        break;
+      }
+    }
+  }
+  const missingPageOperations = requirements.flatMap(item => {
+    const successful = successfulByPage.get(normalizeNavigationUrl(item.url)) || new Set<OperationKind>();
+    const operations = item.operations.filter(operation => !successful.has(operation));
+    return operations.length ? [{ url: item.url, label: item.label, operations }] : [];
+  });
   const failures = events.flatMap(event => {
     if (event.kind !== "network" || isSuccessfulNetworkEvidence(event)) return [];
     const reason = businessFailureReason(event);
     return reason ? [{ url: event.request.url, reason }] : [];
   });
   return {
-    ready: missingOperations.length === 0,
+    ready: missingOperations.length === 0 && missingPages.length === 0 && missingPageOperations.length === 0,
     expectedOperations: expected,
     successfulOperations: [...successfulOperations],
     missingOperations,
-    message: missingOperations.length
-      ? `录制尚未完成：${missingOperations.map(operation => OPERATION_LABEL[operation] || operation).join("、")}没有取得业务成功响应。继续当前浏览器会话，修复后再结束录制。${failures.length ? ` 最近的业务失败：${failures.at(-1)!.reason}` : ""}`
+    pageCoverage,
+    missingPages,
+    missingPageOperations,
+    message: missingOperations.length || missingPages.length || missingPageOperations.length
+      ? `录制尚未完成：${missingOperations.length ? `${missingOperations.map(operation => OPERATION_LABEL[operation] || operation).join("、")}没有取得业务成功响应。` : ""}${missingPages.length ? `还有 ${missingPages.length} 个已发现菜单页面没有实际访问：${missingPages.slice(0, 8).map(item => item.label).join("、")}${missingPages.length > 8 ? "等" : ""}。` : ""}${missingPageOperations.length ? `还有 ${missingPageOperations.length} 个页面缺少能力成功证据：${missingPageOperations.slice(0, 8).map(item => `${item.label}（${item.operations.map(operation => OPERATION_LABEL[operation] || operation).join("、")}）`).join("、")}${missingPageOperations.length > 8 ? "等" : ""}。` : ""}继续当前浏览器会话，修复后再结束录制。${failures.length ? ` 最近的业务失败：${failures.at(-1)!.reason}` : ""}`
       : "要求的操作均已取得业务成功响应，可以结束录制。"
   };
 }
@@ -137,9 +209,14 @@ const DETECT_LOGIN_IN_PAGE = new Function(String.raw`
   const controls = [...document.querySelectorAll("button,input[type='submit'],a,[role='button'],h1,h2,h3")].filter(visible);
   const loginText = controls.map(element => String(element.value || element.textContent || "").replace(/\s+/g, " ").trim())
     .some(text => text.length <= 40 && /登录|登陆|登入|统一身份认证|sign\s*in|log\s*in|login/i.test(text));
-  const formAction = [...document.querySelectorAll("form")]
-    .map(form => String(form.getAttribute("action") || "") + " " + String(form.textContent || ""))
-    .some(text => /登录|登陆|登入|(?:^|[\/_-])login(?:[\/?#_-]|$)|sign[\s_-]*in/i.test(text));
+  const formAction = [...document.querySelectorAll("form")].some(form => {
+    const action = String(form.getAttribute("action") || "");
+    if (/(?:^|[\/_-])login(?:[\/?#_-]|$)|sign[\s_-]*in/i.test(action)) return true;
+    return [...form.querySelectorAll("button,input[type='submit'],[role='button']")].some(control => {
+      const text = String(control.value || control.textContent || "").replace(/\s+/g, " ").trim();
+      return /^(登录|登陆|登入|sign\s*in|log\s*in|login)$/i.test(text);
+    });
+  });
   const urlIntent = /(?:^|[\/#?&=._-])(?:login|log-in|signin|sign-in|sso)(?:$|[\/#?&=._-])/i.test(location.href);
   const qr = [...document.querySelectorAll("canvas,img,svg")].filter(visible)
     .some(element => /二维码|qr.?code|qrcode/i.test(String(element.id) + " " + String(element.className) + " " + String(element.getAttribute("alt") || "")));
@@ -153,6 +230,7 @@ interface ActionGuard {
   consecutiveFailures: number;
   followManualSteps: boolean;
   formScopeKey?: string;
+  wholeFormExercised?: boolean;
 }
 
 interface ActiveRecording {
@@ -166,6 +244,10 @@ interface ActiveRecording {
   manualEvents: UiEvidence[];
   externalBrowser: boolean;
   guard: ActionGuard;
+  navigationTargets: Map<string, { label: string; selector: string; url: string }>;
+  visitedNavigationKeys: Set<string>;
+  pageOperationRequirements: Map<string, { label: string; operations: Set<OperationKind> }>;
+  authenticationFailure?: { at: number; reason: string; pageUrl?: string };
 }
 
 const EMPTY_JPEG = Buffer.from(
@@ -210,6 +292,88 @@ export class BrowserRecorder {
   });
 
   constructor(private readonly config: StudioConfig) {}
+
+  private navigationKey(rawUrl: string, baseUrl?: string) {
+    return normalizeNavigationUrl(rawUrl, baseUrl);
+  }
+
+  private pageOperationCoverage() {
+    const active = this.active;
+    if (!active) return [];
+    return [...active.pageOperationRequirements.entries()].map(([url, requirement]) => ({
+      url,
+      label: requirement.label,
+      operations: [...requirement.operations]
+    }));
+  }
+
+  private navigationCoverage() {
+    const active = this.active;
+    if (!active) return { discovered: 0, visited: 0, remaining: 0, unvisited: [] as Array<{ label: string; selector: string; url: string }> };
+    const targets = [...active.navigationTargets.entries()];
+    const unvisited = targets.filter(([key]) => !active.visitedNavigationKeys.has(key)).map(([, target]) => target);
+    return {
+      discovered: targets.length,
+      visited: targets.length - unvisited.length,
+      remaining: unvisited.length,
+      unvisited
+    };
+  }
+
+  private updateNavigationCoverage(page: Page, snapshot: PageSnapshot) {
+    const active = this.active;
+    if (!active) return;
+    const currentKey = this.navigationKey(String(snapshot.url || page.url()), page.url());
+    if (!active.navigationTargets.has(currentKey)) {
+      active.navigationTargets.set(currentKey, {
+        label: String(snapshot.title || currentKey),
+        selector: `url=${currentKey}`,
+        url: currentKey
+      });
+    }
+    active.visitedNavigationKeys.add(currentKey);
+    for (const target of snapshot.navigationInventory || []) {
+      const key = this.navigationKey(target.url, page.url());
+      if (!active.navigationTargets.has(key)) active.navigationTargets.set(key, { ...target, url: key });
+    }
+    if (active.session.completePageCoverage) {
+      const pageKey = this.navigationKey(String(snapshot.url || page.url()), page.url());
+      const expected = new Set(active.session.expectedOperations || []);
+      const applicable = (snapshot.availableOperations || []).filter(operation => expected.has(operation));
+      const prior = active.pageOperationRequirements.get(pageKey);
+      const operations = prior?.operations || new Set<OperationKind>();
+      // Query controls can be transient (global search popovers, dashboard
+      // cards, stale SPA content). A later stable page-scope snapshot is the
+      // authoritative view for whether this page has a submit-able query.
+      // Keep write/action requirements monotonic because row actions may
+      // legitimately disappear after a filter changes the result set.
+      if (snapshot.scope === "page" && !applicable.includes("query")) operations.delete("query");
+      for (const operation of applicable) operations.add(operation);
+      const target = active.navigationTargets.get(pageKey);
+      active.pageOperationRequirements.set(pageKey, {
+        label: target?.label || prior?.label || String(snapshot.title || pageKey),
+        operations
+      });
+    }
+    snapshot.navigationInventory = (snapshot.navigationInventory || []).map(target => {
+      const key = this.navigationKey(target.url, page.url());
+      return { ...target, url: key, visited: active.visitedNavigationKeys.has(key) };
+    });
+    snapshot.navigationCoverage = this.navigationCoverage();
+    active.session.discoveredPages = [...active.navigationTargets.keys()];
+    active.session.visitedPages = [...active.visitedNavigationKeys].filter(key => active.navigationTargets.has(key));
+    active.session.pageOperations = this.pageOperationCoverage();
+  }
+
+  private markNavigationTargetVisited(urlOrSelector: string) {
+    const active = this.active;
+    if (!active) return;
+    const directKey = this.navigationKey(urlOrSelector, this.currentPage().url());
+    if (active.navigationTargets.has(directKey)) active.visitedNavigationKeys.add(directKey);
+    for (const [key, target] of active.navigationTargets) {
+      if (target.selector === urlOrSelector) active.visitedNavigationKeys.add(key);
+    }
+  }
 
   isActive() {
     return Boolean(this.active);
@@ -321,7 +485,8 @@ export class BrowserRecorder {
     name = "recording",
     viewport?: { width?: number; height?: number; scale?: number },
     expectedOperations: OperationKind[] = [],
-    completeFieldCoverage = false
+    completeFieldCoverage = false,
+    completePageCoverage = false
   ): Promise<RecordingSession> {
     if (this.active) throw new Error(`Recording already active: ${this.active.session.id}`);
 
@@ -350,7 +515,8 @@ export class BrowserRecorder {
       startUrl,
       eventsFile,
       expectedOperations: [...new Set(expectedOperations)].filter(operation => EXPECTABLE_OPERATIONS.has(operation)),
-      completeFieldCoverage
+      completeFieldCoverage,
+      completePageCoverage
     };
 
     this.active = {
@@ -362,7 +528,10 @@ export class BrowserRecorder {
       recentUi: [],
       manualEvents: [],
       externalBrowser: false,
-      guard: { consecutiveFailures: 0, followManualSteps: false }
+      guard: { consecutiveFailures: 0, followManualSteps: false },
+      navigationTargets: new Map(),
+      visitedNavigationKeys: new Set(),
+      pageOperationRequirements: new Map()
     };
     this.captureBrowserPid(context);
 
@@ -376,8 +545,14 @@ export class BrowserRecorder {
     this.setFocused(page);
     try {
       await page.goto(startUrl, { waitUntil: "domcontentloaded" });
-      await this.waitForPageQuiet(page);
-      if (await this.pageLooksFailed(page)) {
+      await this.waitForPageQuiet(page, 5_000);
+      if (await this.actions.isStartupSplash()) {
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await this.waitForPageQuiet(page, 8_000);
+      }
+      if (await this.actions.isStartupSplash()) {
+        this.pageError = `页面启动界面没有完成加载：${startUrl}`;
+      } else if (await this.pageLooksFailed(page)) {
         this.pageError = `无法打开页面：${startUrl}`;
       } else {
         this.lastGoodUrl = page.url();
@@ -627,6 +802,8 @@ export class BrowserRecorder {
         truncated
       }
     };
+    const loginFailure = authenticationFailureReason(event.response);
+    if (loginFailure) active.authenticationFailure = { at: Date.now(), reason: loginFailure, pageUrl: page?.url() };
     await appendJsonl(active.eventsFile, event);
   }
 
@@ -690,6 +867,7 @@ export class BrowserRecorder {
   }
 
   private async writePageInventory(page: Page, snapshot: PageSnapshot) {
+    this.updateNavigationCoverage(page, snapshot);
     const fromFields = (snapshot.formFields || []).map(field => ({
       name: typeof field.name === "string" ? field.name : undefined,
       label: typeof field.label === "string" ? field.label : undefined,
@@ -1117,7 +1295,8 @@ export class BrowserRecorder {
     this.active.guard = {
       consecutiveFailures: 0,
       followManualSteps: false,
-      formScopeKey
+      formScopeKey,
+      wholeFormExercised: false
     };
   }
 
@@ -1131,12 +1310,52 @@ export class BrowserRecorder {
     this.resetActionGuard();
   }
 
+  private async requireWholeFormBeforeDirectFieldAction(selector?: string) {
+    const active = this.active;
+    if (!active?.session.completeFieldCoverage || !selector) return undefined;
+    await this.ensureFormScope();
+    if (active.guard.wholeFormExercised) return undefined;
+    const snapshot = await this.actions.captureSnapshot();
+    const normalized = selector.replace(/^label=/i, "");
+    const target = (snapshot.formFields || []).find(field =>
+      field.selector === selector || field.label === normalized || field.name === normalized
+    );
+    if (!target || target.skip || target.disabled) return undefined;
+    return {
+      ok: false,
+      requiresWholeForm: true,
+      recommendedAction: "exercise-form",
+      reason: "当前录制要求完整字段覆盖；首次填写必须调用一次 exercise-form，不能从单字段操作开始。",
+      todoFields: snapshot.todoFields || [],
+      todoCount: snapshot.todoCount ?? (snapshot.todoFields || []).length,
+      formFields: snapshot.formFields || [],
+      followManualSteps: false
+    };
+  }
+
+  private async markWholeFormExercised() {
+    await this.ensureFormScope();
+    if (this.active) this.active.guard.wholeFormExercised = true;
+  }
+
   async stopReadiness() {
     const active = this.active;
-    if (!active) return { ready: true, expectedOperations: [], successfulOperations: [], missingOperations: [], message: "当前没有活动录制。" };
+    if (!active) return {
+      ready: true,
+      expectedOperations: [] as OperationKind[],
+      successfulOperations: [] as OperationKind[],
+      missingOperations: [] as OperationKind[],
+      pageCoverage: undefined,
+      missingPages: [] as Array<{ url: string; title?: string }>,
+      missingPageOperations: [] as Array<{ url: string; label: string; operations: OperationKind[] }>,
+      message: "当前没有活动录制。"
+    };
     await this.drainNetwork(300);
     const events = await readJsonl<EvidenceEvent>(active.eventsFile);
-    return recordingStopReadiness(events, active.session.expectedOperations || []);
+    const pageCoverage = active.session.completePageCoverage
+      ? { ...this.navigationCoverage(), operationRequirements: this.pageOperationCoverage() }
+      : undefined;
+    return recordingStopReadiness(events, active.session.expectedOperations || [], pageCoverage);
   }
 
   private stopBecauseStuck(reason: string) {
@@ -1179,7 +1398,16 @@ export class BrowserRecorder {
     await this.ensureFormScope();
     try {
       for (let automaticAttempts = 1; automaticAttempts <= FORM_ACTION_BUDGET; automaticAttempts += 1) {
-        const result = await work() as { ok?: boolean; retryReady?: boolean; businessFailure?: string };
+        const result = await work() as { ok?: boolean; retryReady?: boolean; businessFailure?: string; loginRequired?: boolean; loginReason?: string };
+        if (result.loginRequired) {
+          return {
+            ...result,
+            automaticAttempts,
+            stopped: true,
+            followManualSteps: false,
+            reason: `检测到登录状态失效（${result.loginReason || result.businessFailure || "未登录"}），已暂停自动操作。请在内置浏览器完成登录后点击“我已完成，继续自动执行”。`
+          };
+        }
         if (result.ok) {
           this.resetFailureStreak();
           return { ...result, automaticAttempts, followManualSteps: false };
@@ -1198,13 +1426,14 @@ export class BrowserRecorder {
   }
 
   async control(command: {
-    action: "goto" | "snapshot" | "click" | "fill" | "select" | "choose" | "press" | "wait" | "screenshot" | "exercise-form" | "submit-form";
+    action: "goto" | "next-page" | "snapshot" | "click" | "fill" | "select" | "choose" | "press" | "wait" | "screenshot" | "exercise-form" | "submit-form";
     selector?: string;
     value?: string | string[];
     url?: string;
     key?: string;
     ms?: number;
   }): Promise<unknown> {
+    const actionStartedAt = Date.now();
     if (LOGIN_BLOCKED_ACTIONS.has(command.action)) {
       const login = await this.loginPageState();
       if (login.detected) return this.loginPauseResult(login);
@@ -1216,6 +1445,20 @@ export class BrowserRecorder {
       switch (command.action) {
         case "goto":
           if (!command.url) throw new Error("goto requires url");
+          if (this.active?.session.completePageCoverage) {
+            const requested = this.navigationKey(command.url, page.url());
+            const current = this.navigationKey(page.url());
+            const start = this.navigationKey(this.active.session.startUrl);
+            if (requested !== current && requested !== start && !this.active.navigationTargets.has(requested)) {
+              return {
+                ok: false,
+                requiresGroundedNavigation: true,
+                followManualSteps: false,
+                reason: "全页面录制只允许访问当前页、录制起始页或 snapshot 真实发现的同源菜单地址；不能猜测路由。",
+                navigationCoverage: this.navigationCoverage()
+              };
+            }
+          }
           try {
             await page.goto(command.url, { waitUntil: "domcontentloaded" });
             await this.waitForPageQuiet(page);
@@ -1229,14 +1472,66 @@ export class BrowserRecorder {
           } catch {
             this.pageError = `无法打开页面：${command.url}`;
           }
+          this.markNavigationTargetVisited(command.url);
           this.resetActionGuard();
           return { url: this.currentPage().url(), title: await this.withTimeout(this.currentPage().title(), 1_200, ""), pageError: this.pageError };
+        case "next-page": {
+          const currentSnapshot = await this.actions.captureSnapshot();
+          const currentKey = this.navigationKey(String(currentSnapshot.url || page.url()), page.url());
+          const currentRequirement = this.active?.pageOperationRequirements.get(currentKey);
+          if (this.active?.session.completeFieldCoverage && currentRequirement?.operations.size) {
+            const todoFields = (currentSnapshot.todoFields || []).filter(field => !field.skip && !field.disabled);
+            if (todoFields.length) {
+              return {
+                ok: false,
+                requiresCurrentPageCompletion: true,
+                followManualSteps: false,
+                reason: `当前页面还有 ${todoFields.length} 个业务字段未完成，不能跳到下一页。`,
+                todoFields,
+                navigationCoverage: this.navigationCoverage()
+              };
+            }
+          }
+          if (currentRequirement?.operations.size) {
+            const readiness = await this.stopReadiness();
+            const missing = readiness.missingPageOperations.find(item => this.navigationKey(item.url) === currentKey);
+            if (missing) {
+              return {
+                ok: false,
+                requiresCurrentPageCompletion: true,
+                followManualSteps: false,
+                reason: `当前页面还缺少${missing.operations.map(operation => OPERATION_LABEL[operation] || operation).join("、")}的业务成功响应，不能跳到下一页。`,
+                missingOperations: missing.operations,
+                navigationCoverage: this.navigationCoverage()
+              };
+            }
+          }
+          const next = this.navigationCoverage().unvisited[0];
+          if (!next) return { ok: true, done: true, navigationCoverage: this.navigationCoverage() };
+          try {
+            await page.goto(next.url, { waitUntil: "domcontentloaded" });
+            await this.waitForPageQuiet(page);
+            if (await this.pageLooksFailed(page)) this.pageError = `无法打开页面：${next.url}`;
+            else {
+              this.setFocused(page);
+              this.lastGoodUrl = page.url();
+              this.pageError = undefined;
+              this.markNavigationTargetVisited(next.url);
+            }
+          } catch {
+            this.pageError = `无法打开页面：${next.url}`;
+          }
+          this.resetActionGuard();
+          const snapshot = await this.actions.captureSnapshot();
+          return { ok: !this.pageError, done: false, target: next, pageError: this.pageError, snapshot, navigationCoverage: this.navigationCoverage() };
+        }
         case "click": {
           if (!command.selector) throw new Error("click requires selector");
           try {
             return await this.guardedPageAction("click", command.selector, async () => {
               const clicked = await this.actions.click(command.selector!);
               await this.followAfterGesture(page, known, watch?.appeared || []);
+              this.markNavigationTargetVisited(command.selector!);
               return { ...clicked, url: this.currentPage().url(), pageError: this.pageError };
             });
           } finally {
@@ -1245,6 +1540,10 @@ export class BrowserRecorder {
         }
         case "fill":
           if (!command.selector || typeof command.value !== "string") throw new Error("fill requires selector and string value");
+          {
+            const required = await this.requireWholeFormBeforeDirectFieldAction(command.selector);
+            if (required) return required;
+          }
           return this.guardedPageAction("fill", command.selector, async () => {
             await this.actions.fillField(command.selector!, command.value as string);
             await this.actions.recordFormInventory().catch(() => {});
@@ -1252,6 +1551,10 @@ export class BrowserRecorder {
           });
         case "choose":
           if (!command.selector || command.value === undefined) throw new Error("choose requires selector and value");
+          {
+            const required = await this.requireWholeFormBeforeDirectFieldAction(command.selector);
+            if (required) return required;
+          }
           return this.guardedPageAction("choose", command.selector, async () => {
             const result = await this.actions.chooseOption(command.selector!, command.value!);
             await this.waitForPageQuiet(page);
@@ -1260,6 +1563,10 @@ export class BrowserRecorder {
           });
         case "select":
           if (!command.selector || command.value === undefined) throw new Error("select requires selector and value");
+          {
+            const required = await this.requireWholeFormBeforeDirectFieldAction(command.selector);
+            if (required) return required;
+          }
           return this.guardedPageAction("select", command.selector, async () => {
             try {
               await (await this.actions.locate(command.selector!)).selectOption(command.value!, { timeout: 1_500 });
@@ -1275,6 +1582,10 @@ export class BrowserRecorder {
           });
         case "press":
           if (!command.selector || !command.key) throw new Error("press requires selector and key");
+          {
+            const required = await this.requireWholeFormBeforeDirectFieldAction(command.selector);
+            if (required) return required;
+          }
           return this.guardedPageAction("press", command.selector, async () => {
             await (await this.actions.locate(command.selector!)).press(command.key!, { timeout: 4_000 });
             return { ok: true };
@@ -1292,6 +1603,7 @@ export class BrowserRecorder {
         case "snapshot":
           return this.actions.captureSnapshot();
         case "exercise-form": {
+          await this.markWholeFormExercised();
           return this.guardedFormAction("exercise-form", () => this.actions.exerciseForm());
         }
         case "submit-form": {
@@ -1299,8 +1611,19 @@ export class BrowserRecorder {
         }
       }
     });
+    if (result && typeof result === "object" && (result as { loginRequired?: boolean }).loginRequired) return result;
     const login = await this.loginPageState();
     if (login.detected) return this.loginPauseResult(login);
+    if (command.action === "click") await this.currentPage().waitForTimeout(80);
+    if (LOGIN_BLOCKED_ACTIONS.has(command.action)) await this.drainNetwork(600);
+    const responseLogin = this.active?.authenticationFailure;
+    if (LOGIN_BLOCKED_ACTIONS.has(command.action) && responseLogin && responseLogin.at >= actionStartedAt) {
+      return this.loginPauseResult({
+        detected: true,
+        reason: `检测到登录状态失效（${responseLogin.reason}），已暂停自动操作。请在内置浏览器完成登录后点击“我已完成，继续自动执行”。`,
+        pageUrl: responseLogin.pageUrl || this.currentPage().url()
+      });
+    }
     if (command.action === "click") this.watchLayerPaint();
     return result;
   }

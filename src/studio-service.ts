@@ -56,10 +56,16 @@ export class StudioService {
     return path.join(this.config.catalogDir, "capabilities.json");
   }
 
-  async startRecording(url: string, name?: string, expectedOperations: OperationKind[] = [], completeFieldCoverage = false) {
+  async startRecording(
+    url: string,
+    name?: string,
+    expectedOperations: OperationKind[] = [],
+    completeFieldCoverage = false,
+    completePageCoverage = false
+  ) {
     if (this.recorder.isActive()) await this.stopRecording();
     this.sessionListCache = undefined;
-    return this.recorder.start(url, name, undefined, expectedOperations, completeFieldCoverage);
+    return this.recorder.start(url, name, undefined, expectedOperations, completeFieldCoverage, completePageCoverage);
   }
 
   async stopRecording() {

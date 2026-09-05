@@ -37,8 +37,8 @@ const CHECK_GUIDANCE: Record<string, { stage: ReviewStage; next: ReviewNext; hin
   "known-operation": { stage: "analyze", next: "re-analyze", hint: "重新识别操作类型；对不上就停，不要猜" },
   "field-metadata-complete": { stage: "analyze", next: "re-analyze", hint: "重新分析字段名称、类型和来源" },
   "field-ownership-consistent": { stage: "analyze", next: "re-analyze", hint: "重新划分调用方字段和系统字段" },
-  "system-required-fields-resolvable": { stage: "analyze", next: "re-analyze", hint: "给系统必填字段补唯一来源规则，不要冻录制样本" },
-  "write-field-origins-resolved": { stage: "analyze", next: "re-analyze", hint: "本会话已有写请求和带出查询时，重新分析按 via 绑定，不要重开录制；不能把录制值写成固定值" },
+  "system-required-fields-resolvable": { stage: "analyze", next: "re-analyze", hint: "按真实因果来源处理；无来源时由系统原样补齐录制成功请求值" },
+  "write-field-origins-resolved": { stage: "analyze", next: "re-analyze", hint: "重新分析真实因果关系；无来源字段使用录制成功请求原值，不要制造绑定" },
   "computed-formula-operands-sound": { stage: "analyze", next: "re-analyze", hint: "公式不能用编号、枚举或时间戳当运算数；重新分析" },
   "picker-uses-recorded-query": { stage: "analyze", next: "re-analyze", hint: "选人/弹窗必须暴露已录制查询，不要把当前页冻成枚举" },
   "write-request-keys-covered": { stage: "analyze", next: "re-analyze", hint: "录制成功请求里的键都要有字段或拼接规则，不要丢父对象" },
@@ -268,7 +268,7 @@ export function reviewCatalog(
         capabilityId: capability.id,
         capabilityTitle: capability.title,
         fieldPath: field.path,
-        message: `字段「${field.label}」(${field.name}) 不能唯一对应到页面输入、其它接口或计算公式。已有写请求和带出查询时重新分析绑定，不要重开录制，不要把录制样本冻成固定值。`
+        message: `字段「${field.label}」(${field.name}) 没有可执行来源，且录制成功请求中没有可安全透传的原值。重新分析真实证据；不要制造绑定或把问题交给用户猜。`
       });
     }
     for (const field of unsoundFormulaFields(capability)) {

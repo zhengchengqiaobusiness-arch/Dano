@@ -183,7 +183,7 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
   assert.match(app, /ResizeObserver/);
   assert.match(server, /pathname === "\/api\/browser\/viewport"/);
   assert.match(recorder, /async fitViewport\(/);
-  assert.match(page, /this\.recorder\.start\(url, name \|\| "web-session", this\.preferredViewport, expectedOperations, completeFieldCoverage\)/);
+  assert.match(page, /this\.recorder\.start\(url, name \|\| "web-session", this\.preferredViewport, expectedOperations, completeFieldCoverage, completePageCoverage\)/);
   assert.match(css, /\.empty-browser\s*\{[^}]*max-width:\s*none/);
   assert.match(css, /\.browser-panel\s*\{[^}]*grid-template-rows:\s*40px minmax\(0,\s*1fr\)/);
   assert.doesNotMatch(css, /\.browser-footer/);
@@ -292,6 +292,18 @@ test("refresh keeps a tab session while a new page starts isolated", async () =>
   assert.match(app, /navigator\.sendBeacon/);
   assert.match(app, /pagehide/);
   assert.doesNotMatch(app, /window\.close\(/);
+});
+
+test("idle workbench tabs start Pi only when the first task is sent", async () => {
+  const [app, server] = await Promise.all([
+    readFile(path.join(root, "web", "app.js"), "utf8"),
+    readFile(path.join(root, "src", "web", "server.ts"), "utf8")
+  ]);
+  const creation = server.slice(server.indexOf("function getOrCreatePage"), server.indexOf("function pageSessionIdFrom"));
+  assert.doesNotMatch(creation, /ensureStarted\(/);
+  assert.match(server, /pathname === "\/api\/chat"[\s\S]*await page\.ensureStarted\(\)/);
+  assert.match(app, /elements\.sendPrompt\.disabled = state\.agentAborting/);
+  assert.doesNotMatch(app, /pendingPrompt/);
 });
 
 test("skill catalog distinguishes handbook export from business spec dump", async () => {

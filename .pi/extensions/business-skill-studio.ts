@@ -40,9 +40,9 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
     return payload as T;
   };
 
-  const startBrowser = (url: string, name?: string, expectedOperations: any[] = [], completeFieldCoverage = false) => browserServiceUrl
-    ? browserRequest<any>("/start", { url, name, expectedOperations, completeFieldCoverage })
-    : studio.startRecording(url, name, expectedOperations, completeFieldCoverage);
+  const startBrowser = (url: string, name?: string, expectedOperations: any[] = [], completeFieldCoverage = false, completePageCoverage = false) => browserServiceUrl
+    ? browserRequest<any>("/start", { url, name, expectedOperations, completeFieldCoverage, completePageCoverage })
+    : studio.startRecording(url, name, expectedOperations, completeFieldCoverage, completePageCoverage);
   const stopBrowser = () => browserServiceUrl
     ? browserRequest<any>("/stop")
     : studio.stopRecording();
@@ -60,7 +60,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_record_start",
     label: "Start business recording",
-    description: "Start the embedded Playwright browser and record real UI actions plus XHR/fetch/document requests and responses. When the user names required operations, always pass every one in expectedOperations so review cannot export a partial Skill. When the user requires every field except upload/attachment, pass completeFieldCoverage=true so review also rejects blank visible fields and unexercised business detail rows.",
+    description: "Start the embedded Playwright browser and record real UI actions plus XHR/fetch/document requests and responses. When the user names required operations, always pass every one in expectedOperations so review cannot export a partial Skill. When the user requires every field except upload/attachment, pass completeFieldCoverage=true. When the user requires every accessible menu page, pass completePageCoverage=true so discovered but unvisited pages block completion.",
     parameters: parameters({
       url: { type: "string", description: "Real business-system URL" },
       name: { type: "string", description: "Optional recording name" },
@@ -72,10 +72,14 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       completeFieldCoverage: {
         type: "boolean",
         description: "True only when the user requires every operable field to be filled; upload and attachment controls remain excluded."
+      },
+      completePageCoverage: {
+        type: "boolean",
+        description: "True when every accessible menu page must be visited. Snapshot returns grounded navigation coverage and record_stop rejects discovered but unvisited pages."
       }
     }, ["url"]),
     async execute(_toolCallId, params: any) {
-      const session = await startBrowser(params.url, params.name, params.expectedOperations || [], params.completeFieldCoverage === true);
+      const session = await startBrowser(params.url, params.name, params.expectedOperations || [], params.completeFieldCoverage === true, params.completePageCoverage === true);
       if (session?.id) lastRecordingSessionId = session.id;
       return {
         content: [{ type: "text", text: `Recording started: ${session.id}. The live page is visible in the Studio browser panel.` }],
@@ -111,9 +115,9 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_browser_control",
     label: "Control recording browser",
-    description: "Control the active embedded browser with goto/snapshot/click/fill/select/choose/press/wait/screenshot/exercise-form/submit-form. A detected login page stops before any automatic action with loginRequired and waits for the person to complete login through the Studio manual-takeover card. Snapshot includes operationInventory and enabled availableOperations across the page and visible iframes, so complete every requested page operation rather than only opening its route. Clicked operations and correlated HTTP requests remain recorded evidence; only expectedOperations supplied at recording start define the completion contract. The first exercise-form call is authoritative and fills every currently visible eligible field in one pass; later calls may repair only returned todoFields, fields newly revealed by that pass, format constraints, or a returned failure. Use choose for dropdowns and tree/cascader nodes. Only actual failures consume the per-page/form repair budget; a successful automatic operation clears the consecutive-failure streak. The first or second failure must be repaired from refreshed page evidence, not treated as a stop. On the third consecutive failed automatic operation this same tool call pauses for the Studio manual-takeover card; wait until it returns resumedAfterManualTakeover and continue from its snapshot. A snapshot never requests takeover by itself. Never blindly replay an unchanged failed selector or record_stop+analyze a planned write with no successful response. Required number 0 is empty.",
+    description: "Control the active embedded browser with goto/next-page/snapshot/click/fill/select/choose/press/wait/screenshot/exercise-form/submit-form. next-page opens the next unvisited URL from the real menu inventory; never guess a route. Snapshot includes navigationCoverage, operationInventory and enabled availableOperations. When complete field coverage is active, exercise-form fills every currently visible eligible field in one pass and is the authoritative whole-form action; direct single-field mutations are rejected until it has run once for that page/form. The first or second failure must be repaired from refreshed page evidence. A detected login page stops before any automatic action. Only actual failures consume the per-page/form repair budget; the third consecutive failure pauses for manual takeover.",
     parameters: parameters({
-      action: { type: "string", enum: ["goto", "snapshot", "click", "fill", "select", "choose", "press", "wait", "screenshot", "exercise-form", "submit-form"] },
+      action: { type: "string", enum: ["goto", "next-page", "snapshot", "click", "fill", "select", "choose", "press", "wait", "screenshot", "exercise-form", "submit-form"] },
       selector: { type: "string" },
       value: {},
       url: { type: "string" },

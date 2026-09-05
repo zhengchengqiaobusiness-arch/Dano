@@ -68,7 +68,12 @@ export function flattenRequestValues(value: unknown, prefix = "$"): Array<{ path
     const name = prefix.split(".").pop()?.replace(/\[\*\]$/, "") || prefix;
     return [{ path: prefix, name, value }];
   }
-  return Object.entries(value as Record<string, unknown>).flatMap(([key, child]) =>
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (!entries.length) {
+    const name = prefix.split(".").pop()?.replace(/\[\*\]$/, "") || prefix;
+    return [{ path: prefix, name, value }];
+  }
+  return entries.flatMap(([key, child]) =>
     flattenRequestValues(child, `${prefix}.${key}`)
   );
 }
@@ -659,7 +664,13 @@ export function findObservation(
 }
 
 export function fieldHasUiEvidence(field: InputFormField, events: UiEvidence[]) {
-  return Boolean(findObservation(field, undefined, collectUiObservations(events)));
+  const observations = collectUiObservations(events);
+  if (findObservation(field, undefined, observations)) return true;
+  if (field.valueType !== "array" || field.widget !== "date") return false;
+  const labels = field.label.split(/\s*(?:\/|、|至)\s*/).filter(Boolean);
+  return labels.length >= 2 && labels.every(label =>
+    observations.some(item => looksDateControl(item) && labelsEquivalent(item.label, label))
+  );
 }
 
 export function staticCandidatesHaveUiEvidence(field: InputFormField, events: UiEvidence[]) {
@@ -689,39 +700,6 @@ function literalRule(value: unknown) {
   }
 }
 
-function formatObserved(value: unknown) {
-  if (value === undefined || value === null || value === "") return undefined;
-  return typeof value === "string" ? value : JSON.stringify(value);
-}
-
-export function attachObservedDefaults(
-  fields: InputFormField[],
-  sample: unknown,
-  persistSystemValues = false
-): InputFormField[] {
-  if (!persistSystemValues) return fields;
-  return fields.map(field => {
-    if (field.source === "caller" || field.source === "binding" || PAGE_NAME.test(field.name)) return field;
-    const value = requestValueAt(sample, field.path);
-    const rule = field.defaultRule || literalRule(value);
-    const shown = formatObserved(value);
-    if (!rule || shown === undefined) return field;
-    if (field.defaultRule && /执行时按录制成功请求写入/.test(field.sourceDetail || "")) {
-      return field;
-    }
-    const base = (field.sourceDetail || "业务系统处理")
-      .replace(/。?不要使用录制样本填这个字段/g, "")
-      .replace(/。?不要用录制样本[^。]*/g, "")
-      .replace(/。+$/g, "");
-    return {
-      ...field,
-      defaultRule: rule,
-      sourceDetail: `${base}。执行时按录制成功请求写入 ${shown}，调用方不必提供`
-    };
-  });
-}
-
-
 function formatHint(field: InputFormField, requestValue?: unknown) {
   if (/time|date|start|end/i.test(`${field.name} ${field.label}`) || field.widget === "date") {
     const clock = recordedClock(requestValue);
@@ -744,7 +722,7 @@ function finalizeUnhandled(field: InputFormField): InputFormField {
     systemHandled: true,
     required: false,
     defaultRule: undefined,
-    sourceDetail: "请求中出现但未能唯一对应到页面控件。不要使用录制样本填这个字段"
+    sourceDetail: "请求中出现但未能唯一对应到页面控件；分析阶段将优先核对因果来源，无来源时由系统原样补齐成功请求值"
   };
 }
 
@@ -1015,6 +993,52 @@ function adjacentDateSlots(owner?: UiEvidence) {
   return slots;
 }
 
+function bindRepeatedDateRange(
+  fields: InputFormField[],
+  owner: UiEvidence | undefined,
+  observations: UiObservation[],
+  sample: unknown,
+  lists: RecordedList[]
+) {
+  const bound = new Map<string, InputFormField>();
+  for (const field of fields) {
+    if (field.valueType !== "array" || PAGE_NAME.test(field.name) || isReadonlyBound(field)) continue;
+    const values = requestValueAt(sample, field.path);
+    if (!Array.isArray(values) || values.length < 2 || !values.every(value => Boolean(dateDay(value)))) continue;
+
+    // Some clients serialize a date range as repeated query keys
+    // (`createTime=a&createTime=b`) instead of indexed keys. The request then
+    // has one array field while the page still has two real date controls.
+    // Bind the array only when one adjacent control group matches every
+    // recorded request value in order. This is causal evidence, not a name or
+    // equal-value guess, and therefore also works with generated control ids.
+    const slots = adjacentDateSlots(owner).find(group =>
+      group.length === values.length
+      && group.every((slot, index) => observationMatchesValue(slot, values[index], lists))
+    );
+    if (!slots) continue;
+    const labels = slots.map(slot => displayLabel(slot.label, slot.rangeIndex)).filter((label): label is string => Boolean(label));
+    if (new Set(labels).size !== values.length) continue;
+    const clocks = values.map(value => recordedClock(value)).filter((clock): clock is string => Boolean(clock));
+    bound.set(field.path, {
+      ...field,
+      label: labels.join(" / "),
+      source: "caller",
+      required: slots.some(slot => slot.required === true),
+      requiredBasis: slots.some(slot => slot.required === true) ? "ui-required" : "not-observed",
+      systemHandled: false,
+      widget: "date",
+      candidates: undefined,
+      defaultRule: undefined,
+      dateClock: undefined,
+      dateClocks: clocks.length === values.length ? clocks : undefined,
+      sourceDetail: `页面由「${labels.join("、")}」${values.length}个日期控件组成；调用方按页面顺序提供 ${field.valueType}${clocks.length === values.length ? `，请求时间分别使用 ${clocks.join("、")}` : ""}，不要写成录制样本`
+    });
+  }
+  if (!bound.size) return fields;
+  return fields.map(field => bound.get(field.path) || field);
+}
+
 function bindIndexedDateRange(
   fields: InputFormField[],
   owner: UiEvidence | undefined,
@@ -1069,6 +1093,7 @@ export function bindLeftoverFields(
   lists: RecordedList[] = [],
   owner?: UiEvidence
 ): InputFormField[] {
+  fields = bindRepeatedDateRange(fields, owner, observations, sample, lists);
   const leftoverObs = leftoverEditable(fields, observations);
   const leftoverFields = fields.filter(field => {
     if (field.source === "caller" || PAGE_NAME.test(field.name) || isReadonlyBound(field)) return false;
@@ -1551,9 +1576,10 @@ export function finalizeCallerFields(
     sample,
     observations
   );
+  const ranged = bindRepeatedDateRange(finalized, owner, observations, sample, lists);
   const readonly = uniqueByLabel(observations.filter(item => item.label && looksReadonly(item) && !pollutedLabel(item)));
-  if (!readonly.length) return finalized;
-  return finalized.map(field => {
+  if (!readonly.length) return ranged;
+  return ranged.map(field => {
     if (field.source === "caller" || (field.label !== field.name && /[^\x00-\x7f]/.test(field.label))) return field;
     const value = requestValueAt(sample, field.path);
     if (value === undefined || value === null || value === "") return field;

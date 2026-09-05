@@ -49,6 +49,7 @@ export function classifyExported(capabilities: CapabilityContract[]) {
 }
 
 function defaultStrategy(field: InputFormField) {
+  if (isDateField(field) && field.valueType === "array") return "按页面顺序提供日期数组，每项格式 YYYY-MM-DD，不复制未见过的值";
   if (isDateField(field)) return "根据当前请求和当前日期推导，格式 YYYY-MM-DD，不复制未见过的值";
   if (field.valueType === "number" || field.valueType === "integer") return "从当前用户意图提取可唯一转换的数字，不任意使用 0";
   if (field.valueType === "array" || field.valueType === "object") return "根据当前意图生成满足字段 schema 的合法 JSON，不复制未见过的值";
@@ -72,7 +73,7 @@ function recommendedDefault(field: InputFormField, capability: CapabilityContrac
       ? `${field.sourceDetail}（${field.defaultRule}）`
       : field.defaultRule;
   }
-  if (field.defaultRule?.startsWith("literal:")) return `${field.defaultRule.slice("literal:".length)}（系统默认，不是录制样本）`;
+  if (field.defaultRule?.startsWith("literal:")) return `${field.defaultRule.slice("literal:".length)}（系统按成功请求原值自动补齐）`;
   return "按用户本次意图填写";
 }
 
@@ -182,11 +183,12 @@ export function exportedQuestion(field: InputFormField, capabilities: Capability
       return hint && field.label === field.name ? `${field.label}（${hint}）` : field.label;
     })(),
     inputType: inputType(field),
-    multiple: field.widget === "multiselect",
+    multiple: field.valueType === "array" || field.widget === "multiselect",
     required: field.required,
     defaultStrategy: defaultStrategy(field)
   };
   if (isDateField(field)) question.dateFormat = "YYYY-MM-DD";
+  if (field.dateClocks?.length) question.dateClocks = field.dateClocks;
   if (field.candidates?.type === "static") question.options = field.candidates.values;
   const dataSource = publishedDataSource(field, capabilities);
   if (dataSource) question.dataSource = dataSource;
@@ -574,7 +576,7 @@ function systemFieldTable(capability: CapabilityContract) {
   if (!fields.length) return "";
   return `
 
-系统处理字段不要问用户。处理方式以录制证据里唯一成立的来源为准，可能是其它接口带出、请求内计算、字段拷贝、系统默认、会话或生成等。不要把某次录制样本当成固定业务值。查询里没有默认值的筛选不要编造。
+系统处理字段不要问用户。存在唯一因果证据时，按其它接口带出、请求内计算、字段拷贝、会话或生成规则处理；没有因果来源时，按录制成功请求中的原始值和原始类型自动补齐，不要为了凑来源制造关联。查询里没有默认值的筛选不要编造。
 
 | 合同路径 | 业务名称 | 来源 | 处理方式 |
 |---|---|---|---|

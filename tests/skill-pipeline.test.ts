@@ -58,7 +58,7 @@ test("does not promote request fields that share a leftover UI value or have no 
   assert.equal(capability.inputForm.find(field => field.name === "qty")?.label, "数量");
   assert.equal(capability.inputForm.find(field => field.name === "amount")?.source, "system");
   assert.equal(capability.inputForm.find(field => field.name === "token")?.source, "system");
-  assert.notEqual(capability.inputForm.find(field => field.name === "amount")?.defaultRule, "literal:1");
+  assert.equal(capability.inputForm.find(field => field.name === "amount")?.defaultRule, "literal:1");
   assert.equal(capability.inputForm.find(field => field.name === "token")?.defaultRule, undefined);
 });
 
@@ -161,7 +161,8 @@ test("distinguishes caller fields from unresolved system fields", () => {
   assert.equal(customer.systemHandled, false);
   assert.equal(tenant.source, "system");
   assert.equal(tenant.systemHandled, true);
-  assert.match(tenant.sourceDetail, /未能唯一对应到页面控件/);
+  assert.equal(tenant.defaultRule, "literal:t1");
+  assert.match(tenant.sourceDetail, /系统执行时原样补齐/);
   const validated = validateCapability(capability, events, [capability]);
   assert.equal(validated.validation.status, "verified");
 });
