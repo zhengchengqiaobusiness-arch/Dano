@@ -1,5 +1,5 @@
 import type { CapabilityContract, CandidateRule, EvidenceEvent, InputFormField, UiEvidence } from "../domain.js";
-import { looksPickerField, pickerEntity, recordedLists } from "./field-resolver.js";
+import { looksDirectoryPicker, looksPickerField, pickerEntity, recordedLists } from "./field-resolver.js";
 
 function pathPickerEntity(path: string) {
   if (/\/(?:dept|department)(?:\/|$)/i.test(path)) return "dept";
@@ -68,6 +68,32 @@ function pickUnique<T>(items: T[]) {
   return items.length === 1 ? items[0] : undefined;
 }
 
+function pickDirectoryLookup(items: CapabilityContract[]) {
+  if (!items.length) return undefined;
+  if (items.length === 1) return items[0];
+  const simple = items.filter(item => /simple-list$/i.test(item.transport.pathTemplate || ""));
+  return simple.length === 1 ? simple[0] : undefined;
+}
+
+export function isLookupListPath(pathTemplate: string) {
+  const path = pathTemplate || "";
+  return /\/(?:user|dept|department|role|post|tenant|dict)\/(?:page|list|simple-list)$/i.test(path)
+    || /simple-list|dict-data|\/enum(?:\/|$)/i.test(path);
+}
+
+function triggeredByField(field: InputFormField, capability: CapabilityContract, events: EvidenceEvent[]) {
+  return triggerLabels(capability, events).has(field.label);
+}
+
+function usableCandidateSource(
+  field: InputFormField,
+  source: CapabilityContract,
+  events: EvidenceEvent[]
+) {
+  if (triggeredByField(field, source, events)) return true;
+  return isLookupListPath(source.transport.pathTemplate || "");
+}
+
 function displayNamesOf(capability: CapabilityContract, events: EvidenceEvent[]) {
   const ids = new Set(capability.evidence.filter(item => item.kind === "network").map(item => item.eventId));
   return new Set(
@@ -110,15 +136,23 @@ function lookupFor(field: InputFormField, catalog: CapabilityContract[], events:
     item.operation === "query"
     && Boolean(listPaths(item.outputSchema))
   );
+  const lookups = lists.filter(item => isLookupListPath(item.transport.pathTemplate || ""));
   const byTrigger = events.length
-    ? lists.filter(item => triggerLabels(item, events).has(field.label))
+    ? lists.filter(item => {
+      if (!triggeredByField(field, item, events)) return false;
+      if ((looksDirectoryPicker(field) || looksPickerField(field))
+        && !isLookupListPath(item.transport.pathTemplate || "")) {
+        return false;
+      }
+      return true;
+    })
     : [];
-  const byPath = lists.filter(item => pathHasStem(item.transport.pathTemplate, fieldStem(field.name)));
+  const byPath = lookups.filter(item => pathHasStem(item.transport.pathTemplate, fieldStem(field.name)));
   const optionLabels = field.candidates?.type === "static"
     ? field.candidates.values.map(item => String(item.label || "")).filter(Boolean)
     : [];
   const byOptions = optionLabels.length >= 2 && events.length
-    ? lists.filter(item => {
+    ? lookups.filter(item => {
       const names = displayNamesOf(item, events);
       const hit = optionLabels.filter(label => names.has(label)).length;
       return hit >= Math.max(2, optionLabels.length - 1) && names.size <= optionLabels.length * 2 + 4;
@@ -126,7 +160,7 @@ function lookupFor(field: InputFormField, catalog: CapabilityContract[], events:
     : [];
   const displays = events.length ? selectedDisplays(field, events) : [];
   const bySelected = displays.length
-    ? lists.filter(item => {
+    ? lookups.filter(item => {
       const names = displayNamesOf(item, events);
       return displays.every(label => names.has(label)) && names.size <= Math.max(40, displays.length * 8);
     })
@@ -135,22 +169,29 @@ function lookupFor(field: InputFormField, catalog: CapabilityContract[], events:
     && field.candidates.values.length >= 2
     && field.candidates.values.length <= 20
     && !looksPickerField(field);
-  const byPicker = looksPickerField(field)
-    ? lists.filter(item => {
+  const byPicker = looksPickerField(field) || looksDirectoryPicker(field)
+    ? lookups.filter(item => {
       if (!/\/(?:user|dept|department|role|post)\/(?:page|list|simple-list)$/i.test(item.transport.pathTemplate || "")) return false;
       const fieldEntity = pickerEntity(field);
       const listEntity = pathPickerEntity(item.transport.pathTemplate || "");
       return Boolean(fieldEntity && listEntity && fieldEntity === listEntity);
     })
     : [];
-  if (closedEnum) return pickUnique(byTrigger) || pickUnique(byPath);
-  return pickUnique(byTrigger) || pickUnique(byPath) || pickUnique(byOptions) || pickUnique(bySelected) || pickUnique(byPicker);
+  if (closedEnum) return pickUnique(byTrigger) || pickUnique(byPath) || pickDirectoryLookup(byPath);
+  return pickUnique(byTrigger)
+    || pickUnique(byPath)
+    || pickDirectoryLookup(byPath)
+    || pickUnique(byOptions)
+    || pickUnique(bySelected)
+    || pickDirectoryLookup(byPicker)
+    || pickUnique(byPicker);
 }
 
 export function queryCandidateForField(field: InputFormField, catalog: CapabilityContract[], events: EvidenceEvent[] = []) {
   if (field.source !== "caller") return undefined;
   if (field.candidates?.type === "capability") return undefined;
   if (!looksPickerField(field)
+    && !looksDirectoryPicker(field)
     && field.widget !== "select"
     && field.widget !== "multiselect"
     && field.candidates?.type !== "static") return undefined;
@@ -168,12 +209,26 @@ export function attachCandidateSources(catalog: CapabilityContract[], events: Ev
       // happens to contain the same sample text. Candidate APIs require real
       // picker/enum UI evidence.
       if (!looksPickerField(field)
+        && !looksDirectoryPicker(field)
         && field.widget !== "select"
         && field.widget !== "multiselect"
         && field.candidates?.type !== "static") return field;
       const source = lookupFor(field, catalog.filter(item => item.id !== capability.id), events);
       const paths = source ? listPaths(source.outputSchema) : undefined;
-      if (!source || !paths) return field;
+      if (!source || !paths) {
+        if (field.candidates?.type === "capability") {
+          const existing = catalog.find(item => item.id === field.candidates!.capabilityId);
+          if (existing && usableCandidateSource(field, existing, events)) return field;
+          const { candidates: _candidates, ...rest } = field;
+          return {
+            ...rest,
+            sourceDetail: /已录制查询接口|data\.list/.test(rest.sourceDetail || "")
+              ? "页面有筛选控件；有值时按页面字段名传递，空则省略，与未选时不传该键一致"
+              : rest.sourceDetail
+          };
+        }
+        return field;
+      }
       const candidates: CandidateRule = {
         type: "capability",
         capabilityId: source.id,

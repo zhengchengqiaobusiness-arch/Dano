@@ -71,17 +71,28 @@ export function getByPath(value: any, jsonPath: string): unknown {
   return current;
 }
 
+function pathSegments(jsonPath: string): Array<string | number> {
+  return [...jsonPath.replace(/^\$\./, "").matchAll(/([^.\[\]]+)|\[(\d+)\]/g)]
+    .map(match => (match[1] ?? Number(match[2])));
+}
+
 export function setByPath(target: Record<string, unknown>, jsonPath: string, value: unknown) {
   const literal = jsonPath.replace(/^\$\./, "");
   if (!literal.includes(".")) {
     target[literal] = value;
     return;
   }
-  const parts = literal.split(".").filter(Boolean);
+  const parts = pathSegments(jsonPath);
+  if (!parts.length) return;
   let cursor: any = target;
-  for (let i = 0; i < parts.length; i++) {
-    const key = parts[i]!;
-    if (i === parts.length - 1) cursor[key] = value;
-    else cursor = cursor[key] ??= {};
+  for (let index = 0; index < parts.length; index++) {
+    const key = parts[index]!;
+    if (index === parts.length - 1) {
+      cursor[key] = value;
+      return;
+    }
+    const next = parts[index + 1];
+    if (cursor[key] == null) cursor[key] = typeof next === "number" ? [] : {};
+    cursor = cursor[key];
   }
 }

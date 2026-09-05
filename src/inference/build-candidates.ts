@@ -7,7 +7,7 @@ import type {
 } from "../domain.js";
 import { inferOperation, inferUiOperationIntent, isSuccessfulNetworkEvidence, normalizeUrl, operationConfidence } from "./heuristics.js";
 import { attachCatalogDerivations } from "./field-derivation.js";
-import { assignUniqueFromSamples, bindByLabelAffinity, bindByRecordedOptions, bindBySemanticLabel, bindByUniqueMatching, bindLeftoverFields, collectUiObservations, finalizeCallerFields, flattenRequestValues, owningFormEvent, preferRequestValueType, promoteUnboundFillable, recordedLists, relatedUiEvents, requestValueAt, resolveFieldOwnership, sameFormShape } from "./field-resolver.js";
+import { assignUniqueFromSamples, attachOptionalNamedFilters, bindByLabelAffinity, bindByRecordedOptions, bindBySemanticLabel, bindByUniqueMatching, bindLeftoverFields, collectUiObservations, finalizeCallerFields, flattenRequestValues, owningFormEvent, preferRequestValueType, promoteUnboundFillable, recordedLists, relatedUiEvents, requestValueAt, resolveFieldOwnership, sameFormShape, splitSectionedCollectionFields } from "./field-resolver.js";
 import { mergeSchemas, schemaFromValue } from "../schema.js";
 import { slugify } from "../utils.js";
 
@@ -399,21 +399,31 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
           }
         }
         const samples = group.map(requestInput);
-        return finalizeCallerFields(
-          promoteUnboundFillable(
-            bindByRecordedOptions(
-              bindByLabelAffinity(
-                bindByUniqueMatching(
-                  assignUniqueFromSamples(
-                    bindLeftoverFields(
-                      bindBySemanticLabel([...forms.values()], observations, sample, lists),
+        return attachOptionalNamedFilters(
+          splitSectionedCollectionFields(
+            finalizeCallerFields(
+              promoteUnboundFillable(
+                bindByRecordedOptions(
+                  bindByLabelAffinity(
+                    bindByUniqueMatching(
+                      assignUniqueFromSamples(
+                        bindLeftoverFields(
+                          bindBySemanticLabel([...forms.values()], observations, sample, lists),
+                          observations,
+                          sample,
+                          lists,
+                          owner
+                        ),
+                        observations,
+                        samples,
+                        lists
+                      ),
                       observations,
                       sample,
-                      lists,
-                      owner
+                      lists
                     ),
                     observations,
-                    samples,
+                    sample,
                     lists
                   ),
                   observations,
@@ -421,20 +431,19 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
                   lists
                 ),
                 observations,
-                sample,
-                lists
+                sample
               ),
               observations,
               sample,
-              lists
+              lists,
+              owner
             ),
             observations,
             sample
           ),
           observations,
           sample,
-          lists,
-          owner
+          operation === "query"
         );
       })(),
       evidence,

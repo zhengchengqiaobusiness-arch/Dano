@@ -113,11 +113,14 @@ export function skillCredentialFile(outputRoot: string, skillName: string) {
 
 export function requiredCredentialOrigins(capabilities: CapabilityContract[], events: EvidenceEvent[]) {
   const evidenceIds = new Set(capabilities.flatMap(capability => capability.evidence.map(ref => ref.eventId)));
+  const allowed = new Set(capabilities.map(capability => capability.transport.origin).filter(Boolean));
   const origins = new Set<string>();
   for (const event of events) {
     if (event.kind !== "network" || !evidenceIds.has(event.id)) continue;
     if (!Object.keys(event.request.headers || {}).some(isCredentialHeader)) continue;
-    origins.add(originOf(event.request.url));
+    const origin = originOf(event.request.url);
+    if (allowed.size && !allowed.has(origin)) continue;
+    origins.add(origin);
   }
   return [...origins];
 }

@@ -1,6 +1,6 @@
 import type { CapabilityContract, CapabilityRoute, InputFormField, JsonSchema } from "../domain.js";
 import { describeFieldHandling } from "../inference/candidate-sources.js";
-import { isCandidateSourceCapability, isPrimaryCapability } from "../inference/export-scope.js";
+import { isCandidateSourceCapability, isPrimaryCapability, pageRoleLabel } from "../inference/export-scope.js";
 
 const operationNames: Record<CapabilityContract["operation"], string> = {
   query: "查询", create: "新建", update: "修改", review: "审核", delete: "删除",
@@ -22,6 +22,15 @@ const intentByOperation: Partial<Record<CapabilityContract["operation"], string>
   download: "要下载或导出",
   action: "要执行已验证的业务动作"
 };
+
+export function intentForCapability(capability: CapabilityContract) {
+  if (capability.operation === "query") {
+    const role = pageRoleLabel(capability.transport.pathTemplate);
+    if (role === "统计") return "只要看统计、汇总或分析";
+    if (role === "详情") return "只要看一笔单据详情";
+  }
+  return intentByOperation[capability.operation] || `要执行${capability.title}`;
+}
 
 export function safeCell(value: unknown) {
   return String(value ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
@@ -170,6 +179,7 @@ export function dataSourceOf(field: InputFormField, capabilities: CapabilityCont
 }
 
 export function questionKey(field: InputFormField, siblings: InputFormField[] = []) {
+  if (/\[[0-9]+\]/.test(field.path || "")) return field.path.replace(/^\$\./, "");
   const clashes = siblings.filter(item => item.name === field.name);
   if (clashes.length <= 1) return field.name;
   return field.path.replace(/^\$\./, "").replace(/\[\*\]/g, "");
@@ -235,13 +245,21 @@ function compositionNarrative(displayName: string, primary: CapabilityContract[]
 }
 
 function planningExamples(primary: CapabilityContract[], routes: CapabilityRoute[]) {
-  const query = primary.find(capability => capability.operation === "query");
+  const queries = primary.filter(capability => capability.operation === "query");
+  const query = queries.find(capability => pageRoleLabel(capability.transport.pathTemplate) !== "统计") || queries[0];
+  const summary = queries.find(capability => pageRoleLabel(capability.transport.pathTemplate) === "统计");
   const write = primary.find(capability => capability.confirmation.required);
   const blocks: string[] = [];
   if (query) {
     blocks.push(`用户：「${query.title.replace(/^查询/, "查一下")}」
 规划：单一原子操作「${query.title}」。只收集用户点名的筛选。
 执行：读 [INPUT_FORMS.md](references/INPUT_FORMS.md#${query.id}) → 原生 \`ask_user_question\` → \`python scripts/execute.py --capability ${query.id} --input '...'\` → \`python scripts/format_list.py\`。
+停止：多个主能力都像，或显示名对不上候选。`);
+  }
+  if (summary) {
+    blocks.push(`用户：「${summary.title.replace(/^查询/, "看一下")}」
+规划：单一原子操作「${summary.title}」。只收集用户点名的筛选。
+执行：读 [INPUT_FORMS.md](references/INPUT_FORMS.md#${summary.id}) → 原生 \`ask_user_question\` → \`python scripts/execute.py --capability ${summary.id} --input '...'\`。
 停止：多个主能力都像，或显示名对不上候选。`);
   }
   if (write) {
@@ -266,7 +284,7 @@ function planningExamples(primary: CapabilityContract[], routes: CapabilityRoute
 
 function routingRows(primary: CapabilityContract[]) {
   return primary.map(capability => {
-    const intent = intentByOperation[capability.operation] || `要执行${capability.title}`;
+    const intent = intentForCapability(capability);
     return `| ${intent} | ${safeCell(capability.title)} | \`${capability.id}\` |`;
   }).join("\n");
 }
@@ -280,16 +298,25 @@ function routeIndex(routes: CapabilityRoute[]) {
 
 function routeByIntent(primary: CapabilityContract[], lookups: CapabilityContract[]) {
   const query = primary.filter(capability => capability.operation === "query");
+  const listQueries = query.filter(capability => pageRoleLabel(capability.transport.pathTemplate) !== "统计");
+  const summaryQueries = query.filter(capability => pageRoleLabel(capability.transport.pathTemplate) === "统计");
   const writes = primary.filter(capability => capability.confirmation.required);
   const others = primary.filter(capability => !query.includes(capability) && !writes.includes(capability));
   const lookupNames = lookups.map(capability => capability.title.replace(/^查询/, "")).filter(Boolean).join("、");
   const sections: string[] = [];
-  if (query.length) {
+  if (listQueries.length) {
     sections.push(`### 查、筛、列单据
 
 当用户只要看已有单据时走这里。选定后先读 [CAPABILITIES.md](references/CAPABILITIES.md)，再读该能力在 [INPUT_FORMS.md](references/INPUT_FORMS.md) 的小节。
 
-${query.map(capability => `- ${capability.title}：\`${capability.id}\``).join("\n")}`);
+${listQueries.map(capability => `- ${capability.title}：\`${capability.id}\``).join("\n")}`);
+  }
+  if (summaryQueries.length) {
+    sections.push(`### 统计与汇总
+
+当用户只要看统计、汇总或分析时走这里。选定后先读 [CAPABILITIES.md](references/CAPABILITIES.md)，再读该能力在 [INPUT_FORMS.md](references/INPUT_FORMS.md) 的小节。
+
+${summaryQueries.map(capability => `- ${capability.title}：\`${capability.id}\``).join("\n")}`);
   }
   if (writes.length) {
     sections.push(`### 写单据
@@ -493,7 +520,7 @@ export function buildCapabilities(capabilities: CapabilityContract[], routes: Ca
       : "无需调用方字段";
     return `## ${safeCell(capability.title)}
 
-- 何时用：${intentByOperation[capability.operation] || capability.title}
+- 何时用：${intentForCapability(capability)}
 - 读写：${capability.confirmation.required ? "写" : "读"} · ${operationNames[capability.operation]}
 - 能力编号：\`${capability.id}\`
 - 输入概况：${input}

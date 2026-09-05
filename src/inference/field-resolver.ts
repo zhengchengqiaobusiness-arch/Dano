@@ -223,7 +223,8 @@ const SYNONYM_GROUPS = [
   /name|名称/i,
   /category|classify|classification|分类|类别/i,
   /processDefinition|processDefKey|definitionKey|所属流程|流程定义/i,
-  /balance|remaining|remain|surplus|stock|inventory|quota|余额|剩余|库存/i
+  /balance|remaining|remain|surplus|stock|inventory|quota|余额|剩余|库存/i,
+  /progress|进度|完成率/i
 ];
 
 function fieldText(field: { name?: string; label?: string }) {
@@ -343,6 +344,11 @@ export function looksPickerField(
   }
   if (/picker/i.test(`${observation?.type || ""} ${field.widget || ""}`)) return true;
   return pickerEntity(field) === "user";
+}
+
+export function looksDirectoryPicker(field: Pick<InputFormField, "name" | "label" | "widget" | "path">) {
+  const entity = pickerEntity(field);
+  return entity === "dept" || entity === "role" || entity === "post";
 }
 
 export function preferRequestValueType(
@@ -707,6 +713,25 @@ export function fieldHasUiEvidence(field: InputFormField, events: UiEvidence[]) 
   return labels.length >= 2 && labels.every(label =>
     observations.some(item => looksDateControl(item) && labelsEquivalent(item.label, label))
   );
+}
+
+export function collectionRowHasUiEvidence(
+  field: InputFormField,
+  fields: InputFormField[],
+  events: UiEvidence[]
+) {
+  const parsed = parseCollectionLeafPath(field.path);
+  if (!parsed || parsed.index === "*") return false;
+  return fields.some(other => {
+    if (other.path === field.path || other.source !== "caller") return false;
+    const sibling = parseCollectionLeafPath(other.path);
+    return Boolean(
+      sibling
+      && sibling.prefix === parsed.prefix
+      && sibling.index === parsed.index
+      && fieldHasUiEvidence(other, events)
+    );
+  });
 }
 
 export function staticCandidatesHaveUiEvidence(field: InputFormField, events: UiEvidence[]) {
@@ -1670,7 +1695,24 @@ export function promoteUnboundFillable(
   });
 }
 
+export function parseCollectionLeafPath(path: string) {
+  const starred = /^(.*)\[\*\]\.(.+)$/.exec(path);
+  if (starred) return { prefix: starred[1]!, index: "*" as const, key: starred[2]!.split(".")[0]! };
+  const indexed = /^(.*)\[(\d+)\]\.(.+)$/.exec(path);
+  if (indexed) return { prefix: indexed[1]!, index: Number(indexed[2]), key: indexed[3]!.split(".")[0]! };
+  return undefined;
+}
+
+export function isCollectionMetadataKey(key: string) {
+  return /^(itemType|_X_ROW_KEY|_X_ID|rowKey|row_key|sort|index)$/i.test(key);
+}
+
 export function requestValueAt(sample: unknown, path: string) {
+  const indexed = parseCollectionLeafPath(path);
+  if (indexed && indexed.index !== "*") {
+    const rows = collectionRowsAt(sample, indexed.prefix);
+    return rows[indexed.index]?.[indexed.key];
+  }
   const items = flattenRequestValues(sample);
   const exact = items.find(item => item.path === path);
   if (exact) return exact.value;
@@ -1704,6 +1746,178 @@ export function collectionLeafUniform(sample: unknown, leafPath: string) {
   if (!rows.every(row => Object.prototype.hasOwnProperty.call(row, key))) return false;
   const first = rows[0]![key];
   return rows.every(row => Object.is(row[key], first) || sameValue(row[key], first));
+}
+
+function collectionDiscriminator(rows: Array<Record<string, unknown>>) {
+  for (const key of ["itemType", "lineType", "rowType", "kind", "category"]) {
+    if (!rows.every(row => row[key] !== undefined && row[key] !== null && row[key] !== "")) continue;
+    if (new Set(rows.map(row => String(row[key]))).size > 1) return key;
+  }
+  return undefined;
+}
+
+function collectionKeySetsDiffer(rows: Array<Record<string, unknown>>) {
+  const sets = rows.map(row => Object.keys(row).filter(key => !/^(_X_ROW_KEY|_X_ID|rowKey|sort)$/i.test(key)).sort().join("\0"));
+  return new Set(sets).size > 1;
+}
+
+function distinctLeafLabels(observations: UiObservation[], key: string) {
+  const labels = new Set(
+    observations
+      .filter(item => !looksReadonly(item) && item.label && !/^\d+$/.test(item.label) && (!item.name || item.name === key))
+      .map(item => item.label!)
+  );
+  return labels.size > 1;
+}
+
+export function collectionIsSectioned(
+  sample: unknown,
+  collectionPath: string,
+  observations: UiObservation[] = []
+) {
+  const rows = collectionRowsAt(sample, collectionPath);
+  if (rows.length < 2) return false;
+  if (collectionDiscriminator(rows) || collectionKeySetsDiffer(rows)) return true;
+  const keys = [...new Set(rows.flatMap(row => Object.keys(row)))].filter(key => !isCollectionMetadataKey(key));
+  return keys.some(key => distinctLeafLabels(observations, key));
+}
+
+function takeRowObservation(
+  row: Record<string, unknown>,
+  key: string,
+  observations: UiObservation[],
+  used: Set<UiObservation>
+) {
+  const value = row[key];
+  const unused = observations.filter(item => !used.has(item) && !looksReadonly(item) && (!item.name || item.name === key));
+  const byValue = unused.filter(item => observationMatchesValue(item, value, []));
+  if (byValue.length === 1) return byValue[0];
+  if (byValue.length > 1 && new Set(byValue.map(item => item.label)).size === 1) return byValue[0];
+  const named = unused.filter(item => item.name === key);
+  if (named.length === 1 && (value === undefined || value === null || value === "" || observationMatchesValue(named[0]!, value, []))) {
+    return named[0];
+  }
+  return undefined;
+}
+
+function nextLeftoverObservation(
+  key: string,
+  observations: UiObservation[],
+  used: Set<UiObservation>
+) {
+  return observations.find(item =>
+    !used.has(item)
+    && !looksReadonly(item)
+    && item.label
+    && !/^\d+$/.test(item.label)
+    && (item.name === key || (!item.name && sameSynonymGroup({ name: key }, item)))
+  );
+}
+
+function indexedCallerField(
+  base: InputFormField,
+  prefix: string,
+  index: number,
+  key: string,
+  observation: UiObservation | undefined,
+  value: unknown,
+  observations: UiObservation[]
+): InputFormField {
+  const path = `${prefix}[${index}].${key}`;
+  const next = {
+    ...base,
+    path,
+    name: key,
+    required: false,
+    requiredBasis: "not-observed" as const
+  };
+  return observation
+    ? asCaller(next, observation, value, observations, [])
+    : {
+      ...next,
+      source: "caller",
+      systemHandled: false,
+      required: false,
+      sourceDetail: "同一明细行已有页面输入，该业务列由调用方按行填写，不要套用其它行"
+    };
+}
+
+export function splitSectionedCollectionFields(
+  fields: InputFormField[],
+  observations: UiObservation[],
+  sample: unknown
+): InputFormField[] {
+  const parents = fields.filter(field =>
+    field.valueType === "array"
+    && collectionIsSectioned(sample, field.path, observations)
+  );
+  if (!parents.length) return fields;
+  const used = new Set<UiObservation>();
+  const replacements = new Map<string, InputFormField[]>();
+  for (const parent of parents) {
+    const rows = collectionRowsAt(sample, parent.path);
+    const keys = [...new Set(rows.flatMap(row => Object.keys(row)))];
+    const businessKeys = keys.filter(key => !isCollectionMetadataKey(key));
+    for (const key of businessKeys) {
+      const base = fields.find(field => field.path === `${parent.path}[*].${key}`)
+        || fields.find(field => field.name === key && field.path.startsWith(`${parent.path}[`));
+      if (!base) continue;
+      const indexed: InputFormField[] = [];
+      for (let index = 0; index < rows.length; index++) {
+        const row = rows[index]!;
+        if (!Object.prototype.hasOwnProperty.call(row, key)) continue;
+        const observation = takeRowObservation(row, key, observations, used)
+          || nextLeftoverObservation(key, observations, used);
+        if (observation) used.add(observation);
+        indexed.push(indexedCallerField(base, parent.path, index, key, observation, row[key], observations));
+      }
+      if (indexed.length) replacements.set(`${parent.path}[*].${key}`, indexed);
+    }
+  }
+  if (!replacements.size) return fields;
+  return fields.flatMap(field => replacements.get(field.path) || [field]);
+}
+
+export function attachOptionalNamedFilters(
+  fields: InputFormField[],
+  observations: UiObservation[],
+  sample: unknown,
+  query = false
+): InputFormField[] {
+  if (!query) return fields;
+  const leftover = leftoverEditable(fields, observations);
+  const extra: InputFormField[] = [];
+  const taken = new Set(fields.map(field => field.name));
+  for (const observation of leftover) {
+    const name = realFieldName(observation.name);
+    if (!name || taken.has(name) || PAGE_NAME.test(name)) continue;
+    if (fields.some(field => field.path === `$.${name}` || field.name === name)) continue;
+    taken.add(name);
+    extra.push({
+      path: `$.${name}`,
+      name,
+      label: observation.label || name,
+      valueType: "string",
+      source: "caller",
+      required: false,
+      requiredBasis: "not-observed",
+      systemHandled: false,
+      widget: widgetFromObservation({
+        path: `$.${name}`,
+        name,
+        label: observation.label || name,
+        valueType: "string",
+        source: "caller",
+        required: false,
+        requiredBasis: "not-observed",
+        systemHandled: false,
+        sourceDetail: "",
+        widget: "text"
+      }, observation),
+      sourceDetail: "页面有筛选控件；有值时按页面字段名传递，空则省略，与未选时不传该键一致"
+    });
+  }
+  return extra.length ? [...fields, ...extra] : fields;
 }
 
 function formNames(form: NonNullable<UiEvidence["form"]>) {

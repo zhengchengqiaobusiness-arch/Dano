@@ -64,13 +64,24 @@ def set_by_path(target: dict[str, Any], json_path: str, value: Any) -> None:
         target[key] = value
         return
     parts = path_parts(json_path)
-    if any(isinstance(part, int) for part in parts):
-        raise ValueError(f"暂不支持向数组路径写入字段：{json_path}")
-    current = target
-    for part in parts[:-1]:
-        current = current.setdefault(str(part), {})
-    if parts:
-        current[str(parts[-1])] = value
+    current: Any = target
+    for index, part in enumerate(parts):
+        last = index == len(parts) - 1
+        nxt = None if last else parts[index + 1]
+        if isinstance(current, list) and isinstance(part, int):
+            while len(current) <= part:
+                current.append({} if last or not isinstance(nxt, int) else [])
+            if last:
+                current[part] = value
+                return
+            current = current[part]
+            continue
+        if last:
+            current[part] = value
+            return
+        if not isinstance(current, dict) or part not in current or current[part] is None:
+            current[part] = [] if isinstance(nxt, int) else {}
+        current = current[part]
 
 
 def date_to_millis(value: str) -> int:
@@ -114,48 +125,94 @@ def collection_template_rows(capability: dict[str, Any], prefix: str) -> list[di
     return None
 
 
+def parse_collection_leaf_path(path: str) -> dict[str, Any] | None:
+    starred = re.fullmatch(r"(.*)\[\*\]\.(.+)", path)
+    if starred:
+        return {"prefix": starred.group(1), "index": "*", "key": starred.group(2).split(".")[0]}
+    indexed = re.fullmatch(r"(.*)\[(\d+)\]\.(.+)", path)
+    if indexed:
+        return {"prefix": indexed.group(1), "index": int(indexed.group(2)), "key": indexed.group(3).split(".")[0]}
+    return None
+
+
+def collection_field_input_keys(field: dict[str, Any], siblings: list[dict[str, Any]]) -> list[str]:
+    path = field.get("path") or ""
+    keys = {path, path.removeprefix("$.")}
+    name = field.get("name")
+    if name and sum(1 for item in siblings if item.get("name") == name) <= 1:
+        keys.add(name)
+    return list(keys)
+
+
 def apply_collection_templates(capability: dict[str, Any], prepared: dict[str, Any]) -> None:
-    for field in capability.get("inputForm", []):
+    fields = capability.get("inputForm", [])
+    for field in fields:
         path = field.get("path") or ""
-        if "[*]" in path:
+        parsed = parse_collection_leaf_path(path)
+        if parsed:
             continue
         template = collection_template_rows(capability, path)
         if not template:
             continue
         current = get_by_path(prepared, path)
-        if not isinstance(current, list) or not current:
-            set_by_path(prepared, path, copy.deepcopy(template))
-            continue
-        merged: list[Any] = []
-        for index, row in enumerate(template):
-            overlay = current[index] if index < len(current) else None
-            next_row = copy.deepcopy(row)
-            if isinstance(overlay, dict):
-                next_row.update(overlay)
-            merged.append(next_row)
-        if len(current) > len(template):
-            merged.extend(copy.deepcopy(item) if isinstance(item, dict) else item for item in current[len(template):])
-        set_by_path(prepared, path, merged)
+        rows = copy.deepcopy(template)
+        if isinstance(current, list) and current:
+            rows = []
+            for index, row in enumerate(template):
+                overlay = current[index] if index < len(current) else None
+                next_row = copy.deepcopy(row)
+                if isinstance(overlay, dict):
+                    next_row.update(overlay)
+                rows.append(next_row)
+            if len(current) > len(template):
+                rows.extend(copy.deepcopy(item) if isinstance(item, dict) else item for item in current[len(template):])
+        header_names = {
+            item.get("name")
+            for item in fields
+            if not parse_collection_leaf_path(item.get("path") or "") and item.get("path") != path
+        }
+        for child in fields:
+            leaf = parse_collection_leaf_path(child.get("path") or "")
+            if not leaf or leaf["prefix"] != path:
+                continue
+            for key in collection_field_input_keys(child, fields):
+                if key not in prepared:
+                    continue
+                value = prepared[key]
+                if leaf["index"] == "*":
+                    for row in rows:
+                        if isinstance(row, dict) and leaf["key"] in row:
+                            row[leaf["key"]] = value
+                elif leaf["index"] < len(rows) and isinstance(rows[leaf["index"]], dict) and leaf["key"] in rows[leaf["index"]]:
+                    rows[leaf["index"]][leaf["key"]] = value
+                if key != child.get("name") or child.get("name") not in header_names:
+                    prepared.pop(key, None)
+        for key, value in list(prepared.items()):
+            if key in header_names or key == field.get("name"):
+                continue
+            if not any(isinstance(row, dict) and key in row for row in rows):
+                continue
+            for row in rows:
+                if isinstance(row, dict) and key in row:
+                    row[key] = value
+            prepared.pop(key, None)
+        set_by_path(prepared, path, rows)
 
 
 def nest_line_items(capability: dict[str, Any], supplied: dict[str, Any]) -> dict[str, Any]:
     prepared = copy.deepcopy(supplied)
-    item_fields = [field for field in capability.get("inputForm", []) if "[*]" in field.get("path", "")]
+    fields = capability.get("inputForm", [])
+    item_fields = [field for field in fields if parse_collection_leaf_path(field.get("path") or "")]
     if not item_fields:
         return prepared
     if isinstance(prepared.get("items"), list):
         return prepared
-    header_names = {field["name"] for field in capability.get("inputForm", []) if "[*]" not in field.get("path", "")}
-    item: dict[str, Any] = {}
     for field in item_fields:
-        name = field["name"]
-        dotted = item_input_key(field)
-        if dotted in prepared and dotted != name:
-            item[name] = prepared.pop(dotted)
-        elif name in prepared and name not in header_names:
-            item[name] = prepared.pop(name)
-    if item:
-        prepared["items"] = [item]
+        for key in collection_field_input_keys(field, fields):
+            if key not in prepared:
+                continue
+            if get_by_path(prepared, field["path"]) is None:
+                set_by_path(prepared, field["path"], prepared[key])
     return prepared
 
 

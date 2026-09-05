@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { getByPath, setByPath } from "../utils.js";
 import { dateToMillis, isDateInput, normalizeDateString } from "../inference/date-format.js";
 import { parseFromRule } from "../inference/field-derivation.js";
+import { parseCollectionLeafPath } from "../inference/field-resolver.js";
 
 export type MaterializeOptions = {
   catalog?: CapabilityContract[];
@@ -236,48 +237,79 @@ function collectionTemplateRows(cap: CapabilityContract, prefix: string) {
     : undefined;
 }
 
+function collectionFieldInputKeys(field: InputFormField, siblings: InputFormField[]) {
+  const keys = new Set<string>([field.path, field.path.replace(/^\$\./, "")]);
+  const clashes = siblings.filter(item => item.name === field.name);
+  if (clashes.length <= 1) keys.add(field.name);
+  return [...keys];
+}
+
 function applyCollectionTemplates(cap: CapabilityContract, prepared: Record<string, unknown>) {
   for (const field of cap.inputForm) {
-    if (field.path.includes("[*]")) continue;
+    if (field.path.includes("[") && field.path !== field.name) {
+      const parsed = parseCollectionLeafPath(field.path);
+      if (parsed && parsed.index !== "*") continue;
+    }
     const template = collectionTemplateRows(cap, field.path);
     if (!template?.length) continue;
     const current = getByPath(prepared, field.path);
-    if (!Array.isArray(current) || !current.length) {
-      setByPath(prepared, field.path, structuredClone(template));
-      continue;
+    let rows = structuredClone(template);
+    if (Array.isArray(current) && current.length) {
+      rows = template.map((row, index) => {
+        const overlay = current[index];
+        if (!overlay || typeof overlay !== "object" || Array.isArray(overlay)) return structuredClone(row);
+        return { ...structuredClone(row), ...overlay };
+      });
+      if (current.length > template.length) {
+        rows.push(...current.slice(template.length).map(row => (
+          row && typeof row === "object" && !Array.isArray(row) ? { ...row } : row
+        )));
+      }
     }
-    const merged = template.map((row, index) => {
-      const overlay = current[index];
-      if (!overlay || typeof overlay !== "object" || Array.isArray(overlay)) return structuredClone(row);
-      return { ...structuredClone(row), ...overlay };
-    });
-    if (current.length > template.length) {
-      merged.push(...current.slice(template.length).map(row => (
-        row && typeof row === "object" && !Array.isArray(row) ? { ...row } : row
-      )));
+    const headerNames = new Set(
+      cap.inputForm
+        .filter(item => !parseCollectionLeafPath(item.path) && item.path !== field.path)
+        .map(item => item.name)
+    );
+    for (const child of cap.inputForm) {
+      const parsed = parseCollectionLeafPath(child.path);
+      if (!parsed || parsed.prefix !== field.path) continue;
+      for (const key of collectionFieldInputKeys(child, cap.inputForm)) {
+        if (!Object.prototype.hasOwnProperty.call(prepared, key)) continue;
+        const value = prepared[key];
+        if (parsed.index === "*") {
+          for (const row of rows) {
+            if (Object.prototype.hasOwnProperty.call(row, parsed.key)) row[parsed.key] = value;
+          }
+        } else if (rows[parsed.index] && Object.prototype.hasOwnProperty.call(rows[parsed.index]!, parsed.key)) {
+          rows[parsed.index]![parsed.key] = value;
+        }
+        if (key !== child.name || !headerNames.has(child.name)) delete prepared[key];
+      }
     }
-    setByPath(prepared, field.path, merged);
+    for (const [key, value] of Object.entries(prepared)) {
+      if (headerNames.has(key) || key === field.name) continue;
+      if (!rows.some(row => Object.prototype.hasOwnProperty.call(row, key))) continue;
+      for (const row of rows) {
+        if (Object.prototype.hasOwnProperty.call(row, key)) row[key] = value;
+      }
+      delete prepared[key];
+    }
+    setByPath(prepared, field.path, rows);
   }
 }
 
 function nestLineItems(cap: CapabilityContract, supplied: Record<string, unknown>) {
   const prepared = structuredClone(supplied);
-  const itemFields = cap.inputForm.filter(field => field.path.includes("[*]"));
+  const itemFields = cap.inputForm.filter(field => parseCollectionLeafPath(field.path));
   if (!itemFields.length) return prepared;
   if (Array.isArray(prepared.items)) return prepared;
-  const headerNames = new Set(cap.inputForm.filter(field => !field.path.includes("[*]")).map(field => field.name));
-  const item: Record<string, unknown> = {};
   for (const field of itemFields) {
-    const dotted = itemInputKey(field);
-    if (dotted !== field.name && Object.prototype.hasOwnProperty.call(prepared, dotted)) {
-      item[field.name] = prepared[dotted];
-      delete prepared[dotted];
-    } else if (Object.prototype.hasOwnProperty.call(prepared, field.name) && !headerNames.has(field.name)) {
-      item[field.name] = prepared[field.name];
-      delete prepared[field.name];
+    for (const key of collectionFieldInputKeys(field, cap.inputForm)) {
+      if (!Object.prototype.hasOwnProperty.call(prepared, key)) continue;
+      if (getByPath(prepared, field.path) === undefined) setByPath(prepared, field.path, prepared[key]);
     }
   }
-  if (Object.keys(item).length) prepared.items = [item];
   return prepared;
 }
 

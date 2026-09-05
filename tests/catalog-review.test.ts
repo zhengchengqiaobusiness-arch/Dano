@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { CapabilityContract, EvidenceEvent } from "../src/domain.js";
-import { capabilitiesForSession, isPrimaryCapability, sessionCatalogSlice, summarizeCatalog } from "../src/inference/export-scope.js";
+import { capabilitiesForSession, isPrimaryCapability, relatedLookupCapabilities, sessionCatalogSlice, summarizeCatalog } from "../src/inference/export-scope.js";
 import { reviewCatalog } from "../src/review/catalog-review.js";
 import { applyReviewActionPolicy, isMajorEvidenceGap } from "../src/review/review-action.js";
 import { mergeCatalogByTransport } from "../src/catalog/normalize.js";
@@ -52,6 +52,27 @@ test("a same-resource detail reload after save is a supporting lookup, not a thi
 
   assert.deepEqual(summarizeCatalog(catalog).primary.map(item => item.id), ["query-work-report-page", "create-work-report"]);
   assert.equal(isPrimaryCapability(catalog[2]!, catalog), false);
+});
+
+test("a detail get with a record-shaped response is still not a primary when the write exists", () => {
+  const catalog = [
+    cap({
+      id: "query-page",
+      operation: "query",
+      transport: { method: "GET", urlTemplate: "https://x/oa/doc/page", origin: "https://x", pathTemplate: "/oa/doc/page" },
+      inputForm: [{ path: "$.billCode", name: "billCode", label: "单据编号", valueType: "string", source: "caller", required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面", widget: "text" }]
+    }),
+    cap({ id: "create-doc", operation: "create", transport: { method: "POST", urlTemplate: "https://x/oa/doc/submit", origin: "https://x", pathTemplate: "/oa/doc/submit" } }),
+    cap({
+      id: "query-get",
+      operation: "query",
+      transport: { method: "GET", urlTemplate: "https://x/oa/doc/get", origin: "https://x", pathTemplate: "/oa/doc/get" },
+      outputSchema: { type: "object", properties: { data: { type: "object", properties: { items: { type: "array", items: { type: "object" } } } } } },
+      inputForm: [{ path: "$.id", name: "id", label: "id", valueType: "string", source: "caller", required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "详情", widget: "text" }]
+    })
+  ];
+  assert.equal(isPrimaryCapability(catalog[2]!, catalog), false);
+  assert.equal(summarizeCatalog(catalog).primary.some(item => item.id === "query-get"), false);
 });
 
 test("unexplained write field blocks export and asks for re-analyze", () => {
@@ -459,6 +480,89 @@ test("caller field not sent in this session does not fail caller-fields-backed-b
   const validated = validateCapability(query, events, [query]);
   const check = validated.validation.checks.find(item => item.name === "caller-fields-backed-by-ui");
   assert.equal(check?.ok, true, JSON.stringify(validated.validation.checks.filter(item => !item.ok)));
+});
+
+test("a department picker brings in a recorded directory lookup from another page", () => {
+  const page = cap({
+    id: "query-doc-page",
+    operation: "query",
+    transport: { method: "GET", urlTemplate: "https://x/oa/doc/page", origin: "https://x", pathTemplate: "/oa/doc/page" },
+    inputForm: [{
+      path: "$.deptId", name: "deptId", label: "申请部门", valueType: "string", source: "caller",
+      required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面", widget: "select"
+    }]
+  });
+  const create = cap({
+    id: "create-doc",
+    operation: "create",
+    transport: { method: "POST", urlTemplate: "https://x/oa/doc/submit", origin: "https://x", pathTemplate: "/oa/doc/submit" }
+  });
+  const dept = cap({
+    id: "query-dept",
+    operation: "query",
+    transport: { method: "GET", urlTemplate: "https://x/system/dept/simple-list", origin: "https://x", pathTemplate: "/system/dept/simple-list" },
+    outputSchema: {
+      type: "object",
+      properties: {
+        data: { type: "array", items: { type: "object", properties: { id: { type: "integer" }, name: { type: "string" } } } }
+      }
+    }
+  });
+  const related = relatedLookupCapabilities([page, create, dept], [page, create]);
+  assert.equal(related.some(item => item.id === "query-dept"), true);
+  const foreign = cap({
+    id: "query-foreign-dept",
+    operation: "query",
+    transport: { method: "GET", urlTemplate: "https://other.test/system/dept/simple-list", origin: "https://other.test", pathTemplate: "/system/dept/simple-list" }
+  });
+  const sameHostOnly = relatedLookupCapabilities([page, create, dept, foreign], [page, create]);
+  assert.equal(sameHostOnly.some(item => item.id === "query-foreign-dept"), false);
+});
+
+test("finalize drops a sibling business page bound as a department candidate", () => {
+  const stats = cap({
+    id: "query-doc-statistics",
+    operation: "query",
+    title: "查询单据",
+    transport: { method: "GET", urlTemplate: "https://x/oa/doc/statistics", origin: "https://x", pathTemplate: "/oa/doc/statistics" },
+    inputForm: [{
+      path: "$.deptId", name: "deptId", label: "组织机构", valueType: "string", source: "caller",
+      required: false, requiredBasis: "not-observed", systemHandled: false,
+      sourceDetail: "调用方从已录制查询接口选择，不要写死录制样本。接口 GET /oa/doc/page，值 $.data.list[*].id，显示 $.data.list[*].title",
+      widget: "select",
+      candidates: {
+        type: "capability",
+        capabilityId: "query-doc-page",
+        valuePath: "$.data.list[*].id",
+        labelPath: "$.data.list[*].title"
+      }
+    }]
+  });
+  const page = cap({
+    id: "query-doc-page",
+    operation: "query",
+    title: "查询单据",
+    transport: { method: "GET", urlTemplate: "https://x/oa/doc/page", origin: "https://x", pathTemplate: "/oa/doc/page" },
+    outputSchema: {
+      type: "object",
+      properties: {
+        data: {
+          type: "object",
+          properties: {
+            list: { type: "array", items: { type: "object", properties: { id: { type: "integer" }, title: { type: "string" } } } },
+            total: { type: "integer" }
+          }
+        }
+      }
+    },
+    inputForm: [{
+      path: "$.billCode", name: "billCode", label: "单据编号", valueType: "string", source: "caller",
+      required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面", widget: "text"
+    }]
+  });
+  const [next] = finalizeSessionSlice([stats, page], [], [stats, page]);
+  const dept = next?.inputForm.find(item => item.name === "deptId");
+  assert.equal(dept?.candidates, undefined);
 });
 
 test("finalize drops candidate sources that are not in this session slice", () => {

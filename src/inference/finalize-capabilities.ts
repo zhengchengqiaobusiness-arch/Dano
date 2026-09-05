@@ -74,15 +74,10 @@ export function finalizeSessionSlice(
   existing: CapabilityContract[] = []
 ) {
   const availableIds = new Set(slice.map(capability => capability.id));
-  let stripped = false;
-  const cleaned = slice.map(capability => {
-    const next = stripUnavailableSources(capability, availableIds);
-    if (next !== capability) stripped = true;
-    return next;
-  });
-  const ready = stripped ? cleaned : slice;
-  if (sessionExportReady(ready) && existing.length) return ready;
-  const finalized = finalizeCapabilities(ready, events);
+  const cleaned = slice.map(capability => stripUnavailableSources(capability, availableIds));
+  const sourced = attachCandidateSources(cleaned, events);
+  if (sessionExportReady(sourced) && existing.length) return sourced;
+  const finalized = finalizeCapabilities(sourced, events);
   if (!existing.length) return finalized;
   const existingByKey = new Map(existing.map(capability => [catalogTransportKey(capability), capability]));
   return finalized.map(capability => {

@@ -1,6 +1,6 @@
 import type { CapabilityContract, EvidenceEvent } from "../domain.js";
 import { ASK_KEY } from "./heuristics.js";
-import { isPaginationField } from "./field-resolver.js";
+import { isPaginationField, pickerEntity } from "./field-resolver.js";
 
 const NOISE_PATH = /\/im\/|notify-message|unread-count|online-status|get-permission-info|captcha|tenant\/get-by-website|tenant\/get-id-by-name|\/user\/get-current$|\/auth\/login|\/auth\/logout/i;
 
@@ -24,6 +24,52 @@ const OPERATION_SEGMENT = /^(page|list|search|query|find|create|update|delete|sa
 const SUMMARY_QUERY = /\/(?:statistics|statistic|stats|summary|overview|analyse|analyze|dashboard)$/i;
 const OPERATION_PREFIX = /^(get|create|update|delete|save|submit|query|list|find|add|edit|remove|enable|disable|complete)/i;
 const OPERATION_SUFFIX = /(?:List|Page|Search|Query|Find|Detail|Info|Count|Process|ById)$/i;
+const DIRECTORY_LOOKUP = /\/(?:user|dept|department|role|post)\/(?:page|list|simple-list)$/i;
+const PAGE_ROLE_LABELS: Record<string, string> = {
+  page: "列表",
+  list: "列表",
+  search: "列表",
+  query: "列表",
+  statistics: "统计",
+  statistic: "统计",
+  stats: "统计",
+  summary: "统计",
+  overview: "统计",
+  analyse: "统计",
+  analyze: "统计",
+  dashboard: "统计",
+  get: "详情",
+  detail: "详情",
+  info: "详情",
+  export: "导出",
+  import: "导入"
+};
+
+function pathPickerEntity(path: string) {
+  if (/\/(?:dept|department)(?:\/|$)/i.test(path)) return "dept";
+  if (/\/role(?:\/|$)/i.test(path)) return "role";
+  if (/\/post(?:\/|$)/i.test(path)) return "post";
+  if (/\/user(?:\/|$)/i.test(path)) return "user";
+  return undefined;
+}
+
+export function directoryLookupEntity(pathTemplate: string) {
+  const path = pathTemplate || "";
+  return DIRECTORY_LOOKUP.test(path) ? pathPickerEntity(path) : undefined;
+}
+
+export function pageRoleLabel(pathTemplate: string, pageUrl = "") {
+  const path = pathTemplate || "";
+  const haystack = `${path} ${pageUrl}`;
+  if (SUMMARY_QUERY.test(path) || /statistic|stats|summary|overview|dashboard|analyse|analyze/.test(haystack)) {
+    return "统计";
+  }
+  if (DETAIL_QUERY.test(path)) return "详情";
+  if (PAGE_QUERY.test(path) || LIST_QUERY.test(path) || /(?:list|search|query)(?:[-_/]|$)/i.test(pageUrl)) {
+    return "列表";
+  }
+  return PAGE_ROLE_LABELS[lastSegment(path).toLowerCase()];
+}
 
 export function resourcePrefix(pathTemplate: string) {
   const parts = (pathTemplate || "").split("/").filter(Boolean);
@@ -86,13 +132,40 @@ function transportKey(capability: CapabilityContract) {
 }
 
 export function relatedLookupCapabilities(catalog: CapabilityContract[], scoped: CapabilityContract[]) {
-  const writes = scoped.filter(item => WRITE_OPERATIONS.has(item.operation) && !isNoiseCapability(item));
-  if (!writes.length) return [];
   const have = new Set(scoped.map(transportKey));
-  return catalog.filter(item => {
-    if (have.has(transportKey(item))) return false;
-    if (!isBroughtOutLookup(item)) return false;
-    return writes.some(write => relatedResource(write.transport.pathTemplate, item.transport.pathTemplate));
+  const writes = scoped.filter(item => WRITE_OPERATIONS.has(item.operation) && !isNoiseCapability(item));
+  const fromWrites = writes.length
+    ? catalog.filter(item => {
+      if (have.has(transportKey(item))) return false;
+      if (!isBroughtOutLookup(item)) return false;
+      return writes.some(write => relatedResource(write.transport.pathTemplate, item.transport.pathTemplate));
+    })
+    : [];
+  const needed = new Set(
+    scoped.flatMap(capability =>
+      capability.inputForm
+        .filter(field => field.source === "caller")
+        .map(field => pickerEntity(field))
+        .filter((entity): entity is NonNullable<ReturnType<typeof pickerEntity>> => Boolean(entity))
+    )
+  );
+  const origins = new Set(scoped.map(item => item.transport.origin).filter(Boolean));
+  const fromPickers = needed.size
+    ? catalog.filter(item => {
+      if (have.has(transportKey(item))) return false;
+      if (item.operation !== "query" || isNoiseCapability(item)) return false;
+      if (item.transport.origin && origins.size && !origins.has(item.transport.origin)) return false;
+      const path = item.transport.pathTemplate || "";
+      const entity = pathPickerEntity(path);
+      return Boolean(entity && needed.has(entity) && DIRECTORY_LOOKUP.test(path));
+    })
+    : [];
+  const seen = new Set<string>();
+  return [...fromWrites, ...fromPickers].filter(item => {
+    const key = transportKey(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 }
 
@@ -215,7 +288,7 @@ export function isPrimaryCapability(capability: CapabilityContract, catalog: Cap
       // write result, not another user-facing "query" ability. A standalone
       // detail recording can still be primary when no same-resource write is
       // present in the reviewed slice.
-      if (DETAIL_QUERY.test(path) && !isPageResultQuery(capability)) return false;
+      if (DETAIL_QUERY.test(path)) return false;
       return true;
     }
     const shared = catalog.filter(item =>
@@ -369,6 +442,21 @@ function lookupRecordedOnSessionPages(
   return allEvents.some(event => eventIds.has(event.id) && sessionPages.has(evidencePageKey(event.pageUrl)));
 }
 
+function sameResourceVerifiedPrimaries(
+  catalog: CapabilityContract[],
+  scoped: CapabilityContract[]
+) {
+  if (!scoped.length) return [];
+  return catalog.filter(capability => {
+    if (scoped.some(item => item.id === capability.id)) return false;
+    if (capability.validation.status !== "verified") return false;
+    if (isNoiseCapability(capability)) return false;
+    if (!isPrimaryCapability(capability, catalog)) return false;
+    if (WRITE_OPERATIONS.has(capability.operation)) return false;
+    return scoped.some(item => sameResource(item.transport.pathTemplate, capability.transport.pathTemplate));
+  });
+}
+
 export function sessionCatalogSlice(
   catalog: CapabilityContract[],
   allEvents: EvidenceEvent[],
@@ -376,10 +464,13 @@ export function sessionCatalogSlice(
 ) {
   const scoped = capabilitiesForSession(catalog, allEvents, sessionEvents);
   const related = usableRelatedLookups(catalog, scoped, sessionEvents);
+  const keptPrimaries = sameResourceVerifiedPrimaries(catalog, scoped);
   const needed = referencedCapabilityIds(scoped);
   for (const item of related) needed.add(item.id);
+  for (const item of keptPrimaries) needed.add(item.id);
   const slice = catalog.filter(capability => {
     if (scoped.some(item => item.id === capability.id)) return true;
+    if (keptPrimaries.some(item => item.id === capability.id)) return true;
     if (!needed.has(capability.id)) return false;
     return lookupUsableInSession(capability, sessionEvents)
       || lookupRecordedOnSessionPages(capability, allEvents, sessionEvents);

@@ -1,9 +1,9 @@
 import type { CapabilityContract, DataBinding, EvidenceEvent, InputFormField, NetworkEvidence } from "../domain.js";
 import type { SemanticConcept } from "./field-resolver.js";
 import { id } from "../utils.js";
-import { collectionLeafPresentOnEveryRow, collectionLeafUniform, flattenRequestValues, isPaginationField, nameTokens, requestValueAt, sameSynonymGroup, sameValue, semanticConcepts } from "./field-resolver.js";
+import { collectionLeafPresentOnEveryRow, collectionLeafUniform, flattenRequestValues, isPaginationField, nameTokens, pickerEntity, requestValueAt, sameSynonymGroup, sameValue, semanticConcepts } from "./field-resolver.js";
 import { isSuccessfulNetworkEvidence, normalizeUrl } from "./heuristics.js";
-import { evidencePageKey, isNoiseCapability, isPageResultQuery, isPrimaryCapability, relatedResource } from "./export-scope.js";
+import { directoryLookupEntity, evidencePageKey, isNoiseCapability, isPageResultQuery, isPrimaryCapability, relatedResource } from "./export-scope.js";
 
 const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload", "action"]);
 const PAGE_NAME = /^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i;
@@ -668,6 +668,13 @@ function buildLookupIndex(events: EvidenceEvent[], catalog: CapabilityContract[]
   return index;
 }
 
+function directoryLeafAllowed(field: InputFormField, leafPath: string, pathTemplate: string) {
+  const entity = directoryLookupEntity(pathTemplate);
+  if (!entity) return true;
+  if (pickerEntity(field) !== entity) return false;
+  return /^(id|value|code|name|label|nickname|title)$/i.test(lastPathName(leafPath));
+}
+
 function fromApiMatch(
   field: InputFormField,
   value: unknown,
@@ -687,6 +694,7 @@ function fromApiMatch(
     if (event && targetAt && Date.parse(event.at) > Date.parse(targetAt)) continue;
     if (entry.isPageQuery && entry.isPrimary) continue;
     for (const leaf of matchingLeaves(entry, value)) {
+      if (!directoryLeafAllowed(field, leaf.path, capability.transport.pathTemplate)) continue;
       if (isEnvelopePath(leaf.path, field.name)) continue;
       if (leaf.value !== undefined && !sameDerivedValue(leaf.value, value)) continue;
       if (leaf.value === undefined) continue;
@@ -733,6 +741,7 @@ function fromApiMatch(
     if (!via) continue;
     if (!hasExplicitWriteCause(entry, via, write, field)) continue;
     for (const leaf of entry.leaves) {
+      if (!directoryLeafAllowed(field, leaf.path, entry.capability.transport.pathTemplate)) continue;
       if (isEnvelopePath(leaf.path, field.name)) continue;
       const leafName = lastPathName(leaf.path);
       const strongFieldSemantics = leafName.toLowerCase() === field.name.toLowerCase()

@@ -1,6 +1,6 @@
 import type { CapabilityContract, EvidenceEvent, NetworkEvidence, UiEvidence } from "../domain.js";
 import { getByPath } from "../utils.js";
-import { fieldHasUiEvidence, flattenRequestValues, requestValueAt, sameValue, staticCandidatesHaveUiEvidence } from "../inference/field-resolver.js";
+import { collectionRowHasUiEvidence, fieldHasUiEvidence, flattenRequestValues, requestValueAt, sameValue, staticCandidatesHaveUiEvidence } from "../inference/field-resolver.js";
 import { evidenceSample, isExecutableRule } from "../inference/field-derivation.js";
 import { pickerFieldsMissingQuery, uncoveredWriteLeaves, unresolvedWriteFields, unsoundFormulaFields } from "../review/catalog-review.js";
 import { businessFailureReason, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
@@ -179,6 +179,7 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
       const sent = requestValueAt(sample, field.path) !== undefined;
       if (!sent) return true;
       return fieldHasUiEvidence(field, uiRefs)
+        || collectionRowHasUiEvidence(field, cap.inputForm, uiRefs)
         || field.candidates?.type === "capability"
         || field.candidates?.type === "static"
         || (() => {

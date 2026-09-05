@@ -5,7 +5,7 @@ import type { CapabilityContract, DataBinding, EvidenceEvent, InputFormField } f
 import { normalizeCatalog } from "../catalog/normalize.js";
 import { buildApprovedRoutes, collectRouteIssues } from "../planner/routes.js";
 import { id, writeJson } from "../utils.js";
-import { exportableCapabilities, isPrimaryCapability } from "../inference/export-scope.js";
+import { exportableCapabilities, isPrimaryCapability, pageRoleLabel } from "../inference/export-scope.js";
 import { assertExportable } from "../review/catalog-review.js";
 import {
   buildCapabilities,
@@ -50,13 +50,27 @@ export function uniqueSkillExportName(slug: string) {
   return `${slug}-${id("sk")}`;
 }
 
-function exportedTitle(capability: CapabilityContract, displayName: string, capabilities: CapabilityContract[]) {
+export function exportedCapabilityTitle(capability: CapabilityContract, displayName: string, capabilities: CapabilityContract[]) {
   if (capability.editing?.title === "manual") return capability.title;
+  const operation = operationNames[capability.operation];
+  const baseName = displayName.replace(/管理$/, "");
+  const peers = capabilities.filter(item =>
+    isPrimaryCapability(item, capabilities) && item.operation === capability.operation
+  );
+  if (isPrimaryCapability(capability, capabilities) && displayName && peers.length > 1) {
+    const kind = pageRoleLabel(capability.transport.pathTemplate);
+    const peerKinds = peers.map(item => pageRoleLabel(item.transport.pathTemplate));
+    if (kind && peerKinds.filter(item => item === kind).length === 1) {
+      return `${operation}${baseName}${kind}`;
+    }
+    const resource = resourceSlugFromPath(capability.transport.pathTemplate || "");
+    return `${operation}${baseName}${kind || resource}`;
+  }
   if (/[\u4e00-\u9fff]/.test(capability.title) && !/[a-z]{3,}/i.test(capability.title)) {
     return capability.title;
   }
   if (isPrimaryCapability(capability, capabilities) && displayName) {
-    return `${operationNames[capability.operation]}${displayName.replace(/管理$/, "")}`;
+    return `${operation}${baseName}`;
   }
   const usedBy = capabilities.flatMap(item => item.inputForm).find(field =>
     field.candidates?.type === "capability" && field.candidates.capabilityId === capability.id
@@ -80,7 +94,7 @@ function exportedDescription(capability: CapabilityContract, displayName: string
 function withExportTitles(capabilities: CapabilityContract[], displayName: string) {
   return capabilities.map(capability => ({
     ...capability,
-    title: exportedTitle(capability, displayName, capabilities),
+    title: exportedCapabilityTitle(capability, displayName, capabilities),
     description: exportedDescription(capability, displayName, capabilities)
   }));
 }

@@ -189,3 +189,38 @@ test("managed export attaches captured credentials without writing them into the
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+test("required credentials ignore leftover evidence from another host", () => {
+  const capability: CapabilityContract = {
+    id: "query-dept",
+    kind: "atomic",
+    title: "查询部门",
+    description: "查询部门",
+    operation: "query",
+    confidence: 1,
+    transport: { method: "GET", urlTemplate: "https://a.example/system/dept/list", origin: "https://a.example", pathTemplate: "/system/dept/list" },
+    inputSchema: { type: "object", properties: {} },
+    outputSchema: { type: "object", properties: {} },
+    inputForm: [],
+    evidence: [
+      { eventId: "net-a", sessionId: "a", kind: "network", at: "2026-09-05T00:00:00.000Z", status: 200 },
+      { eventId: "net-b", sessionId: "b", kind: "network", at: "2026-09-05T00:00:01.000Z", status: 200 }
+    ],
+    sideEffect: false,
+    confirmation: { required: false },
+    completion: { acceptedHttpStatuses: [200] },
+    bindings: [],
+    validation: { version: 2, status: "verified", checks: [] },
+    generated: { source: "heuristic", generatedAt: "2026-09-05T00:00:00.000Z" }
+  };
+  const events: EvidenceEvent[] = [{
+    id: "net-a", kind: "network", sessionId: "a", at: "2026-09-05T00:00:00.000Z",
+    request: { method: "GET", url: "https://a.example/system/dept/list", resourceType: "xhr", headers: { authorization: "[REDACTED]" }, query: {} },
+    response: { status: 200, headers: {}, body: {} }
+  }, {
+    id: "net-b", kind: "network", sessionId: "b", at: "2026-09-05T00:00:01.000Z",
+    request: { method: "GET", url: "http://other.example:90/system/dept/list", resourceType: "xhr", headers: { authorization: "[REDACTED]" }, query: {} },
+    response: { status: 200, headers: {}, body: {} }
+  }];
+  assert.deepEqual(requiredCredentialOrigins([capability], events), ["https://a.example"]);
+});

@@ -4,7 +4,9 @@ import type { CapabilityContract, EvidenceEvent } from "../src/domain.js";
 import { materializeHttpRequest } from "../src/execution/http-executor.js";
 import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
 import { attachCandidateSources } from "../src/inference/candidate-sources.js";
-import { exportableCapabilities, isPageResultQuery, isPrimaryCapability } from "../src/inference/export-scope.js";
+import { exportedCapabilityTitle } from "../src/export/skill-exporter.js";
+import { questionKey } from "../src/export/skill-handbook.js";
+import { exportableCapabilities, isPageResultQuery, isPrimaryCapability, pageRoleLabel, sessionCatalogSlice } from "../src/inference/export-scope.js";
 import { collectUiObservations, collectionLeafUniform, flattenRequestValues, pickerEntity } from "../src/inference/field-resolver.js";
 import { finalizeCapabilities } from "../src/inference/finalize-capabilities.js";
 
@@ -176,6 +178,25 @@ test("a leftover department select is not a people picker and does not steal cre
     .find(item => item.transport.pathTemplate.endsWith("/oa/doc/page"))!
     .inputForm.find(item => item.path === "$.creator")!;
   assert.notEqual(sourcedCreator.candidates?.type, "capability");
+  const dept = field(query, "$.deptId");
+  assert.equal(dept?.source, "caller");
+  assert.equal(dept?.required, false);
+  assert.equal(dept?.label, "申请部门");
+  const omitted = new URL(materializeHttpRequest(query, { billCode: "1", processStatus: "1" }).url);
+  assert.equal(omitted.searchParams.get("deptId"), null);
+  const passed = new URL(materializeHttpRequest(query, { billCode: "1", processStatus: "1", deptId: "106" }).url);
+  assert.equal(passed.searchParams.get("deptId"), "106");
+  assert.equal(field(query, "$.reportType")?.defaultRule, 'literal:"1"');
+  assert.equal(field(query, "$.reportType")?.source, "system");
+  const sourcedDept = sourced
+    .find(item => item.transport.pathTemplate.endsWith("/oa/doc/page"))!
+    .inputForm.find(item => item.path === "$.deptId")!;
+  assert.equal(sourcedDept.candidates?.type, "capability");
+  assert.match(
+    sourced.find(item => item.id === (sourcedDept.candidates?.type === "capability" ? sourcedDept.candidates.capabilityId : ""))
+      ?.transport.pathTemplate || "",
+    /\/dept\/simple-list$/
+  );
 });
 
 test("heterogeneous recorded rows stay a whole-table system template and replay with the same shape", () => {
@@ -189,10 +210,15 @@ test("heterogeneous recorded rows stay a whole-table system template and replay 
   assert.equal(field(create, "$.items[*].itemType")?.defaultRule, undefined);
   assert.equal(field(create, "$.items[*]._X_ROW_KEY")?.defaultRule, undefined);
   assert.equal(field(create, "$.items[*].sort")?.defaultRule, "literal:0");
-  const content = field(create, "$.items[*].content");
-  assert.equal(content?.source, "caller");
-  assert.notEqual(content?.label, "1");
-  assert.match(content?.label || "", /工作内容/);
+  assert.equal(field(create, "$.items[*].content"), undefined);
+  const firstContent = field(create, "$.items[0].content");
+  const secondContent = field(create, "$.items[1].content");
+  assert.equal(firstContent?.source, "caller");
+  assert.equal(secondContent?.source, "caller");
+  assert.match(firstContent?.label || "", /工作内容/);
+  assert.equal(field(create, "$.items[0].progress")?.source, "caller");
+  assert.equal(field(create, "$.items[0].progress")?.label, "完成进度");
+  assert.equal(field(create, "$.items[1].progress"), undefined);
 
   const request = materializeHttpRequest(create, {
     title: "1",
@@ -206,6 +232,23 @@ test("heterogeneous recorded rows stay a whole-table system template and replay 
   assert.deepEqual(request.body, recordedSubmit);
   assert.equal((request.body as { items: Array<{ itemType: number }> }).items[1]?.itemType, 2);
   assert.equal(Object.prototype.hasOwnProperty.call((request.body as { items: object[] }).items[1]!, "progress"), false);
+
+  const split = materializeHttpRequest(create, {
+    title: "1",
+    todayContent: "1",
+    planContent: "1",
+    issueContent: "1",
+    remark: "1",
+    "items[0].content": "今日工作",
+    "items[1].content": "明日计划",
+    "items[0].progress": 40
+  });
+  const splitItems = (split.body as { items: Array<Record<string, unknown>> }).items;
+  assert.equal(splitItems[0]?.content, "今日工作");
+  assert.equal(splitItems[1]?.content, "明日计划");
+  assert.equal(splitItems[0]?.progress, 40);
+  assert.equal(splitItems[1]?.itemType, 2);
+  assert.equal(Object.prototype.hasOwnProperty.call(splitItems[1]!, "progress"), false);
 });
 
 test("an unresolved from-rule falls back to the recorded successful request value", () => {
@@ -262,4 +305,60 @@ test("a business summary query is a primary page result, not a leftover lookup",
   assert.equal(url.searchParams.get("reportType"), "1");
   assert.equal(url.searchParams.get("startDate"), "2026-09-01");
   assert.equal(url.searchParams.get("endDate"), "2026-09-05");
+  const statsDept = field(stats, "$.deptId");
+  assert.equal(statsDept?.candidates?.type, "capability");
+  const sourceId = statsDept?.candidates?.type === "capability" ? statsDept.candidates.capabilityId : "";
+  const source = catalog.find(item => item.id === sourceId);
+  assert.ok(source, sourceId);
+  assert.match(source.transport.pathTemplate, /\/dept\/simple-list$/);
+  assert.notEqual(sourceId, page.id);
+});
+
+test("later session export keeps a same-resource verified primary from another page", () => {
+  const events = fidelityEvents();
+  const catalog = finalizeCapabilities(buildCapabilityCandidates(events), events).map(item => ({
+    ...item,
+    validation: { ...item.validation, status: "verified" as const }
+  }));
+  const later = events.filter(item => {
+    if (item.kind === "network") return !item.request.url.includes("/statistics");
+    return !/statistics/i.test(item.pageUrl || "");
+  });
+  const slice = sessionCatalogSlice(catalog, events, later);
+  assert.equal(slice.some(item => item.transport.pathTemplate.endsWith("/oa/doc/page")), true);
+  assert.equal(slice.some(item => item.transport.pathTemplate.endsWith("/oa/doc/submit")), true);
+  assert.equal(slice.some(item => item.transport.pathTemplate.endsWith("/oa/doc/statistics")), true);
+});
+
+test("export titles distinguish list and statistics pages of the same resource", () => {
+  const events = fidelityEvents();
+  const catalog = finalizeCapabilities(buildCapabilityCandidates(events), events).map(item => ({
+    ...item,
+    validation: { ...item.validation, status: "verified" as const }
+  }));
+  const page = catalog.find(item => item.transport.pathTemplate.endsWith("/oa/doc/page"))!;
+  const stats = catalog.find(item => item.transport.pathTemplate.endsWith("/oa/doc/statistics"))!;
+  const write = catalog.find(item => item.transport.pathTemplate.endsWith("/oa/doc/submit"))!;
+  const selected = [page, write, stats];
+  assert.equal(pageRoleLabel(page.transport.pathTemplate), "列表");
+  assert.equal(pageRoleLabel(stats.transport.pathTemplate), "统计");
+  assert.equal(exportedCapabilityTitle(page, "工作日报管理", selected), "查询工作日报列表");
+  assert.equal(exportedCapabilityTitle(stats, "工作日报管理", selected), "查询工作日报统计");
+  assert.notEqual(exportedCapabilityTitle(write, "工作日报管理", selected), "查询工作日报列表");
+  assert.notEqual(exportedCapabilityTitle(write, "工作日报管理", selected), "查询工作日报统计");
+});
+
+test("indexed collection cells keep their row path as the question key", () => {
+  assert.equal(questionKey({
+    path: "$.items[0].progress",
+    name: "progress",
+    label: "progress",
+    valueType: "integer",
+    source: "caller",
+    required: false,
+    requiredBasis: "not-observed",
+    systemHandled: false,
+    sourceDetail: "",
+    widget: "number"
+  }), "items[0].progress");
 });
