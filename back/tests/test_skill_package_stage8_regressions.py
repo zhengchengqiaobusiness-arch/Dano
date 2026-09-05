@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from uuid import UUID
 
+from dano.execution.page.capability_io import _capability_input_schema, _sync_capability_io_schemas
 from dano.execution.page.flow_spec import FlowCapability, FlowSpec, flow_spec_to_api_request
 from dano.execution.page.flow_spec_core.models import (
     CapabilityRelation,
@@ -1116,6 +1117,11 @@ def test_dynamic_options_do_not_export_a_historical_enum_snapshot() -> None:
     assert "x-options-incomplete" not in field
     assert "历史客户" not in str(schema)
     assert field["description"] == "运行时获取当前有效候选，不使用历史候选快照。"
+    assert field["dataSource"]["endpoint"] == "/customers"
+    assert field["dataSource"]["idField"] == "id"
+    assert field["dataSource"]["labelField"] == "name"
+    assert "source_url" not in field["dataSource"]
+    assert "x-options-source" not in field
 
 
 def test_main_workflow_table_uses_progressive_disclosure() -> None:
@@ -1923,3 +1929,292 @@ def test_validator_rejects_system_placeholder_asked_of_caller(tmp_path: Path) ->
     )
 
     assert any(item["code"] == "script_system_param_as_caller" for item in issues)
+
+
+def _form_questions(forms: str) -> list[dict]:
+    start = forms.index("```json") + len("```json")
+    return json.loads(forms[start:forms.index("```", start)])["questions"]
+
+
+def test_capability_io_keeps_live_option_and_enum_labels_for_wire_number_fields() -> None:
+    schema = _capability_input_schema([
+        ParamField(
+            path="query.deptId",
+            key="deptId",
+            label="部门",
+            type="number",
+            source_kind="api_option",
+            exposed_to_user=True,
+            category="user_param",
+            source={
+                "kind": "api_option",
+                "source_url": "/admin-api/system/dept/list",
+                "source_method": "GET",
+                "value_key": "id",
+                "label_key": "name",
+                "children_key": "children",
+            },
+        ),
+        ParamField(
+            path="query.reportType",
+            key="reportType",
+            label="汇报类型",
+            type="number",
+            source_kind="page_enum",
+            exposed_to_user=True,
+            category="user_param",
+            enum_options=[
+                {"label": "日报", "value": 1},
+                {"label": "周报", "value": 2},
+                {"label": "月报", "value": 3},
+            ],
+            enum_value_map={"日报": 1, "周报": 2, "月报": 3},
+        ),
+    ])
+
+    dept = schema["properties"]["deptId"]
+    report = schema["properties"]["reportType"]
+    assert dept["x-options-source"] is True
+    assert dept["x-dano-option-source"]["source_url"] == "/admin-api/system/dept/list"
+    assert dept["x-dano-tree"] is True
+    assert report["x-options"][0] == {"label": "日报", "value": 1}
+    assert report["x-enum-value-map"]["日报"] == 1
+
+
+def test_export_forms_match_capability_option_controls() -> None:
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="stats",
+                name="查询工作汇报统计",
+                title="查询工作汇报统计",
+                kind="query",
+                step_ids=["step_statistics"],
+                request_refs=[CapabilityRequestRef(step_id="step_statistics", usage="execute")],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "deptId": {"type": "number", "title": "部门"},
+                        "reportType": {"type": "number", "title": "汇报类型", "enum": [1, 2, 3]},
+                    },
+                },
+            ),
+        ],
+        steps=[
+            FlowStep(
+                step_id="step_statistics",
+                method="GET",
+                path="/oa/work-report/statistics",
+                params=[
+                    ParamField(
+                        path="query.deptId",
+                        key="deptId",
+                        type="number",
+                        source_kind="api_option",
+                        exposed_to_user=True,
+                        source={
+                            "source_url": "/admin-api/system/dept/list",
+                            "source_method": "GET",
+                            "value_key": "id",
+                            "label_key": "name",
+                            "children_key": "children",
+                        },
+                    ),
+                    ParamField(
+                        path="query.reportType",
+                        key="reportType",
+                        type="enum",
+                        source_kind="page_enum",
+                        exposed_to_user=True,
+                        enum_options=[
+                            {"label": "日报", "value": 1},
+                            {"label": "周报", "value": 2},
+                            {"label": "月报", "value": 3},
+                        ],
+                        enum_value_map={"日报": 1, "周报": 2, "月报": 3},
+                    ),
+                ],
+            ),
+        ],
+    )
+    api_request = {
+        "capabilities": [{
+            "capability_id": "stats",
+            "name": "查询工作汇报统计",
+            "title": "查询工作汇报统计",
+            "kind": "query",
+            "execution_contract": {
+                "steps": [{"step_id": "step_statistics", "method": "GET", "path": "/oa/work-report/statistics"}],
+            },
+            "input_schema": spec.capabilities[0].input_schema,
+        }],
+    }
+
+    plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), spec, api_request)
+    questions = {item["id"]: item for item in _form_questions(_input_forms_md(plans))}
+    options = _options_md(plans)
+    public = _public_schema(plans[0]["input_schema"])["properties"]
+
+    assert questions["deptId"]["inputType"] == "treeSelect"
+    assert questions["deptId"]["dataSource"]["endpoint"] == "/admin-api/system/dept/list"
+    assert questions["deptId"]["dataSource"]["labelField"] == "name"
+    assert questions["deptId"]["dataSource"]["childrenField"] == "children"
+    assert "options" not in questions["deptId"]
+    assert questions["reportType"]["options"] == [
+        {"id": 1, "label": "日报"},
+        {"id": 2, "label": "周报"},
+        {"id": 3, "label": "月报"},
+    ]
+    assert "GET /admin-api/system/dept/list" in options
+    assert "| 日报 | `1` |" in options
+    assert public["deptId"]["dataSource"]["endpoint"] == "/admin-api/system/dept/list"
+    assert "source_url" not in public["deptId"]["dataSource"]
+    assert public["reportType"]["x-enum-options"][0] == {"id": 1, "label": "日报"}
+    assert public["reportType"]["x-enum-value-map"]["日报"] == 1
+
+
+def test_export_upgrades_unlabeled_enum_and_nested_item_labels() -> None:
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="create",
+                name="新建并提交工作日报",
+                title="新建并提交工作日报",
+                kind="command",
+                step_ids=["step_submit"],
+                request_refs=[CapabilityRequestRef(step_id="step_submit", usage="execute")],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "title": "工作项与计划项",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "itemType": {
+                                        "type": "number",
+                                        "title": "类型",
+                                        "enum": [1, 2],
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            ),
+        ],
+        steps=[
+            FlowStep(
+                step_id="step_submit",
+                method="POST",
+                path="/oa/work-report/submit",
+                params=[
+                    ParamField(
+                        path="body.items[].itemType",
+                        key="itemType",
+                        type="enum",
+                        source_kind="page_enum",
+                        exposed_to_user=True,
+                        enum_options=[
+                            {"label": "工作项", "value": 1},
+                            {"label": "计划项", "value": 2},
+                        ],
+                        enum_value_map={"工作项": 1, "计划项": 2},
+                    ),
+                ],
+            ),
+        ],
+    )
+    api_request = {
+        "capabilities": [{
+            "capability_id": "create",
+            "name": "新建并提交工作日报",
+            "title": "新建并提交工作日报",
+            "kind": "command",
+            "execution_contract": {
+                "steps": [{"step_id": "step_submit", "method": "POST", "path": "/oa/work-report/submit"}],
+            },
+            "input_schema": spec.capabilities[0].input_schema,
+        }],
+    }
+
+    plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), spec, api_request)
+    options = _options_md(plans)
+    public_item = (
+        _public_schema(plans[0]["input_schema"])["properties"]["items"]["items"]["properties"]["itemType"]
+    )
+
+    assert "| 工作项 | `1` |" in options
+    assert public_item["x-enum-options"] == [
+        {"id": 1, "label": "工作项"},
+        {"id": 2, "label": "计划项"},
+    ]
+
+
+def test_sync_schema_then_export_keeps_caller_controls() -> None:
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="stats",
+                name="查询统计",
+                title="查询统计",
+                kind="query",
+                step_ids=["step_q"],
+                request_refs=[CapabilityRequestRef(step_id="step_q", usage="execute")],
+            ),
+        ],
+        steps=[
+            FlowStep(
+                step_id="step_q",
+                method="GET",
+                path="/stats",
+                params=[
+                    ParamField(
+                        path="query.deptId",
+                        key="deptId",
+                        label="部门",
+                        type="number",
+                        source_kind="api_option",
+                        exposed_to_user=True,
+                        category="user_param",
+                        source={
+                            "source_url": "/system/dept/list",
+                            "value_key": "id",
+                            "label_key": "name",
+                        },
+                    ),
+                    ParamField(
+                        path="query.reportType",
+                        key="reportType",
+                        label="汇报类型",
+                        type="enum",
+                        source_kind="page_enum",
+                        exposed_to_user=True,
+                        category="user_param",
+                        enum_options=[{"label": "日报", "value": 1}, {"label": "周报", "value": 2}],
+                        enum_value_map={"日报": 1, "周报": 2},
+                    ),
+                ],
+            ),
+        ],
+    )
+    _sync_capability_io_schemas(spec)
+    api_request = {
+        "capabilities": [{
+            "capability_id": "stats",
+            "name": "查询统计",
+            "title": "查询统计",
+            "kind": "query",
+            "execution_contract": {
+                "steps": [{"step_id": "step_q", "method": "GET", "path": "/stats"}],
+            },
+            "input_schema": spec.capabilities[0].input_schema,
+        }],
+    }
+    plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), spec, api_request)
+    questions = {item["id"]: item for item in _form_questions(_input_forms_md(plans))}
+
+    assert questions["deptId"]["inputType"] == "select"
+    assert questions["deptId"]["dataSource"]["endpoint"] == "/system/dept/list"
+    assert questions["reportType"]["options"][0] == {"id": 1, "label": "日报"}

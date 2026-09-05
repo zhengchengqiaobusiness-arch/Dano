@@ -1150,9 +1150,20 @@ def _question_control(schema: dict, field: str = "") -> str:
         or schema.get("x-enum-options")
         or schema.get("x-options-source")
         or schema.get("x-dano-option-source")
+        or schema.get("x-options-source-meta")
+        or schema.get("x-enum-value-map")
     )
     if selectable:
-        return "treeSelect" if schema.get("x-dano-tree") or schema.get("childrenField") else "select"
+        live = schema.get("x-dano-option-source") or schema.get("x-options-source-meta") or {}
+        data_source = _question_data_source(schema) or {}
+        children = (
+            schema.get("x-dano-tree")
+            or schema.get("childrenField")
+            or data_source.get("childrenField")
+            or (live.get("childrenField") if isinstance(live, dict) else None)
+            or (live.get("children_key") if isinstance(live, dict) else None)
+        )
+        return "treeSelect" if children else "select"
     if business_type in {"textarea", "rich_text", "array", "object"}:
         return "textarea"
     semantic_text = " ".join(str(value or "") for value in (
@@ -1184,11 +1195,18 @@ def _question_options(schema: dict) -> list[dict]:
     schema = schema or {}
     raw = (
         schema.get("x-options")
-        or schema.get("x-options-snapshot")
         or schema.get("x-enum-options")
         or schema.get("enum")
         or []
     )
+    value_map = schema.get("x-enum-value-map") if isinstance(schema.get("x-enum-value-map"), dict) else {}
+    inverse = {
+        str(value): str(label)
+        for label, value in value_map.items()
+        if value not in (None, "")
+    }
+    if not raw and value_map:
+        return [{"id": value, "label": str(label)} for label, value in value_map.items()]
     if not raw and str(schema.get("type") or "").lower() == "boolean":
         raw = [{"id": "true", "label": "是"}, {"id": "false", "label": "否"}]
     options: list[dict] = []
@@ -1201,6 +1219,10 @@ def _question_options(schema: dict) -> list[dict]:
             option_id = label = item
         if option_id in (None, "") or label in (None, ""):
             continue
+        if str(option_id) == str(label) and str(label) in value_map:
+            option_id = value_map[str(label)]
+        elif str(option_id) in inverse and inverse[str(option_id)] != str(option_id):
+            label = inverse[str(option_id)]
         stable_id = str(option_id)
         if stable_id in seen_ids:
             continue
@@ -1231,50 +1253,44 @@ def _question_option_source(schema: dict, field: str = "<字段名>") -> str:
 def _question_data_source(schema: dict) -> dict | None:
     """Return only a complete ask_user_question remote-option contract."""
     schema = schema or {}
-    source = (
-        schema.get("x-dano-option-source")
-        if isinstance(schema.get("x-dano-option-source"), dict)
-        else schema.get("x-options-source-meta")
-        if isinstance(schema.get("x-options-source-meta"), dict)
-        else {}
-    )
+    source = {}
+    for key in ("x-dano-option-source", "x-options-source-meta", "x-options-source"):
+        value = schema.get(key)
+        if isinstance(value, dict) and value:
+            source = value
+            break
     endpoint = str(
         source.get("endpoint") or source.get("source_url") or source.get("url") or ""
     ).strip()
-    result_path = source.get("result_path") or source.get("resultPath")
-    value_key = source.get("value_key") or source.get("idField")
-    label_key = source.get("label_key") or source.get("labelField")
-    if (
-        (schema.get("x-options-source") or schema.get("x-dano-option-source"))
-        and endpoint
-        and result_path
-        and value_key
-        and label_key
+    if not endpoint:
+        return None
+    if not (
+        schema.get("x-options-source")
+        or schema.get("x-dano-option-source")
+        or schema.get("x-options-source-meta")
     ):
-        data_source = {"type": "api", "endpoint": endpoint}
-        method = str(source.get("method") or source.get("source_method") or "GET").upper()
-        if method in {"GET", "POST"}:
-            data_source["method"] = method
-        params = dict(source.get("params") or source.get("source_params") or source.get("source_body") or {})
-        category_key = str(source.get("category_key") or "").strip()
-        if category_key and source.get("category_value") not in (None, ""):
-            params[category_key] = source.get("category_value")
-        if params:
-            data_source["params"] = params
-        for source_key, target_key in (
-            ("result_path", "resultPath"), ("value_key", "idField"),
-            ("label_key", "labelField"), ("children_key", "childrenField"),
-        ):
-            if source.get(source_key):
-                data_source[target_key] = source[source_key]
-        for source_key, target_key in (
-            ("resultPath", "resultPath"), ("idField", "idField"),
-            ("labelField", "labelField"), ("childrenField", "childrenField"),
-        ):
-            if source.get(source_key):
-                data_source[target_key] = source[source_key]
-        return data_source
-    return None
+        return None
+    data_source = {
+        "type": "api",
+        "endpoint": endpoint,
+        "method": str(source.get("method") or source.get("source_method") or "GET").upper(),
+        "params": {},
+        "resultPath": str(source.get("result_path") or source.get("resultPath") or "data"),
+        "idField": source.get("value_key") or source.get("idField") or "id",
+        "labelField": source.get("label_key") or source.get("labelField") or "name",
+    }
+    if data_source["method"] not in {"GET", "POST"}:
+        data_source["method"] = "GET"
+    params = dict(source.get("params") or source.get("source_params") or source.get("source_body") or {})
+    category_key = str(source.get("category_key") or "").strip()
+    if category_key and source.get("category_value") not in (None, ""):
+        params[category_key] = source.get("category_value")
+    if params:
+        data_source["params"] = params
+    children = source.get("children_key") or source.get("childrenField")
+    if children:
+        data_source["childrenField"] = children
+    return data_source
 
 
 def _question_default_text(schema: dict, *, query: bool, control: str) -> str:

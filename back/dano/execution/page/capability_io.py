@@ -439,6 +439,7 @@ def _capability_input_schema(
             props[key]["x-dano-wire-format"] = wire_format
         if p.label:
             props[key]["label"] = p.label
+            props[key].setdefault("title", p.label)
         if p.description or p.reason:
             props[key]["description"] = p.description or p.reason
         if (
@@ -463,6 +464,11 @@ def _capability_input_schema(
         )
         if isinstance(option_source, dict) and option_source:
             props[key]["x-dano-option-source"] = copy.deepcopy(option_source)
+            if option_source.get("source_url") or option_source.get("endpoint") or option_source.get("url"):
+                props[key]["x-options-source"] = True
+                props[key]["x-options-source-meta"] = dict(option_source)
+                if option_source.get("children_key") or option_source.get("childrenField"):
+                    props[key]["x-dano-tree"] = True
         _apply_param_schema_default(props[key], p)
         if _is_dynamic_array_input(p):
             item_params = _dynamic_array_item_params(params, p, capability_step_ids)
@@ -482,38 +488,55 @@ def _capability_input_schema(
             value = grounded_constraints.get(constraint)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 props[key][constraint] = value
-        enum_input = p.type in {"enum", "list-enum"}
-        dynamic_options = enum_input and p.source_kind == "api_option"
+        type_is_enum = p.type in {"enum", "list-enum"}
+        selectable = type_is_enum or p.source_kind in _OPTION_SOURCE_KINDS
+        dynamic_options = bool(props[key].get("x-options-source")) or (
+            p.source_kind == "api_option"
+            and bool(
+                (p.source or {}).get("source_url")
+                or (p.source or {}).get("endpoint")
+                or (p.source or {}).get("url")
+            )
+        )
         enum_confirmed = (p.source or {}).get("enum_confirmed")
-        incomplete_page_enum = enum_input and p.source_kind == "page_enum" and enum_confirmed is False
-        if enum_input:
+        incomplete_page_enum = (
+            selectable
+            and p.source_kind == "page_enum"
+            and enum_confirmed is False
+        )
+        if type_is_enum:
             if p.type == "list-enum":
                 props[key].setdefault("items", {})["format"] = "name-ref"
             else:
                 props[key]["format"] = "name-ref"
         if dynamic_options:
             props[key]["x-options-source"] = True
-            props[key]["x-options-source-meta"] = dict(p.source or {})
+            if isinstance(p.source, dict) and p.source and not props[key].get("x-options-source-meta"):
+                props[key]["x-options-source-meta"] = dict(p.source)
         if incomplete_page_enum:
             props[key]["x-options-incomplete"] = True
-        if enum_input and p.enum_options:
+        if selectable and p.enum_options:
             # API-backed people/department/dictionary choices are a recording-time
             # snapshot, not a stable caller constraint. Keep the snapshot only as
             # evidence and require a live lookup at invocation time.
             props[key]["x-options-snapshot" if (dynamic_options or incomplete_page_enum) else "x-options"] = list(p.enum_options)
             labels: list[str] = []
+            wire_values: list[Any] = []
             for option in p.enum_options:
                 pair = _enum_label_value(option)
                 if pair:
                     labels.append(str(pair[0]))
+                    if pair[1] not in (None, ""):
+                        wire_values.append(pair[1])
                 elif option not in (None, ""):
                     labels.append(str(option))
             if labels and not dynamic_options and not incomplete_page_enum:
+                enum_values = labels if type_is_enum else (wire_values or labels)
                 if p.type == "list-enum":
-                    props[key].setdefault("items", {})["enum"] = labels
+                    props[key].setdefault("items", {})["enum"] = enum_values
                 else:
-                    props[key]["enum"] = labels
-        if enum_input and p.enum_value_map:
+                    props[key]["enum"] = enum_values
+        if selectable and p.enum_value_map:
             props[key]["x-enum-value-map"] = dict(p.enum_value_map)
         if _param_requires_caller_input(p, capability_step_ids):
             required.append(key)
@@ -1244,7 +1267,16 @@ def _capability_schema_field(field: CapabilityField) -> dict[str, Any]:
     if field.wire_format:
         schema["x-dano-wire-format"] = field.wire_format
     if field.enum_options:
-        schema["enum"] = list(field.enum_options)
+        schema["x-options"] = list(field.enum_options)
+        labels: list[Any] = []
+        for option in field.enum_options:
+            pair = _enum_label_value(option)
+            if pair:
+                labels.append(pair[1] if pair[1] not in (None, "") else pair[0])
+            elif option not in (None, ""):
+                labels.append(option)
+        if labels and not any(isinstance(item, (dict, list)) for item in labels):
+            schema["enum"] = labels
     if field.enum_value_map:
         schema["x-enum-value-map"] = dict(field.enum_value_map)
     if field.display_name:

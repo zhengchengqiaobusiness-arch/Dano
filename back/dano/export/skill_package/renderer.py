@@ -253,19 +253,21 @@ def _compiled_request(skill, spec) -> dict:  # noqa: ANN001
         if isinstance(item, dict)
     ]
     if _has_embedded_execution_steps(capabilities):
-        if all(
-            isinstance(item.get("input_schema"), dict)
-            and (item["input_schema"].get("properties") or item["input_schema"].get("required"))
-            for item in capabilities
-        ):
-            return published
         flow = spec
         if flow is None:
             try:
                 flow = _flow_spec(skill)
             except ValueError:
                 flow = None
-        return restore_compiled_capability_schemas(published, flow)
+        if flow is not None:
+            return restore_compiled_capability_schemas(published, flow)
+        if all(
+            isinstance(item.get("input_schema"), dict)
+            and (item["input_schema"].get("properties") or item["input_schema"].get("required"))
+            for item in capabilities
+        ):
+            return published
+        return restore_compiled_capability_schemas(published, None)
     flow = spec if spec is not None else _flow_spec(skill)
     if flow is not None:
         from dano.execution.page.flow_spec import flow_spec_to_api_request
@@ -551,30 +553,69 @@ def _capability_owned_params(spec, cap: dict) -> dict[str, Any]:  # noqa: ANN001
     return params
 
 
+def _option_source_endpoint(source: dict[str, Any] | None) -> str:
+    raw = source if isinstance(source, dict) else {}
+    return str(raw.get("source_url") or raw.get("endpoint") or raw.get("url") or "").strip()
+
+
+def _enum_options_unlabeled(options: list[dict]) -> bool:
+    return bool(options) and all(
+        str(item.get("label")) == str(item.get("id"))
+        for item in options
+        if isinstance(item, dict)
+    )
+
+
+def _apply_param_options_to_field(field: dict[str, Any], param: Any) -> None:
+    """Copy caller-visible option contract from the capability param onto the schema field."""
+    source = param.source if isinstance(getattr(param, "source", None), dict) else {}
+    source_kind = str(getattr(param, "source_kind", "") or "")
+    endpoint = _option_source_endpoint(source)
+    if source_kind == "api_option" and endpoint:
+        field["x-options-source"] = True
+        if not field.get("x-dano-option-source"):
+            field["x-dano-option-source"] = dict(source)
+        if not field.get("x-options-source-meta"):
+            field["x-options-source-meta"] = dict(source)
+        if source.get("children_key") or source.get("childrenField"):
+            field["x-dano-tree"] = True
+        return
+    labeled = _normalize_enum_options(list(getattr(param, "enum_options", None) or []))
+    value_map = dict(getattr(param, "enum_value_map", None) or {})
+    if not value_map:
+        value_map = {
+            str(item["label"]): item["id"]
+            for item in labeled
+            if str(item.get("label")) != str(item.get("id"))
+        }
+    existing = _capability_enum_options(field)
+    existing_unlabeled = _enum_options_unlabeled(existing) or (
+        not existing
+        and bool(field.get("enum"))
+        and not field.get("x-enum-value-map")
+    )
+    has_labels = bool(value_map) or any(
+        str(item.get("label")) != str(item.get("id")) for item in labeled
+    )
+    if labeled and (not existing or (existing_unlabeled and has_labels)):
+        field["x-options"] = list(param.enum_options)
+    if value_map and (not field.get("x-enum-value-map") or existing_unlabeled):
+        field["x-enum-value-map"] = value_map
+
+
 def _attach_capability_param_options(schema: dict[str, Any], spec, cap: dict) -> dict[str, Any]:  # noqa: ANN001
     packed = deepcopy(schema)
     properties = packed.get("properties") if isinstance(packed.get("properties"), dict) else {}
     if not properties:
         return packed
     owned = _capability_owned_params(spec, cap)
-    for name, field in properties.items():
-        if not isinstance(field, dict):
-            continue
+    if not owned:
+        return packed
+    for _path, name, field in _iter_schema_fields(packed):
         param = owned.get(str(name))
         if param is None:
             continue
-        if param.enum_options and not (field.get("x-enum-options") or field.get("x-options")):
-            field["x-options"] = list(param.enum_options)
-            if param.enum_value_map and not field.get("x-enum-value-map"):
-                field["x-enum-value-map"] = dict(param.enum_value_map)
-        source = param.source if isinstance(getattr(param, "source", None), dict) else {}
-        if (
-            str(getattr(param, "source_kind", "") or "") == "api_option"
-            and source.get("source_url")
-            and not field.get("x-dano-option-source")
-            and not field.get("x-options-source-meta")
-        ):
-            field["x-options-source-meta"] = dict(source)
+        _apply_param_options_to_field(field, param)
     return packed
 
 
@@ -637,14 +678,9 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
             script += "_" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:6]
         used_scripts.add(script)
         compiled_schema = cap.get("input_schema") or cap.get("parameters") or {}
-        compiled_props = (
-            compiled_schema.get("properties")
-            if isinstance(compiled_schema, dict)
-            else {}
-        )
         schema = consume_upstream_input_schema(
             compiled_schema,
-            {} if compiled_props else _upstream_capability_schema(spec, skill, cap),
+            _upstream_capability_schema(spec, skill, cap),
         )
         schema = _attach_capability_param_options(schema, spec, cap)
         schema = _stage8_input_schema(schema, cap, confirmed_derived)
@@ -849,8 +885,16 @@ def _field_label(name: str, field: dict) -> str:
     return explicit or str(name)
 
 
+def _raw_option_source(field: dict) -> dict | None:
+    for key in ("x-dano-option-source", "x-options-source-meta", "x-options-source", "dataSource"):
+        value = field.get(key)
+        if isinstance(value, dict) and value:
+            return value
+    return None
+
+
 def _option_source(field: dict) -> dict | None:
-    source = field.get("x-dano-option-source") or field.get("x-options-source-meta")
+    source = _raw_option_source(field)
     if not isinstance(source, dict):
         return None
     endpoint = _safe_text(
@@ -858,8 +902,13 @@ def _option_source(field: dict) -> dict | None:
     )
     result_path = source.get("resultPath") or source.get("result_path")
     id_field = source.get("idField") or source.get("value_key") or "id"
-    label_field = source.get("labelField") or source.get("label_key") or source.get("label_path")
-    if not all((endpoint, id_field, label_field)):
+    label_field = (
+        source.get("labelField")
+        or source.get("label_key")
+        or source.get("label_path")
+        or "name"
+    )
+    if not endpoint:
         return None
     data_source: dict[str, Any] = {
         "type": "api",
@@ -904,10 +953,22 @@ def _capability_enum_options(field: dict) -> list[dict]:
     return []
 
 
+def _invert_enum_value_map(value_map: dict) -> dict[str, str]:
+    inverse: dict[str, str] = {}
+    for label, value in value_map.items():
+        if value in (None, ""):
+            continue
+        key = str(value)
+        if key not in inverse:
+            inverse[key] = str(label)
+    return inverse
+
+
 def _field_options(field: dict) -> list[dict]:
     options = _capability_enum_options(field)
+    value_map = dict(field.get("x-enum-value-map") or {})
+    inverse = _invert_enum_value_map(value_map)
     if options:
-        value_map = dict(field.get("x-enum-value-map") or {})
         if not value_map:
             return options
         resolved: list[dict] = []
@@ -916,13 +977,14 @@ def _field_options(field: dict) -> list[dict]:
             raw_id = item.get("id")
             if str(raw_id) == label and label in value_map:
                 resolved.append({"id": value_map[label], "label": label})
+            elif str(raw_id) in inverse and inverse[str(raw_id)] != str(raw_id):
+                resolved.append({"id": raw_id, "label": inverse[str(raw_id)]})
             else:
                 resolved.append(item)
         return resolved
     values = list(field.get("enum") or [])
-    labels = dict(field.get("x-enum-value-map") or {})
-    if labels:
-        return [{"id": value, "label": str(label)} for label, value in labels.items()]
+    if value_map:
+        return [{"id": value, "label": str(label)} for label, value in value_map.items()]
     return [{"id": value, "label": str(value)} for value in values]
 
 
@@ -995,16 +1057,14 @@ def _iter_schema_fields(schema: dict | None, prefix: str = "") -> list[tuple[str
 
 
 def _option_binding(path: str, name: str, field: dict) -> dict | None:
-    source = field.get("x-dano-option-source") or field.get("x-options-source-meta")
+    source = _raw_option_source(field)
     if not isinstance(source, dict):
         return None
     url = _safe_text(source.get("source_url") or source.get("endpoint") or source.get("url"))
     if not url:
         return None
     value_key = source.get("value_key") or source.get("idField") or "id"
-    label_key = source.get("label_key") or source.get("labelField") or source.get("label_path")
-    if not label_key:
-        return None
+    label_key = source.get("label_key") or source.get("labelField") or source.get("label_path") or "name"
     id_path = str(source.get("id_path") or source.get("schema_identity_path") or path)
     binding: dict[str, Any] = {
         "param": name if "." not in path and "[" not in path else name,
@@ -1290,11 +1350,15 @@ def _field_control(name: str, field: dict) -> str:
     configured = str(
         field.get("x-dano-control") or field.get("x-ui-control") or field.get("inputType") or ""
     ).strip()
-    has_choices = bool(_option_source(field) or _field_options(field))
+    data_source = _option_source(field)
+    has_choices = bool(data_source or _field_options(field))
     if has_choices:
         if configured in {"radio", "checkbox", "select", "treeSelect"}:
             return configured
-        return "treeSelect" if field.get("x-dano-tree") else "select"
+        return "treeSelect" if (
+            field.get("x-dano-tree")
+            or (data_source or {}).get("childrenField")
+        ) else "select"
     if configured in {"text", "textarea", "date", "radio", "checkbox", "select", "treeSelect"}:
         return configured
     if field.get("type") in {"date", "datetime"} or field.get("format") in {"date", "date-time"}:
@@ -2161,7 +2225,7 @@ def _options_md(plans: list[dict]) -> str:
         for name, _field_path, raw in _iter_schema_fields(schema):
             source = _option_source(raw)
             options = [] if source else _field_options(raw)
-            raw_source = raw.get("x-dano-option-source") or raw.get("x-options-source-meta")
+            raw_source = _raw_option_source(raw)
             if not source and not options and not isinstance(raw_source, dict):
                 continue
             incomplete_source = not source and isinstance(raw_source, dict)
@@ -2423,15 +2487,26 @@ def _operations_md(skill, plans: list[dict], spec) -> str:  # noqa: ANN001
         option_lines: list[str] = []
         for name, raw in properties.items():
             field = raw if isinstance(raw, dict) else {}
-            live_source = field.get("x-dano-option-source") or field.get("x-options-source-meta")
+            live_source = _raw_option_source(field)
             values = list(field.get("enum") or [])
             labels = dict(field.get("x-enum-value-map") or {})
             if not live_source and not values and not labels:
                 continue
             option_lines.extend([f"### `{name}` 选项", ""])
             if isinstance(live_source, dict) and live_source:
-                method = str(live_source.get("source_method") or "GET").upper()
-                endpoint = str(live_source.get("source_url") or "")
+                public_source = _option_source(field) or {}
+                method = str(
+                    public_source.get("method")
+                    or live_source.get("source_method")
+                    or live_source.get("method")
+                    or "GET"
+                ).upper()
+                endpoint = str(
+                    public_source.get("endpoint")
+                    or live_source.get("endpoint")
+                    or _source_path(live_source.get("source_url") or live_source.get("url"))
+                    or ""
+                )
                 option_lines.append(f"- 运行时来源：`{method} {endpoint}`")
             if labels:
                 option_lines.extend(f"- `{_safe_text(label)}` → `{value}`" for label, value in labels.items())
@@ -3458,6 +3533,7 @@ def _public_schema(node: Any, key: str = "") -> Any:
             node.get("x-options-source")
             or node.get("x-dano-option-source")
             or node.get("x-options-source-meta")
+            or node.get("dataSource")
         )
         result = {
             str(child_key): _public_schema(value, str(child_key))
@@ -3483,8 +3559,17 @@ def _public_schema(node: Any, key: str = "") -> Any:
                     str(result.get("description")),
                     result,
                 )
-        if not dynamic_options:
+        if dynamic_options:
+            public_source = _option_source(node)
+            if public_source:
+                result["dataSource"] = public_source
+        else:
             owned = _capability_enum_options(node)
+            if not owned:
+                owned = [
+                    item for item in _field_options(node)
+                    if str(item.get("label")) != str(item.get("id"))
+                ]
             if owned:
                 result["x-enum-options"] = owned
                 result["enum"] = [item["id"] for item in owned]
