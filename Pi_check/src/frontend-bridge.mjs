@@ -20,6 +20,14 @@ function newAction() {
   return `action_${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
+export function shouldCancelOnFrontendDisconnect(view, { finalizing = false } = {}) {
+  if (finalizing) return false;
+  if (!view) return false;
+  if (view.status === "succeeded" || view.hasFinalResult) return false;
+  if (view.frozen || view.status === "pi_finalizing") return false;
+  return true;
+}
+
 export function attachFrontendBridge(httpServer, { controller, catalog }) {
   const wss = new WebSocketServer({ noServer: true });
   httpServer.on("upgrade", (req, socket, head) => {
@@ -37,6 +45,9 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
       action: "",
       recordingId: "",
       title: "",
+      finalizing: false,
+      closed: false,
+      started: Promise.resolve(),
       frameSeq: 0,
       frames: null,
       frameBusy: false,
@@ -141,6 +152,10 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
           return;
         }
         if (type === "start") {
+          let resolveStarted = () => {};
+          session.started = new Promise((resolve) => {
+            resolveStarted = resolve;
+          });
           session.action = String(message.resume_action || newAction());
           session.title = String(message.title || "").trim();
           logPiOnly("正在启动 PI；旧录制逻辑绝不启动");
@@ -149,16 +164,27 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
             label: "正在启动 PI",
             progress: { step: "capturing", label: "正在启动 PI" },
           }));
-          const started = await controller.start({
-            targetUrl: message.start_url,
-            goal: message.goal_text || message.title,
-            title: session.title,
-            action: session.action,
-            storageState: message.storage_state || null,
-            viewport: message.viewport || null,
-            onThought: think,
-          });
-          session.recordingId = started.id;
+          let started;
+          try {
+            started = await controller.start({
+              targetUrl: message.start_url,
+              goal: message.goal_text || message.title,
+              title: session.title,
+              action: session.action,
+              storageState: message.storage_state || null,
+              viewport: message.viewport || null,
+              onThought: think,
+            });
+            session.recordingId = started.id;
+            resolveStarted();
+            if (session.closed && !session.finalizing) {
+              await controller.cancel(started.id).catch(() => {});
+              return;
+            }
+          } catch (error) {
+            resolveStarted();
+            throw error;
+          }
           const browser = controller.browserOf?.(started.id);
           if (message.viewport) {
             await browser?.setViewport?.(message.viewport);
@@ -200,6 +226,8 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
           return;
         }
         if (type === "finish") {
+          await session.started;
+          session.finalizing = true;
           stopFrames();
           logPiOnly("证据已冻结，等待 PI 调用 submit_recording_result");
           think("证据冻结，等待 PI 提交完整能力。");
@@ -232,6 +260,7 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
           return;
         }
         if (type === "cancel") {
+          session.finalizing = false;
           stopFrames();
           try {
             await controller.cancel(session.recordingId);
@@ -258,6 +287,7 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
     });
 
     ws.on("close", () => {
+      session.closed = true;
       stopFrames();
       const recordingId = session.recordingId;
       if (!recordingId) return;
@@ -267,7 +297,10 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
       } catch {
         return;
       }
-      if (!view || view.status === "succeeded" || view.hasFinalResult) return;
+      if (!shouldCancelOnFrontendDisconnect(view, { finalizing: session.finalizing })) {
+        logPiOnly(`前台断开，证据已冻结或正在最终分析，继续等 PI recording=${recordingId}`);
+        return;
+      }
       controller.cancel(recordingId).catch(() => {});
     });
   });

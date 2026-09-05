@@ -62,12 +62,14 @@ export class ScriptedPiSession {
     sessionId = "scripted-pi",
     behavior = "submit_on_final",
     result,
+    delayMs = 250,
   }) {
     this.tools = tools;
     this.recordingId = recordingId;
     this.sessionId = sessionId;
     this.behavior = behavior;
     this.result = result || sampleResult();
+    this.delayMs = Number(delayMs) || 250;
     this.alive = true;
     this.started = true;
     this.unfrozenRejected = false;
@@ -105,6 +107,16 @@ export class ScriptedPiSession {
   async requestFinalAnalysis() {
     if (!this.alive) throw new Error("PI 在录制期间退出");
     if (this.behavior === "never_submit" || this.behavior === "submit_unfrozen") return;
+    if (this.behavior === "submit_after_delay") {
+      await new Promise((resolve) => setTimeout(resolve, this.delayMs));
+      if (!this.alive) throw new Error("PI 会话已关闭");
+      await this.tools.submit_recording_result({
+        recording_id: this.recordingId,
+        final: true,
+        result: this.result,
+      });
+      return;
+    }
     if (this.behavior === "empty_result") {
       await this.tools.submit_recording_result({
         recording_id: this.recordingId,
@@ -196,6 +208,7 @@ export async function createHarness(options = {}) {
         behavior: piBehavior,
         result,
         sessionId: options.piSessionId || "scripted-pi",
+        delayMs: options.piDelayMs,
       });
       return piRef;
     }),

@@ -1132,6 +1132,28 @@ export default function PageRecorder({
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "client stop");
   }
 
+  async function watchHistoryForCurrentAction() {
+    const action = actionRef.current;
+    if (!action) return;
+    const deadline = Date.now() + 600000;
+    while (Date.now() < deadline && !closingRef.current) {
+      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      if (closingRef.current) return;
+      try {
+        const rows = await listRecordingResults(subsystem);
+        setHistory(rows);
+        if (rows.some((row) => row.action === action)) {
+          finishRequestedRef.current = false;
+          setFinishRequested(false);
+          message.success("PI 已提交能力，已写入历史");
+          return;
+        }
+      } catch {
+        // 历史刷新失败时继续等后台提交
+      }
+    }
+  }
+
   function markRecordingDisconnected(reason: string) {
     const current = snapshotRef.current;
     const detail = reason || "后台录制进程已断开";
@@ -1549,12 +1571,17 @@ export default function PageRecorder({
       }
       if (closingRef.current) return;
       const status = snapshotRef.current?.status;
-      if (["recording", "processing", "waiting_operator"].includes(status || "")) {
-        markRecordingDisconnected(
-          status === "processing"
-            ? "后台分析进程已断开，前台已停止等待"
-            : "后台录制进程已断开，本次录制已中断",
-        );
+      if (status === "processing") {
+        appendThought({
+          kind: "text",
+          text: "前台连接已断开，后台仍在等待 PI 提交。完成后会写入历史。",
+        });
+        message.info("分析仍在后台进行，完成后会出现在历史列表");
+        void watchHistoryForCurrentAction();
+        return;
+      }
+      if (["recording", "waiting_operator"].includes(status || "")) {
+        markRecordingDisconnected("后台录制进程已断开，本次录制已中断");
       }
     };
   }
@@ -1673,6 +1700,10 @@ export default function PageRecorder({
       return;
     }
     if (deletingIdRef.current || openingId) return;
+    if (snapshotRef.current?.status === "processing" || finishRequestedRef.current) {
+      message.warning("当前录制正在分析，完成后会写入历史，请稍后再打开其他结果");
+      return;
+    }
     cancellingRef.current = false;
     setCancelling(false);
     setAnalysisRequested(false);
