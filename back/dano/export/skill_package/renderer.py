@@ -2559,8 +2559,26 @@ def _json_object(raw, label):
     return value
 
 
+def _runtime_tenant():
+    return str(os.environ.get("DANO_TENANT") or CONFIG.get("tenant") or "").strip()
+
+
+def _tenant_key(tenant):
+    raw = os.environ.get("DANO_TENANT_KEYS_JSON") or ""
+    if raw.strip():
+        mapping = json.loads(raw)
+        if not isinstance(mapping, dict):
+            raise RuntimeError("DANO_TENANT_KEYS_JSON must be a JSON object of tenant to key")
+        for candidate in (tenant, str(tenant)):
+            value = mapping.get(candidate)
+            if value:
+                return str(value).strip()
+    return str(os.environ.get("DANO_TENANT_KEY") or "").strip()
+
+
 def _cache_headers():
-    path = Path.home() / ".dano" / "sessions" / f"{CONFIG['tenant']}__{CONFIG['subsystem'].replace('/', '_')}.json"
+    tenant = _runtime_tenant()
+    path = Path.home() / ".dano" / "sessions" / f"{tenant}__{CONFIG['subsystem'].replace('/', '_')}.json"
     if not path.is_file():
         return {}
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -2580,26 +2598,36 @@ def _cache_headers():
     return headers
 
 
+def _live_headers():
+    dano_url = os.environ.get("DANO_URL", "").rstrip("/")
+    tenant = _runtime_tenant()
+    tenant_key = _tenant_key(tenant)
+    if not dano_url or not tenant_key or not tenant:
+        return {}
+    response = httpx.get(
+        dano_url + "/v1/settings/token/raw",
+        params={"tenant": tenant, "subsystem": CONFIG["subsystem"]},
+        headers={"X-Tenant-Key": tenant_key}, timeout=20,
+    )
+    if response.status_code in {401, 403}:
+        response.raise_for_status()
+    if not response.is_success:
+        return {}
+    headers = response.json().get("headers") or {}
+    return headers if isinstance(headers, dict) and headers else {}
+
+
 def auth_headers():
     raw = os.environ.get("DANO_AUTH_HEADERS")
     if raw:
         return _json_object(raw, "DANO_AUTH_HEADERS")
+    live = _live_headers()
+    if live:
+        return live
     cached = _cache_headers()
     if cached:
         return cached
-    dano_url = os.environ.get("DANO_URL", "").rstrip("/")
-    tenant_key = os.environ.get("DANO_TENANT_KEY", "")
-    if dano_url and tenant_key:
-        response = httpx.get(
-            dano_url + "/v1/settings/token/raw",
-            params={"tenant": CONFIG["tenant"], "subsystem": CONFIG["subsystem"]},
-            headers={"X-Tenant-Key": tenant_key}, timeout=20,
-        )
-        response.raise_for_status()
-        headers = response.json().get("headers") or {}
-        if headers:
-            return headers
-    raise RuntimeError("authentication unavailable: set DANO_AUTH_HEADERS or configure a session/Dano token source")
+    raise RuntimeError("authentication unavailable: set DANO_TENANT_KEYS_JSON or DANO_AUTH_HEADERS")
 
 
 def get_path(node, path):
