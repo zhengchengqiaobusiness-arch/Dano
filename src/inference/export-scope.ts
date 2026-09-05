@@ -335,15 +335,50 @@ function referencedCapabilityIds(capabilities: CapabilityContract[]) {
   return ids;
 }
 
+function hasSessionEvidence(capability: CapabilityContract, sessionEvents: EvidenceEvent[]) {
+  const eventIds = new Set(sessionEvents.map(event => event.id));
+  const recordingIds = new Set(sessionEvents.map(event => event.sessionId).filter(Boolean));
+  return capability.evidence.some(ref => eventIds.has(ref.eventId) || recordingIds.has(ref.sessionId));
+}
+
+export function lookupUsableInSession(capability: CapabilityContract, sessionEvents: EvidenceEvent[]) {
+  return capability.validation.status === "verified" || hasSessionEvidence(capability, sessionEvents);
+}
+
+export function usableRelatedLookups(
+  catalog: CapabilityContract[],
+  scoped: CapabilityContract[],
+  sessionEvents: EvidenceEvent[]
+) {
+  return relatedLookupCapabilities(catalog, scoped)
+    .filter(item => lookupUsableInSession(item, sessionEvents));
+}
+
+function lookupRecordedOnSessionPages(
+  capability: CapabilityContract,
+  allEvents: EvidenceEvent[],
+  sessionEvents: EvidenceEvent[]
+) {
+  const sessionPages = new Set(sessionEvents.map(event => evidencePageKey(event.pageUrl)).filter(Boolean));
+  if (!sessionPages.size) return false;
+  const eventIds = new Set(capability.evidence.map(ref => ref.eventId));
+  return allEvents.some(event => eventIds.has(event.id) && sessionPages.has(evidencePageKey(event.pageUrl)));
+}
+
 export function sessionCatalogSlice(
   catalog: CapabilityContract[],
   allEvents: EvidenceEvent[],
   sessionEvents: EvidenceEvent[]
 ) {
   const scoped = capabilitiesForSession(catalog, allEvents, sessionEvents);
-  const related = relatedLookupCapabilities(catalog, scoped);
-  const ids = referencedCapabilityIds([...scoped, ...related]);
-  for (const item of related) ids.add(item.id);
-  const slice = catalog.filter(capability => ids.has(capability.id));
+  const related = usableRelatedLookups(catalog, scoped, sessionEvents);
+  const needed = referencedCapabilityIds(scoped);
+  for (const item of related) needed.add(item.id);
+  const slice = catalog.filter(capability => {
+    if (scoped.some(item => item.id === capability.id)) return true;
+    if (!needed.has(capability.id)) return false;
+    return lookupUsableInSession(capability, sessionEvents)
+      || lookupRecordedOnSessionPages(capability, allEvents, sessionEvents);
+  });
   return slice.length ? slice : scoped;
 }

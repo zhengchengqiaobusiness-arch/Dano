@@ -1,6 +1,7 @@
-import type { CapabilityContract, CapabilityEvidenceRef, InputFormField } from "../domain.js";
+import type { CapabilityContract, CapabilityEvidenceRef, InputFormField, JsonSchema } from "../domain.js";
 import { catalogTransportKey } from "../catalog/normalize.js";
 import { isPrimaryCapability } from "./export-scope.js";
+import { isExecutableRule } from "./field-derivation.js";
 
 const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload", "action"]);
 
@@ -21,12 +22,111 @@ function mergeVerifiedForm(previous: InputFormField[], incoming: InputFormField[
 }
 
 function mergeIncrementalForm(previous: InputFormField[], incoming: InputFormField[]) {
-  // The current successful observation is authoritative for fields it carries.
-  // A missing optional field only means that this particular request omitted it;
-  // it is not evidence that an already verified field stopped existing.
-  const byPath = new Map(previous.map(field => [field.path, { ...field }]));
-  for (const field of incoming) byPath.set(field.path, { ...field });
-  return [...byPath.values()];
+  const previousByPath = new Map(previous.map(field => [field.path, { ...field }]));
+  return incoming.map(field => {
+    const old = previousByPath.get(field.path);
+    if (!old) return { ...field };
+    const incomingRule = field.source !== "caller" && Boolean(field.defaultRule && isExecutableRule(field.defaultRule));
+    const authoritative = old.source === "caller" && field.source !== "caller" && !incomingRule ? old : field;
+    return {
+      ...authoritative,
+      required: old.required || field.required,
+      requiredBasis: old.required
+        ? old.requiredBasis
+        : field.required
+          ? field.requiredBasis
+          : authoritative.requiredBasis
+    };
+  });
+}
+
+function schemaTypes(schema?: JsonSchema) {
+  return new Set(Array.isArray(schema?.type) ? schema.type : schema?.type ? [schema.type] : []);
+}
+
+function mergeSchema(previous: JsonSchema, incoming: JsonSchema): JsonSchema {
+  const types = new Set([...schemaTypes(previous), ...schemaTypes(incoming)]);
+  const type = types.size <= 1 ? [...types][0] : [...types];
+  const properties = new Set([
+    ...Object.keys(previous.properties || {}),
+    ...Object.keys(incoming.properties || {})
+  ]);
+  const mergedProperties = properties.size
+    ? Object.fromEntries([...properties].map(name => {
+        const old = previous.properties?.[name];
+        const next = incoming.properties?.[name];
+        return [name, old && next ? mergeSchema(old, next) : next || old || {}];
+      }))
+    : undefined;
+  const items = previous.items && incoming.items
+    ? mergeSchema(previous.items, incoming.items)
+    : incoming.items || previous.items;
+  const required = [...new Set([...(previous.required || []), ...(incoming.required || [])])];
+  return {
+    ...previous,
+    ...incoming,
+    ...(type ? { type } : {}),
+    ...(mergedProperties ? { properties: mergedProperties } : {}),
+    ...(items ? { items } : {}),
+    ...(required.length ? { required } : {})
+  };
+}
+
+function incomingContractNames(incoming: CapabilityContract) {
+  const names = new Set(Object.keys(incoming.inputSchema.properties || {}));
+  for (const field of incoming.inputForm) {
+    names.add(field.name);
+    const root = field.path.replace(/^\$\.?/, "").split(/[.[]/)[0];
+    if (root) names.add(root);
+  }
+  return names;
+}
+
+function retainSchemaProperties(schema: JsonSchema, keep: Set<string>): JsonSchema {
+  if (!schema.properties) return schema;
+  const properties = Object.fromEntries(
+    Object.entries(schema.properties).filter(([key]) => keep.has(key))
+  );
+  const required = (schema.required || []).filter(name => keep.has(name));
+  return {
+    ...schema,
+    properties,
+    ...(required.length ? { required } : { required: undefined })
+  };
+}
+
+function mergeUrlTemplate(previous: string, incoming: string, keepParamNames?: Set<string>) {
+  try {
+    const oldUrl = new URL(previous);
+    const nextUrl = new URL(incoming);
+    if (`${oldUrl.origin}${oldUrl.pathname}` !== `${nextUrl.origin}${nextUrl.pathname}`) return incoming;
+    const params = new Map<string, string>();
+    for (const [name, value] of oldUrl.searchParams) {
+      if (keepParamNames && !keepParamNames.has(name) && !nextUrl.searchParams.has(name)) continue;
+      params.set(name, value);
+    }
+    for (const [name, value] of nextUrl.searchParams) params.set(name, value);
+    const query = [...params]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, value]) => `${encodeURIComponent(name)}=${value}`)
+      .join("&");
+    return `${nextUrl.origin}${nextUrl.pathname}${query ? `?${query}` : ""}${nextUrl.hash}`;
+  } catch {
+    return incoming;
+  }
+}
+
+function mergeIncrementalContract(previous: CapabilityContract, incoming: CapabilityContract): CapabilityContract {
+  const keep = incomingContractNames(incoming);
+  return {
+    ...incoming,
+    transport: {
+      ...incoming.transport,
+      urlTemplate: mergeUrlTemplate(previous.transport.urlTemplate, incoming.transport.urlTemplate, keep)
+    },
+    inputSchema: retainSchemaProperties(mergeSchema(previous.inputSchema, incoming.inputSchema), keep),
+    outputSchema: mergeSchema(previous.outputSchema, incoming.outputSchema)
+  };
 }
 
 function canonical(value: unknown): unknown {
@@ -111,8 +211,11 @@ function mergeReanalyzedBindings(
   candidate: CapabilityContract,
   old: CapabilityContract
 ) {
+  const incomingPaths = new Set(candidate.inputForm.map(field => field.path));
   const valid = (binding: CapabilityContract["bindings"][number]) =>
-    binding.fromCapabilityId !== old.id && binding.fromCapabilityId !== candidate.id;
+    binding.fromCapabilityId !== old.id
+    && binding.fromCapabilityId !== candidate.id
+    && (incomingPaths.has(binding.toPath) || binding.approvalSource === "human");
   const oldBindings = (old.bindings || []).filter(valid);
   const human = oldBindings.filter(binding => binding.approvalSource === "human");
   const humanTargets = new Set(human.map(binding => binding.toPath));
@@ -132,8 +235,15 @@ export function reanalyzeIncoming(incoming: CapabilityContract[], existing: Capa
   return incoming.map(candidate => {
     const old = existingByTransport.get(catalogTransportKey(candidate));
     if (!old) return candidate;
-    const bindings = mergeReanalyzedBindings(candidate, old);
-    const operation = old.editing?.operation === "manual" ? old.operation : candidate.operation;
+    const preserveVerifiedWrite = old.validation.status === "verified"
+      && WRITE_OPERATIONS.has(old.operation)
+      && !WRITE_OPERATIONS.has(candidate.operation);
+    const operation = old.editing?.operation === "manual" || preserveVerifiedWrite ? old.operation : candidate.operation;
+    const sameOperation = old.operation === operation;
+    if (sameOperation) candidate = mergeIncrementalContract(old, candidate);
+    const bindings = preserveVerifiedWrite
+      ? mergeReanalyzedBindings({ ...candidate, bindings: [] }, old)
+      : mergeReanalyzedBindings(candidate, old);
     const sideEffect = WRITE_OPERATIONS.has(operation);
     const manualPaths = new Set(old.editing?.fieldPaths || []);
     const candidateForm =
@@ -141,7 +251,6 @@ export function reanalyzeIncoming(incoming: CapabilityContract[], existing: Capa
         const previous = old.inputForm.find(item => item.path === field.path);
         return previous && manualPaths.has(field.path) ? { ...previous } : { ...field };
       });
-    const sameOperation = old.operation === operation;
     const incrementalForm = sameOperation
       ? mergeIncrementalForm(old.inputForm, candidateForm)
       : candidateForm;
@@ -156,8 +265,8 @@ export function reanalyzeIncoming(incoming: CapabilityContract[], existing: Capa
     return {
       ...(keepVerified ? old : candidate),
       id: old.editing?.operation === "manual" || generatedIdFitsOperation(old.id, operation) ? old.id : candidate.id,
-      title: old.editing?.title === "manual" ? old.title : candidate.title,
-      description: old.editing?.description === "manual" ? old.description : candidate.description,
+      title: old.editing?.title === "manual" || preserveVerifiedWrite ? old.title : candidate.title,
+      description: old.editing?.description === "manual" || preserveVerifiedWrite ? old.description : candidate.description,
       operation,
       sideEffect,
       confirmation: {

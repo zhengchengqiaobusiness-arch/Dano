@@ -113,7 +113,14 @@ function emptyCoverageValue(value: unknown) {
   if (Array.isArray(value)) return value.length === 0;
   if (typeof value !== "string") return false;
   const text = value.replace(/<[^>]+>/g, "").replace(/&nbsp;|&#160;/gi, " ").trim();
-  return !text || /^(请选择|请输入|请填写|please (select|enter|choose))$/i.test(text);
+  return !text || /^(请选择|请输入|请填写|please (select|enter|choose))/i.test(text);
+}
+
+function emptyChooserWithoutOptions(field: NonNullable<Extract<EvidenceEvent, { kind: "ui" }>["form"]>[number]) {
+  const type = String(field.type || "");
+  if (!/select|picker|chooser|dropdown|cascader/i.test(type)) return false;
+  if ((field.options || []).length) return false;
+  return (field.visibleOptions || []).some(item => /暂无数据|无数据|no data/i.test(String(item)));
 }
 
 function blankCompleteCoverageFields(capability: CapabilityContract, events: EvidenceEvent[]) {
@@ -123,6 +130,7 @@ function blankCompleteCoverageFields(capability: CapabilityContract, events: Evi
     const label = String(field.label || field.name || "").trim();
     const type = String(field.type || "");
     if (!label || /upload|file|readonly|hidden/i.test(type) || /附件|上传/.test(label)) continue;
+    if (emptyChooserWithoutOptions(field)) continue;
     const key = `${label}:${field.rangeIndex ?? ""}`;
     const previous = coverage.get(key);
     coverage.set(key, {

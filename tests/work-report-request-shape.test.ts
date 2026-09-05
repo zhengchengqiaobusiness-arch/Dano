@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { EvidenceEvent } from "../src/domain.js";
 import { materializeHttpRequest } from "../src/execution/http-executor.js";
 import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
+import { flattenRequestValues } from "../src/inference/field-resolver.js";
 
 const recordedBody = {
   creator: "1",
@@ -75,4 +76,25 @@ test("work report keeps caller fields editable and reproduces every system field
   assert.equal(create.inputForm.find(field => field.path === "$.items[*]._X_ROW_KEY")?.defaultRule, "literal:row_272");
   assert.equal(create.inputForm.find(field => field.path === "$.title")?.source, "caller");
   assert.equal(create.inputForm.find(field => field.path === "$.items[*].progress")?.source, "caller");
+});
+
+test("null keys in a successful write stay executable literals and are replayed as null", () => {
+  const leaves = flattenRequestValues({ title: "A", deptId: null, items: [] });
+  assert.equal(leaves.some(item => item.path === "$.deptId" && item.value === null), true);
+  const events: EvidenceEvent[] = [{
+    id: "ui-save", kind: "ui", sessionId: "doc", at: "2026-09-05T08:00:02.000Z",
+    pageUrl: "https://example.test/oa/doc-info", eventType: "click", text: "保存", label: "保存",
+    form: [{ name: "title", label: "标题", type: "text", value: "A" }]
+  }, {
+    id: "net-create", kind: "network", sessionId: "doc", at: "2026-09-05T08:00:03.000Z",
+    pageUrl: "https://example.test/oa/doc-info", correlatedUiEvidenceId: "ui-save",
+    request: {
+      method: "POST", url: "https://example.test/oa/doc/submit", resourceType: "xhr", headers: {}, query: {},
+      body: { title: "A", deptId: null }
+    },
+    response: { status: 200, headers: {}, body: { code: 0, data: 1 } }
+  }];
+  const create = buildCapabilityCandidates(events).find(item => item.transport.pathTemplate.endsWith("/oa/doc/submit"))!;
+  assert.equal(create.inputForm.find(field => field.path === "$.deptId")?.defaultRule, "literal:null");
+  assert.equal(materializeHttpRequest(create, { title: "A" }).body?.deptId, null);
 });

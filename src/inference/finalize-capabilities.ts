@@ -6,6 +6,35 @@ import { validateCapability } from "../validation/validator.js";
 import { attachCatalogDerivations } from "./field-derivation.js";
 import { exportableCapabilities, isCandidateSourceCapability, isPrimaryCapability } from "./export-scope.js";
 
+function stripUnavailableSources(capability: CapabilityContract, availableIds: Set<string>): CapabilityContract {
+  let changed = false;
+  const inputForm = capability.inputForm.map(field => {
+    let next = field;
+    if (next.candidates?.type === "capability" && !availableIds.has(next.candidates.capabilityId)) {
+      const { candidates: _candidates, ...rest } = next;
+      next = rest;
+      changed = true;
+    }
+    const from = /^from:([^:]+):/.exec(next.defaultRule || "");
+    if (from?.[1] && !availableIds.has(from[1])) {
+      next = {
+        ...next,
+        defaultRule: undefined,
+        source: next.source === "binding" ? "system" : next.source,
+        systemHandled: next.source === "binding" ? true : next.systemHandled
+      };
+      changed = true;
+    }
+    return next;
+  });
+  const bindings = capability.bindings.filter(binding =>
+    availableIds.has(binding.fromCapabilityId) || binding.approvalSource === "human"
+  );
+  if (bindings.length !== capability.bindings.length) changed = true;
+  if (!changed) return capability;
+  return { ...capability, inputForm, bindings };
+}
+
 function hasScopedNetworkEvidence(capability: CapabilityContract, events: EvidenceEvent[]) {
   const ids = new Set(events.map(event => event.id));
   return capability.evidence.some(ref => ids.has(ref.eventId));
@@ -44,8 +73,16 @@ export function finalizeSessionSlice(
   events: EvidenceEvent[],
   existing: CapabilityContract[] = []
 ) {
-  if (sessionExportReady(slice) && existing.length) return slice;
-  const finalized = finalizeCapabilities(slice, events);
+  const availableIds = new Set(slice.map(capability => capability.id));
+  let stripped = false;
+  const cleaned = slice.map(capability => {
+    const next = stripUnavailableSources(capability, availableIds);
+    if (next !== capability) stripped = true;
+    return next;
+  });
+  const ready = stripped ? cleaned : slice;
+  if (sessionExportReady(ready) && existing.length) return ready;
+  const finalized = finalizeCapabilities(ready, events);
   if (!existing.length) return finalized;
   const existingByKey = new Map(existing.map(capability => [catalogTransportKey(capability), capability]));
   return finalized.map(capability => {

@@ -172,26 +172,29 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
     });
   }
 
+  const sample = evidenceSample(cap, events);
   const callerFieldsBacked = cap.inputForm
     .filter(field => field.source === "caller")
-    .every(field =>
-      fieldHasUiEvidence(field, uiRefs)
-      || field.candidates?.type === "capability"
-      || field.candidates?.type === "static"
-      || (() => {
-        const value = requestValueAt(evidenceSample(cap, events), field.path);
-        const lastTargetAt = networkRefs.map(event => event.at).sort().at(-1);
-        return value !== undefined && events.some(event => {
-          if (event.kind !== "network" || networkRefs.includes(event) || (lastTargetAt && event.at > lastTargetAt)) return false;
-          const input = event.request.body && typeof event.request.body === "object" && !Array.isArray(event.request.body)
-            ? { ...event.request.query, ...(event.request.body as Record<string, unknown>) }
-            : event.request.query;
-          return flattenRequestValues(input).some(item =>
-            item.name.toLowerCase() === field.name.toLowerCase() && sameValue(item.value, value)
-          );
-        });
-      })()
-    );
+    .every(field => {
+      const sent = requestValueAt(sample, field.path) !== undefined;
+      if (!sent) return true;
+      return fieldHasUiEvidence(field, uiRefs)
+        || field.candidates?.type === "capability"
+        || field.candidates?.type === "static"
+        || (() => {
+          const value = requestValueAt(sample, field.path);
+          const lastTargetAt = networkRefs.map(event => event.at).sort().at(-1);
+          return value !== undefined && events.some(event => {
+            if (event.kind !== "network" || networkRefs.includes(event) || (lastTargetAt && event.at > lastTargetAt)) return false;
+            const input = event.request.body && typeof event.request.body === "object" && !Array.isArray(event.request.body)
+              ? { ...event.request.query, ...(event.request.body as Record<string, unknown>) }
+              : event.request.query;
+            return flattenRequestValues(input).some(item =>
+              item.name.toLowerCase() === field.name.toLowerCase() && sameValue(item.value, value)
+            );
+          });
+        })();
+    });
   checks.push({
     name: "caller-fields-backed-by-ui",
     ok: callerFieldsBacked,

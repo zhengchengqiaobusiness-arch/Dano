@@ -57,21 +57,17 @@ function eventLabel(event: UiEvidence) {
 }
 
 export function flattenRequestValues(value: unknown, prefix = "$"): Array<{ path: string; name: string; value: unknown }> {
-  if (value === null || value === undefined) return [];
+  if (value === undefined) return [];
+  const name = prefix.split(".").pop()?.replace(/\[\*\]$/, "") || prefix;
+  if (value === null || typeof value !== "object") return [{ path: prefix, name, value }];
   if (Array.isArray(value)) {
-    const name = prefix.split(".").pop()?.replace(/\[\*\]$/, "") || prefix;
     if (!value.length) return [{ path: prefix, name, value }];
     const first = value.find(item => item !== null && item !== undefined);
     const children = flattenRequestValues(first, `${prefix}[*]`);
     return [{ path: prefix, name, value }, ...children];
   }
-  if (typeof value !== "object") {
-    const name = prefix.split(".").pop()?.replace(/\[\*\]$/, "") || prefix;
-    return [{ path: prefix, name, value }];
-  }
   const entries = Object.entries(value as Record<string, unknown>);
   if (!entries.length) {
-    const name = prefix.split(".").pop()?.replace(/\[\*\]$/, "") || prefix;
     return [{ path: prefix, name, value }];
   }
   return entries.flatMap(([key, child]) =>

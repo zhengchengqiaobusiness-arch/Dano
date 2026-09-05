@@ -155,7 +155,7 @@ test("reanalyze keeps verified shared lookups and resets this page's primaries",
   assert.equal(next.find(item => item.transport.pathTemplate.includes("/system/user/page"))?.validation.status, "verified");
 });
 
-test("reanalyze incrementally updates one capability without dropping previously verified fields or session evidence", () => {
+test("reanalyze incrementally updates one capability from this session's fields and keeps session evidence", () => {
   const transport = {
     method: "GET",
     urlTemplate: "https://x/admin-api/oa/work-report/page",
@@ -196,10 +196,46 @@ test("reanalyze incrementally updates one capability without dropping previously
 
   const [next] = reanalyzeIncoming([incoming], [old]);
   assert.ok(next);
-  assert.deepEqual(next.inputForm.map(item => item.name).sort(), ["billCode", "companyId"]);
+  assert.deepEqual(next.inputForm.map(item => item.name).sort(), ["companyId"]);
   assert.equal(next.inputForm.find(item => item.name === "companyId")?.sourceDetail, "新会话更新");
   assert.deepEqual(next.evidence.map(item => item.eventId).sort(), ["new-query", "old-query"]);
   assert.equal(next.validation.status, "candidate");
+});
+
+test("reanalyze does not graft other-session filters onto a slimmer query", () => {
+  const transport = {
+    method: "GET",
+    urlTemplate: "https://x/oa/doc/page",
+    origin: "https://x",
+    pathTemplate: "/oa/doc/page"
+  };
+  const field = (name: string, source: "caller" | "system") => ({
+    path: `$.${name}`,
+    name,
+    label: name,
+    valueType: "string" as const,
+    source,
+    required: false,
+    requiredBasis: "not-observed" as const,
+    systemHandled: source === "system",
+    sourceDetail: source === "caller" ? "旧会话日期" : "本会话",
+    widget: "text" as const
+  });
+  const old = cap({
+    id: "query-doc",
+    operation: "query",
+    transport: { ...transport, urlTemplate: "https://x/oa/doc/page?billCode={billCode}&createTime={createTime}" },
+    inputForm: [field("billCode", "caller"), field("createTime", "caller")]
+  });
+  const incoming = cap({
+    id: "query-doc-now",
+    operation: "query",
+    transport,
+    inputForm: [field("billCode", "caller")]
+  });
+  const [next] = reanalyzeIncoming([incoming], [old]);
+  assert.deepEqual(next?.inputForm.map(item => item.name), ["billCode"]);
+  assert.equal(next?.transport.urlTemplate.includes("createTime"), false);
 });
 
 test("reanalyze drops impossible self-bindings when a transport is reclassified", () => {

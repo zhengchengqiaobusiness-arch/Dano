@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { CapabilityContract, EvidenceEvent } from "../src/domain.js";
-import { capabilitiesForSession, isPrimaryCapability, summarizeCatalog } from "../src/inference/export-scope.js";
+import { capabilitiesForSession, isPrimaryCapability, sessionCatalogSlice, summarizeCatalog } from "../src/inference/export-scope.js";
 import { reviewCatalog } from "../src/review/catalog-review.js";
 import { mergeCatalogByTransport } from "../src/catalog/normalize.js";
+import { finalizeSessionSlice } from "../src/inference/finalize-capabilities.js";
+import { validateCapability } from "../src/validation/validator.js";
 
 function cap(partial: Partial<CapabilityContract> & Pick<CapabilityContract, "id" | "operation" | "transport">): CapabilityContract {
   return {
@@ -267,4 +269,139 @@ test("session review keeps same-page writes and ignores other-page unverified cr
   const review = reviewCatalog(scoped, chatEvents);
   assert.equal(review.status, "passed", review.summary);
   assert.equal(review.primaryTitles.join(","), "查询 sjws_chat");
+});
+
+test("complete coverage does not demand a chooser that opened with no options", () => {
+  const query = cap({
+    id: "query-doc",
+    operation: "query",
+    title: "查询单据",
+    transport: { method: "GET", urlTemplate: "https://x/oa/doc/page", origin: "https://x", pathTemplate: "/oa/doc/page" },
+    evidence: [{ eventId: "net-search", sessionId: "s", kind: "network", at: "2026-09-05T08:00:01.000Z", status: 200 }]
+  });
+  const events: EvidenceEvent[] = [{
+    id: "ui-search", kind: "ui", sessionId: "s", at: "2026-09-05T08:00:00.000Z",
+    pageUrl: "https://x/web/#/oa/doc", eventType: "click", text: "搜索", label: "搜索",
+    form: [
+      { name: "billCode", label: "单据编号", type: "text", value: "A1" },
+      { name: "deptId", label: "申请部门", type: "select", value: "", visibleOptions: ["暂无数据"] }
+    ]
+  }, {
+    id: "net-search", kind: "network", sessionId: "s", at: "2026-09-05T08:00:01.000Z",
+    pageUrl: "https://x/web/#/oa/doc", correlatedUiEvidenceId: "ui-search",
+    request: { method: "GET", url: "https://x/oa/doc/page?billCode=A1", resourceType: "xhr", headers: {}, query: { billCode: "A1" } },
+    response: { status: 200, headers: {}, body: { code: 0, data: { list: [], total: 0 } } }
+  }];
+  const review = reviewCatalog([query], events, ["query"], true);
+  assert.equal(review.findings.some(item => item.code === "complete-field-coverage"), false, review.summary);
+});
+
+test("unverified lookup without this session's evidence stays out of the session slice", () => {
+  const query = cap({
+    id: "query-doc",
+    operation: "query",
+    title: "查询单据",
+    transport: { method: "GET", urlTemplate: "https://x/oa/doc/page", origin: "https://x", pathTemplate: "/oa/doc/page" },
+    inputForm: [{
+      path: "$.billCode", name: "billCode", label: "单据编号", valueType: "string", source: "caller",
+      required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面", widget: "text"
+    }, {
+      path: "$.deptId", name: "deptId", label: "申请部门", valueType: "string", source: "caller",
+      required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "旧候选", widget: "select",
+      candidates: { type: "capability", capabilityId: "query-dept", valuePath: "$.data[*].id", labelPath: "$.data[*].name" }
+    }],
+    evidence: [{ eventId: "net-page", sessionId: "now", kind: "network", at: "2026-09-05T08:00:01.000Z", status: 200 }]
+  });
+  const create = cap({
+    id: "create-doc",
+    operation: "create",
+    title: "新建单据",
+    transport: { method: "POST", urlTemplate: "https://x/oa/doc/submit", origin: "https://x", pathTemplate: "/oa/doc/submit" },
+    inputForm: [{
+      path: "$.title", name: "title", label: "标题", valueType: "string", source: "caller",
+      required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面", widget: "text"
+    }],
+    evidence: [{ eventId: "net-create", sessionId: "now", kind: "network", at: "2026-09-05T08:00:02.000Z", status: 200 }]
+  });
+  const dept = cap({
+    id: "query-dept",
+    operation: "query",
+    title: "查询部门",
+    transport: { method: "GET", urlTemplate: "https://x/system/dept/list", origin: "https://x", pathTemplate: "/system/dept/list" },
+    evidence: [{ eventId: "old-dept", sessionId: "old", kind: "network", at: "2026-09-01T00:00:00.000Z", status: 200 }],
+    validation: {
+      version: 2,
+      status: "candidate",
+      checks: [{ name: "recorded-network-evidence", ok: false, detail: "No recorded network evidence" }]
+    }
+  });
+  const events: EvidenceEvent[] = [{
+    id: "net-page", kind: "network", sessionId: "now", at: "2026-09-05T08:00:01.000Z",
+    pageUrl: "https://x/web/#/oa/doc",
+    request: { method: "GET", url: "https://x/oa/doc/page?billCode=A1", resourceType: "xhr", headers: {}, query: { billCode: "A1" } },
+    response: { status: 200, headers: {}, body: { data: { list: [] } } }
+  }, {
+    id: "net-create", kind: "network", sessionId: "now", at: "2026-09-05T08:00:02.000Z",
+    pageUrl: "https://x/web/#/oa/doc-info",
+    request: { method: "POST", url: "https://x/oa/doc/submit", resourceType: "xhr", headers: {}, query: {}, body: { title: "A" } },
+    response: { status: 200, headers: {}, body: { data: 1 } }
+  }];
+  const slice = sessionCatalogSlice([query, create, dept], events, events);
+  assert.equal(slice.some(item => item.id === "query-dept"), false, slice.map(item => item.id).join(","));
+  const review = reviewCatalog(slice, events, ["query", "create"]);
+  assert.equal(review.findings.some(item => item.capabilityId === "query-dept"), false, review.summary);
+});
+
+test("caller field not sent in this session does not fail caller-fields-backed-by-ui", () => {
+  const query = cap({
+    id: "query-doc",
+    operation: "query",
+    title: "查询单据",
+    transport: { method: "GET", urlTemplate: "https://x/oa/doc/page?billCode={billCode}", origin: "https://x", pathTemplate: "/oa/doc/page" },
+    inputForm: [
+      { path: "$.billCode", name: "billCode", label: "单据编号", valueType: "string", source: "caller", required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面", widget: "text" },
+      { path: "$.createTime", name: "createTime", label: "开始时间 / 结束时间", valueType: "array", source: "caller", required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "旧会话日期", widget: "date" }
+    ],
+    evidence: [
+      { eventId: "ui-search", sessionId: "now", kind: "ui", at: "2026-09-05T08:00:00.000Z" },
+      { eventId: "net-search", sessionId: "now", kind: "network", at: "2026-09-05T08:00:01.000Z", status: 200 }
+    ],
+    validation: { version: 2, status: "candidate", checks: [] }
+  });
+  const events: EvidenceEvent[] = [{
+    id: "ui-search", kind: "ui", sessionId: "now", at: "2026-09-05T08:00:00.000Z",
+    pageUrl: "https://x/web/#/oa/doc", eventType: "click", text: "搜索", label: "搜索",
+    form: [{ name: "billCode", label: "单据编号", type: "text", value: "A1" }]
+  }, {
+    id: "net-search", kind: "network", sessionId: "now", at: "2026-09-05T08:00:01.000Z",
+    pageUrl: "https://x/web/#/oa/doc", correlatedUiEvidenceId: "ui-search",
+    request: { method: "GET", url: "https://x/oa/doc/page?billCode=A1", resourceType: "xhr", headers: {}, query: { billCode: "A1" } },
+    response: { status: 200, headers: {}, body: { code: 0, data: { list: [], total: 0 } } }
+  }];
+  const validated = validateCapability(query, events, [query]);
+  const check = validated.validation.checks.find(item => item.name === "caller-fields-backed-by-ui");
+  assert.equal(check?.ok, true, JSON.stringify(validated.validation.checks.filter(item => !item.ok)));
+});
+
+test("finalize drops candidate sources that are not in this session slice", () => {
+  const query = cap({
+    id: "query-doc",
+    operation: "query",
+    title: "查询单据",
+    transport: { method: "GET", urlTemplate: "https://x/oa/doc/page", origin: "https://x", pathTemplate: "/oa/doc/page" },
+    inputForm: [{
+      path: "$.deptId", name: "deptId", label: "申请部门", valueType: "string", source: "caller",
+      required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "旧候选", widget: "select",
+      candidates: { type: "capability", capabilityId: "query-dept", valuePath: "$.data[*].id", labelPath: "$.data[*].name" }
+    }],
+    evidence: [{ eventId: "net-search", sessionId: "now", kind: "network", at: "2026-09-05T08:00:01.000Z", status: 200 }]
+  });
+  const events: EvidenceEvent[] = [{
+    id: "net-search", kind: "network", sessionId: "now", at: "2026-09-05T08:00:01.000Z",
+    pageUrl: "https://x/web/#/oa/doc",
+    request: { method: "GET", url: "https://x/oa/doc/page?billCode=A1", resourceType: "xhr", headers: {}, query: { billCode: "A1" } },
+    response: { status: 200, headers: {}, body: { code: 0, data: { list: [], total: 0 } } }
+  }];
+  const [next] = finalizeSessionSlice([query], events, [query]);
+  assert.equal(next?.inputForm.find(item => item.name === "deptId")?.candidates, undefined);
 });
