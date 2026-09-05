@@ -159,6 +159,10 @@ test("object-array flatten keeps the union of row keys instead of only the first
 test("a leftover department select is not a people picker and does not steal creator", () => {
   assert.equal(pickerEntity({ name: "creator", label: "创建人" }), "user");
   assert.equal(pickerEntity({ name: "deptId", label: "申请部门" }), "dept");
+  assert.equal(pickerEntity({ label: "组织机构" }), "dept");
+  assert.equal(pickerEntity({ label: "人力审批" }), "user");
+  assert.equal(pickerEntity({ label: "领导审批" }), "user");
+  assert.equal(pickerEntity({ name: "processStatus", label: "审批结果" }), undefined);
   const events = fidelityEvents();
   const catalog = finalizeCapabilities(buildCapabilityCandidates(events), events);
   const query = catalog.find(item => item.transport.pathTemplate.endsWith("/oa/doc/page"))!;

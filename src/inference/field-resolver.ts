@@ -327,10 +327,10 @@ function looksChoiceField(field: InputFormField) {
 export function pickerEntity(value: { name?: string; label?: string; path?: string }) {
   const pathName = value.path?.split(".").pop()?.replace(/\[\*\]$/, "") || "";
   const text = fieldText({ name: value.name || pathName, label: value.label });
-  if (/dept|department|部门/.test(text) && !/creator|userId|userIds|人员|创建人|选人|审批人/.test(text)) return "dept";
+  if (/dept|department|部门|组织机构/.test(text) && !/creator|userId|userIds|人员|创建人|选人|审批人/.test(text)) return "dept";
   if (/\brole\b|角色/.test(text)) return "role";
   if (/\bpost\b|岗位|职位/.test(text)) return "post";
-  if (/人员|创建人|选人|审批人|assignee|approver|creator|Activity_|userId|userIds|UserSelect/i.test(text)) return "user";
+  if (/人员|创建人|选人|审批人|审批(?!结果|状态)|assignee|approver|creator|Activity_|userId|userIds|UserSelect/i.test(text)) return "user";
   return undefined;
 }
 
@@ -1203,9 +1203,7 @@ export function assignUniqueRemaining(
     const pickerObs = leftoverObs.filter(item => {
       if (bound.has(item.label || "") || !/picker|select|combobox/i.test(item.type || "")) return false;
       const observationEntity = pickerEntity(item);
-      if (fieldEntity && observationEntity && fieldEntity !== observationEntity) return false;
-      return observationCompatible(field, item, value, lists)
-        || Boolean(fieldEntity && observationEntity && fieldEntity === observationEntity && sameSynonymGroup(field, item));
+      return !(fieldEntity && observationEntity && fieldEntity !== observationEntity);
     });
     const required = pickerObs.filter(item => item.required);
     const pool = required.length ? required : pickerObs;
