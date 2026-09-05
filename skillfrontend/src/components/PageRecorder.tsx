@@ -707,6 +707,9 @@ export default function PageRecorder({
   const [cancelling, setCancelling] = useState(false);
   const [history, setHistory] = useState<RecordingResultSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(Boolean(tenant));
+  const historyBodyRef = useRef<HTMLDivElement | null>(null);
+  const [historyPageSize, setHistoryPageSize] = useState(5);
+  const [historyScrollY, setHistoryScrollY] = useState(240);
   const [activeResultId, setActiveResultId] = useState("");
   const [deletingId, setDeletingId] = useState("");
   const [openingId, setOpeningId] = useState("");
@@ -850,6 +853,25 @@ export default function PageRecorder({
     if (!node) return;
     node.scrollTop = node.scrollHeight;
   }, [thoughts]);
+
+  useEffect(() => {
+    if (viewStage !== 0) return;
+    const node = historyBodyRef.current;
+    if (!node) return;
+    const measure = () => {
+      const paginationH = 40;
+      const headerH = 39;
+      const available = node.clientHeight - paginationH - headerH;
+      const rowH = 56;
+      if (available < rowH) return;
+      setHistoryPageSize(Math.max(3, Math.min(8, Math.floor(available / rowH))));
+      setHistoryScrollY(Math.max(rowH * 3, available));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [viewStage]);
 
   function appendThought(chunk: ThoughtChunk) {
     setThoughts((current) => {
@@ -2384,8 +2406,8 @@ export default function PageRecorder({
 
   function renderSetup() {
     return (
-      <div>
-      <Card>
+      <div style={{ height: "100%", minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <Card style={{ flexShrink: 0 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flexWrap: "nowrap" }}>
             <Text strong style={{ whiteSpace: "nowrap" }}><Text type="danger">* </Text>业务地址</Text>
@@ -2430,26 +2452,41 @@ export default function PageRecorder({
           </div>
         </div>
       </Card>
-      <Card title="历史录制结果" size="small" style={{ marginTop: 12 }}>
+      <Card
+        title="历史录制结果"
+        size="small"
+        style={{ marginTop: 12, flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+        styles={{ body: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", paddingBottom: 8 } }}
+      >
+        <div ref={historyBodyRef} style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
         <Table<RecordingResultSummary>
           rowKey="id"
           size="small"
           loading={historyLoading}
-          pagination={false}
           dataSource={history}
+          scroll={{ y: historyScrollY }}
+          pagination={{
+            pageSize: historyPageSize,
+            size: "small",
+            showSizeChanger: false,
+            showQuickJumper: history.length > historyPageSize,
+            showTotal: (total) => `共 ${total} 条`,
+            hideOnSinglePage: false,
+          }}
           locale={{ emptyText: <Empty description="还没有保存的录制结果" /> }}
           columns={[
             {
               title: "Skill",
+              ellipsis: true,
               render: (_, item) => {
                 const lifecycle = historyPublishLabel(item);
                 return (
-                  <div>
-                    <div>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {historySkillName(item)}
                       <Tag color={lifecycle.color as "success"} style={{ marginLeft: 8 }}>{lifecycle.label}</Tag>
                     </div>
-                    <div style={{ fontSize: 12, color: "#999" }}>{item.action}</div>
+                    <div style={{ fontSize: 12, color: "#999", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.action}</div>
                   </div>
                 );
               },
@@ -2494,6 +2531,7 @@ export default function PageRecorder({
             },
           ]}
         />
+        </div>
       </Card>
       </div>
     );
@@ -3768,7 +3806,7 @@ export default function PageRecorder({
         ]}
         style={{ maxWidth: 980, margin: "0 auto 12px", flexShrink: 0 }}
       />
-      <div style={{ display: viewStage === 0 ? "block" : "none", flex: 1, minHeight: 0, overflow: "auto" }}>{renderSetup()}</div>
+      <div style={{ display: viewStage === 0 ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>{renderSetup()}</div>
       {keepRecording ? <div style={{ display: viewStage === 1 ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>{renderRecording()}</div> : null}
       {keepResult ? <div style={{ display: viewStage === 2 ? "block" : "none", flex: 1, minHeight: 0, overflow: "auto" }}>{renderResult()}</div> : null}
       <Modal
