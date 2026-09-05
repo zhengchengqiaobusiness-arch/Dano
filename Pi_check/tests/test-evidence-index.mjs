@@ -195,3 +195,37 @@ test("读请求会带上响应正文，request_id 也能取到 inline body", asy
     await harness.cleanup();
   }
 });
+
+test("读截图只回元数据，不把图片二进制塞进对话", async () => {
+  const harness = await createHarness();
+  try {
+    const started = await harness.controller.start({
+      targetUrl: "http://example.com",
+      goal: "截图",
+    });
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+    const stored = await harness.evidence.writeBlob(started.id, jpeg);
+    await harness.evidence.append(started.id, "screenshot", {
+      reason: "page_ready",
+      image: { stored: "blob", blob_id: stored.blobId },
+    });
+    const host = createPiToolHost({
+      recordingId: started.id,
+      evidence: harness.evidence,
+      files: harness.files,
+      gate: harness.gate,
+      getPiSessionId: () => harness.controller.view(started.id).piSessionId,
+    });
+    const shot = await host.read_screenshot({ blob_id: stored.blobId });
+    assert.equal(shot.found, true);
+    assert.equal(shot.stored, "image");
+    assert.equal(shot.readable, false);
+    assert.equal(shot.bytes_base64, undefined);
+    assert.match(shot.error, /visible_control/);
+    const viaBlob = await host.read_response_blob({ blob_id: stored.blobId });
+    assert.equal(viaBlob.stored, "image");
+    assert.equal(viaBlob.bytes_base64, undefined);
+  } finally {
+    await harness.cleanup();
+  }
+});

@@ -46,8 +46,11 @@ export function summarizeToolResult(name, result) {
     const resp = result.response?.status != null ? ` resp=${result.response.status}` : "";
     return `kind=${event.kind || ""} ${event.payload?.method || ""} ${compactText(event.payload?.url || event.payload?.path || "", 80)}${resp}`;
   }
-  if (name === "read_response_blob") {
+  if (name === "read_response_blob" || name === "read_screenshot") {
     if (result.found === false) return `没有正文 ${compactText(result.error, 120)}`;
+    if (result.stored === "image" || result.readable === false) {
+      return `stored=image bytes=${result.total_bytes ?? ""} readable=false`;
+    }
     return `stored=${result.stored || ""} bytes=${result.total_bytes ?? ""}`;
   }
   if (name === "read_evidence_delta") return `events=${result.events?.length ?? 0} next_seq=${result.next_seq ?? ""}`;

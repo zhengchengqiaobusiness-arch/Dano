@@ -47,6 +47,8 @@ test("录制中不打断 PI，冻结后只发一次最终提示，忙时改用 f
   assert.match(session.prompts[1].text, /确认弹层可填意见必须完整处理/);
   assert.match(session.prompts[1].text, /每个 exposed_to_user=true 的 param 都必须出现在 schema/);
   assert.match(session.prompts[1].text, /树\/页签\/分段器\/单选组\/日期区间/);
+  assert.match(session.prompts[1].text, /不要读 screenshot/);
+  assert.ok(session.prompts[1].text.length < 1600, `最终提示过长: ${session.prompts[1].text.length}`);
   assert.equal(session.prompts[1].options.streamingBehavior, "followUp");
 });
 
@@ -58,12 +60,14 @@ test("分析停住时催促提交，但不中止当前轮", async () => {
   });
   const session = {
     prompts,
+    aborted: 0,
     async prompt(text, options = {}) {
       prompts.push({ text, options });
       if (options.streamingBehavior === "steer") return;
       await pending;
     },
     async abort() {
+      this.aborted += 1;
       rejectPending?.(new Error("aborted"));
     },
   };
@@ -77,12 +81,57 @@ test("分析停住时催促提交，但不中止当前轮", async () => {
     trace,
   });
   await assert.rejects(
-    () => pi.requestFinalAnalysis({ timeoutMs: 250, idleSubmitMs: 40 }),
+    () => pi.requestFinalAnalysis({ timeoutMs: 70, idleSubmitMs: 40 }),
     /超时/,
   );
   const steers = prompts.filter((item) => item.options.streamingBehavior === "steer" && /submit_recording_result/.test(item.text));
   assert.equal(steers.length, 1);
   assert.equal(prompts.filter((item) => !item.options.streamingBehavior && /证据已经够了/.test(item.text)).length, 0);
+});
+
+test("第二次空转时中止当前轮并要求立刻提交", async () => {
+  const prompts = [];
+  let rejectPending;
+  let pending = new Promise((_, reject) => {
+    rejectPending = reject;
+  });
+  const session = {
+    prompts,
+    aborted: 0,
+    async prompt(text, options = {}) {
+      prompts.push({ text, options });
+      if (options.streamingBehavior === "steer") return;
+      await pending;
+    },
+    async abort() {
+      this.aborted += 1;
+      rejectPending?.(new Error("aborted"));
+      pending = new Promise((_, reject) => {
+        rejectPending = reject;
+      });
+    },
+  };
+  const { createPiTrace } = await import("../src/pi-trace.mjs");
+  const trace = createPiTrace();
+  trace.recordTool("list_recording_index", {}, "items=2", true);
+  const pi = new LivePiSession({
+    session,
+    sessionId: "pi_idle_abort",
+    dispose: () => {},
+    trace,
+  });
+  await pi.requestFinalAnalysis({
+    timeoutMs: 400,
+    idleSubmitMs: 40,
+    hasResult: async () => (
+      session.aborted >= 1
+      && prompts.some((item) => /证据已经够了/.test(item.text) && !item.options.streamingBehavior)
+    ),
+  });
+  assert.equal(pi.status, "submitted");
+  assert.ok(session.aborted >= 1);
+  assert.ok(prompts.some((item) => item.options.streamingBehavior === "steer"));
+  assert.ok(prompts.some((item) => /证据已经够了/.test(item.text) && !item.options.streamingBehavior));
 });
 
 test("关闭会话后立即停止最终分析，不再继续 prompt", async () => {

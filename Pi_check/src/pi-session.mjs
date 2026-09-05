@@ -62,7 +62,8 @@ export function buildFinalAnalysisPrompt(latestSeq) {
   return (
     `证据已冻结，最新 seq=${Number(latestSeq) || 0}。现在必须调用 submit_recording_result。\n` +
     "先调 list_recording_index 建台账，看 interaction、xhr/fetch、network_response 和 visible_control。读关键 execute 请求正文；响应在 network_response 或读请求时附带的 response.body。\n" +
-    "先读各页 visible_control，再对 execute 每个 query/body 键。树/页签/分段器/单选组/日期区间都是可改选择。可改控件一律调用方，即使本场没改、请求没带，也必须写进 input_schema。一个区间日期对上起止两个键，都是调用方。可增行：调用方按行填写添加行后出现的输入框，系统再组装成一个数组 path；行内调用方写在 items.properties，行类型码不要进 schema。同名 form textarea 不是这些行。每个 exposed_to_user=true 的 param 都必须出现在 schema。api_option 字段要把 source_url 写进 param.source 和 schema 的 x-dano-option-source；page_enum 要把 {label,value} 写进 enum_options，不要只写 1/2/3。禁止编造 execute query/body 和可见控件都没有的键，禁止编造没发过的写请求，禁止把请求头当业务字段。空数组若有上传/选人/可增行控件仍是调用方。确认弹层可填意见必须完整处理：进了写请求建成调用方，对不上 path 写入 unresolved，不要编造键。execute 每个键都要进 params；无独立来源标系统并按原值提交。登录身份用 current_user，不要写死本场数字。\n" +
+    "先读各页 visible_control，再对 execute 每个 query/body 键。树/页签/分段器/单选组/日期区间都是可改选择。可改控件一律调用方。每个 exposed_to_user=true 的 param 都必须出现在 schema。确认弹层可填意见必须完整处理。登录身份用 current_user，不要写死本场数字。\n" +
+    "api_option 把 source_url 写进 param.source 和 schema 的 x-dano-option-source；page_enum 写 {label,value}。不要读 screenshot。\n" +
     "read_response_blob 只接受 body.blob_id（blob_ 开头）。不要把 request_id 当 blob_id，也不要读 screenshot 去找接口正文。\n" +
     "看完关键请求立刻把完整 result 作为 submit_recording_result 的工具参数提交。不要把 JSON 写在对话里。不要写 capabilities[].fields。request_refs 必须是 {step_id, usage}。steps[].params 必须是含 key/path 的对象数组。\n" +
     "若已有 submit_recording_draft，立刻 final=true 提交。草稿不会自动变成结果。"
@@ -181,6 +182,8 @@ export class LivePiSession {
     let emptySettles = 0;
     let retryTimer = null;
     let steered = false;
+    let interrupted = false;
+    let restartAfterAbort = false;
     let settled = false;
     let resolveDone;
     let rejectDone;
@@ -241,8 +244,23 @@ export class LivePiSession {
         startPrompt(text);
       }, 0);
     };
+    const interruptHungTurn = () => {
+      if (settled || !this.alive || interrupted) return;
+      interrupted = true;
+      restartAfterAbort = true;
+      logPiOnly("[PI分析] 催促后仍无新工具，中止当前轮并要求立刻提交");
+      this.#emitThought({ kind: "text", text: "分析卡住，中止当前轮并要求立刻提交" });
+      Promise.resolve(this.session.abort?.())
+        .catch(() => {})
+        .finally(() => {
+          if (settled || !this.alive) return;
+          restartAfterAbort = false;
+          startPrompt(submitNow);
+        });
+    };
     const onPromptSettled = async (error) => {
       if (settled) return;
+      if (restartAfterAbort) return;
       if (!this.alive) {
         settleErr(new Error("PI 会话已关闭"));
         return;
@@ -316,19 +334,24 @@ export class LivePiSession {
         lastToolCount = this.#trace.toolCount;
         lastToolAt = Date.now();
         steered = false;
+        interrupted = false;
         return;
       }
       if (this.#trace.toolCount <= 0) return;
-      const quietFor = Date.now() - Math.max(lastToolAt, this.#trace.lastEventAt || 0);
+      const quietFor = Date.now() - lastToolAt;
       if (quietFor < idleMs) return;
-      if (steered) return;
-      steered = true;
-      logPiOnly(`[PI分析] ${Math.round(quietFor / 1000)}s 没有新工具，催促提交，不中止当前轮`);
-      this.#emitThought({ kind: "text", text: `${Math.round(quietFor / 1000)}s 没有新工具，催促提交` });
-      if (!this.alive) return;
-      this.session.prompt(submitNow, { streamingBehavior: "steer" }).catch((error) => {
-        logPiOnly(`[PI分析] 催促提交失败 ${error?.message || error}`);
-      });
+      if (!steered) {
+        steered = true;
+        lastToolAt = Date.now();
+        logPiOnly(`[PI分析] ${Math.round(quietFor / 1000)}s 没有新工具，催促提交，不中止当前轮`);
+        this.#emitThought({ kind: "text", text: `${Math.round(quietFor / 1000)}s 没有新工具，催促提交` });
+        if (!this.alive) return;
+        this.session.prompt(submitNow, { streamingBehavior: "steer" }).catch((error) => {
+          logPiOnly(`[PI分析] 催促提交失败 ${error?.message || error}`);
+        });
+        return;
+      }
+      interruptHungTurn();
     }, Math.min(1000, Math.max(20, Math.floor(idleMs / 2) || 20)));
     let timeoutHandle;
     const timeoutTask = new Promise((_, reject) => {

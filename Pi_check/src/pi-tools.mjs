@@ -15,6 +15,26 @@ function toolText(payload) {
   };
 }
 
+function looksLikeImage(bytes) {
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || []);
+  if (buf.length < 3) return false;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return true;
+  if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return true;
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return true;
+  return false;
+}
+
+function imageBlobMeta(blobId, totalBytes = 0) {
+  return {
+    found: true,
+    stored: "image",
+    blob_id: blobId,
+    total_bytes: Number(totalBytes) || 0,
+    readable: false,
+    error: "这是页面截图，不是请求正文。不要当文本读，也不要分段拉二进制。控件用 visible_control，请求正文用 network_request / network_response。",
+  };
+}
+
 async function responseView(evidence, recordingId, response) {
   const body = response.payload?.body && typeof response.payload.body === "object"
     ? { ...response.payload.body }
@@ -111,6 +131,9 @@ export function createPiToolHost({
       const fileId = stored?.body?.blob_id || blob_id;
       try {
         const slice = await evidence.readBlob(recordingId, fileId, { offset: start, length: maxLen });
+        if (looksLikeImage(slice.bytes)) {
+          return imageBlobMeta(slice.blobId, slice.totalBytes);
+        }
         return {
           found: true,
           stored: "blob",
@@ -131,17 +154,26 @@ export function createPiToolHost({
         throw error;
       }
     },
-    async read_screenshot({ blob_id, offset = 0, length = 65536 }) {
-      const result = await this.read_response_blob({ blob_id, offset, length });
-      if (result.found) return result;
+    async read_screenshot({ blob_id }) {
       const index = await evidence.index(recordingId);
       const shots = index.items.filter((item) => item.kind === "screenshot" && item.blob_id);
+      const hit = shots.find((item) => item.blob_id === blob_id);
+      if (hit) {
+        let totalBytes = 0;
+        try {
+          const slice = await evidence.readBlob(recordingId, blob_id, { offset: 0, length: 16 });
+          totalBytes = slice.totalBytes;
+        } catch {
+          // 只要索引里有这张图，就只回元数据，不把二进制塞进对话
+        }
+        return imageBlobMeta(blob_id, totalBytes);
+      }
       return {
         found: false,
         blob_id,
         error: shots.length
           ? `没有这张截图。可用 blob_id：${shots.map((item) => item.blob_id).join(", ")}`
-          : "这场录制没有截图。不要编造 blob_id，用 interaction 和请求正文即可。",
+          : "这场录制没有截图。不要编造 blob_id，用 visible_control、interaction 和请求正文即可。",
       };
     },
     async get_recording_freeze_state() {
@@ -238,7 +270,7 @@ export function describePiTools() {
     {
       name: "read_screenshot",
       label: "读取截图",
-      description: "按偏移量读取页面截图或快照二进制。",
+      description: "确认截图是否存在。只返回元数据，不返回图片二进制。控件用 visible_control，请求正文用 network_request / network_response。不要用本工具找接口字段。",
       parameters: {
         type: "object",
         properties: {
