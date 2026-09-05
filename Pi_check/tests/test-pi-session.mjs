@@ -150,3 +150,70 @@ test("本轮结束但未提交时继续催促，直到有结果", async () => {
   assert.equal(pi.status, "submitted");
   assert.ok(prompts.some((item) => /证据已经够了/.test(item.text) && !item.options.streamingBehavior));
 });
+
+test("PI 空转未提交时停止分析，不刷屏重试", async () => {
+  const prompts = [];
+  const session = {
+    prompts,
+    async prompt(text, options = {}) {
+      prompts.push({ text, options, at: Date.now() });
+    },
+  };
+  const pi = new LivePiSession({
+    session,
+    sessionId: "pi_spin",
+    dispose: () => {},
+  });
+  const started = Date.now();
+  const analysis = pi.requestFinalAnalysis({
+    timeoutMs: 60000,
+    idleSubmitMs: 90000,
+    hasResult: async () => false,
+  });
+  const outcome = await Promise.race([
+    analysis.then(
+      () => ({ kind: "ok" }),
+      (error) => ({ kind: "err", message: String(error?.message || error) }),
+    ),
+    new Promise((resolve) => setTimeout(() => resolve({ kind: "hung" }), 400)),
+  ]);
+  assert.notEqual(outcome.kind, "hung", `空转未让出事件循环，已 prompt ${session.prompts.length} 次`);
+  assert.equal(outcome.kind, "err");
+  assert.match(outcome.message, /空转|未调用工具|未提交/);
+  assert.ok(session.prompts.length <= 4, `prompt 次数过多: ${session.prompts.length}`);
+  assert.ok(Date.now() - started < 1500);
+  assert.equal(pi.status, "failed");
+});
+
+test("PI prompt 抛错后停止分析，不再立刻重开一轮", async () => {
+  const prompts = [];
+  const session = {
+    prompts,
+    async prompt(text, options = {}) {
+      prompts.push({ text, options });
+      throw new Error("model request failed");
+    },
+  };
+  const pi = new LivePiSession({
+    session,
+    sessionId: "pi_error",
+    dispose: () => {},
+  });
+  const analysis = pi.requestFinalAnalysis({
+    timeoutMs: 60000,
+    idleSubmitMs: 90000,
+    hasResult: async () => false,
+  });
+  const outcome = await Promise.race([
+    analysis.then(
+      () => ({ kind: "ok" }),
+      (error) => ({ kind: "err", message: String(error?.message || error) }),
+    ),
+    new Promise((resolve) => setTimeout(() => resolve({ kind: "hung" }), 400)),
+  ]);
+  assert.notEqual(outcome.kind, "hung", `异常后仍在空转，已 prompt ${session.prompts.length} 次`);
+  assert.equal(outcome.kind, "err");
+  assert.match(outcome.message, /model request failed/);
+  assert.ok(session.prompts.length <= 2, `异常后仍在重试: ${session.prompts.length}`);
+  assert.equal(pi.status, "failed");
+});

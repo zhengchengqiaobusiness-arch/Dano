@@ -69,6 +69,8 @@ export function buildFinalAnalysisPrompt(latestSeq) {
   );
 }
 
+export const MAX_EMPTY_FINAL_SETTLES = 3;
+
 export class LivePiSession {
   constructor({
     session,
@@ -155,7 +157,12 @@ export class LivePiSession {
     return this.#notifyChain;
   }
 
-  async requestFinalAnalysis({ timeoutMs = 600000, idleSubmitMs = 90000, hasResult } = {}) {
+  async requestFinalAnalysis({
+    timeoutMs = 600000,
+    idleSubmitMs = 90000,
+    hasResult,
+    maxEmptySettles = MAX_EMPTY_FINAL_SETTLES,
+  } = {}) {
     if (!this.alive) {
       throw new PiRequiredError("PI 会话已关闭");
     }
@@ -163,12 +170,16 @@ export class LivePiSession {
     const started = Date.now();
     const deadline = started + timeoutMs;
     const idleMs = Math.max(20, Number(idleSubmitMs) || 90000);
+    const emptyBudget = Math.max(1, Number(maxEmptySettles) || MAX_EMPTY_FINAL_SETTLES);
     const submitNow = (
       "证据已经够了。立刻调用 submit_recording_result，把完整 result 作为工具参数提交。不要把 JSON 写在对话里，不要再读证据。"
     );
     const checkResult = typeof hasResult === "function" ? hasResult : null;
     let lastToolCount = this.#trace.toolCount;
     let lastToolAt = Date.now();
+    let lastSeenTools = this.#trace.toolCount;
+    let emptySettles = 0;
+    let retryTimer = null;
     let steered = false;
     let settled = false;
     let resolveDone;
@@ -177,14 +188,22 @@ export class LivePiSession {
       resolveDone = resolve;
       rejectDone = reject;
     });
+    const clearRetry = () => {
+      if (retryTimer != null) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+    };
     const settleOk = () => {
       if (settled) return;
       settled = true;
+      clearRetry();
       resolveDone();
     };
     const settleErr = (error) => {
       if (settled) return;
       settled = true;
+      clearRetry();
       rejectDone(error);
     };
     this.#analysisSettleErr = settleErr;
@@ -198,6 +217,29 @@ export class LivePiSession {
       } catch {
         return false;
       }
+    };
+    const scheduleRetry = (text) => {
+      const toolsNow = this.#trace.toolCount;
+      if (toolsNow > lastSeenTools) {
+        lastSeenTools = toolsNow;
+        emptySettles = 0;
+      } else {
+        emptySettles += 1;
+      }
+      if (emptySettles >= emptyBudget) {
+        logPiOnly(`[PI分析] 连续 ${emptySettles} 轮空转未提交，停止重试`);
+        this.#emitThought({ kind: "text", text: "连续空转未提交，停止分析" });
+        settleErr(new Error("PI 连续空转未调用工具且未提交"));
+        return;
+      }
+      logPiOnly("[PI分析] 本轮结束但未提交，继续要求 submit_recording_result");
+      this.#emitThought({ kind: "text", text: "本轮结束但未提交，继续要求提交完整能力" });
+      clearRetry();
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        if (settled || !this.alive) return;
+        startPrompt(text);
+      }, 0);
     };
     const onPromptSettled = async (error) => {
       if (settled) return;
@@ -214,6 +256,10 @@ export class LivePiSession {
         else settleOk();
         return;
       }
+      if (error) {
+        settleErr(error);
+        return;
+      }
       if (Date.now() >= deadline) {
         settleErr(new Error("PI 最终分析超时"));
         return;
@@ -222,13 +268,17 @@ export class LivePiSession {
         settleErr(new Error("PI 会话已关闭"));
         return;
       }
-      logPiOnly("[PI分析] 本轮结束但未提交，继续要求 submit_recording_result");
-      this.#emitThought({ kind: "text", text: "本轮结束但未提交，继续要求提交完整能力" });
-      startPrompt(submitNow);
+      scheduleRetry(submitNow);
     };
     const startPrompt = (text, options) => {
       if (settled || !this.alive) return;
-      const task = options ? this.session.prompt(text, options) : this.#promptNow(text);
+      let task;
+      try {
+        task = options ? this.session.prompt(text, options) : this.#promptNow(text);
+      } catch (error) {
+        onPromptSettled(error);
+        return;
+      }
       Promise.resolve(task).then(
         () => onPromptSettled(),
         (error) => onPromptSettled(error),
@@ -306,6 +356,7 @@ export class LivePiSession {
       throw error;
     } finally {
       this.#analysisSettleErr = null;
+      clearRetry();
       clearTimeout(timeoutHandle);
       clearInterval(heartbeat);
       clearInterval(idleWatch);
