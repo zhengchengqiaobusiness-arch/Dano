@@ -443,7 +443,8 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
           ),
           observations,
           sample,
-          operation === "query"
+          operation === "query",
+          owner
         );
       })(),
       evidence,

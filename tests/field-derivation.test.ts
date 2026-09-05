@@ -42,6 +42,9 @@ test("sameValue does not treat arbitrary text as boolean true", () => {
   assert.equal(sameValue(true, "true"), true);
   assert.equal(sameValue(true, 1), true);
   assert.equal(sameValue(3, "3"), true);
+  assert.equal(sameValue([], 0), false);
+  assert.equal(sameValue(0, []), false);
+  assert.equal(sameValue([], []), true);
 });
 
 test("write fields use evidenced derivations and preserve otherwise-unmatched system values", () => {
@@ -375,6 +378,57 @@ test("unmatched write fields preserve the successful request value as system inp
     assert.equal(field.systemHandled, true, `${path}: ${JSON.stringify(field)}`);
     assert.equal(field.defaultRule, rule, `${path}: ${JSON.stringify(field)}`);
   }
+});
+
+test("a process-instance detail cannot become a write-field source even when a user id matches creator", () => {
+  const recorded: EvidenceEvent[] = [{
+    id: "ui-open-user", kind: "ui", sessionId: "s", at: "2026-09-05T01:51:10.000Z",
+    pageUrl: "https://example.test/web/#/oa/trip/trip-apply-info", eventType: "click",
+    text: "擎天柱", label: "擎天柱", tag: "span"
+  }, {
+    id: "net-approval-detail", kind: "network", sessionId: "s", at: "2026-09-05T01:51:10.500Z",
+    pageUrl: "https://example.test/web/#/oa/trip/trip-apply-info",
+    correlatedUiEvidenceId: "ui-open-user",
+    request: {
+      method: "GET",
+      url: "https://example.test/admin-api/bpm/process-instance/get-approval-detail?id=1",
+      resourceType: "xhr",
+      headers: {},
+      query: { id: "1" }
+    },
+    response: {
+      status: 200, headers: {},
+      body: {
+        code: 0,
+        data: {
+          status: -1,
+          activityNodes: [{ candidateUsers: [{ id: 1, deptId: 103, deptName: "研发部门" }] }]
+        }
+      }
+    }
+  }, {
+    id: "ui-confirm", kind: "ui", sessionId: "s", at: "2026-09-05T01:51:11.000Z",
+    pageUrl: "https://example.test/web/#/oa/trip/trip-apply-info", eventType: "click",
+    text: "确认提交", label: "确认提交", tag: "button", role: "button"
+  }, {
+    id: "net-submit", kind: "network", sessionId: "s", at: "2026-09-05T01:51:12.119Z",
+    pageUrl: "https://example.test/web/#/oa/trip/trip-apply-info",
+    correlatedUiEvidenceId: "ui-confirm",
+    request: {
+      method: "POST", url: "https://example.test/admin-api/oa/business-trip/submit", resourceType: "xhr", headers: {}, query: {},
+      body: { creator: "1", deptId: 103, processStatus: -1, startDate: "2026-09-08" }
+    },
+    response: { status: 200, headers: {}, body: { code: 0, data: 17, msg: "" } }
+  }];
+
+  const create = buildCapabilityCandidates(recorded).find(item => item.transport.pathTemplate.endsWith("/business-trip/submit"))!;
+  assert.equal(create.bindings.some(binding => /process-instance|approval-detail/.test(binding.fromCapabilityId)), false, JSON.stringify(create.bindings));
+  const deptId = create.inputForm.find(item => item.name === "deptId")!;
+  const processStatus = create.inputForm.find(item => item.name === "processStatus")!;
+  assert.equal(deptId.source, "system", JSON.stringify(deptId));
+  assert.match(deptId.defaultRule || "", /^literal:/);
+  assert.equal(processStatus.source, "system", JSON.stringify(processStatus));
+  assert.match(processStatus.defaultRule || "", /^literal:/);
 });
 
 test("an unrelated detail response cannot become a write-field source by equal sample values", () => {

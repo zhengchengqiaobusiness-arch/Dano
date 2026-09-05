@@ -666,6 +666,20 @@ export class BrowserRecorder {
     return result;
   }
 
+  private clearsAuthenticationFailure(event: NetworkEvidence) {
+    const status = event.response?.status;
+    if (!status || status >= 400) return false;
+    if (authenticationFailureReason(event.response)) return false;
+    try {
+      const url = new URL(event.request.url);
+      const page = event.pageUrl ? new URL(event.pageUrl) : undefined;
+      if (page && url.origin !== page.origin) return false;
+      return /\/admin-api\/|\/api\//i.test(url.pathname);
+    } catch {
+      return false;
+    }
+  }
+
   private pageFor(request: Request): Page | undefined {
     try {
       return request.frame().page();
@@ -803,13 +817,27 @@ export class BrowserRecorder {
       }
     };
     const loginFailure = authenticationFailureReason(event.response);
-    if (loginFailure) active.authenticationFailure = { at: Date.now(), reason: loginFailure, pageUrl: page?.url() };
+    if (loginFailure) {
+      active.authenticationFailure = { at: Date.now(), reason: loginFailure, pageUrl: page?.url() };
+    } else if (this.clearsAuthenticationFailure(event)) {
+      active.authenticationFailure = undefined;
+    }
     await appendJsonl(active.eventsFile, event);
   }
 
   private stabilizeUiEvent(event: UiEvidence): UiEvidence {
     const value = event.value === undefined || event.value === null ? "" : String(event.value);
-    const cssy = (text?: string) => Boolean(text && ((/^[a-z]+\./i.test(text) && text.includes(">")) || /(?:arco-|el-|ant-)[\w-]*\./.test(text)));
+    const cssy = (text?: string) => Boolean(text && ((/^[a-z]+\./i.test(text) && text.includes(">")) || /(?:arco-|el-|ant-|vxe-)[\w-]*\./.test(text)));
+    const actionName = String(event.text || event.label || "").replace(/\s+/g, " ").trim();
+    const actionClick = event.tag === "button" || event.role === "button" || event.inputType === "submit" || event.inputType === "button"
+      || /^(确\s*认|确\s*定|取\s*消|提交|保存|搜索|查询|关闭)/.test(actionName);
+    if (actionClick && actionName && actionName.length <= 40 && !cssy(actionName)) {
+      return {
+        ...event,
+        label: actionName.replace(/\s+/g, "") || event.label,
+        selector: cssy(event.selector) ? `role=button[name="${actionName}"]` : event.selector
+      };
+    }
     const polluted = Boolean(event.label && value && event.label === value) || event.label === "字段" || cssy(event.label);
     if (!polluted && !cssy(event.selector)) return event;
     const hit = (event.form || []).find(field =>

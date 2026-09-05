@@ -41,9 +41,9 @@ export const PAGE_HELPERS = String.raw`
   const FORM_ITEM_SEL = '.el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [data-slot="form-item"], [class*="form-item"]:not([class*="form-item__"]):not([class*="form-item-"])';
   const FORM_LABEL_SEL = 'label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label, [data-slot="form-label"]';
   const DIALOG_SEL = '[role="dialog"], [role="alertdialog"], .el-dialog, .el-drawer, .el-overlay-dialog, .ant-modal, .ant-drawer, .arco-modal, .arco-drawer';
-  const PICKER_SEL = '.el-picker-panel, .el-select-dropdown, .el-cascader__dropdown, .el-picker__popper, .el-popper.el-date-picker, .el-date-range-picker, .el-time-panel, .ant-picker-dropdown, .ant-select-dropdown, .arco-picker-container, .arco-select-dropdown, .arco-select-popup, .arco-tree-select-popup, .arco-cascader-popup, .arco-trigger-popup, [class*="picker-panel"], [class*="picker-dropdown"], [class*="select-popup"], [class*="trigger-popup"], [data-reka-popper-content-wrapper], [data-radix-popper-content-wrapper], [data-state="open"][data-slot="popover-content"], [data-state="open"][data-slot="select-content"], [data-state="open"][data-slot="combobox-content"]';
-  const CHOOSER_TITLE = /选择(用户|人员|员工|审批|部门|项目|角色|岗位|成员|产品|供应商|商品|客户|物料|仓库|账户)|选人|选部门|(用户|人员|产品|供应商)选择/;
-  const OPTION_SEL = '[role="option"], [role="menuitem"], [role="treeitem"], .el-select-dropdown__item, .el-cascader-node, .el-tree-node__content, .el-autocomplete-suggestion__list li, .ant-select-item-option, .ant-select-tree-title, .ant-cascader-menu-item, .arco-select-option, .arco-tree-node-title, .arco-cascader-option, .n-base-select-option';
+  const PICKER_SEL = '.el-picker-panel, .el-select-dropdown, .el-cascader__dropdown, .el-picker__popper, .el-popper.el-date-picker, .el-date-range-picker, .el-time-panel, .ant-picker-dropdown, .ant-select-dropdown, .ant-tree-select-dropdown, .arco-picker-container, .arco-select-dropdown, .arco-select-popup, .arco-tree-select-popup, .arco-cascader-popup, .arco-trigger-popup, [class*="picker-panel"], [class*="picker-dropdown"], [class*="select-popup"], [class*="trigger-popup"], [data-reka-popper-content-wrapper], [data-radix-popper-content-wrapper], [data-state="open"][data-slot="popover-content"], [data-state="open"][data-slot="select-content"], [data-state="open"][data-slot="combobox-content"]';
+  const CHOOSER_TITLE = /选择(用户|人员|员工|审批|部门|项目|角色|岗位|成员|产品|供应商|商品|客户|物料|仓库|账户|用品|物品|办公)|选人|选部门|(用户|人员|产品|供应商|用品|物品)选择|^(请选择|选择|挑选|选取)/;
+  const OPTION_SEL = '[role="option"], [role="menuitem"], [role="treeitem"], .el-select-dropdown__item, .el-cascader-node, .el-tree-node__content, .el-autocomplete-suggestion__list li, .ant-select-item-option, .ant-select-tree-title, .ant-tree-title, .ant-cascader-menu-item, .arco-select-option, .arco-tree-node-title, .arco-cascader-option, .n-base-select-option';
   const EMPTY_VALUE = /^(请选择|请输入|请填写|请挑选|select|please select|please enter|please choose|choose|yyyy-mm-dd|年\/月\/日)/i;
   const PROMPT_ONLY = /^(请选择|请输入|请填写|请挑选|select|please select|please enter|please choose|choose)[.…]?$/i;
   const DATE_PLACEHOLDER = /yyyy-mm-dd|年\/月\/日/i;
@@ -89,16 +89,16 @@ export const PAGE_HELPERS = String.raw`
   };
 
   const tableHeaderOf = (el) => {
-    const cell = el.closest("td, th, .el-table__cell, .ant-table-cell");
-    const row = cell?.closest("tr, .el-table__row, .ant-table-row");
+    const cell = el.closest("td, th, .el-table__cell, .ant-table-cell, .vxe-body--column, .vxe-header--column");
+    const row = cell?.closest("tr, .el-table__row, .ant-table-row, .vxe-body--row, .vxe-header--row");
     if (!cell || !row) return "";
-    const cells = [...row.children].filter((node) => node.matches("td, th, .el-table__cell, .ant-table-cell"));
+    const cells = [...row.children].filter((node) => node.matches("td, th, .el-table__cell, .ant-table-cell, .vxe-body--column, .vxe-header--column"));
     const index = cells.indexOf(cell);
-    const host = el.closest(".el-table, .ant-table, .arco-table") || el.closest("table");
-    const headerRow = host?.querySelector(".el-table__header tr, .el-table__header-wrapper tr, .ant-table-thead tr, .arco-table-tr, thead tr");
+    const host = el.closest(".el-table, .ant-table, .arco-table, .vxe-table") || el.closest("table");
+    const headerRow = host?.querySelector(".el-table__header tr, .el-table__header-wrapper tr, .ant-table-thead tr, .arco-table-tr, thead tr, .vxe-header--row");
     const headers = headerRow
-      ? [...headerRow.children].filter((node) => node.matches("th, td, .el-table__cell, .ant-table-cell, .arco-table-th"))
-      : [...(host?.querySelectorAll("th, .el-table__header .el-table__cell, .ant-table-thead th, .arco-table-th") || [])];
+      ? [...headerRow.children].filter((node) => node.matches("th, td, .el-table__cell, .ant-table-cell, .arco-table-th, .vxe-header--column"))
+      : [...(host?.querySelectorAll("th, .el-table__header .el-table__cell, .ant-table-thead th, .arco-table-th, .vxe-header--column") || [])];
     return index >= 0 ? clean(headers[index]?.textContent || "") : "";
   };
 
@@ -241,7 +241,8 @@ export const PAGE_HELPERS = String.raw`
       if (isWide(node) || node.matches(FORM_ITEM_SEL)) break;
       const cls = String(node.className || "");
       const role = node.getAttribute("role") || "";
-      if (/input-wrapper|suffix|caret|search|selection-item|selected-item|placeholder|(?:^|\s)el-select__selection(?:\s|$)/i.test(cls)) continue;
+      if (/input-wrapper|suffix|caret|selection-item|selected-item|placeholder|(?:^|\s)el-select__selection(?:\s|$)/i.test(cls)) continue;
+      if (/(?:selection-search|search-input|select-view-input|select__input)/i.test(cls)) continue;
       if (role === "combobox" && !node.matches("input, textarea")) return node;
       if (/^(select-trigger|combobox-trigger)$/.test(node.getAttribute("data-slot") || "")) return node;
       if (/(?:^|\s)(el-select__wrapper|ant-select-selector|arco-select-view)/.test(cls)) return node;
@@ -251,18 +252,49 @@ export const PAGE_HELPERS = String.raw`
     return null;
   };
 
+  const isValueSlot = (node) => node.matches("[class*='selection-item'], [class*='selected-item'], [class*='selected'], [class*='placeholder'], [class*='tag'], [data-slot$='-value'], [data-slot='select-value'], [data-slot='combobox-value']");
+  const chooserSurface = (host) => {
+    if (!(host instanceof Element)) return false;
+    const slot = host.getAttribute("data-slot") || "";
+    const cls = String(host.className || "");
+    if (host.getAttribute("role") === "combobox") return true;
+    if (/^(select-trigger|combobox-trigger)$/.test(slot)) return true;
+    return /(?:^|\s)(el-select__wrapper|ant-select-selector|arco-select-view|el-select|ant-select|ant-tree-select|arco-select|n-select)(?:\s|$)/.test(cls);
+  };
+  const slotText = (node) => {
+    const shown = clean(node.textContent) || clean(node.getAttribute("title"));
+    return shown && !EMPTY_VALUE.test(shown) && !PLUS_ONLY.test(shown) ? shown : "";
+  };
+  const skipDisplayNode = (node) => {
+    if (!(node instanceof Element)) return true;
+    if (isValueSlot(node)) return false;
+    return Boolean(node.closest("[class*='input-wrapper'], [class*='selection-search'], [class*='search-input'], [class*='select-view-input'], [class*='suffix'], [class*='caret'], [class*='arrow'], .anticon, .el-icon, .arco-icon"));
+  };
+  const visibleChooserText = (host) => {
+    const walk = (node) => {
+      if (!(node instanceof Element)) return [];
+      const style = getComputedStyle(node);
+      if (style.display === "none" || style.visibility === "hidden") return [];
+      if (node.matches("input, textarea, svg, i, [class*='suffix'], [class*='arrow'], [class*='caret'], .anticon, .el-icon, .arco-icon")) return [];
+      if (node.matches("[class*='placeholder'], [class*='selection-search'], [class*='search-input'], [class*='select-view-input']") && !isValueSlot(node)) return [];
+      const kids = [...node.children];
+      if (kids.length) {
+        const nested = kids.flatMap(walk);
+        if (nested.length) return nested;
+      }
+      const shown = slotText(node);
+      return shown ? [shown] : [];
+    };
+    return walk(host).find(Boolean) || "";
+  };
   const hostDisplay = (host) => {
     if (!(host instanceof Element)) return "";
-    const skip = (node) => node.closest("[class*='input-wrapper'], [class*='selection-search'], [class*='search-input'], [class*='select-view-input'], [class*='suffix'], [class*='caret'], [class*='icon'], [class*='arrow']");
     const slotted = [...host.querySelectorAll("[class*='selected'], [class*='selection-item'], [class*='placeholder'], [class*='tag'], [class*='value'], [data-slot$='-value'], [data-slot='select-value'], [data-slot='combobox-value']")]
-      .filter((node) => !skip(node))
-      .map((node) => clean(node.textContent))
-      .find((text) => text && !EMPTY_VALUE.test(text) && !PLUS_ONLY.test(text));
+      .filter((node) => !skipDisplayNode(node))
+      .map(slotText)
+      .find(Boolean);
     if (slotted) return slotted;
-    if (host.getAttribute("role") === "combobox" || /^(select-trigger|combobox-trigger)$/.test(host.getAttribute("data-slot") || "")) {
-      const own = clean(host.textContent);
-      if (own && !EMPTY_VALUE.test(own) && !PLUS_ONLY.test(own)) return own;
-    }
+    if (chooserSurface(host)) return visibleChooserText(host);
     return "";
   };
 
@@ -334,7 +366,13 @@ export const PAGE_HELPERS = String.raw`
     if (selectPlaceholder && !isChooserFilter(el)) return "picker";
     if (el.hasAttribute("readonly") && !isDisabledWidget(el) && (EMPTY_VALUE.test(placeholder) || /请选择|please select/i.test(blob))) return "picker";
     if (isDisabledWidget(el)) return "readonly";
-    if (type === "number" || el.getAttribute("inputmode") === "decimal" || el.getAttribute("inputmode") === "numeric") return "number";
+    if (
+      type === "number"
+      || role === "spinbutton"
+      || el.getAttribute("inputmode") === "decimal"
+      || el.getAttribute("inputmode") === "numeric"
+      || el.closest(".el-input-number, .ant-input-number, .arco-input-number, .n-input-number")
+    ) return "number";
     if (el.tagName === "TEXTAREA" || role === "textbox" || el.isContentEditable) return "textarea";
     return "text";
   };
@@ -374,7 +412,7 @@ export const PAGE_HELPERS = String.raw`
   };
 
   const collectOptionRecords = (root) => {
-    const dropdowns = [...document.querySelectorAll(".el-select-dropdown, .el-cascader__dropdown, .el-autocomplete-suggestion, .ant-select-dropdown, .arco-select-dropdown, .arco-select-popup, .arco-tree-select-popup, .arco-cascader-popup, .arco-trigger-popup, [class*='select-popup'], [class*='tree-select-popup'], [class*='cascader-popup'], [class*='trigger-popup'], [role='listbox'], [data-reka-popper-content-wrapper], [data-radix-popper-content-wrapper], [data-state='open'][data-slot='popover-content'], [data-state='open'][data-slot='select-content'], [data-state='open'][data-slot='combobox-content']")].filter(isVisible);
+    const dropdowns = [...document.querySelectorAll(".el-select-dropdown, .el-cascader__dropdown, .el-autocomplete-suggestion, .ant-select-dropdown, .ant-tree-select-dropdown, .arco-select-dropdown, .arco-select-popup, .arco-tree-select-popup, .arco-cascader-popup, .arco-trigger-popup, [class*='select-popup'], [class*='tree-select-popup'], [class*='cascader-popup'], [class*='trigger-popup'], [role='listbox'], [data-reka-popper-content-wrapper], [data-radix-popper-content-wrapper], [data-state='open'][data-slot='popover-content'], [data-state='open'][data-slot='select-content'], [data-state='open'][data-slot='combobox-content']")].filter(isVisible);
     const searchRoot = dropdowns.at(-1) || root || document;
     return [...searchRoot.querySelectorAll(OPTION_SEL)]
       .filter((el) => isVisible(el)
@@ -404,9 +442,9 @@ export const PAGE_HELPERS = String.raw`
     if (!(el instanceof Element) || isPickerHost(el)) return false;
     const title = clean((el.querySelector(".el-dialog__title, .el-dialog__header, .ant-modal-title, .arco-modal-title, .el-drawer__title, [class*='dialog__title'], [class*='dialog-header'], [class*='modal-title']") || {}).textContent || "");
     const formItems = el.querySelectorAll(".el-form-item, .ant-form-item, .arco-form-item").length;
-    const rows = el.querySelectorAll("tbody tr, .el-table__row, .el-tree-node").length;
-    const confirm = [...el.querySelectorAll("button, [role='button']")].some((btn) => /^(确定|确认|选择|ok|confirm)$/i.test(String(btn.textContent || "").replace(/\s+/g, "")));
-    if (CHOOSER_TITLE.test(title) && formItems <= 8) return true;
+    const rows = el.querySelectorAll("tbody tr, .el-table__body .el-table__row, .ant-table-tbody .ant-table-row, .vxe-body--row, .el-tree-node").length;
+    const confirm = [...el.querySelectorAll("button, [role='button']")].some((btn) => /^(确\s*定|确\s*认|选\s*择|ok|confirm)$/i.test(String(btn.textContent || "").replace(/\s+/g, "")));
+    if (CHOOSER_TITLE.test(title)) return true;
     const tree = el.querySelectorAll(".el-tree, [role='tree']").length;
     if (tree >= 1 && confirm && formItems <= 8) return true;
     return Boolean(rows >= 1 && formItems <= 3 && confirm);
@@ -781,7 +819,9 @@ export const PAGE_HELPERS = String.raw`
       return host && host !== el ? fieldFromControl(host, item) : null;
     }
     if (!isVisible(el) && !(chooserHostOf(el) && isVisible(chooserHostOf(el)))) return null;
-    if (el.closest(PICKER_SEL + ", " + CHROME_SEL + ", thead, .el-table__header, .el-table__header-wrapper, .ant-table-thead")) return null;
+    const chooser = el.closest(DIALOG_SEL);
+    if (chooser && isChooserDialog(chooser)) return null;
+    if (el.closest(PICKER_SEL + ", " + CHROME_SEL + ", thead, .el-table__header, .el-table__header-wrapper, .ant-table-thead, .vxe-header--row")) return null;
     const type = (el.getAttribute("type") || "").toLowerCase();
     if (/hidden|submit|reset|image/.test(type)) return null;
     if (type === "button" && el.getAttribute("role") !== "combobox" && !/dialog|listbox|menu|tree/i.test(el.getAttribute("aria-haspopup") || "")) return null;
@@ -827,7 +867,7 @@ export const PAGE_HELPERS = String.raw`
 
   const fieldSelector = (el, label, identity, phCounts) => {
     const header = tableHeaderOf(el);
-    if (header && el.closest("td, th, .el-table__cell, .ant-table-cell")) return "column=" + header;
+    if (header && el.closest("td, th, .el-table__cell, .ant-table-cell, .vxe-body--column, .vxe-cell")) return "column=" + header;
     if (identity && (phCounts.get(identity) || 0) === 1) return "placeholder=" + identity;
     if (label) return "label=" + label;
     return selectorOf(el);
@@ -881,7 +921,7 @@ export const PAGE_HELPERS = String.raw`
         });
       });
     }
-    for (const cell of queryDeep(root, "tbody td, .el-table__body td, .el-table__body .el-table__cell, .ant-table-tbody .ant-table-cell")) {
+    for (const cell of queryDeep(root, "tbody td, .el-table__body td, .el-table__body .el-table__cell, .ant-table-tbody .ant-table-cell, .vxe-body--column, .vxe-body--row .vxe-cell")) {
       const el = cell.querySelector("input, textarea, select, [role=combobox], [contenteditable=true]");
       if (!el || formItemOf(el) || seenEls.has(el)) continue;
       seenEls.add(el);
@@ -890,7 +930,7 @@ export const PAGE_HELPERS = String.raw`
       add({ ...field, selector: fieldSelector(el, field.label, identityPlaceholder(el), phCounts) });
     }
     for (const el of queryDeep(root, "input, textarea, select, [role=combobox], [contenteditable=true], [role=textbox]")) {
-      if (formItemOf(el) || isChooserFilter(el) || el.closest("td, th, thead, .el-table__header, .el-table__header-wrapper, .el-table__cell, .ant-table-cell, .ant-table-thead") || seenEls.has(el)) continue;
+      if (formItemOf(el) || isChooserFilter(el) || el.closest("td, th, thead, .el-table__header, .el-table__header-wrapper, .el-table__cell, .ant-table-cell, .ant-table-thead, .vxe-body--column, .vxe-header--column") || seenEls.has(el)) continue;
       const host = el.closest("label") || el.parentElement;
       const range = rangeInputsOf(host);
       if (range.length >= 2) {
@@ -991,10 +1031,28 @@ export const PAGE_HELPERS = String.raw`
       const label = clean(el.getAttribute("aria-label") || el.textContent || "");
       if (!label || label.length > 100 || seen.has(url.href)) continue;
       seen.add(url.href);
-      items.push({ label, selector: selectorOf(el), url: url.href });
+      const current = url.href === location.href
+        || Boolean(url.hash && url.hash === location.hash);
+      items.push({ label, selector: selectorOf(el), url: url.href, current });
       if (items.length >= 500) break;
     }
     return items;
+  };
+
+  const collectPageHeading = () => {
+    const crumbs = queryDeep(document.body, ".el-breadcrumb__inner, .el-breadcrumb__item, .ant-breadcrumb-link, .arco-breadcrumb-item, [class*='breadcrumb'] li, [class*='breadcrumb-item']")
+      .filter(isVisible)
+      .map((el) => clean(el.textContent || ""))
+      .filter((text) => text && text.length <= 40 && !/^[\/\>]+$/.test(text));
+    if (crumbs.length) return crumbs[crumbs.length - 1];
+    const header = queryDeep(document.body, "main h1, .el-page-header__content, .ant-page-header-heading-title, [class*='page-header'] h1, [class*='page-title']")
+      .filter(isVisible)
+      .map((el) => clean(el.textContent || ""))
+      .find((text) => text && text.length >= 2 && text.length <= 40);
+    if (header) return header;
+    const currentNav = collectNavigation().find((item) => item.current && item.label);
+    if (currentNav?.label) return currentNav.label;
+    return clean(String(document.title || "").replace(/\s*[-|–—].*$/, "")) || clean(document.title);
   };
 
   const formSnapshot = (container) => {
@@ -1034,6 +1092,7 @@ export const PAGE_HELPERS = String.raw`
     const todoFields = formFields.filter((field) => !field.skip && !field.disabled && !field.filled);
     return {
       title: document.title,
+      pageHeading: collectPageHeading(),
       url: location.href,
       text: pageText(scope, formFields),
       scope: scopeName(scope),
@@ -1075,21 +1134,26 @@ export const UI_RECORDER_SCRIPT = `(() => {
   const send = (eventType, rawTarget) => {
     const el = rawTarget instanceof HTMLElement ? rawTarget : rawTarget?.parentElement;
     if (!(el instanceof HTMLElement)) return;
-    const control = el.matches('input,select,textarea,button,[contenteditable="true"],[role="button"],[role="combobox"],[role="checkbox"],[role="switch"],[role="radio"],[role="option"],.arco-select-view,[class*="arco-select-view"],.el-select__wrapper,.ant-select-selector')
+    const tableBox = el.closest(".vxe-cell--checkbox, .vxe-checkbox--icon, [class*='vxe-table-icon-checkbox'], .ant-checkbox, .el-checkbox");
+    const control = tableBox
+      ? (tableBox.closest(".vxe-cell--checkbox, .ant-checkbox, .el-checkbox") || tableBox)
+      : el.matches('input,select,textarea,button,[contenteditable="true"],[role="button"],[role="combobox"],[role="checkbox"],[role="switch"],[role="radio"],[role="option"],.arco-select-view,[class*="arco-select-view"],.el-select__wrapper,.ant-select-selector')
       ? el
       : el.closest('input,select,textarea,button,[contenteditable="true"],[role="button"],[role="combobox"],[role="checkbox"],[role="switch"],[role="radio"],[role="option"],.arco-select-view,[class*="arco-select-view"],.el-select__wrapper,.ant-select-selector,a') || el;
     const formContainer = control.closest('form, [role="form"], .el-form, .ant-form, .arco-form, [data-form], [role="dialog"], [role="alertdialog"], .el-dialog, .el-drawer, .el-overlay-dialog, .ant-modal, .ant-drawer, .arco-modal, .arco-drawer') || activeScope();
     const actionLabel = control.matches('button,a,[role="button"],[role="link"],input[type="button"],input[type="submit"]')
       ? clean(control.getAttribute("aria-label") || control.textContent || control.getAttribute("value") || "")
       : "";
+    const row = control.closest(".vxe-body--row, .ant-table-tbody tr.ant-table-row, .el-table__body .el-table__row, tbody tr");
+    const rowLabel = tableBox && row ? clean(row.innerText).slice(0, 40) : "";
     const payload = {
       eventType,
       pageUrl: location.href,
-      selector: selectorOf(control),
+      selector: rowLabel ? "label=" + rowLabel : selectorOf(control),
       tag: control.tagName.toLowerCase(),
       role: control.getAttribute("role") || undefined,
       text: clean(control.textContent || control.getAttribute("value") || ""),
-      label: actionLabel || labelOf(control) || undefined,
+      label: actionLabel || labelOf(control) || rowLabel || undefined,
       name: nameOf(control),
       inputType: control.getAttribute("type") || undefined,
       value: (() => {

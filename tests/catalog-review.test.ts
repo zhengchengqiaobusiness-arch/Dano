@@ -279,6 +279,38 @@ test("lookup-to-lookup bindings do not block export of already verified primarie
   assert.equal(review.findings.some(item => item.capabilityId === "query-bpmn"), false);
 });
 
+test("complete coverage treats an empty query filter as covered when the successful request submitted it empty", () => {
+  const query = cap({
+    id: "query-car",
+    operation: "query",
+    title: "查询车辆",
+    transport: { method: "GET", urlTemplate: "https://x/oa/car/page", origin: "https://x", pathTemplate: "/oa/car/page" },
+    evidence: [{ eventId: "net-search", sessionId: "car", kind: "network", at: "2026-09-05T18:00:01.000Z", status: 200 }]
+  });
+  const events: EvidenceEvent[] = [{
+    id: "ui-search", kind: "ui", sessionId: "car", at: "2026-09-05T18:00:00.000Z",
+    pageUrl: "https://x/web/#/oa/car/car-info", eventType: "click", text: "搜索", label: "搜索",
+    form: [
+      { name: "carNo", label: "车牌号码", type: "text", value: "" },
+      { name: "companyId", label: "*所属公司", type: "select", value: "", options: [{ value: 100, label: "宇擎源码" }] }
+    ]
+  }, {
+    id: "net-search", kind: "network", sessionId: "car", at: "2026-09-05T18:00:01.000Z",
+    pageUrl: "https://x/web/#/oa/car/car-info", correlatedUiEvidenceId: "ui-search",
+    request: {
+      method: "GET",
+      url: "https://x/oa/car/page?pageNo=1&pageSize=10&companyId=",
+      resourceType: "xhr",
+      headers: {},
+      query: { pageNo: "1", pageSize: "10", companyId: "" }
+    },
+    response: { status: 200, headers: {}, body: { code: 0, data: { list: [{ id: 1 }], total: 1 } } }
+  }];
+  const review = reviewCatalog([query], events, ["query"], true);
+  assert.equal(review.status, "passed", review.summary);
+  assert.equal(review.findings.some(item => item.code === "complete-field-coverage"), false, review.summary);
+});
+
 test("complete coverage does not demand a named empty filter that the successful request never sent", () => {
   const query = cap({
     id: "query-page",

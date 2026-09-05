@@ -134,9 +134,22 @@ function emptyChooserWithoutOptions(field: NonNullable<Extract<EvidenceEvent, { 
   return (field.visibleOptions || []).some(item => /暂无数据|无数据|no data/i.test(String(item)));
 }
 
+function queryFilterSubmittedEmpty(
+  capability: CapabilityContract,
+  field: { name?: string },
+  requestLeaves: Array<{ name: string; value: unknown }>
+) {
+  if (capability.operation !== "query") return false;
+  const name = realFieldName(field.name);
+  if (!name) return false;
+  const leaves = requestLeaves.filter(item => uiNameMatches(name, item.name));
+  return leaves.length > 0 && leaves.every(item => emptyCoverageValue(item.value));
+}
+
 function blankCompleteCoverageFields(capability: CapabilityContract, events: EvidenceEvent[]) {
   type CoverageField = NonNullable<Extract<EvidenceEvent, { kind: "ui" }>["form"]>[number];
-  const requestNames = new Set(flattenRequestValues(evidenceSample(capability, events)).map(item => item.name));
+  const requestLeaves = flattenRequestValues(evidenceSample(capability, events));
+  const requestNames = new Set(requestLeaves.map(item => item.name));
   const coverage = new Map<string, { field: CoverageField; filled: boolean }>();
   for (const field of completeCoverageUiFields(capability, events)) {
     const label = String(field.label || field.name || "").trim();
@@ -149,7 +162,11 @@ function blankCompleteCoverageFields(capability: CapabilityContract, events: Evi
     const previous = coverage.get(key);
     coverage.set(key, {
       field: previous?.field || field,
-      filled: Boolean(previous?.filled || !emptyCoverageValue(field.value))
+      filled: Boolean(
+        previous?.filled
+        || !emptyCoverageValue(field.value)
+        || queryFilterSubmittedEmpty(capability, field, requestLeaves)
+      )
     });
   }
   return [...coverage.values()].filter(item => !item.filled).map(item => item.field);

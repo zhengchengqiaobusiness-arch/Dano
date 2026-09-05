@@ -17,7 +17,7 @@ export async function writeJson(file: string, value: unknown) {
 
 export async function readJson<T>(file: string, fallback: T): Promise<T> {
   try {
-    return JSON.parse(await readFile(file, "utf8")) as T;
+    return JSON.parse((await readFile(file, "utf8")).replace(/^\uFEFF/, "")) as T;
   } catch (error: any) {
     if (error?.code === "ENOENT") return fallback;
     throw error;

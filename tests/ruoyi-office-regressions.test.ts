@@ -627,7 +627,7 @@ test("complete page coverage follows grounded menu URLs and blocks stop until ev
       discovered: 2,
       visited: 1,
       remaining: 1,
-      unvisited: [{ label: "第二页", selector: 'role=menuitem[name="第二页"]', url: `http://127.0.0.1:${address.port}/second` }]
+      unvisited: [{ label: "第二页", selector: 'role=menuitem[name="第二页"]', url: `http://127.0.0.1:${address.port}/second`, current: false }]
     });
     const invented: any = await recorder.control({ action: "goto", url: `http://127.0.0.1:${address.port}/invented` });
     assert.equal(invented.ok, false, JSON.stringify(invented));
@@ -858,6 +858,71 @@ test("business account configuration with login-name and password fields is not 
   }
 });
 
+test("exercise-form fills spinbutton and labeled sort fields with numbers not 样例 text", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "numeric-sample-"));
+  let posted: Record<string, unknown> | undefined;
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/car/create" && request.method === "POST") {
+      const chunks: Buffer[] = [];
+      request.on("data", chunk => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        posted = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+        response.setHeader("content-type", "application/json; charset=utf-8");
+        response.end(JSON.stringify({ code: 0, data: 1 }));
+      });
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body>
+      <div role="dialog">
+        <label>*车牌号<input placeholder="请输入车牌号" name="carNo"></label>
+        <label>车座<input role="spinbutton" placeholder="请输入车座" name="seatNum"></label>
+        <div class="el-input-number"><label>显示顺序<input placeholder="请输入显示顺序" name="sort"></label></div>
+        <button type="button" id="save">确认</button>
+      </div>
+      <script>
+        document.getElementById("save").addEventListener("click", () => {
+          fetch("/api/car/create", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              carNo: document.querySelector("[name=carNo]").value,
+              seatNum: document.querySelector("[name=seatNum]").value,
+              sort: document.querySelector("[name=sort]").value
+            })
+          });
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "numeric-sample", undefined, ["create"], true);
+    const exercised: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(exercised.ok, true, JSON.stringify(exercised));
+    const byLabel = (label: string) => (exercised.formFields || []).find((field: any) => field.label === label);
+    assert.match(String(byLabel("*车牌号")?.value || ""), /样例/, JSON.stringify(exercised.formFields));
+    assert.equal(String(byLabel("车座")?.value || ""), "1", JSON.stringify(exercised.formFields));
+    assert.equal(String(byLabel("显示顺序")?.value || ""), "1", JSON.stringify(exercised.formFields));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("exercise-form expands and fills every visible business detail section in one pass", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "work-report-repeatables-"));
   const server = http.createServer((_request, response) => {
@@ -958,6 +1023,71 @@ test("HTTP 200 business code 401 pauses for login immediately without consuming 
     assert.equal(result.automaticAttempts, 1, JSON.stringify(result));
     assert.match(result.reason, /登录状态失效/);
     assert.equal(queryCount, 1);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("a transient 401 cleared by refresh-token does not pause later clicks", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "refresh-clears-login-"));
+  let definitionCount = 0;
+  const server = http.createServer((request, response) => {
+    if (request.url === "/admin-api/bpm/process-definition/get") {
+      definitionCount += 1;
+      response.setHeader("content-type", "application/json; charset=utf-8");
+      if (definitionCount === 1) {
+        response.end(JSON.stringify({ code: 401, msg: "账号未登录" }));
+        return;
+      }
+      response.end(JSON.stringify({ code: 0, data: { id: "bpm_1" } }));
+      return;
+    }
+    if (request.url === "/admin-api/system/auth/refresh-token" && request.method === "POST") {
+      response.setHeader("content-type", "application/json; charset=utf-8");
+      response.end(JSON.stringify({ code: 0, data: { accessToken: "next" } }));
+      return;
+    }
+    if (request.url === "/admin-api/oa/trip/page") {
+      response.setHeader("content-type", "application/json; charset=utf-8");
+      response.end(JSON.stringify({ code: 0, data: { list: [], total: 0 } }));
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body><main>
+      <button type="button" id="open" onclick="
+        fetch('/admin-api/bpm/process-definition/get').then(r => r.json()).then(body => {
+          if (body.code === 401) {
+            return fetch('/admin-api/system/auth/refresh-token', {method:'POST'}).then(() => fetch('/admin-api/bpm/process-definition/get'));
+          }
+        })
+      ">办理</button>
+      <button type="button" id="search" onclick="fetch('/admin-api/oa/trip/page')">搜索</button>
+    </main></body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "refresh-clears-login");
+    const first: any = await recorder.control({ action: "click", selector: 'role=button[name="办理"]' });
+    assert.equal(first.loginRequired, undefined, JSON.stringify(first));
+    assert.notEqual(first.stopped, true, JSON.stringify(first));
+    const second: any = await recorder.control({ action: "click", selector: 'role=button[name="搜索"]' });
+    assert.equal(second.loginRequired, undefined, JSON.stringify(second));
+    assert.notEqual(second.stopped, true, JSON.stringify(second));
+    assert.equal(definitionCount >= 2, true, `definitionCount=${definitionCount}`);
   } finally {
     if (recorder.isActive()) await recorder.stop().catch(() => {});
     await new Promise<void>(resolve => server.close(() => resolve()));

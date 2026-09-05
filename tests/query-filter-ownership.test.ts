@@ -186,6 +186,70 @@ test("repeated query keys bind one array field to the ordered date controls", ()
   ]);
 });
 
+test("a list query does not inherit create-dialog fields from the same page", () => {
+  const events: EvidenceEvent[] = [{
+    id: "ui-list", kind: "ui", sessionId: "supply", at: "2026-09-05T16:47:50.000Z",
+    pageUrl: "https://example.test/web/#/oa/supply/info", eventType: "snapshot", scope: "page",
+    form: [
+      { name: "name", label: "物品名称", type: "text", value: "笔" },
+      { name: "code", label: "物品编码", type: "text", value: "" },
+      { name: "managementType", label: "管理类型", type: "select", value: "消耗品" }
+    ]
+  }, {
+    id: "net-query", kind: "network", sessionId: "supply", at: "2026-09-05T16:47:51.000Z",
+    pageUrl: "https://example.test/web/#/oa/supply/info", correlatedUiEvidenceId: "ui-list",
+    request: {
+      method: "GET",
+      url: "https://example.test/admin-api/oa/supply/page?pageNo=1&pageSize=20&name=%E7%AC%94&managementType=1&companyId=",
+      resourceType: "xhr",
+      headers: {},
+      query: { pageNo: "1", pageSize: "20", name: "笔", managementType: "1", companyId: "" }
+    },
+    response: { status: 200, headers: {}, body: { code: 0, data: { list: [], total: 0 } } }
+  }, {
+    id: "ui-dialog", kind: "ui", sessionId: "supply", at: "2026-09-05T16:54:18.000Z",
+    pageUrl: "https://example.test/web/#/oa/supply/info", eventType: "snapshot", scope: "dialog",
+    form: [
+      { name: "companyId", label: "*所属公司", type: "select", value: "宇擎源码" },
+      { name: "name", label: "*物品名称", type: "text", value: "笔" },
+      { name: "code", label: "物品编码", type: "text", value: "B01" },
+      { name: "unitPrice", label: "参考单价", type: "text", value: "10" },
+      { name: "stockQuantity", label: "库存数量", type: "text", value: "100" },
+      { name: "remark", label: "备注", type: "textarea", value: "备注" }
+    ]
+  }, {
+    id: "net-create", kind: "network", sessionId: "supply", at: "2026-09-05T16:54:23.000Z",
+    pageUrl: "https://example.test/web/#/oa/supply/info", correlatedUiEvidenceId: "ui-dialog",
+    request: {
+      method: "POST",
+      url: "https://example.test/admin-api/oa/supply/create",
+      resourceType: "xhr",
+      headers: {},
+      body: { companyId: 100, name: "笔", code: "B01", unitPrice: 10, stockQuantity: 100, remark: "备注" }
+    },
+    response: { status: 200, headers: {}, body: { code: 0, data: 36 } }
+  }, {
+    id: "net-refresh", kind: "network", sessionId: "supply", at: "2026-09-05T16:54:23.400Z",
+    pageUrl: "https://example.test/web/#/oa/supply/info",
+    request: {
+      method: "GET",
+      url: "https://example.test/admin-api/oa/supply/page?pageNo=1&pageSize=20&name=%E7%AC%94&managementType=1&companyId=",
+      resourceType: "xhr",
+      headers: {},
+      query: { pageNo: "1", pageSize: "20", name: "笔", managementType: "1", companyId: "" }
+    },
+    response: { status: 200, headers: {}, body: { code: 0, data: { list: [], total: 0 } } }
+  }];
+  const query = buildCapabilityCandidates(events).find(item => item.operation === "query")!;
+  const create = buildCapabilityCandidates(events).find(item => item.operation === "create")!;
+  assert.equal(fieldByName(query, "name")?.source, "caller");
+  assert.equal(fieldByName(query, "unitPrice"), undefined, JSON.stringify(query.inputForm.map(field => field.name)));
+  assert.equal(fieldByName(query, "stockQuantity"), undefined);
+  assert.equal(fieldByName(query, "remark"), undefined);
+  assert.equal(fieldByName(create, "unitPrice")?.source, "caller");
+  assert.equal(fieldByName(create, "stockQuantity")?.source, "caller");
+});
+
 test("write-only process keys still freeze when they never appear on the page", () => {
   const events: EvidenceEvent[] = [{
     id: "ui-create", kind: "ui", sessionId: "leave", at: "2026-09-04T05:00:00.000Z",

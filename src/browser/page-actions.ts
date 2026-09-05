@@ -1,5 +1,6 @@
 import type { Frame, Locator, Page } from "playwright";
 import type { OperationKind } from "../domain.js";
+import { PATCH_VUE_FORM_COMPANIONS } from "./form-companions.js";
 import { MARK_LABELED_CONTROL, SNAPSHOT_FIELDS_IN_PAGE, SNAPSHOT_IN_PAGE } from "./page-script.js";
 import { authenticationFailureReason, businessResponseFailureReason, inferUiOperationIntent } from "../inference/heuristics.js";
 
@@ -11,8 +12,9 @@ export const DROPDOWNS = ".el-select-dropdown:visible, .el-select__popper:visibl
 export const DATE_PANELS = ".el-picker-panel:visible, .el-popper.el-date-picker:visible, .el-picker__popper:visible, .el-date-range-picker:visible, .el-time-panel:visible, .ant-picker-dropdown:visible, .arco-picker-container:visible, [class*='picker-dropdown']:visible, [class*='picker-panel']:visible";
 const ACTIVE_DATE_OVERLAYS = ".ant-picker-dropdown:visible, .el-picker__popper:visible, .el-popper.el-date-picker:visible, .el-date-range-picker:visible, .el-date-picker:visible, .arco-picker-container:visible, [class*='picker-dropdown']:visible";
 const PICKER_DIALOG = /picker-panel|picker-dropdown|picker__popper|el-date-picker|el-date-range-picker|el-time-panel|el-time-picker|ant-picker-dropdown|arco-picker-container|datepicker/i;
-export const OPTION_ITEMS = "[role='option'], [role='treeitem'], .el-select-dropdown__item, .el-cascader-node, .el-tree-node__content, .el-autocomplete-suggestion__list li, .ant-select-item-option, .ant-select-tree-title, .ant-cascader-menu-item, .arco-select-option, .arco-tree-node-title, .arco-cascader-option, .n-base-select-option";
-export const DIALOG_CHOICES = "[role='option'], [role='treeitem'], [role='listitem'], [role='row'], tbody tr, .el-table__body .el-table__row, .el-tree-node__content, .el-cascader-node, [role='radio'], .el-checkbox";
+export const OPTION_ITEMS = "[role='option'], [role='treeitem'], .el-select-dropdown__item, .el-cascader-node, .el-tree-node__content, .el-autocomplete-suggestion__list li, .ant-select-item-option, .ant-select-tree-title, .ant-tree-title, .ant-cascader-menu-item, .arco-select-option, .arco-tree-node-title, .arco-cascader-option, .n-base-select-option";
+export const DIALOG_CHOICES = "[role='option'], [role='treeitem'], [role='listitem'], tbody [role='row'], tbody tr, .el-table__body .el-table__row, .ant-table-tbody .ant-table-row, .vxe-table--body .vxe-body--row, .vxe-body--row, .el-tree-node__content, .el-cascader-node, [role='radio'], .el-checkbox";
+const TABLE_DATA_ROWS = "tbody tr:not(.ant-table-measure-row):not(.ant-table-placeholder):not(.vxe-header--row), .el-table__body .el-table__row, .ant-table-tbody .ant-table-row:not(.ant-table-measure-row):not(.ant-table-placeholder), .vxe-table--body tbody tr.vxe-body--row, .vxe-body--row";
 export const WIDGET_SURFACES = "xpath=ancestor-or-self::*[contains(@class,'el-select__wrapper') or contains(@class,'el-input__wrapper') or contains(@class,'el-date-editor') or contains(@class,'ant-select-selector') or contains(@class,'ant-picker') or contains(@class,'arco-select-view') or contains(@class,'arco-picker') or contains(@class,'picker-range') or contains(@class,'date-editor') or @role='combobox' or contains(@data-slot,'select-trigger') or contains(@data-slot,'combobox-trigger')][1]";
 export const BUSY_SPINNERS = "body > .loading:visible, .el-loading-mask:visible, .el-overlay.is-loading:visible, .nprogress-busy:visible, .ant-spin-spinning:visible, .arco-spin-loading:visible, [aria-busy='true']:visible";
 
@@ -37,6 +39,7 @@ export interface FormField {
 
 export interface PageSnapshot {
   title?: string;
+  pageHeading?: string;
   url?: string;
   text?: string;
   scope?: string;
@@ -62,6 +65,7 @@ export interface PageSnapshot {
     selector: string;
     url: string;
     visited?: boolean;
+    current?: boolean;
   }>;
   navigationCoverage?: {
     discovered: number;
@@ -201,11 +205,11 @@ export class PageActions {
     return item.evaluate(el => {
       const title = String((el.querySelector(".el-dialog__title, .el-dialog__header, .ant-modal-title, .arco-modal-title, .el-drawer__title, [class*='dialog__title'], [class*='dialog-header'], [class*='modal-title']") || {}).textContent || "").replace(/\s+/g, " ").trim();
       const formItems = el.querySelectorAll(".el-form-item, .ant-form-item, .arco-form-item").length;
-      const rows = el.querySelectorAll("tbody tr, .el-table__row, .el-tree-node").length;
-      const confirm = [...el.querySelectorAll("button, [role='button']")].some(btn => /^(确定|确认|选择|ok|confirm)$/i.test(String(btn.textContent || "").replace(/\s+/g, "")));
+      const rows = el.querySelectorAll("tbody tr, .el-table__body .el-table__row, .ant-table-tbody .ant-table-row, .vxe-body--row, .el-tree-node").length;
+      const confirm = [...el.querySelectorAll("button, [role='button']")].some(btn => /^(确\s*定|确\s*认|选\s*择|ok|confirm)$/i.test(String(btn.textContent || "").replace(/\s+/g, "")));
       const tree = el.querySelectorAll(".el-tree, [role='tree'], .el-tree-node").length;
       const selectionTitle = /(?:^|[：:\-—])(请选择|选择|挑选|选取)|^(请选择|选择|挑选|选取)|(?:选择|挑选|选取)$|\b(?:choose|select|picker)\b/i.test(title);
-      if (selectionTitle && confirm && (rows >= 1 || tree >= 1) && formItems <= 12) return true;
+      if (selectionTitle) return true;
       if (tree >= 1 && confirm && formItems <= 8) return true;
       return rows >= 1 && formItems <= 3 && confirm;
     }).catch(() => false);
@@ -340,6 +344,12 @@ export class PageActions {
     return /^(label|placeholder|column)=/i.test(selector);
   }
 
+  private widgetAlias(selector: string) {
+    if (!selector || /^(text|label|placeholder|role|column)=/i.test(selector)) return "";
+    if (!/checkbox/i.test(selector)) return "";
+    return ".vxe-cell--checkbox, .vxe-checkbox--icon, .vxe-table-icon-checkbox-unchecked, .col--checkbox .vxe-cell, .ant-checkbox, .el-checkbox, input[type=checkbox]";
+  }
+
   async locate(selector: string, options: { allowNavigation?: boolean } = {}) {
     const page = this.page();
     const deadline = Date.now() + 1_500;
@@ -378,15 +388,26 @@ export class PageActions {
             if (table) return table;
             const unique = await this.uniqueField(scope, name);
             if (unique) return unique;
+            const row = await this.tableRowByLabel(scope, name);
+            if (row) return row;
             continue;
           }
           const found = this.locatorIn(scope, selector).filter({ visible: true });
-          const count = await found.count();
+          let count = await found.count();
+          if (!count && !fieldOnly && !textOnly && !dayOnly) {
+            const alias = this.widgetAlias(selector);
+            if (alias) {
+              const chooser = await this.lastChooserDialog(frame);
+              const fallback = this.locatorIn(chooser || scope, alias).filter({ visible: true });
+              if (await fallback.count()) return fallback.first();
+            }
+          }
           if (count === 1) {
             const item = found.first();
             if (textOnly && !options.allowNavigation && await this.isNavigationTarget(item)) continue;
             return item;
           }
+          if (count > 1 && !fieldOnly && !textOnly && dialog && scope === dialog) return found.first();
           if (count > 1 && fieldOnly) {
             const resolved = await this.uniquePlaceholder(found, selector);
             if (resolved) return resolved;
@@ -411,10 +432,19 @@ export class PageActions {
       return { ok: true, url: this.page().url() };
     }
     if (this.isFieldSelector(selector)) {
-      await this.hostClick(await this.clickTarget(selector));
+      const target = await this.clickTarget(selector);
+      if (await this.isTableDataRow(target)) {
+        await this.domActivateRow(target);
+        return { ok: true, url: this.page().url() };
+      }
+      await this.hostClick(target);
       return { ok: true, url: this.page().url() };
     }
     const target = await this.locate(selector, { allowNavigation: true });
+    if (await this.isChooserCheckbox(target) || await this.isTableDataRow(target)) {
+      await this.domActivateRow(target);
+      return { ok: true, url: this.page().url() };
+    }
     const navigation = await this.isNavigationTarget(target);
     if (navigation) {
       const snapshot = await this.captureSnapshot();
@@ -423,12 +453,21 @@ export class PageActions {
       const hasEnteredValues = (snapshot.formFields || []).some(field => field.filled && !field.disabled && !field.skip);
       if (hasWriteSubmit && hasEnteredValues) throw new Error("Refusing to leave a write form with entered values");
     }
+    const label = String(
+      await target.innerText().catch(() => "")
+      || await target.getAttribute("aria-label")
+      || await target.getAttribute("title")
+      || ""
+    ).replace(/\s+/g, "");
+    if (WRITE_SUBMIT_LABEL.test(label) && !/搜索|查询|search/i.test(label)) {
+      await this.patchVueFormCompanions();
+    }
     await this.clickSafely(target, navigation ? "navigation" : "button");
     return { ok: true, url: this.page().url() };
   }
 
   async tableControl(root: Frame | Locator, name: string) {
-    const tables = root.locator(".el-table, .ant-table, .arco-table, table");
+    const tables = root.locator(".el-table, .ant-table, .arco-table, .vxe-table, table");
     const tableCount = await tables.count();
     for (let tableIndex = 0; tableIndex < tableCount; tableIndex += 1) {
       const table = tables.nth(tableIndex);
@@ -665,8 +704,8 @@ export class PageActions {
       };
       const dialogs = vis("[role='dialog'], [role='alertdialog'], .el-dialog, .el-drawer, .ant-modal, .arco-modal")
         .filter((el) => !/picker-panel|picker-dropdown|picker__popper|el-date-picker|el-date-range-picker|el-time-panel|el-time-picker|ant-picker-dropdown|arco-picker-container|datepicker/i.test(String(el.className || "")));
-      const kitDrops = vis(".el-select-dropdown, .el-select__popper, .el-cascader__dropdown, .el-autocomplete-suggestion, .ant-select-dropdown, .arco-select-dropdown, .arco-select-popup, .arco-tree-select-popup, .arco-cascader-popup, .arco-trigger-popup, [class*='select-popup'], [class*='tree-select-popup'], [class*='cascader-popup'], [class*='trigger-popup'], [role='listbox'], [data-reka-popper-content-wrapper], [data-radix-popper-content-wrapper], [data-state='open'][data-slot='popover-content'], [data-state='open'][data-slot='select-content'], [data-state='open'][data-slot='combobox-content'], [data-state='open'][data-slot='dropdown-menu-content']")
-        .filter((el) => el.querySelector("[role='option'], [role='treeitem'], [role='listbox'], [role='tree']"));
+      const kitDrops = vis(".el-select-dropdown, .el-select__popper, .el-cascader__dropdown, .el-autocomplete-suggestion, .ant-select-dropdown, .ant-tree-select-dropdown, .arco-select-dropdown, .arco-select-popup, .arco-tree-select-popup, .arco-cascader-popup, .arco-trigger-popup, [class*='select-popup'], [class*='tree-select-popup'], [class*='cascader-popup'], [class*='trigger-popup'], [role='listbox'], [data-reka-popper-content-wrapper], [data-radix-popper-content-wrapper], [data-state='open'][data-slot='popover-content'], [data-state='open'][data-slot='select-content'], [data-state='open'][data-slot='combobox-content'], [data-state='open'][data-slot='dropdown-menu-content']")
+        .filter((el) => el.querySelector("[role='option'], [role='treeitem'], [role='listbox'], [role='tree'], .ant-select-item-option, .ant-select-tree-title, .ant-select-tree, .ant-tree-title, .el-select-dropdown__item, .el-tree-node"));
       const looseDrops = vis("ul").filter((el) => el.querySelector("[role='option'], .el-select-dropdown__item, .ant-select-item-option"));
       const drops = [...new Set([...kitDrops, ...looseDrops])];
       const dates = vis(".el-picker-panel, .el-popper.el-date-picker, .el-picker__popper, .el-date-range-picker, .el-time-panel, .ant-picker-dropdown, .arco-picker-container, [class*='picker-panel'], [class*='picker-dropdown']");
@@ -952,7 +991,9 @@ export class PageActions {
   private async clickOption(locator: Locator) {
     const clicked = await locator.evaluate(el => {
       const target = el instanceof HTMLElement
-        ? (el.closest("[role='option'], [role='treeitem'], .el-select-dropdown__item, .el-tree-node__content, .ant-select-item-option, .ant-select-tree-title, .arco-select-option, .arco-tree-node-title, .arco-tree-node, .arco-cascader-option") || el)
+        ? (el.closest("[role='option'], [role='treeitem'], .el-select-dropdown__item, .el-tree-node__content, .ant-select-item-option, .ant-select-tree-title, .ant-tree-title, .arco-select-option, .arco-tree-node-title, .arco-tree-node, .arco-cascader-option")
+          || el.querySelector("[role='option'], [role='treeitem'], .ant-select-tree-title, .ant-tree-title, .el-tree-node__content, .arco-tree-node-title")
+          || el)
         : null;
       if (!(target instanceof HTMLElement)) return false;
       for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
@@ -1125,12 +1166,19 @@ export class PageActions {
     return `${field.label || ""} ${field.name || ""} ${field.selector || ""} ${field.error || ""} ${extra}`;
   }
 
+  private looksNumericField(field: FormField) {
+    if (field.kind === "number") return true;
+    const hint = this.fieldHint(field);
+    if (/编号|车牌|单号|手机号|电话|证件号|身份证/i.test(hint)) return false;
+    return /显示顺序|排序|顺序|车座|座位数|数量|金额|价格|单价|裸车价|\bsort\b|\bseat\b|\bqty\b|quantity|price|amount/i.test(hint);
+  }
+
   private sampleValue(field: FormField, dateOffset = 0) {
     if (field.kind === "date") {
       const endLike = field.rangeIndex === 1 || dateOffset % 2 === 1;
       return `${localIsoDate(dateOffset)} ${endLike ? "23:59:59" : "00:00:00"}`;
     }
-    if (field.kind === "number") return "1";
+    if (this.looksNumericField(field)) return "1";
     const hint = this.fieldHint(field);
     if (/座机|区号/.test(hint)) return "0516-85881234";
     if (/联系方式|手机号|手机|电话|mobile|phone|lxfs|lxdh/i.test(hint)) return "13212341234";
@@ -1150,52 +1198,171 @@ export class PageActions {
     return undefined;
   }
 
-  private async pickChooserRow(dialog: Locator) {
-    const selection = dialog.locator("tbody input[type='radio']:not(:disabled), tbody [role='radio']:not([aria-disabled='true']), tbody input[type='checkbox']:not(:disabled), tbody [role='checkbox']:not([aria-disabled='true']), tbody .el-radio:not(.is-disabled), tbody .arco-radio:not(.arco-radio-disabled), tbody .ant-radio:not(.ant-radio-disabled), tbody .el-checkbox:not(.is-disabled), tbody .arco-checkbox:not(.arco-checkbox-disabled), tbody .ant-checkbox:not(.ant-checkbox-disabled), .el-table__body input[type='radio']:not(:disabled), .el-table__body input[type='checkbox']:not(:disabled), .el-table__body .el-radio:not(.is-disabled), .el-table__body .el-checkbox:not(.is-disabled)").filter({ visible: true }).first();
-    if (await selection.count()) {
-      await selection.click({ force: true, timeout: 800 }).catch(() => this.clickSafely(selection, "option"));
-      return;
-    }
-    const people = () => dialog.locator("tbody tr, .el-table__body .el-table__row, .el-table__body tr")
+  private async chooserDataRows(dialog: Locator) {
+    const specific = dialog.locator(".vxe-body--row, .el-table__body .el-table__row, .ant-table-tbody tr.ant-table-row:not(.ant-table-measure-row):not(.ant-table-placeholder)");
+    const source = await specific.count()
+      ? specific
+      : dialog.locator(TABLE_DATA_ROWS);
+    return source
       .filter({ visible: true })
       .filter({ hasNotText: /暂无数据|没有数据|no data/i })
-      .filter({ hasText: /\S/ })
-      .first();
-    if (await people().count()) {
-      await this.clickSafely(people(), "option");
-      return;
+      .filter({ hasText: /\S/ });
+  }
+
+  private async waitForChooserChoices(dialog: Locator, timeoutMs = 2000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await (await this.chooserDataRows(dialog)).count()) return true;
+      if (await dialog.locator(".el-tree-node__content, [role='treeitem']").filter({ visible: true }).count()) return true;
+      await this.page().waitForTimeout(200);
     }
+    return Boolean(
+      await (await this.chooserDataRows(dialog)).count()
+      || await dialog.locator(".el-tree-node__content, [role='treeitem']").filter({ visible: true }).count()
+    );
+  }
+
+  private async tableRowByLabel(_root: Frame | Locator, name: string) {
+    const wanted = name.replace(/\s+/g, "");
+    if (!wanted || (wanted.length < 2 && /^[\x00-\x7F]+$/.test(wanted))) return undefined;
+    const mark = `bss-row-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const found = await this.page().evaluate(`(() => {
+      const wanted = ${JSON.stringify(wanted)};
+      const mark = ${JSON.stringify(mark)};
+      const dialogs = [...document.querySelectorAll("[role='dialog'], .el-dialog, .ant-modal, .arco-modal")].filter(function(el) {
+        return el.getClientRects().length && getComputedStyle(el).visibility !== "hidden";
+      });
+      const root = dialogs[dialogs.length - 1] || document;
+      const rows = [...root.querySelectorAll(${JSON.stringify(TABLE_DATA_ROWS)})];
+      const visible = rows.filter(function(el) {
+        return el.getClientRects().length && getComputedStyle(el).visibility !== "hidden";
+      });
+      const hit = visible.find(function(row) {
+        const text = String(row.innerText || "").replace(/\\s+/g, "");
+        if (text === wanted) return true;
+        const cells = [...row.querySelectorAll("td, [class*='body--column'], .ant-table-cell, .el-table__cell")]
+          .map(function(cell) { return String(cell.innerText || "").replace(/\\s+/g, ""); })
+          .filter(Boolean);
+        return cells[0] === wanted;
+      });
+      if (!hit) return false;
+      hit.setAttribute("data-bss-row-hit", mark);
+      return true;
+    })()`).catch(() => false);
+    if (!found) return undefined;
+    const row = this.page().locator(`[data-bss-row-hit="${mark}"]`).first();
+    if (!(await row.count())) return undefined;
+    return row;
+  }
+
+  private async isTableDataRow(locator: Locator) {
+    return Boolean(await locator.getAttribute("data-bss-row-hit").catch(() => null));
+  }
+
+  private async isChooserCheckbox(locator: Locator) {
+    return locator.evaluate((el) => Boolean(
+      el.closest(".vxe-cell--checkbox, .col--checkbox, .ant-checkbox, .el-checkbox")
+    )).catch(() => false);
+  }
+
+  private async domActivateRow(locator: Locator) {
+    const mark = await locator.getAttribute("data-bss-row-hit").catch(() => "");
+    const token = mark || `bss-row-act-${Date.now().toString(36)}`;
+    if (!mark) {
+      const ok = await locator.evaluate((el, value) => {
+        el.setAttribute("data-bss-row-hit", value);
+        return true;
+      }, token).catch(() => false);
+      if (!ok) return false;
+    }
+    return Boolean(await this.page().evaluate(`(() => {
+      const el = document.querySelector('[data-bss-row-hit="${token}"]');
+      if (!el) return false;
+      const row = el.closest(".vxe-body--row, .ant-table-tbody tr.ant-table-row, .el-table__body .el-table__row, tr") || el;
+      const vxe = row.querySelector(".vxe-cell--checkbox, .col--checkbox .vxe-cell");
+      if (vxe) {
+        const icon = vxe.querySelector(".vxe-checkbox--icon, .vxe-checkbox--unchecked-icon, .vxe-table-icon-checkbox-unchecked") || vxe;
+        icon.click();
+        return true;
+      }
+      const box = row.querySelector("input[type=checkbox]:not([disabled]), input[type=radio]:not([disabled])");
+      if (box) box.click();
+      else row.click();
+      return true;
+    })()`).catch(() => false));
+  }
+
+  private async activateChooserRow(dialog: Locator, rowIndex = 0) {
+    const mark = `bss-chooser-${Date.now().toString(36)}`;
+    const marked = await dialog.evaluate((el, token) => {
+      el.setAttribute("data-bss-chooser", token);
+      return true;
+    }, mark).catch(() => false);
+    if (!marked) return false;
+    return Boolean(await this.page().evaluate(`(() => {
+      const root = document.querySelector('[data-bss-chooser="${mark}"]');
+      if (!root) return false;
+      const rows = [...root.querySelectorAll(".vxe-body--row, .ant-table-tbody tr.ant-table-row, .el-table__body .el-table__row")]
+        .filter(function(el) {
+          if (!el.getClientRects().length || getComputedStyle(el).visibility === "hidden") return false;
+          return Boolean(el.querySelector(".vxe-cell--checkbox, .col--checkbox .vxe-cell, input[type=checkbox], input[type=radio], .ant-checkbox"));
+        });
+      const row = rows[${Number(rowIndex) || 0}];
+      if (!row) return false;
+      const vxe = row.querySelector(".vxe-cell--checkbox, .col--checkbox .vxe-cell");
+      if (vxe) {
+        const icon = vxe.querySelector(".vxe-checkbox--icon, .vxe-checkbox--unchecked-icon, .vxe-table-icon-checkbox-unchecked") || vxe;
+        icon.click();
+        return true;
+      }
+      const box = row.querySelector("input[type=checkbox]:not([disabled]), input[type=radio]:not([disabled])");
+      if (box) box.click();
+      else row.click();
+      return true;
+    })()`).catch(() => false));
+  }
+
+  private async pickChooserRow(dialog: Locator, rowIndex = 0) {
+    await this.waitForChooserChoices(dialog);
+    if (await this.activateChooserRow(dialog, rowIndex)) return;
     const tree = dialog.locator(".el-tree-node__content, [role='treeitem']").filter({ visible: true }).first();
     if (await tree.count()) {
       await this.clickSafely(tree, "option");
       await this.page().waitForTimeout(400);
-      if (await people().count()) {
-        await this.clickSafely(people(), "option");
+      const nested = (await this.chooserDataRows(dialog)).first();
+      if (await nested.count()) {
+        if (!(await this.activateChooserRow(dialog, 0))) await this.clickSafely(nested, "option").catch(() => {});
         return;
       }
+      return;
     }
     const row = dialog.locator(DIALOG_CHOICES).filter({ visible: true }).first();
     if (!(await row.count())) throw new Error("Picker dialog has no selectable row");
-    await this.clickSafely(row, "option");
-    const nested = people();
-    if (await nested.count()) await this.clickSafely(nested, "option").catch(() => {});
+    if (!(await this.activateChooserRow(dialog, rowIndex))) await this.clickSafely(row, "option");
   }
 
   private async completeChooserDialog() {
     const dialog = await this.lastChooserDialog();
     if (!dialog) return false;
-    await this.pickChooserRow(dialog).catch(() => {});
+    await this.waitForChooserChoices(dialog);
     const confirm = () => dialog.locator("button, [role='button']").filter({ hasText: /^\s*(确\s*定|确\s*认|选\s*择|ok|confirm)\s*$/i }).first();
-    let ok = confirm();
-    if (await ok.count()) await this.clickSafely(ok, "button").catch(() => {});
-    await dialog.waitFor({ state: "hidden", timeout: 700 }).catch(() => {});
-    if (await this.lastChooserDialog()) {
-      await this.pickChooserRow(dialog).catch(() => {});
-      ok = confirm();
+    const rowCount = await (await this.chooserDataRows(dialog)).count();
+    const attempts = Math.max(1, Math.min(3, rowCount || 1));
+    for (let index = 0; index < attempts; index += 1) {
+      try {
+        await this.pickChooserRow(dialog, index);
+      } catch {
+        return false;
+      }
+      const ok = confirm();
       if (await ok.count()) await this.clickSafely(ok, "button").catch(() => {});
-      await dialog.waitFor({ state: "hidden", timeout: 600 }).catch(() => {});
+      await dialog.waitFor({ state: "hidden", timeout: 400 }).catch(() => {});
+      if (!(await this.lastChooserDialog())) {
+        await this.waitForPageQuiet(300);
+        return true;
+      }
     }
-    await this.waitForPageQuiet(400);
+    await this.waitForPageQuiet(300);
     return !(await this.lastChooserDialog());
   }
 
@@ -1336,7 +1503,10 @@ export class PageActions {
       return score > 0 ? [{ field, score }] : [];
     }).sort((left, right) => right.score - left.score);
     const target = ranked[0]?.field;
-    if (!target) return undefined;
+    if (!target) {
+      const companions = await this.patchVueFormCompanions();
+      return companions.length ? { label: companions.join("、"), previous: "", value: "companion" } : undefined;
+    }
     const selector = target.selector || `label=${target.label}`;
     const previous = target.value;
     if (target.kind === "picker") await this.pickFirstChoice(selector);
@@ -1390,9 +1560,10 @@ export class PageActions {
   }
 
   private async expandRepeatableRows(attempted: Set<string>) {
-    const addRow = /^(新增一行|添加一行|加一行|添加明细|新增明细|(?:添加|新增).{1,16}(?:项|行|明细|条目|记录|内容|计划|工作))$/;
+    // 「添加X」and row synonyms expand a form collection. List-page「新增X」opens create.
+    const addRow = /^(新增一行|添加一行|加一行|添加明细|新增明细|新增行|新增子项|新增条目|新增费用项|添加.{1,16})$/;
     const genericAdd = /^\s*(添加|新增)\s*$/;
-    const excluded = /附件|上传|文件/;
+    const excluded = /附件|上传|文件|申请$|单据$|订单$|列表$/;
     const before = (await this.captureFields()).formFields || [];
     const snapshot = await this.captureSnapshot();
     const controls = (snapshot.controls || []).filter(item => {
@@ -1420,7 +1591,7 @@ export class PageActions {
           for (let depth = 0; node && depth < 7; depth += 1, node = node.parentElement) {
             const heading = node.querySelector("h1,h2,h3,h4,h5,h6,legend,.el-card__header,.ant-card-head-title,[class*='title'],[class*='header']");
             const context = String(heading?.textContent || node.getAttribute("aria-label") || "").replace(/\s+/g, "");
-            if (/明细|行项目|子项|条目|费用项|清单/.test(context) && !/附件|上传/.test(context)) return true;
+            if (/明细|行项目|子项|条目|费用项|清单|用品|物品|领用/.test(context) && !/附件|上传/.test(context)) return true;
           }
           return false;
         }).catch(() => false);
@@ -1450,6 +1621,7 @@ export class PageActions {
         .click({ timeout: 1_200 }).catch(() => {});
     }
     await this.waitForPageQuiet(600);
+    if (await this.lastChooserDialog()) await this.completeChooserDialog();
     const after = (await this.captureFields()).formFields || [];
     const expanded = after.some(field => !before.some(item => item.selector === field.selector && item.label === field.label));
     if (expanded) this.expandedRepeatables.add(key);
@@ -1572,6 +1744,15 @@ export class PageActions {
     };
   }
 
+  private async patchVueFormCompanions() {
+    try {
+      const changed = await this.page().evaluate(PATCH_VUE_FORM_COMPANIONS) as unknown;
+      return Array.isArray(changed) ? changed.map(item => String(item)).filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  }
+
   async submitForm(stage = 0): Promise<Record<string, unknown>> {
     await this.completeChooserDialog();
     await this.dismissTransientOverlays();
@@ -1581,6 +1762,10 @@ export class PageActions {
     if (!button) throw new Error("No submit/search button in the active form");
     const write = WRITE_SUBMIT_LABEL.test(button.text) && !/搜索|查询|search/i.test(button.text);
     let repaired = false;
+    if (write) {
+      const companions = await this.patchVueFormCompanions();
+      if (companions.length) repaired = true;
+    }
     if (!this.formReady(before, startUrl)) {
       await this.repairFormValues(startUrl);
       before = await this.captureSnapshot();
@@ -1636,6 +1821,15 @@ export class PageActions {
     const businessRepair = businessFailure && !authenticationFailure
       ? await this.repairBusinessFailure(businessFailure, startUrl).catch(() => undefined)
       : undefined;
+    if (write && businessRepair && stage < 2) {
+      const retried = await this.submitForm(stage + 1);
+      return {
+        ...retried,
+        repaired: true,
+        businessRepair,
+        submitStages: stage + 1
+      };
+    }
     return {
       ok,
       submitted: button.text,

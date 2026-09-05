@@ -588,7 +588,7 @@ function addLeafKey(index: Map<string, IndexedLeaf[]>, key: string | undefined, 
 
 function matchingLeaves(entry: LookupIndexEntry, value: unknown) {
   const keys = lookupValueKeys(value);
-  if (!keys.length) return entry.leaves;
+  if (!keys.length) return isLowInformationValue(value) || Array.isArray(value) ? [] : entry.leaves;
   const seen = new Set<IndexedLeaf>();
   const matched: IndexedLeaf[] = [];
   for (const key of keys) {
@@ -699,7 +699,7 @@ function fromApiMatch(
       if (leaf.value !== undefined && !sameDerivedValue(leaf.value, value)) continue;
       if (leaf.value === undefined) continue;
       const exactLeafName = lastPathName(leaf.path).toLowerCase() === field.name.toLowerCase();
-      if (isLowInformationValue(value) && !entry.triggeredByFieldChoice && !exactLeafName) continue;
+      if (isLowInformationValue(value) && (mode !== "write" || (!entry.triggeredByFieldChoice && !exactLeafName))) continue;
       const via = leaf.row ? pickVia(field, joins, leaf.row) : causalLookupVia(field, joins, entry);
       const samePageQueryCause = mode === "query"
         && Boolean(event?.pageUrl && targetPageUrl)
@@ -753,7 +753,7 @@ function fromApiMatch(
         && hasExplicitWriteCause(entry, via, write, field)
         && (entry.triggeredByFieldChoice || sameBusinessResource || entry.capability.transport.pathTemplate.includes(lastPathName(leaf.path)));
       if (!valuesAgree && !causallySupported) continue;
-      if (isLowInformationValue(value) && !entry.triggeredByFieldChoice && !causallySupported) continue;
+      if (isLowInformationValue(value) && !valuesAgree) continue;
       const score = lookupAffinityScore(field, leaf.path, entry.capability, write);
       if (score < 6) continue;
       associated.push({

@@ -1,6 +1,6 @@
 import type { EvidenceEvent, InputFormField, NetworkEvidence, UiEvidence } from "../domain.js";
 import { ASK_KEY } from "./heuristics.js";
-import { clockFromEpoch, dateDay, recordedClock } from "./date-format.js";
+import { clockFromEpoch, dateDay, isDateOnly, isIsoInstant, recordedClock } from "./date-format.js";
 
 const GENERATED_NAME = /^(el-id-\d+|el-[a-z]+-\d+|reka-v-\d+-form-item|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i;
 const PAGE_NAME = /^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i;
@@ -64,6 +64,19 @@ function eventLabel(event: UiEvidence) {
   return event.label || emptyPromptLabel(event.text);
 }
 
+function labelTokens(label?: string) {
+  return String(label || "").split(/\s+/).filter(token => token && !/^\d+(?:\.\d+)?$/.test(token));
+}
+
+function chooserRowDisplay(event: UiEvidence, label: string) {
+  if (event.eventType !== "click" || event.scope !== "dialog") return undefined;
+  if (event.tag === "button" || event.role === "button" || event.inputType === "button" || event.inputType === "submit") {
+    return undefined;
+  }
+  if (event.value !== undefined && event.value !== "") return undefined;
+  return labelTokens(label)[0];
+}
+
 export function flattenRequestValues(value: unknown, prefix = "$"): Array<{ path: string; name: string; value: unknown }> {
   if (value === undefined) return [];
   const name = prefix.split(".").pop()?.replace(/\[\*\]$/, "") || prefix;
@@ -113,6 +126,10 @@ function richTextPlain(value: unknown) {
 export function sameValue(left: unknown, right: unknown) {
   if (left === undefined || left === null || right === undefined || right === null || right === "") return false;
   if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    return left.every((item, index) => Object.is(item, right[index]) || sameValue(item, right[index]));
+  }
   if (typeof left === "boolean" || typeof right === "boolean") {
     const asBoolean = (value: unknown) => {
       if (typeof value === "boolean") return value;
@@ -378,6 +395,22 @@ function scalarRequestValue(value: unknown) {
   return Array.isArray(value) && value.length === 1 ? value[0] : value;
 }
 
+const PROCESS_COMMENT_LABEL = /提交意见|审批意见|办理意见|审核意见/;
+const PROCESS_COMMENT_FIELD = /^(reason|comment|opinion|approvalComment|form_item_reason)$|提交意见|审批意见|办理意见|审核意见/i;
+
+function isProcessCommentObservation(item: Pick<UiObservation, "name" | "label">) {
+  return PROCESS_COMMENT_LABEL.test(String(item.label || item.name || ""));
+}
+
+function hasProcessCommentField(fields: InputFormField[]) {
+  return fields.some(field => PROCESS_COMMENT_FIELD.test(`${field.name} ${field.label || ""}`));
+}
+
+function observationCanJoinList(item: UiObservation) {
+  if (isProcessCommentObservation(item)) return false;
+  return !looksTextObservation(item) || looksChoiceObservation(item);
+}
+
 function observationCompatible(
   field: InputFormField,
   item: UiObservation,
@@ -386,6 +419,12 @@ function observationCompatible(
 ) {
   value = scalarRequestValue(value);
   if (value === undefined || value === null || value === "") return false;
+  if (isProcessCommentObservation(item) && !PROCESS_COMMENT_FIELD.test(`${field.name} ${field.label || ""}`)) {
+    return false;
+  }
+  if (looksTextObservation(item) && looksPickerField(field) && !uiNameMatches(item.name, field.name)) {
+    return false;
+  }
   const choiceObs = looksChoiceObservation(item);
   const quantityField = looksQuantityField(field);
   const quantityObs = looksQuantityObservation(item);
@@ -436,7 +475,15 @@ export function collectUiObservations(events: UiEvidence[]): UiObservation[] {
     } else if (event.name && !isGeneratedFieldName(event.name)) {
       items.push({ name: event.name, label: observationLabel({ name: event.name, label, value: event.value }), value: event.value, type: controlType, disabled: eventField?.disabled, options: eventOptions });
     } else if (label && !actionControl) {
-      items.push({ name: undefined, label: observationLabel({ label, value: event.value }), value: event.value, type: controlType, disabled: eventField?.disabled, options: eventOptions });
+      const picked = chooserRowDisplay(event, label);
+      items.push({
+        name: undefined,
+        label: observationLabel({ label, value: picked ?? event.value }),
+        value: picked ?? event.value,
+        type: picked ? "select" : controlType,
+        disabled: eventField?.disabled,
+        options: eventOptions
+      });
     } else if (eventOptions?.length) {
       const matches = (event.form || []).filter(field =>
         field.label && eventOptions.some(item => String(item.label || item.value).includes(field.label!))
@@ -509,7 +556,7 @@ function rowIdentity(row: Record<string, unknown>) {
 }
 
 function rowDisplay(row: Record<string, unknown>) {
-  for (const key of ["name", "label", "title", "dictLabel", "nickname", "text", "xtmc", "yymc", "bmmc", "ssbmmc", "yyxtmc", "mc", "csmc"]) {
+  for (const key of ["name", "label", "title", "dictLabel", "nickname", "text", "billCode", "documentNo", "applyNo", "orderNo", "xtmc", "yymc", "bmmc", "ssbmmc", "yyxtmc", "mc", "csmc"]) {
     const value = row[key];
     if (value !== undefined && value !== null && value !== "") return value;
   }
@@ -520,6 +567,10 @@ function rowDisplayCandidates(row: Record<string, unknown>) {
   const values = new Set<string>();
   const primary = rowDisplay(row);
   if (primary !== undefined && primary !== null && primary !== "") values.add(String(primary));
+  for (const key of ["billCode", "documentNo", "applyNo", "orderNo"]) {
+    const value = row[key];
+    if (value !== undefined && value !== null && value !== "") values.add(String(value));
+  }
   const username = row.username ?? row.userName;
   const nickname = row.nickname;
   if (username !== undefined && username !== null && username !== "") values.add(String(username));
@@ -685,6 +736,7 @@ export function findObservation(
 
   if (requestValue !== undefined && requestValue !== null && requestValue !== "" && !requestValueIsShared(sample, field.path, requestValue)) {
     const hits = observations.filter(item => {
+      if (!observationCanJoinList(item)) return false;
       const list = listForObservation(item, lists, requestValue);
       return Boolean(list && list.rows.some(row =>
         sameValue(rowIdentity(row), requestValue) && rowDisplayCandidates(row).some(display => sameValue(display, item.value))
@@ -961,6 +1013,7 @@ function observationMatchesValue(item: UiObservation, value: unknown, lists: Rec
   if (sameValue(item.value, value)) return true;
   const day = dateDay(value);
   if (day && dateDay(item.value) === day) return true;
+  if (!observationCanJoinList(item)) return false;
   const list = listForObservation(item, lists, value);
   return Boolean(list && list.rows.some(row =>
     sameValue(rowIdentity(row), value)
@@ -978,8 +1031,12 @@ function leftoverCallerLabels(fields: InputFormField[]) {
 
 function leftoverEditable(fields: InputFormField[], observations: UiObservation[]) {
   const callerLabels = leftoverCallerLabels(fields);
+  const keepComments = hasProcessCommentField(fields);
   return uniqueByLabel(observations.filter(item =>
-    item.label && !callerLabels.has(item.label) && !looksReadonly(item)
+    item.label
+    && !callerLabels.has(item.label)
+    && !looksReadonly(item)
+    && (keepComments || !isProcessCommentObservation(item))
   ));
 }
 
@@ -1328,10 +1385,14 @@ function bindUnlabeledCallers(
   const unlabeled = unlabeledCallers(fields);
   const leftoverObs = leftoverEditable(fields, observations);
   if (leftoverObs.length === 1 && unlabeled.length === 1) {
-    return fields.map(field =>
-      field.path === unlabeled[0]!.path
-        ? asCaller(field, leftoverObs[0], requestValueAt(sample, field.path), observations, lists)
-        : field
+    const field = unlabeled[0]!;
+    const observation = leftoverObs[0]!;
+    const value = requestValueAt(sample, field.path);
+    if (!observationCompatible(field, observation, value, lists)) return fields;
+    return fields.map(item =>
+      item.path === field.path
+        ? asCaller(item, observation, value, observations, lists)
+        : item
     );
   }
   const dateObs = leftoverObs.filter(looksDateControl);
@@ -1534,15 +1595,76 @@ function qualifySharedLabel(shared: string, field: InputFormField, siblings: Inp
   return `${shared}${zh}`;
 }
 
+function chooserIdentityAndDisplay(group: InputFormField[], sample: unknown, lists: RecordedList[]) {
+  for (const list of lists) {
+    for (const row of list.rows) {
+      const identity = rowIdentity(row);
+      const displays = rowDisplayCandidates(row);
+      const idField = group.find(field => sameValue(requestValueAt(sample, field.path), identity));
+      const displayField = group.find(field => displays.some(display => sameValue(requestValueAt(sample, field.path), display)));
+      if (idField && displayField && idField.path !== displayField.path) return { idField, displayField };
+    }
+  }
+  return undefined;
+}
+
+function promoteChooserIdentities(
+  fields: InputFormField[],
+  sample: unknown,
+  lists: RecordedList[]
+): InputFormField[] {
+  if (!lists.length) return fields;
+  return fields.map(field => {
+    if (field.source === "caller" || PAGE_NAME.test(field.name) || isReadonlyBound(field)) return field;
+    const value = requestValueAt(sample, field.path);
+    if (value === undefined || value === null || value === "") return field;
+    const display = fields.find(other =>
+      other.path !== field.path
+      && other.source === "caller"
+      && lists.some(list => list.rows.some(row =>
+        sameValue(rowIdentity(row), value)
+        && rowDisplayCandidates(row).some(item => sameValue(item, requestValueAt(sample, other.path)))
+      ))
+    );
+    if (!display) return field;
+    return asCaller(field, {
+      name: field.name,
+      label: display.label,
+      value,
+      type: "select"
+    }, value, [], lists);
+  });
+}
+
+function asSharedCompanion(field: InputFormField, label: string, detail: string, defaultRule?: string): InputFormField {
+  return {
+    ...field,
+    source: "system",
+    systemHandled: true,
+    required: false,
+    requiredBasis: "not-observed",
+    defaultRule,
+    candidates: undefined,
+    widget: field.widget === "date" ? "text" : field.widget,
+    sourceDetail: detail.replace("{label}", label)
+  };
+}
+
+function sharedLabelKey(label: string) {
+  return String(label).replace(/^\*+/, "").replace(/[：:]\s*$/, "").trim();
+}
+
 function refineSharedCallerLabels(
   fields: InputFormField[],
   observations: UiObservation[],
-  sample: unknown
+  sample: unknown,
+  lists: RecordedList[] = []
 ): InputFormField[] {
   const callers = fields.filter(field => field.source === "caller" && field.label);
   const groups = new Map<string, InputFormField[]>();
   for (const field of callers) {
-    groups.set(field.label!, [...(groups.get(field.label!) || []), field]);
+    const key = sharedLabelKey(field.label!);
+    groups.set(key, [...(groups.get(key) || []), field]);
   }
   const relabel = new Map<string, string>();
   const derivedCompanions = new Map<string, InputFormField>();
@@ -1552,7 +1674,7 @@ function refineSharedCallerLabels(
     for (const field of group) {
       const value = requestValueAt(sample, field.path);
       const better = observations.filter(item => {
-        if (!item.label || item.label === label || used.has(item.label)) return false;
+        if (!item.label || sharedLabelKey(item.label) === label || used.has(item.label)) return false;
         const specific = emptyPromptLabel(item.label);
         const matchesValue = value !== undefined && value !== null && value !== ""
           && (sameValue(item.value, value) || Boolean(dateDay(value) && dateDay(item.value) === dateDay(value)));
@@ -1566,11 +1688,32 @@ function refineSharedCallerLabels(
         if (unique[0]!.label) used.add(unique[0]!.label);
       }
     }
-    const still = group.filter(field => (relabel.get(field.path) || field.label) === label);
+    const still = group.filter(field => sharedLabelKey(relabel.get(field.path) || field.label || "") === label);
     if (still.length > 1) {
-      const explicitlyNamed = still.filter(field => observations.some(item => item.name && uiNameMatches(item.name, field.name)));
-      const candidateBacked = still.filter(field => Boolean(field.candidates));
-      const stableIds = still.filter(field => /(?:^|[._\[])id(?:\]|$)|id$/i.test(field.name));
+      const dateOnly = still.filter(field => isDateOnly(requestValueAt(sample, field.path)));
+      const instants = still.filter(field => isIsoInstant(requestValueAt(sample, field.path)));
+      if (dateOnly.length && instants.length) {
+        for (const field of instants) {
+          derivedCompanions.set(field.path, asSharedCompanion(
+            field,
+            label,
+            "页面只有日期控件；该时间戳由系统按提交时刻补齐，调用方不要手填",
+            "now:iso"
+          ));
+        }
+      }
+      const chooser = chooserIdentityAndDisplay(still.filter(field => !derivedCompanions.has(field.path)), sample, lists);
+      if (chooser) {
+        derivedCompanions.set(chooser.displayField.path, asSharedCompanion(
+          chooser.displayField,
+          label,
+          "页面与「{label}」共用一次行选择；该展示字段由已选行自动带出，调用方不要重复输入"
+        ));
+      }
+      const leftover = still.filter(field => !derivedCompanions.has(field.path));
+      const explicitlyNamed = leftover.filter(field => observations.some(item => item.name && uiNameMatches(item.name, field.name)));
+      const candidateBacked = leftover.filter(field => Boolean(field.candidates));
+      const stableIds = leftover.filter(field => /(?:^|[._\[])id(?:\]|$)|id$/i.test(field.name));
       const canonical = explicitlyNamed.length === 1
         ? explicitlyNamed[0]
         : candidateBacked.length === 1
@@ -1578,27 +1721,21 @@ function refineSharedCallerLabels(
           : stableIds.length === 1
             ? stableIds[0]
             : undefined;
-      for (const field of still) {
+      for (const field of leftover) {
         if (field === canonical) continue;
         const candidates = canonical?.candidates?.type === "static" ? canonical.candidates.values : [];
         const canonicalValue = canonical ? requestValueAt(sample, canonical.path) : undefined;
         const fieldValue = requestValueAt(sample, field.path);
         const selected = candidates.find(option => sameValue(option.value, canonicalValue));
         if (selected && sameValue(selected.label, fieldValue)) {
-          derivedCompanions.set(field.path, {
-            ...field,
-            source: "system",
-            systemHandled: true,
-            required: false,
-            requiredBasis: "not-observed",
-            defaultRule: undefined,
-            candidates: undefined,
-            widget: "text",
-            sourceDetail: `页面与「${label}」共用一个选择器；该伴随字段由已选项自动带出，调用方不要重复输入`
-          });
+          derivedCompanions.set(field.path, asSharedCompanion(
+            field,
+            label,
+            "页面与「{label}」共用一个选择器；该伴随字段由已选项自动带出，调用方不要重复输入"
+          ));
           continue;
         }
-        const qualified = qualifySharedLabel(label, field, still);
+        const qualified = qualifySharedLabel(label, field, leftover);
         if (qualified && qualified !== label) relabel.set(field.path, qualified);
       }
     }
@@ -1618,10 +1755,15 @@ export function finalizeCallerFields(
   lists: RecordedList[] = [],
   owner?: UiEvidence
 ): InputFormField[] {
-  const relabeled = bindUnlabeledCallers(
-    bindByRecordedOptions(
-      bindByLabelAffinity(
-        bindIndexedDateRange(fields, owner, observations, sample, lists, true),
+  const relabeled = promoteChooserIdentities(
+    bindUnlabeledCallers(
+      bindByRecordedOptions(
+        bindByLabelAffinity(
+          bindIndexedDateRange(fields, owner, observations, sample, lists, true),
+          observations,
+          sample,
+          lists
+        ),
         observations,
         sample,
         lists
@@ -1630,7 +1772,6 @@ export function finalizeCallerFields(
       sample,
       lists
     ),
-    observations,
     sample,
     lists
   );
@@ -1640,7 +1781,8 @@ export function finalizeCallerFields(
         enrichFromObservations(field, observations, sample, lists)
       ),
       observations,
-      sample
+      sample,
+      lists
     ),
     sample,
     observations
@@ -1882,15 +2024,18 @@ export function attachOptionalNamedFilters(
   fields: InputFormField[],
   observations: UiObservation[],
   sample: unknown,
-  query = false
+  query = false,
+  owner?: UiEvidence
 ): InputFormField[] {
   if (!query) return fields;
+  const ownerNames = new Set(owner?.form ? formNames(owner.form) : []);
+  if (!ownerNames.size) return fields;
   const leftover = leftoverEditable(fields, observations);
   const extra: InputFormField[] = [];
   const taken = new Set(fields.map(field => field.name));
   for (const observation of leftover) {
     const name = realFieldName(observation.name);
-    if (!name || taken.has(name) || PAGE_NAME.test(name)) continue;
+    if (!name || !ownerNames.has(name) || taken.has(name) || PAGE_NAME.test(name)) continue;
     if (fields.some(field => field.path === `$.${name}` || field.name === name)) continue;
     taken.add(name);
     extra.push({
@@ -1952,7 +2097,6 @@ export function owningFormEvent(
   const correlated = event.correlatedUiEvidenceId
     ? uiEvents.find(item => item.id === event.correlatedUiEvidenceId)
     : undefined;
-  if (correlated?.form?.length) return correlated;
   const at = Date.parse(event.at);
   const candidates = uiEvents
     .filter(item => item.sessionId === event.sessionId && Date.parse(item.at) <= at && Boolean(item.form?.length))
@@ -1968,13 +2112,16 @@ export function owningFormEvent(
     const union = named.length + requestNames.length - names;
     const jaccard = union > 0 ? names / union : 0;
     const recency = 1 / (1 + (at - Date.parse(item.at)) / 60_000);
-    const score = jaccard * 10 + values * 2 + recency * 0.1;
+    const extra = Math.max(0, named.length - names);
+    const write = /^(POST|PUT|PATCH|DELETE)$/i.test(event.request.method);
+    const dialogPenalty = !write && item.scope === "dialog" ? 8 : 0;
+    const score = jaccard * 10 + values * 2 + recency * 0.1 - extra * 2 - dialogPenalty;
     if (score > bestScore) {
       bestScore = score;
       best = item;
     }
   }
-  return best || (correlated?.form?.length ? correlated : candidates[0]);
+  return best || (correlated?.form?.length ? correlated : undefined);
 }
 
 function belongsToOwningForm(
@@ -2023,8 +2170,12 @@ function distinctiveRequestTokens(sample: unknown) {
 function eventMatchesRequest(item: UiEvidence, sample: unknown) {
   const tokens = distinctiveRequestTokens(sample);
   if (!tokens.size) return false;
-  const candidates = [item.name, item.value, item.text, ...(item.form || []).map(field => field.value)];
-  return candidates.some(value => value !== undefined && value !== null && value !== "" && tokens.has(String(value)));
+  const candidates = [item.name, item.value, item.text, item.label, ...(item.form || []).map(field => field.value)];
+  return candidates.some(value => {
+    if (value === undefined || value === null || value === "") return false;
+    if (tokens.has(String(value))) return true;
+    return String(value).split(/\s+/).some(token => tokens.has(token));
+  });
 }
 
 function formFitsRequest(form: NonNullable<UiEvidence["form"]>, sample: unknown) {

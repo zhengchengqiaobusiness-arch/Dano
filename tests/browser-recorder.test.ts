@@ -3769,6 +3769,478 @@ test("exercise-form reads an Ant searchable select from selection-item, not the 
   }
 });
 
+test("snapshot reads an Ant Vue searchable select when the item sits inside the search wrap", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-ant-wrap-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>领用申请管理</title></head><body>
+      <form>
+        <div class="ant-form-item">
+          <div class="ant-form-item-label"><label title="单据状态">单据状态</label></div>
+          <div class="ant-select ant-select-outlined ant-select-show-search">
+            <div class="ant-select-selector">
+              <span class="ant-select-selection-wrap">
+                <span class="ant-select-selection-search">
+                  <input class="ant-select-selection-search-input" role="combobox" type="search" name="processStatus" value="">
+                  <span class="ant-select-selection-item" title="未提交">未提交</span>
+                </span>
+                <span class="ant-select-selection-placeholder" style="visibility:hidden">请选择单据状态</span>
+              </span>
+            </div>
+            <span class="ant-select-arrow"><span class="anticon anticon-down ant-select-suffix"></span></span>
+          </div>
+        </div>
+      </form>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "ant-wrap");
+    const snap: any = await recorder.control({ action: "snapshot" });
+    const status = (snap.formFields || []).find((field: any) => field.label === "单据状态");
+    assert.equal(status?.filled, true, JSON.stringify({ status, fields: snap.formFields }));
+    assert.match(String(status?.value || ""), /未提交/);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exercise-form opens an Ant tree select that has titles but no treeitem roles", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-ant-tree-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>领用申请管理</title></head><body>
+      <form>
+        <div class="ant-form-item">
+          <div class="ant-form-item-label"><label>申请部门</label></div>
+          <div class="ant-select ant-tree-select ant-select-show-search" id="dept-host">
+            <div class="ant-select-selector">
+              <span class="ant-select-selection-wrap">
+                <span class="ant-select-selection-search">
+                  <input id="dept-input" class="ant-select-selection-search-input" role="combobox" type="search" name="deptId" value="">
+                </span>
+                <span class="ant-select-selection-item" id="dept-item"></span>
+                <span class="ant-select-selection-placeholder" id="dept-ph">请选择申请部门</span>
+              </span>
+            </div>
+          </div>
+        </div>
+        <button type="submit">查询</button>
+      </form>
+      <div class="ant-select-dropdown ant-tree-select-dropdown" id="dept-drop" hidden style="position:fixed;left:40px;top:80px;background:#fff;border:1px solid #ccc;z-index:50;padding:8px">
+        <div class="ant-select-tree">
+          <div class="ant-select-tree-treenode">
+            <span class="ant-select-tree-node-content-wrapper"><span class="ant-select-tree-title">研发中心</span></span>
+          </div>
+          <div class="ant-select-tree-treenode">
+            <span class="ant-select-tree-title">财务部</span>
+          </div>
+        </div>
+      </div>
+      <script>
+        const host = document.getElementById("dept-host");
+        const drop = document.getElementById("dept-drop");
+        const item = document.getElementById("dept-item");
+        const placeholder = document.getElementById("dept-ph");
+        const open = () => { drop.hidden = false; };
+        host.addEventListener("click", open);
+        drop.addEventListener("mousedown", event => {
+          const title = event.target.closest(".ant-select-tree-title");
+          if (!title) return;
+          item.textContent = title.textContent;
+          item.setAttribute("title", title.textContent);
+          placeholder.style.display = "none";
+          drop.hidden = true;
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "ant-tree");
+    const filled: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(filled.ok, true, JSON.stringify({ todo: filled.todoFields, failed: filled.failed, fields: filled.formFields }));
+    const dept = (filled.formFields || []).find((field: any) => field.label === "申请部门");
+    assert.match(String(dept?.value || ""), /研发中心|财务部/);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exercise-form expands 添加办公用品 and picks an Ant table chooser row", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-ant-add-row-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>领用申请</title></head><body>
+      <form>
+        <div class="ant-form-item">
+          <label>申请事由</label>
+          <textarea name="applyReason" placeholder="请输入申请事由"></textarea>
+        </div>
+        <h3 class="ant-card-head-title">领用明细</h3>
+        <button type="button" id="add-supply">添加办公用品</button>
+        <div id="lines"></div>
+        <button type="submit">提交</button>
+      </form>
+      <div class="ant-modal" role="dialog" id="pick" hidden style="position:fixed;left:40px;top:40px;background:#fff;border:1px solid #ccc;z-index:50;padding:16px">
+        <div class="ant-modal-title">选择办公用品</div>
+        <div class="ant-table" style="position:relative">
+          <div class="ant-table-header" style="position:absolute;left:0;top:72px;right:0;z-index:5;background:#fff;height:32px">
+            <table><thead class="ant-table-thead"><tr role="row">
+              <th class="ant-table-selection-column"><span class="ant-checkbox"></span></th>
+              <th>物品名称</th>
+            </tr></thead></table>
+          </div>
+          <div class="ant-table-body" style="padding-top:72px">
+            <table><tbody class="ant-table-tbody" id="tbody"></tbody></table>
+          </div>
+        </div>
+        <button type="button" id="ok">确 认</button>
+      </div>
+      <script>
+        const pick = document.getElementById("pick");
+        const lines = document.getElementById("lines");
+        const tbody = document.getElementById("tbody");
+        document.getElementById("add-supply").addEventListener("click", () => {
+          pick.hidden = false;
+          setTimeout(() => {
+            tbody.innerHTML = '<tr class="ant-table-row" role="row"><td><span class="ant-checkbox"><input type="checkbox" id="item-pen"></span></td><td>笔</td></tr>';
+          }, 800);
+        });
+        document.getElementById("ok").addEventListener("click", () => {
+          if (!document.getElementById("item-pen")?.checked) return;
+          lines.innerHTML = '<div class="ant-form-item"><label>数量</label><input name="qty" value=""></div>';
+          pick.hidden = true;
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "ant-add-row");
+    const filled: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(filled.ok, true, JSON.stringify({ todo: filled.todoFields, failed: filled.failed, fields: filled.formFields }));
+    const qty = (filled.formFields || []).find((field: any) => field.label === "数量" || field.name === "qty");
+    assert.ok(qty, JSON.stringify(filled.formFields));
+    assert.equal(qty.filled, true, JSON.stringify(qty));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exercise-form does not treat list-page 新增办公用品 as a detail add-row", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-list-create-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>办公用品信息</title></head><body>
+      <form>
+        <div class="ant-form-item"><label>物品名称</label><input name="name" placeholder="请输入物品名称"></div>
+        <button type="button" id="search">搜 索</button>
+        <button type="button" id="create">新增办公用品</button>
+      </form>
+      <div id="dialog" hidden>
+        <div class="ant-form-item"><label>参考单价</label><input type="number" name="unitPrice" value="0"></div>
+      </div>
+      <script>
+        window.createClicks = 0;
+        document.getElementById("create").addEventListener("click", () => {
+          window.createClicks += 1;
+          document.getElementById("dialog").hidden = false;
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    const session = await recorder.start(`http://127.0.0.1:${address.port}/`, "list-create");
+    const filled: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(filled.ok, true, JSON.stringify({ todo: filled.todoFields, failed: filled.failed }));
+    await recorder.stop();
+    const events = await readJsonl<EvidenceEvent>(session.eventsFile);
+    const createClicks = events.filter(event => event.kind === "ui" && /新增办公用品/.test(String(event.text || event.label || "")));
+    assert.equal(createClicks.length, 0, JSON.stringify(createClicks));
+    const unitPrice = (filled.formFields || []).find((field: any) => field.label === "参考单价");
+    assert.equal(unitPrice, undefined, "list-page exercise must not open the create dialog");
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exercise-form picks a VXE checkbox cell and retries the next row after confirm fails", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-vxe-chooser-"));
+  const listRow = (name: string) => `<tr class="vxe-body--row"><td class="col--checkbox"><span class="vxe-cell--checkbox"><span class="vxe-checkbox--unchecked-icon"></span></span></td><td>${name}</td></tr>`;
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>领用申请</title></head><body>
+      <div id="kept-list" class="vxe-table">
+        <table class="vxe-table--body"><tbody>
+          ${["列表单据甲", "列表单据乙", "列表单据丙", "列表单据丁"].map(listRow).join("")}
+        </tbody></table>
+      </div>
+      <form>
+        <div class="ant-form-item">
+          <label>申请事由</label>
+          <textarea name="applyReason" placeholder="请输入申请事由"></textarea>
+        </div>
+        <h3 class="ant-card-head-title">领用明细</h3>
+        <button type="button" id="add-supply">添加办公用品</button>
+        <div id="lines"></div>
+        <button type="submit">提交</button>
+      </form>
+      <div class="ant-modal" role="dialog" id="pick" hidden style="position:fixed;left:40px;top:40px;background:#fff;border:1px solid #ccc;z-index:50;padding:16px">
+        <div class="ant-modal-title">选择办公用品</div>
+        <div class="vxe-table">
+          <div class="vxe-table--header-wrapper">
+            <table class="vxe-table--header"><thead><tr class="vxe-header--row"><th>物品名称</th></tr></thead></table>
+          </div>
+          <div class="vxe-table--body-wrapper">
+            <div class="vxe-table--body-inner-wrapper">
+              <table class="vxe-table--body">
+                <tbody>
+                  <tr class="vxe-body--row" data-stock="0">
+                    <td class="col--checkbox"><span class="vxe-cell--checkbox" onclick="document.querySelectorAll('#pick .vxe-cell--checkbox').forEach(el=>el.classList.remove('is--checked'));document.querySelectorAll('#pick .vxe-body--row').forEach(el=>el.classList.remove('row--checked'));this.classList.add('is--checked');this.closest('.vxe-body--row').classList.add('row--checked')"><span class="vxe-checkbox--unchecked-icon"></span></span></td>
+                    <td>打印机 借用品0</td>
+                  </tr>
+                  <tr class="vxe-body--row" data-stock="188">
+                    <td class="col--checkbox"><span class="vxe-cell--checkbox" onclick="document.querySelectorAll('#pick .vxe-cell--checkbox').forEach(el=>el.classList.remove('is--checked'));document.querySelectorAll('#pick .vxe-body--row').forEach(el=>el.classList.remove('row--checked'));this.classList.add('is--checked');this.closest('.vxe-body--row').classList.add('row--checked')"><span class="vxe-checkbox--unchecked-icon"></span></span></td>
+                    <td>笔</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <button type="button" id="ok">确 认</button>
+      </div>
+      <script>
+        const pick = document.getElementById("pick");
+        const lines = document.getElementById("lines");
+        document.getElementById("add-supply").addEventListener("click", () => { pick.hidden = false; });
+        document.getElementById("ok").addEventListener("click", () => {
+          const selected = pick.querySelector(".vxe-cell--checkbox.is--checked")?.closest(".vxe-body--row");
+          if (!selected || selected.getAttribute("data-stock") === "0") return;
+          lines.innerHTML = '<div class="ant-form-item"><label>数量</label><input name="qty" value=""></div>';
+          pick.hidden = true;
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "vxe-chooser");
+    const filled: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(filled.ok, true, JSON.stringify({ todo: filled.todoFields, failed: filled.failed, fields: filled.formFields }));
+    const qty = (filled.formFields || []).find((field: any) => field.label === "数量" || field.name === "qty");
+    assert.ok(qty, JSON.stringify(filled.formFields));
+    assert.equal(qty.filled, true, JSON.stringify(qty));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("click label= concatenated VXE row text checks the dialog row not the keep-alive list", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-vxe-row-label-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>领用申请</title></head><body>
+      <div id="kept-list" class="vxe-table">
+        <table class="vxe-table--body"><tbody>
+          <tr class="vxe-body--row"><td class="col--checkbox"><span class="vxe-cell--checkbox"></span></td><td>列表单据甲</td></tr>
+        </tbody></table>
+      </div>
+      <button type="button" id="add-supply">添加办公用品</button>
+      <div id="lines"></div>
+      <div class="ant-modal" role="dialog" id="pick" hidden style="position:fixed;left:40px;top:40px;background:#fff;border:1px solid #ccc;z-index:50;padding:16px">
+        <div class="ant-modal-title">选择办公用品</div>
+        <table class="vxe-table--body"><tbody>
+          <tr class="vxe-body--row" data-stock="0">
+            <td class="col--checkbox"><span class="vxe-cell--checkbox" onclick="document.querySelectorAll('#pick .vxe-cell--checkbox').forEach(el=>el.classList.remove('is--checked'));this.classList.add('is--checked')"><span class="vxe-checkbox--unchecked-icon"></span></span></td>
+            <td>打印机</td><td>借用品</td><td>0</td>
+          </tr>
+          <tr class="vxe-body--row" data-stock="188">
+            <td class="col--checkbox"><span class="vxe-cell--checkbox" id="pen-box" onclick="document.querySelectorAll('#pick .vxe-cell--checkbox').forEach(el=>el.classList.remove('is--checked'));this.classList.add('is--checked')"><span class="vxe-checkbox--unchecked-icon"></span></span></td>
+            <td>笔</td><td>消耗品</td><td>188</td>
+          </tr>
+        </tbody></table>
+        <button type="button" id="ok">确 认</button>
+      </div>
+      <script>
+        const pick = document.getElementById("pick");
+        document.getElementById("add-supply").addEventListener("click", () => { pick.hidden = false; });
+        document.getElementById("ok").addEventListener("click", () => {
+          const selected = pick.querySelector(".vxe-cell--checkbox.is--checked")?.closest(".vxe-body--row");
+          if (!selected || selected.getAttribute("data-stock") === "0") return;
+          document.getElementById("lines").innerHTML = '<div class="ant-form-item"><label>数量</label><input name="qty" value="1"></div>';
+          pick.hidden = true;
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "vxe-row-label");
+    await recorder.control({ action: "click", selector: 'role=button[name="添加办公用品"]' });
+    const missed: any = await recorder.control({ action: "click", selector: "label=打印机 借用品0" }).catch((error: Error) => ({ ok: false, error: error.message }));
+    assert.equal(missed.ok, true, JSON.stringify(missed));
+    const picked: any = await recorder.control({ action: "click", selector: "label=笔" });
+    assert.equal(picked.ok, true, JSON.stringify(picked));
+    await recorder.control({ action: "click", selector: 'role=button[name="确 认"]' });
+    const snapshot: any = await recorder.control({ action: "snapshot" });
+    const qty = (snapshot.formFields || []).find((field: any) => field.label === "数量" || field.name === "qty");
+    assert.ok(qty, JSON.stringify(snapshot.formFields));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("click .vxe-checkbox aliases the widget and manual click keeps the row label", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-vxe-alias-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>领用申请</title></head><body>
+      <button type="button" id="add-supply">添加办公用品</button>
+      <div id="lines"></div>
+      <div class="ant-modal" role="dialog" id="pick" hidden style="position:fixed;left:0;top:0;width:640px;height:320px;background:#fff;z-index:50;padding:16px">
+        <div class="ant-modal-title">选择办公用品</div>
+        <table class="vxe-table--body"><tbody>
+          <tr class="vxe-body--row" data-stock="188">
+            <td class="col--checkbox">
+              <span class="vxe-cell--checkbox" style="position:absolute;left:80px;top:80px;width:24px;height:24px;display:inline-block"
+                onclick="if(event.target.tagName==='INPUT')return;this.classList.add('is--checked')">
+                <input type="checkbox" onclick="event.stopPropagation()">
+                <span class="vxe-checkbox--icon vxe-table-icon-checkbox-unchecked"></span>
+              </span>
+            </td>
+            <td>笔</td><td>消耗品</td><td>188</td>
+          </tr>
+        </tbody></table>
+        <button type="button" id="ok" style="position:absolute;left:200px;top:200px">确 认</button>
+      </div>
+      <script>
+        const pick = document.getElementById("pick");
+        document.getElementById("add-supply").addEventListener("click", () => { pick.hidden = false; });
+        document.getElementById("ok").addEventListener("click", () => {
+          const selected = pick.querySelector(".vxe-cell--checkbox.is--checked")?.closest(".vxe-body--row");
+          if (!selected) return;
+          document.getElementById("lines").innerHTML = '<div class="ant-form-item"><label>数量</label><input name="qty" value="1"></div>';
+          pick.hidden = true;
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: temporary,
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "vxe-alias");
+    await recorder.control({ action: "click", selector: 'role=button[name="添加办公用品"]' });
+    const aliased: any = await recorder.control({ action: "click", selector: ".vxe-checkbox" });
+    assert.equal(aliased.ok, true, JSON.stringify(aliased));
+    await recorder.control({ action: "click", selector: 'role=button[name="确 认"]' });
+    const snapshot: any = await recorder.control({ action: "snapshot" });
+    const qty = (snapshot.formFields || []).find((field: any) => field.label === "数量" || field.name === "qty");
+    assert.ok(qty, JSON.stringify(snapshot.formFields));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 function parseFieldInstant(value?: string) {
   const text = String(value || "");
   const match = text.match(/(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}(?::\d{2})?))?/);

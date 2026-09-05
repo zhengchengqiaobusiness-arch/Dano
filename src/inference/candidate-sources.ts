@@ -81,6 +81,13 @@ export function isLookupListPath(pathTemplate: string) {
     || /simple-list|dict-data|\/enum(?:\/|$)/i.test(path);
 }
 
+function isChooserResourceList(pathTemplate: string) {
+  const path = pathTemplate || "";
+  return /\/(?:page|list)$/i.test(path)
+    && !isLookupListPath(path)
+    && !/process-instance|process-definition|notify-message|unread-count/i.test(path);
+}
+
 function triggeredByField(field: InputFormField, capability: CapabilityContract, events: EvidenceEvent[]) {
   return triggerLabels(capability, events).has(field.label);
 }
@@ -136,7 +143,10 @@ function lookupFor(field: InputFormField, catalog: CapabilityContract[], events:
     item.operation === "query"
     && Boolean(listPaths(item.outputSchema))
   );
-  const lookups = lists.filter(item => isLookupListPath(item.transport.pathTemplate || ""));
+  const lookups = lists.filter(item =>
+    isLookupListPath(item.transport.pathTemplate || "")
+    || isChooserResourceList(item.transport.pathTemplate || "")
+  );
   const byTrigger = events.length
     ? lists.filter(item => {
       if (!triggeredByField(field, item, events)) return false;

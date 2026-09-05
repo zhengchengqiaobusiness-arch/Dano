@@ -2,7 +2,7 @@ import type { CapabilityContract, EvidenceEvent } from "../domain.js";
 import { ASK_KEY } from "./heuristics.js";
 import { isPaginationField, pickerEntity } from "./field-resolver.js";
 
-const NOISE_PATH = /\/im\/|notify-message|unread-count|online-status|get-permission-info|captcha|tenant\/get-by-website|tenant\/get-id-by-name|\/user\/get-current$|\/auth\/login|\/auth\/logout/i;
+const NOISE_PATH = /\/im\/|notify-message|unread-count|online-status|get-permission-info|captcha|tenant\/get-by-website|tenant\/get-id-by-name|\/user\/get-current$|\/auth\/login|\/auth\/logout|process-instance|process-definition/i;
 
 export function isNoiseCapability(capability: CapabilityContract) {
   if (capability.operation === "authenticate") return true;
