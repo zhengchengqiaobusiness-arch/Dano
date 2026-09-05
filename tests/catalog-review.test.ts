@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { CapabilityContract, EvidenceEvent } from "../src/domain.js";
 import { capabilitiesForSession, isPrimaryCapability, sessionCatalogSlice, summarizeCatalog } from "../src/inference/export-scope.js";
 import { reviewCatalog } from "../src/review/catalog-review.js";
+import { applyReviewActionPolicy, isMajorEvidenceGap } from "../src/review/review-action.js";
 import { mergeCatalogByTransport } from "../src/catalog/normalize.js";
 import { finalizeSessionSlice } from "../src/inference/finalize-capabilities.js";
 import { validateCapability } from "../src/validation/validator.js";
@@ -71,7 +72,7 @@ test("unexplained write field blocks export and asks for re-analyze", () => {
   assert.equal(review.status, "blocked");
   assert.equal(review.next, "re-analyze");
   assert.match(review.summary, /审核未通过/);
-  assert.match(review.summary, /只验证一次|禁止发现一条/);
+  assert.match(review.summary, /不要进入补录循环|不要对同一审核结果再分析或再录/);
   assert.match(review.summary, /单位/);
 });
 
@@ -404,4 +405,71 @@ test("finalize drops candidate sources that are not in this session slice", () =
   }];
   const [next] = finalizeSessionSlice([query], events, [query]);
   assert.equal(next?.inputForm.find(item => item.name === "deptId")?.candidates, undefined);
+});
+
+test("lookup evidence gaps remapped to re-analyze when primary writes already succeeded", () => {
+  const query = cap({
+    id: "query-doc",
+    operation: "query",
+    title: "查询单据",
+    transport: { method: "GET", urlTemplate: "https://x/oa/doc/page", origin: "https://x", pathTemplate: "/oa/doc/page" }
+  });
+  const create = cap({
+    id: "create-doc",
+    operation: "create",
+    title: "新建单据",
+    transport: { method: "POST", urlTemplate: "https://x/oa/doc/submit", origin: "https://x", pathTemplate: "/oa/doc/submit" },
+    inputForm: [{
+      path: "$.deptId", name: "deptId", label: "申请部门", valueType: "string", source: "caller",
+      required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面", widget: "select",
+      candidates: { type: "capability", capabilityId: "query-dept", valuePath: "$.data[*].id", labelPath: "$.data[*].name" }
+    }]
+  });
+  const dept = cap({
+    id: "query-dept",
+    operation: "query",
+    title: "查询部门",
+    transport: { method: "GET", urlTemplate: "https://x/system/dept/list", origin: "https://x", pathTemplate: "/system/dept/list" },
+    validation: {
+      version: 2,
+      status: "candidate",
+      checks: [{ name: "recorded-network-evidence", ok: false, detail: "No recorded network evidence" }]
+    }
+  });
+  const review = reviewCatalog([query, create, dept]);
+  const leftover = review.findings.find(item => item.capabilityId === "query-dept" && item.code === "recorded-network-evidence");
+  assert.ok(leftover, review.summary);
+  assert.equal(leftover.next, "re-analyze");
+  assert.equal(review.next, "re-analyze");
+  assert.match(review.summary, /不要进入补录循环|不要重新录制/);
+  assert.equal(isMajorEvidenceGap(leftover, [query, create]), false);
+});
+
+test("applyReviewActionPolicy keeps major primary gaps on re-record", () => {
+  const create = cap({
+    id: "create-doc",
+    operation: "create",
+    transport: { method: "POST", urlTemplate: "https://x/oa/doc/submit", origin: "https://x", pathTemplate: "/oa/doc/submit" }
+  });
+  const [kept] = applyReviewActionPolicy([{
+    code: "successful-response",
+    severity: "block",
+    stage: "record",
+    next: "re-record",
+    capabilityId: "create-doc",
+    capabilityTitle: "新建单据",
+    message: "No successful recorded response"
+  }], [create]);
+  assert.equal(kept?.next, "re-record");
+  const [remapped] = applyReviewActionPolicy([{
+    code: "recorded-network-evidence",
+    severity: "block",
+    stage: "record",
+    next: "re-record",
+    capabilityId: "query-dept",
+    capabilityTitle: "查询部门",
+    message: "No recorded network evidence"
+  }], [create]);
+  assert.equal(remapped?.next, "re-analyze");
+  assert.match(remapped?.message || "", /不要重新录制/);
 });

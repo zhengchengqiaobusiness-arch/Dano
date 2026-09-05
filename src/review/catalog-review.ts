@@ -4,6 +4,7 @@ import { queryCandidateForField } from "../inference/candidate-sources.js";
 import { flattenRequestValues, isPaginationField, looksPickerField } from "../inference/field-resolver.js";
 import { capabilitiesForSession, isCandidateSourceCapability, isNoiseCapability, sessionCatalogSlice, summarizeCatalog } from "../inference/export-scope.js";
 import { inferUiOperationIntent, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
+import { applyReviewActionPolicy } from "./review-action.js";
 
 const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload", "action"]);
 const OPERATION_LABEL: Partial<Record<OperationKind, string>> = {
@@ -20,7 +21,7 @@ const OPERATION_LABEL: Partial<Record<OperationKind, string>> = {
 const NEXT_RANK: Record<ReviewNext, number> = { "re-record": 0, "re-analyze": 1, manual: 2, export: 3 };
 const NEXT_LABEL: Record<ReviewNext, string> = {
   "re-record": "回到页面补录",
-  "re-analyze": "补证据后重新分析再验证",
+  "re-analyze": "根据已有成功证据重新分析再验证，不要重新录制",
   manual: "需要人工改目录或平台后再验证",
   export: "可以导出"
 };
@@ -31,7 +32,7 @@ const CHECK_GUIDANCE: Record<string, { stage: ReviewStage; next: ReviewNext; hin
   "recorded-network-evidence": { stage: "record", next: "re-record", hint: "回到页面重新操作，直到该请求出现在本次录制里" },
   "successful-response": { stage: "record", next: "re-record", hint: "回到页面提交到成功，不要在失败或弹窗未关时停止" },
   "write-ui-correlation": { stage: "record", next: "re-record", hint: "写操作必须点页面按钮提交，不要只抓到后台请求" },
-  "caller-fields-backed-by-ui": { stage: "record", next: "re-record", hint: "把该字段在页面上填一遍或选出选项，再分析" },
+  "caller-fields-backed-by-ui": { stage: "analyze", next: "re-analyze", hint: "按本次成功请求重新划分字段来源，不要为了对字段再录一遍" },
   "transport-consistency": { stage: "analyze", next: "re-analyze", hint: "只分析本次录制，不要混进其它会话" },
   "completion-assertions-backed-by-evidence": { stage: "analyze", next: "re-analyze", hint: "完成条件必须来自成功响应，重新分析" },
   "known-operation": { stage: "analyze", next: "re-analyze", hint: "重新识别操作类型；对不上就停，不要猜" },
@@ -178,10 +179,10 @@ export function reviewCatalog(
 ): ReviewReport {
   const { primary, lookups } = summarizeCatalog(capabilities);
   const neededLookups = lookups.filter(item => isCandidateSourceCapability(item, capabilities) && !isNoiseCapability(item));
-  const findings: ReviewFinding[] = [];
+  const rawFindings: ReviewFinding[] = [];
 
   if (!primary.length) {
-    findings.push({
+    rawFindings.push({
       code: "no-primary-capability",
       severity: "block",
       stage: "analyze",
@@ -194,7 +195,7 @@ export function reviewCatalog(
   for (const operation of [...new Set(expectedOperations)].filter(item => item !== "unknown")) {
     if (actualOperations.has(operation)) continue;
     const label = OPERATION_LABEL[operation] || operation;
-    findings.push({
+    rawFindings.push({
       code: "missing-expected-operation",
       severity: "block",
       stage: "record",
@@ -207,7 +208,7 @@ export function reviewCatalog(
     for (const capability of primary) {
       for (const field of blankCompleteCoverageFields(capability, events)) {
         const label = String(field.label || field.name || "字段");
-        findings.push({
+        rawFindings.push({
           code: "complete-field-coverage",
           severity: "block",
           stage: "record",
@@ -219,7 +220,7 @@ export function reviewCatalog(
         });
       }
       for (const collection of emptyBusinessCollections(capability, events)) {
-        findings.push({
+        rawFindings.push({
           code: "complete-field-coverage",
           severity: "block",
           stage: "record",
@@ -235,7 +236,7 @@ export function reviewCatalog(
 
   for (const capability of [...primary, ...neededLookups]) {
     for (const binding of capability.bindings.filter(item => item.fromCapabilityId === capability.id)) {
-      findings.push({
+      rawFindings.push({
         code: "binding-structure-valid",
         severity: "block",
         stage: "analyze",
@@ -249,10 +250,10 @@ export function reviewCatalog(
     if (capability.validation.status === "verified") continue;
     const failed = capability.validation.checks.filter(check => !check.ok);
     if (failed.length) {
-      findings.push(...failed.map(check => findingFromCheck(capability, check)));
+      rawFindings.push(...failed.map(check => findingFromCheck(capability, check)));
       continue;
     }
-    findings.push({
+    rawFindings.push({
       code: "not-verified",
       severity: "block",
       stage: "validate",
@@ -265,10 +266,10 @@ export function reviewCatalog(
 
   for (const capability of primary.filter(item => WRITE_OPERATIONS.has(item.operation))) {
     for (const field of unresolvedWriteFields(capability)) {
-      if (findings.some(item => item.capabilityId === capability.id && item.code === "write-field-origins-resolved" && item.fieldPath === field.path)) {
+      if (rawFindings.some(item => item.capabilityId === capability.id && item.code === "write-field-origins-resolved" && item.fieldPath === field.path)) {
         continue;
       }
-      findings.push({
+      rawFindings.push({
         code: "write-field-origins-resolved",
         severity: "block",
         stage: "analyze",
@@ -281,7 +282,7 @@ export function reviewCatalog(
     }
     for (const field of unsoundFormulaFields(capability)) {
       const expr = parseComputedRule(field.defaultRule || "") || "";
-      findings.push({
+      rawFindings.push({
         code: "computed-formula-operands-sound",
         severity: "block",
         stage: "analyze",
@@ -293,7 +294,7 @@ export function reviewCatalog(
       });
     }
     for (const field of pickerFieldsMissingQuery(capability, capabilities, events)) {
-      findings.push({
+      rawFindings.push({
         code: "picker-uses-recorded-query",
         severity: "block",
         stage: "analyze",
@@ -305,7 +306,7 @@ export function reviewCatalog(
       });
     }
     for (const leaf of uncoveredWriteLeaves(capability, events)) {
-      findings.push({
+      rawFindings.push({
         code: "write-request-keys-covered",
         severity: "block",
         stage: "analyze",
@@ -318,19 +319,25 @@ export function reviewCatalog(
     }
   }
 
+  const findings = applyReviewActionPolicy(rawFindings, capabilities);
   const next = worstNext(findings);
   const verifiedPrimary = primary.filter(item => item.validation.status === "verified");
   const status = findings.length === 0 && verifiedPrimary.length === primary.length && primary.length > 0 ? "passed" : "blocked";
   const primaryTitles = primary.map(item => item.title);
   const lookupTitles = neededLookups.map(item => item.title);
+  const blockedLead = next === "re-record"
+    ? `审核未通过，不能导出。下一步：${NEXT_LABEL[next]}。仅当缺少要求的主操作或其成功响应、或全字段覆盖仍有可填写空字段/空明细时才开新录制。`
+    : `审核未通过，不能导出。下一步：${NEXT_LABEL[next]}。禁止为字段归属或候选查询再开一轮录制；不要进入补录循环，结果相同则停止。`;
   const lines = [
     status === "passed"
       ? `审核通过，可以导出。通过标准：本页主能力均已验证，写字段均有唯一来源规则，公式不用编号/枚举/时间戳做运算，选人暴露已录制查询，请求键均有着落，用到的候选查询可用。`
-      : `审核未通过，不能导出。下一步：${NEXT_LABEL[next]}。先收齐下面全部失败项，按阶段归堆后只补录一次、只分析一次、只验证一次；禁止发现一条就回头重验。`,
+      : blockedLead,
     `主能力 ${primary.length} 项${primaryTitles.length ? `（${primaryTitles.join("、")}）` : ""}；字段候选 ${neededLookups.length} 个${lookupTitles.length ? `（${lookupTitles.join("、")}）` : ""}。下拉、用户分页、IM、登录不是主能力。`
   ];
   if (findings.length) {
-    lines.push("处理顺序：先一次性处理全部补录项，再一次性重新分析，最后只验证一次。");
+    lines.push(next === "re-record"
+      ? "处理顺序：先补齐缺失的主操作成功证据，再分析一次、验证一次。"
+      : "处理顺序：不要补录。不要对同一审核结果再分析或再录；停止并报告本页未通过原因。");
     lines.push(...findings.map(item => `- ${item.capabilityTitle || item.code}：${item.message}`));
   }
   return {
