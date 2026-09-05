@@ -66,6 +66,33 @@ def _plan():  # noqa: ANN202
     return spec, plan
 
 
+def test_then_in_plain_chinese_is_order_not_an_unknown_action() -> None:
+    spec = FlowSpec(capabilities=[
+        _cap("stats", "查询工作汇报统计", "query"),
+        _cap("search", "搜索工作日报列表", "query"),
+        _cap("create", "新增并提交工作日报", "submit"),
+    ])
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="日报填写",
+            planning_mode=PlanningMode.DYNAMIC,
+            business_description="先查询工作汇报统计，然后根据返回进行新增",
+        ),
+        {"stats", "search", "create"},
+        "then-connector",
+    )
+    questions = " ".join(plan.clarification_questions)
+    leftovers = " ".join(
+        item
+        for branch in plan.intent_branches
+        for item in branch.unresolved
+    )
+    assert "「然」" not in questions
+    assert "「然」" not in leftovers
+    assert any(route.capability_sequence == ["stats", "create"] for route in plan.routes)
+
+
 def test_all_described_branches_compile_or_stop_for_clarification() -> None:
     spec, plan = _plan()
 

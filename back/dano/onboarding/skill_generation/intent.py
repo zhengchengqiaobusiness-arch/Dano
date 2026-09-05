@@ -16,9 +16,12 @@ from dano.onboarding.skill_generation.models import IntentBranch, SkillGeneratio
 
 _SEQ_SPLIT = re.compile(r"[；;。.!？?\n]+")
 _LIST_SPLIT = re.compile(r"或者|或是|以及|和|[、,/]|或")
+_AFTER_NOT_THEN = r"(?<!然)(?<!之)(?<!随)后"
 _ORDER_PATTERNS = (
     re.compile(r"先(?P<left>.+?)再(?:对选中的[^做]*做)?(?P<right>.+)"),
-    re.compile(r"先(?P<left>.+?)后(?:再)?(?P<right>.+)"),
+    re.compile(r"先(?P<left>.+?)然后(?P<right>.+)"),
+    re.compile(r"先(?P<left>.+?)之后(?P<right>.+)"),
+    re.compile(rf"先(?P<left>.+?){_AFTER_NOT_THEN}(?:再)?(?P<right>.+)"),
     re.compile(r"完成(?P<left>.+?)方可(?P<right>.+)"),
     re.compile(r"(?P<left>.+?)优先[，,、\s]*(?P<right>.+?)其次"),
     re.compile(r"(?P<left>.+?)在前[，,、\s]*(?P<right>.+?)在后"),
@@ -38,7 +41,7 @@ _ORDER_PATTERNS = (
     re.compile(
         r"(?P<left>.+?)(?:完成|完毕|做完|完了)(?:后|了)?(?:就|再|立即|马上|紧接着|帮我)?(?P<right>.+)"
     ),
-    re.compile(r"(?P<left>查询|查看|搜索|筛选|查出).{0,6}后(?:再)?(?P<right>.+)"),
+    re.compile(rf"(?P<left>查询|查看|搜索|筛选|查出).{{0,6}}{_AFTER_NOT_THEN}(?:再)?(?P<right>.+)"),
     re.compile(r"(?P<left>查询|查看|搜索|筛选|查出).{0,8}再(?P<right>.+)"),
 )
 _SEQUENCE_HINTS = (
@@ -100,6 +103,25 @@ _NARRATIVE_PHRASES = (
     "统计存档",
     "统计归档",
 )
+_CLAUSE_GLUE = (
+    "根据返回",
+    "根据结果",
+    "根据",
+    "返回",
+    "结果",
+    "进行",
+    "办理",
+    "操作",
+    "然后",
+    "之后",
+    "随后",
+    "接着",
+    "接下来",
+    "再",
+    "后",
+    "并",
+)
+_CONNECTOR_FRAGMENTS = "然之随接"
 
 
 def _cap_title(cap: FlowCapability) -> str:
@@ -186,6 +208,18 @@ def _parts(text: str) -> list[str]:
     return [item.strip() for item in _LIST_SPLIT.split(text) if item and item.strip()]
 
 
+def _is_clause_noise(part: str) -> bool:
+    """Connectors and leftover fragments like「然」are not page operations."""
+    compact = re.sub(r"[\s，,。.!？?、；;：:]+", "", str(part or "")).strip()
+    if not compact:
+        return True
+    rest = compact
+    for word in sorted(_CLAUSE_GLUE, key=len, reverse=True):
+        rest = rest.replace(word, "")
+    rest = re.sub(f"[{_CONNECTOR_FRAGMENTS}]", "", rest)
+    return not rest
+
+
 def _match_alternatives(text: str, caps: list[FlowCapability]) -> tuple[list[FlowCapability], list[str]]:
     """Parse a parallel list into capabilities. Unmapped items become clarifications."""
     raw = str(text or "").strip()
@@ -198,6 +232,8 @@ def _match_alternatives(text: str, caps: list[FlowCapability]) -> tuple[list[Flo
         hits = _match_caps(part, caps) or _match_prefix_aliases(part, caps)
         if hits:
             found.extend(hits)
+            continue
+        if _is_clause_noise(part):
             continue
         unresolved.append(part)
     return _unique_caps(found), unresolved
@@ -391,6 +427,8 @@ def _expand_order(
         ]
     if not left or not right:
         missing = left_text.strip() if not left else right_text.strip()
+        if _is_clause_noise(missing):
+            return [], []
         return [], [f"无法把「{missing}」映射到当前页面已有操作，请改用已有动作或补充说明"]
     sequences: list[list[FlowCapability]] = []
     for start in left:
@@ -449,16 +487,28 @@ def _sentence_orders(
             if len(_match_caps(raw, caps)) < 2:
                 continue
         matched = False
+        fallback_sequences: list[list[FlowCapability]] = []
+        fallback_problems: list[str] = []
         for pattern in _ORDER_PATTERNS:
             match = pattern.search(raw)
             if not match:
                 continue
             sequences, problems = _expand_order(match.group("left"), match.group("right"), caps)
-            unresolved.extend(problems)
-            found.extend(sequences)
-            matched = True
-            break
+            if sequences and not problems:
+                found.extend(sequences)
+                matched = True
+                break
+            if sequences and not fallback_sequences:
+                fallback_sequences = sequences
+            if problems and not fallback_problems:
+                fallback_problems = problems
         if matched:
+            continue
+        if fallback_sequences:
+            found.extend(fallback_sequences)
+            continue
+        if fallback_problems:
+            unresolved.extend(fallback_problems)
             continue
         mention_orders = _orders_from_mentions(raw, caps)
         found.extend(mention_orders or _narrative_lookup_orders(raw, caps))
