@@ -346,6 +346,15 @@ def _is_dynamic_array_input(param: ParamField) -> bool:
     )
 
 
+def _recorded_item_json_type(value: Any) -> str:
+    """Use the recorded Python type. Do not treat digit strings as numbers."""
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    return "string"
+
+
 def _object_array_item_schema_from_value(
     param: ParamField,
     *,
@@ -361,13 +370,13 @@ def _object_array_item_schema_from_value(
     item_params: list[ParamField] = []
     for key in caller_keys:
         sample = next((row.get(key) for row in rows if key in row), None)
-        required = any(key in row and row.get(key) not in (None, "") for row in rows)
+        required = all(key in row and row.get(key) not in (None, "") for row in rows)
         item_params.append(ParamField(
             path=key,
             key=key,
             label=key,
             value=copy.deepcopy(sample),
-            type=_infer_type_from_value(sample) or "string",
+            type=_recorded_item_json_type(sample),
             required=required,
             category="user_param",
             source_kind="user_input",
@@ -874,6 +883,30 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
     _normalize_capability_references(spec)
     _normalize_actionable_placeholder_param_names(spec)
 
+    def overlay_human_titles(derived: dict[str, Any], previous: dict[str, Any], name: str) -> dict[str, Any]:
+        """Keep capability-authored titles when rebuild only has machine keys."""
+        out = dict(derived)
+        previous_title = str(previous.get("title") or previous.get("label") or "").strip()
+        derived_title = str(out.get("title") or out.get("label") or "").strip()
+        if previous_title and (not derived_title or derived_title == name):
+            out["title"] = previous_title
+            if not out.get("label") or out.get("label") == name:
+                out["label"] = previous_title
+        derived_items = out.get("items")
+        previous_items = previous.get("items")
+        if isinstance(derived_items, dict) and isinstance(previous_items, dict):
+            merged_items = overlay_human_titles(derived_items, previous_items, "items")
+            derived_props = merged_items.get("properties")
+            previous_props = previous_items.get("properties")
+            if isinstance(derived_props, dict) and isinstance(previous_props, dict):
+                merged_items["properties"] = {
+                    key: overlay_human_titles(value, previous_props.get(key) or {}, key)
+                    if isinstance(value, dict) else value
+                    for key, value in derived_props.items()
+                }
+            out["items"] = merged_items
+        return out
+
     def reconcile_schema(derived: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
         """当前有效字段是契约真相；仅保留仍存在字段上的人工说明等扩展。"""
         derived = dict(derived or {"type": "object", "properties": {}, "required": []})
@@ -904,7 +937,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
                     and key not in field_schema
                     and previous.get("x-dano-derived-from-query") is not True
                 }
-                props[name] = {**annotations, **field_schema}
+                props[name] = overlay_human_titles({**annotations, **field_schema}, previous, name)
             else:
                 props[name] = field_schema
         for name, field_schema in current_props.items():

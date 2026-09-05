@@ -133,6 +133,16 @@ def _infer_array_item_system_rules(
         if all(value == index or value == str(index) for index, value in enumerate(values)):
             rules.append({"key": key, "strategy": "index"})
             continue
+        if owned and _is_index_within_presence(rows, key, owned):
+            rules.append({"key": key, "strategy": "index_within_presence"})
+            continue
+        if (
+            _looks_row_system_leaf(key)
+            and len(values) == len(set(map(_stable_cell, values)))
+            and not all(isinstance(value, (int, float)) and not isinstance(value, bool) and value in {0, 1, 2} for value in values)
+        ):
+            rules.append({"key": key, "strategy": "uuid"})
+            continue
         encoded = {json.dumps(value, ensure_ascii=False, sort_keys=True, default=str) for value in values}
         if len(encoded) == 1:
             rules.append({"key": key, "strategy": "constant", "value": values[0]})
@@ -141,6 +151,29 @@ def _infer_array_item_system_rules(
         if cases:
             rules.append({"key": key, "strategy": "caller_presence", "cases": cases})
     return rules
+
+
+def _stable_cell(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _is_index_within_presence(
+    rows: list[dict[str, Any]],
+    key: str,
+    caller_keys: list[str],
+) -> bool:
+    grouped: dict[tuple[tuple[str, str], ...], list[Any]] = {}
+    for row in rows:
+        grouped.setdefault(_presence_signature(row, caller_keys), []).append(row.get(key))
+    if len(grouped) < 2:
+        return False
+    saw_increment = False
+    for values in grouped.values():
+        if not all(value == index or value == str(index) for index, value in enumerate(values)):
+            return False
+        if len(values) >= 2:
+            saw_increment = True
+    return saw_increment
 
 
 def _promote_recorded_object_array_params(step: FlowStep) -> None:

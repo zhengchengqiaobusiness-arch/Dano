@@ -15,6 +15,8 @@ import logging
 import re as _re
 from urllib.parse import parse_qsl, quote, urlencode, unquote, urlparse, urlunparse
 
+import httpx
+
 from dano.execution.page.wire_format import apply_wire_formats, date_span_days
 from dano.execution.page.recording_field_selection import select_field_contract_evidence
 
@@ -2941,64 +2943,205 @@ _CURRENT_USER_PROFILE_KEYS = {
     "companyid": ("companyId", "company.id", "user.companyId"),
     "companyname": ("companyName", "company.name", "user.companyName"),
 }
+_IDENTITY_STORAGE_SKIP = (
+    "preference", "theme", "locale", "copyright", "widget", "breadcrumb",
+    "tabbar", "sidebar", "shortcut", "search-history", "remember_me", "hm_lvt",
+)
+_IDENTITY_PROBE_PATH_HINTS = (
+    "get-permission-info",
+    "get-info",
+    "/getinfo",
+    "user/profile",
+    "current-user",
+    "currentuser",
+    "user/info",
+)
+_IDENTITY_PROBE_FALLBACKS = (
+    "/admin-api/system/auth/get-permission-info",
+    "/system/auth/get-permission-info",
+    "/admin-api/system/user/profile/get",
+    "/system/user/profile/get",
+    "/api/user/profile",
+    "/getInfo",
+    "/api/getInfo",
+)
+_LIVE_USER_PROFILE: dict[str, Any] | None = None
+_LIVE_USER_PROFILE_READY = False
 
 
-def _session_identity_profile(storage_state: dict | None) -> dict[str, Any]:
-    """Flatten session JSON so current-user fields can be resolved by name."""
+def _normalized_identity_keys(node: dict) -> set[str]:
+    return {_re.sub(r"[^a-z0-9]+", "", str(name).lower()) for name in node}
+
+
+def _looks_user_record(node: Any) -> bool:
+    """JSON that carries a person/org identity, not app branding or preferences."""
+    if not isinstance(node, dict):
+        return False
+    nested = node.get("user")
+    if isinstance(nested, dict) and _looks_user_record(nested):
+        return True
+    keys = _normalized_identity_keys(node)
+    has_id = bool(keys & {"id", "userid", "uid"})
+    has_name = bool(keys & {"nickname", "username", "realname"})
+    has_org = bool(keys & {"deptid", "departmentid", "dept", "companyid"})
+    return has_id and (has_name or has_org)
+
+
+def _unwrap_storage_json(node: Any) -> Any:
+    if isinstance(node, dict) and set(node) <= {"value"} and isinstance(node.get("value"), (dict, list)):
+        return node["value"]
+    return node
+
+
+def _skip_identity_storage_name(name: str) -> bool:
+    folded = str(name or "").casefold()
+    return any(hint in folded for hint in _IDENTITY_STORAGE_SKIP)
+
+
+def _flatten_identity_node(node: Any) -> dict[str, Any]:
     profile: dict[str, Any] = {}
-    if not storage_state:
-        return profile
 
     def put(key: str, value: Any) -> None:
         if value in (None, "") or key in profile:
             return
         profile[key] = value
 
-    def walk(node: Any, prefix: str) -> None:
-        if isinstance(node, dict):
-            for name, value in node.items():
+    def walk(current: Any, prefix: str) -> None:
+        if isinstance(current, dict):
+            for name, value in current.items():
                 path = f"{prefix}.{name}" if prefix else str(name)
                 put(path, value)
                 put(str(name), value)
                 walk(value, path)
-        elif isinstance(node, list):
-            for index, value in enumerate(node):
+        elif isinstance(current, list):
+            for index, value in enumerate(current):
                 walk(value, f"{prefix}[{index}]")
+
+    walk(node, "")
+    return profile
+
+
+def _session_identity_profile(storage_state: dict | None) -> dict[str, Any]:
+    """Flatten trusted session identity JSON. Ignore branding and ciphertext."""
+    profile: dict[str, Any] = {}
+    if not storage_state:
+        return profile
+
+    for key in ("identity", "profile", "user"):
+        blob = storage_state.get(key)
+        if _looks_user_record(blob) or (isinstance(blob, dict) and blob):
+            for name, value in _flatten_identity_node(blob).items():
+                profile.setdefault(name, value)
 
     for origin in storage_state.get("origins") or []:
         for item in origin.get("localStorage") or []:
             name = str(item.get("name") or "")
             raw = item.get("value", "")
-            if not name:
+            if not name or _skip_identity_storage_name(name):
                 continue
             try:
-                parsed = json.loads(raw)
+                parsed = _unwrap_storage_json(json.loads(raw))
             except Exception:  # noqa: BLE001
-                put(name, raw)
-                put(f"localStorage:{name}", raw)
                 continue
-            walk(parsed, name)
-            walk(parsed, "")
+            if not _looks_user_record(parsed):
+                continue
+            for key, value in _flatten_identity_node(parsed).items():
+                profile.setdefault(key, value)
     return profile
 
 
-def _resolve_current_user_profile(field: str, storage_state: dict | None):
-    profile = _session_identity_profile(storage_state)
+def _lookup_identity_field(profile: dict[str, Any], field: str):
     leaf = _re.sub(r"[^a-z0-9]+", "", str(field or "").lower())
-    candidates = (str(field or ""), *( _CURRENT_USER_PROFILE_KEYS.get(leaf) or () ))
-    for candidate in candidates:
+    for candidate in (str(field or ""), *(_CURRENT_USER_PROFILE_KEYS.get(leaf) or ())):
         if candidate in profile and profile[candidate] not in (None, ""):
             return profile[candidate]
     return None
 
 
-def resolve_identity_value(source: str, storage_state: dict | None, auth_headers: dict | None = None):
+def _profile_from_user_payload(data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    for candidate in (data.get("data"), data.get("user"), data):
+        if not isinstance(candidate, dict):
+            continue
+        if _looks_user_record(candidate):
+            return _flatten_identity_node(candidate)
+    return {}
+
+
+def _live_identity_profile(
+    auth_headers: dict | None,
+    probes: list[str] | None = None,
+    base_url: str = "",
+) -> dict[str, Any]:
+    """Resolve the current login user from a live user-info API, not a recording sample."""
+    global _LIVE_USER_PROFILE, _LIVE_USER_PROFILE_READY
+    if _LIVE_USER_PROFILE_READY:
+        return _LIVE_USER_PROFILE or {}
+    urls = [str(item) for item in (probes or []) if str(item)]
+    root = str(base_url or "").rstrip("/")
+    if not urls and root:
+        urls = [f"{root}{path}" for path in _IDENTITY_PROBE_FALLBACKS]
+    profile: dict[str, Any] = {}
+    if not urls or not auth_headers:
+        _LIVE_USER_PROFILE = profile
+        _LIVE_USER_PROFILE_READY = True
+        return profile
+
+    for url in urls:
+        try:
+            response = httpx.get(url, headers=auth_headers, timeout=15)
+        except Exception:  # noqa: BLE001
+            continue
+        if not response.is_success:
+            continue
+        try:
+            payload = response.json()
+        except Exception:  # noqa: BLE001
+            continue
+        extracted = _profile_from_user_payload(payload)
+        if extracted:
+            _LIVE_USER_PROFILE = extracted
+            _LIVE_USER_PROFILE_READY = True
+            return extracted
+    _LIVE_USER_PROFILE = profile
+    _LIVE_USER_PROFILE_READY = True
+    return profile
+
+
+def _resolve_current_user_profile(
+    field: str,
+    storage_state: dict | None,
+    auth_headers: dict | None = None,
+    probes: list[str] | None = None,
+    base_url: str = "",
+):
+    value = _lookup_identity_field(_session_identity_profile(storage_state), field)
+    if value is not None:
+        return value
+    return _lookup_identity_field(
+        _live_identity_profile(
+            auth_headers,
+            probes or list((storage_state or {}).get("identity_probes") or []),
+            base_url,
+        ),
+        field,
+    )
+
+
+def resolve_identity_value(
+    source: str,
+    storage_state: dict | None,
+    auth_headers: dict | None = None,
+    probes: list[str] | None = None,
+    base_url: str = "",
+):
     """从登录态按 source 取"当前用户/会话值"。source 形如 localStorage:userInfo.userId / cookie:JSESSIONID。"""
     if not source:
         return None
     kind, _, rest = source.partition(":")
     if kind == "current_user":
-        return _resolve_current_user_profile(rest, storage_state)
+        return _resolve_current_user_profile(rest, storage_state, auth_headers, probes, base_url)
     if kind == "requestHeader":
         for k, v in (auth_headers or {}).items():
             if str(k).lower() == rest.lower():
@@ -3037,7 +3180,13 @@ def _apply_identity(body, api_request: dict, storage_state: dict | None) -> list
         source = str(idn.get("source") or "")
         if not source and (idn.get("kind") == "current_user" or idn.get("key")):
             source = f"current_user:{idn.get('key') or idn.get('path') or ''}"
-        val = resolve_identity_value(source, storage_state, api_request.get("auth_headers"))
+        val = resolve_identity_value(
+            source,
+            storage_state,
+            api_request.get("auth_headers"),
+            list(api_request.get("identity_probes") or []),
+            str(api_request.get("base_url") or ""),
+        )
         path = idn.get("tokens") or idn.get("path", "")
         if val is not None:
             if not _set_by_path(body, path, val):
@@ -3062,7 +3211,7 @@ def _system_generated_value(kind: str):
     if kind == "now_s":
         return now_ms // 1000
     if kind == "now_iso":
-        return _datetime.now(_timezone.utc).isoformat()
+        return _datetime.now(_timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     if kind == "now_date":
         return _datetime.now(_timezone.utc).date().isoformat()
     if kind == "uuid":
@@ -4036,10 +4185,13 @@ def _looks_like_token_key(name: str) -> bool:
     return any(h in (name or "").lower() for h in _TOKEN_KEY_HINTS)
 
 
+_TOKEN_VALUE_RE = _re.compile(r"^[A-Za-z0-9._\-+/=]+$")
+
+
 def _token_like_value(v) -> bool:
-    """像登录令牌的值:较长的不透明字符串(JWT/雪花/uuid/satoken),排除短码/带空格。"""
+    """像登录令牌的值:较长的不透明字符串(JWT/雪花/uuid/satoken),排除短码/密文。"""
     s = str(v or "")
-    return len(s) >= 16 and " " not in s
+    return 16 <= len(s) <= 4096 and " " not in s and bool(_TOKEN_VALUE_RE.fullmatch(s))
 
 
 def _auth_headers(storage_state: dict | None, host: str, token_key: str | None = None) -> dict:

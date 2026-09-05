@@ -1509,6 +1509,24 @@ def _prefer_object_array_items(field: dict, other: dict) -> dict:
         packed["items"] = deepcopy(other["items"])
         if other.get("minItems") is not None:
             packed["minItems"] = other["minItems"]
+    if _array_items_are_objects(packed) and _array_items_are_objects(other):
+        packed_items = dict(packed.get("items") or {})
+        other_items = other.get("items") or {}
+        packed_props = dict(packed_items.get("properties") or {})
+        other_props = other_items.get("properties") if isinstance(other_items.get("properties"), dict) else {}
+        for key, node in list(packed_props.items()):
+            previous = other_props.get(key) or {}
+            if not isinstance(node, dict) or not isinstance(previous, dict):
+                continue
+            title = str(previous.get("title") or previous.get("label") or "").strip()
+            current = str(node.get("title") or node.get("label") or "").strip()
+            if title and (not current or current == key):
+                node = dict(node)
+                node["title"] = title
+                node["label"] = title
+                packed_props[key] = node
+        packed_items["properties"] = packed_props
+        packed["items"] = packed_items
     return packed
 
 
@@ -1530,6 +1548,31 @@ def _capability_spec_steps(spec, cap: dict) -> list[Any]:  # noqa: ANN001
     return [step for step in (spec.steps or []) if str(step.step_id) in step_ids]
 
 
+def _object_array_rows_from_step_body(spec, step, name: str) -> list[dict[str, Any]]:  # noqa: ANN001
+    from dano.execution.page.flow_materialization.field_contracts.dynamic_array import (
+        _recorded_object_rows,
+    )
+    from dano.execution.page.flow_spec_core.request_contract import (
+        _parsed_structured_body,
+        _request_fact_for_step,
+    )
+
+    candidates: list[Any] = []
+    parsed = _parsed_structured_body(getattr(step, "body_source", None), getattr(step, "content_type", "") or "")
+    if isinstance(parsed, dict):
+        candidates.append(parsed.get(name))
+    fact = _request_fact_for_step(spec, step)
+    if fact is not None:
+        parsed_fact = _parsed_structured_body(fact.post_data, fact.content_type)
+        if isinstance(parsed_fact, dict):
+            candidates.append(parsed_fact.get(name))
+    for value in candidates:
+        found = _recorded_object_rows(value)
+        if found:
+            return found
+    return []
+
+
 def _object_array_facts(spec, cap: dict, name: str) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:  # noqa: ANN001
     from dano.execution.page.flow_materialization.field_contracts.dynamic_array import (
         _caller_keys_for_object_rows,
@@ -1545,7 +1588,9 @@ def _object_array_facts(spec, cap: dict, name: str) -> tuple[list[dict[str, Any]
             path = str(param.path or "")
             if key != name and not path.endswith(f".{name}") and path != name and path != f"body.{name}":
                 continue
-            found = _recorded_object_rows(param.value)
+            found = _recorded_object_rows(param.value) or _recorded_object_rows(param.default_value)
+            if not found:
+                found = _object_array_rows_from_step_body(spec, step, name)
             if found:
                 rows = found
                 containers = {
@@ -1562,6 +1607,11 @@ def _object_array_facts(spec, cap: dict, name: str) -> tuple[list[dict[str, Any]
                 break
         if rows:
             break
+    if not rows:
+        for step in _capability_spec_steps(spec, cap):
+            rows = _object_array_rows_from_step_body(spec, step, name)
+            if rows:
+                break
     if not rows:
         return [], [], []
     caller_keys = _caller_keys_for_object_rows(rows, item_params)
@@ -1585,7 +1635,7 @@ def _hydrate_object_array_schema(schema: dict[str, Any], spec, cap: dict) -> dic
                 "boolean" if isinstance(sample, bool) else "string"
             )
             item_properties[key] = {"type": item_type, "title": key, "label": key}
-            if any(key in row and row.get(key) not in (None, "") for row in rows):
+            if all(key in row and row.get(key) not in (None, "") for row in rows):
                 required.append(key)
         field["items"] = {
             "type": "object",
@@ -1739,7 +1789,7 @@ def _attach_array_system_fields(step: dict, schema: dict, spec, cap: dict) -> li
         for item in fields
     }
     for name in body:
-        _rows, _caller, rules = _object_array_facts(spec, cap, str(name))
+        _rows, caller_keys, rules = _object_array_facts(spec, cap, str(name))
         if not rules or ("array_item_system_fields", str(name)) in existing:
             continue
         fields.append({
@@ -1748,6 +1798,7 @@ def _attach_array_system_fields(step: dict, schema: dict, spec, cap: dict) -> li
             "container_field": name,
             "container_path": name,
             "rules": rules,
+            "caller_keys": caller_keys,
         })
     return fields
 
@@ -1775,12 +1826,13 @@ def _sanitize_request_mapping(
     formula_paths: set[str],
     runtime_names: set[str] | None = None,
     identity_paths: set[str] | None = None,
+    recorded_literals: dict[str, Any] | None = None,
 ) -> Any:
-    del kind, params
     if not isinstance(template, dict):
         return template
     runtime_names = set(runtime_names or [])
     identity_paths = set(identity_paths or [])
+    recorded_literals = dict(recorded_literals or {})
     out: dict[str, Any] = {}
     for key, value in template.items():
         name = str(key)
@@ -1792,6 +1844,20 @@ def _sanitize_request_mapping(
         ):
             continue
         caller = _caller_name_for_key(name, fields)
+        if isinstance(value, dict):
+            out[name] = _sanitize_request_mapping(
+                value,
+                kind=kind,
+                params=params,
+                fields=fields,
+                linked=linked,
+                system_paths=system_paths,
+                formula_paths=formula_paths,
+                runtime_names=runtime_names,
+                identity_paths=identity_paths,
+                recorded_literals=recorded_literals,
+            )
+            continue
         if _is_placeholder(value):
             inner = _placeholder_name(value)
             if (
@@ -1800,12 +1866,33 @@ def _sanitize_request_mapping(
                 or _is_runtime_placeholder(inner, runtime_names)
             ):
                 out[name] = "{{" + (caller or _caller_name_for_key(inner, fields) or inner) + "}}"
+                continue
+            if inner in recorded_literals:
+                out[name] = deepcopy(recorded_literals[inner])
+            elif name in recorded_literals:
+                out[name] = deepcopy(recorded_literals[name])
             continue
         if caller:
             out[name] = "{{" + caller + "}}"
             continue
         out[name] = value
     return out
+
+
+def _recorded_literals_for_step(spec_step) -> dict[str, Any]:  # noqa: ANN001
+    literals: dict[str, Any] = {}
+    for param in getattr(spec_step, "params", None) or []:
+        value = getattr(param, "value", None)
+        if value in (None, ""):
+            value = getattr(param, "default_value", None)
+        if value in (None, ""):
+            continue
+        key = str(getattr(param, "key", "") or "")
+        path = str(getattr(param, "path", "") or "")
+        for name in (key, path, path.removeprefix("query."), path.removeprefix("body.")):
+            if name:
+                literals.setdefault(name, value)
+    return literals
 
 
 def _strip_recorded_query(url: Any) -> Any:
@@ -1858,6 +1945,7 @@ def _project_capability_step(
         if isinstance(item, dict) and item.get("name")
     }
     caller_names = {name for _path, name, _field in fields if name}
+    recorded_literals = _recorded_literals_for_step(spec_step)
     if projected.get("body_template") is not None:
         projected["body_template"] = _sanitize_request_mapping(
             projected.get("body_template"),
@@ -1869,8 +1957,15 @@ def _project_capability_step(
             formula_paths=formula_paths,
             runtime_names=runtime_names,
             identity_paths=identity_paths,
+            recorded_literals=recorded_literals,
         )
     if projected.get("query_template") is not None:
+        from dano.execution.page.flow_spec_core.request_contract import (
+            _recorded_query_map,
+            _request_fact_for_step,
+            pack_recorded_json_query,
+        )
+
         projected["query_template"] = _sanitize_request_mapping(
             projected.get("query_template"),
             kind="query",
@@ -1881,6 +1976,11 @@ def _project_capability_step(
             formula_paths=formula_paths,
             runtime_names=runtime_names,
             identity_paths=identity_paths,
+            recorded_literals=recorded_literals,
+        )
+        projected["query_template"] = pack_recorded_json_query(
+            projected.get("query_template"),
+            _recorded_query_map(_request_fact_for_step(spec, spec_step) if spec_step is not None else None),
         )
         for key in ("path", "url", "url_template"):
             if projected.get(key):
@@ -3260,7 +3360,11 @@ def _cache_headers():
         for item in origin.get("localStorage") or []:
             name = str(item.get("name") or "").casefold()
             value = str(item.get("value") or "").strip().strip('"')
-            if value and any(hint in name for hint in ("access_token", "accesstoken", "auth_token", "authorization")):
+            if (
+                value
+                and any(hint in name for hint in ("access_token", "accesstoken", "auth_token", "authorization"))
+                and re.fullmatch(r"[A-Za-z0-9._\-+/= ]{16,4096}", value)
+            ):
                 headers.setdefault("Authorization", value if value.lower().startswith("bearer ") else f"Bearer {value}")
     return headers
 
@@ -3370,6 +3474,11 @@ def http_json(method, path="", *, url="", query=None, body=None, content_type="a
         if not BASE_URL:
             raise RuntimeError("DANO_BUSINESS_BASE_URL is required because this action has no absolute origin")
         target = urljoin(BASE_URL + "/", str(target).lstrip("/"))
+    if isinstance(query, dict):
+        query = {
+            key: json.dumps(value, ensure_ascii=False, separators=(",", ":")) if isinstance(value, (dict, list)) else value
+            for key, value in query.items()
+        }
     kwargs = {"params": query or None, "headers": auth_headers(), "timeout": 30}
     if body is not None:
         if "form-urlencoded" in str(content_type).casefold():
@@ -3515,9 +3624,42 @@ _CURRENT_USER_PROFILE_KEYS = {
     "companyid": ("companyId", "company.id", "user.companyId"),
     "companyname": ("companyName", "company.name", "user.companyName"),
 }
+_IDENTITY_STORAGE_SKIP = (
+    "preference", "theme", "locale", "copyright", "widget", "breadcrumb",
+    "tabbar", "sidebar", "shortcut", "search-history", "remember_me", "hm_lvt",
+)
+_IDENTITY_PROBE_FALLBACKS = (
+    "/admin-api/system/auth/get-permission-info",
+    "/system/auth/get-permission-info",
+    "/admin-api/system/user/profile/get",
+    "/system/user/profile/get",
+    "/api/user/profile",
+    "/getInfo",
+    "/api/getInfo",
+)
+_LIVE_USER_PROFILE = None
+_LIVE_USER_PROFILE_READY = False
 
 
-def _session_identity_profile(state):
+def _looks_user_record(node):
+    if not isinstance(node, dict):
+        return False
+    nested = node.get("user")
+    if isinstance(nested, dict) and _looks_user_record(nested):
+        return True
+    keys = {re.sub(r"[^a-z0-9]+", "", str(name).lower()) for name in node}
+    return bool(keys & {"id", "userid", "uid"}) and bool(
+        keys & {"nickname", "username", "realname", "deptid", "departmentid", "dept", "companyid"}
+    )
+
+
+def _unwrap_storage_json(node):
+    if isinstance(node, dict) and set(node) <= {"value"} and isinstance(node.get("value"), (dict, list)):
+        return node["value"]
+    return node
+
+
+def _flatten_identity_node(node):
     profile = {}
 
     def put(key, value):
@@ -3525,40 +3667,100 @@ def _session_identity_profile(state):
             return
         profile[key] = value
 
-    def walk(node, prefix):
-        if isinstance(node, dict):
-            for name, value in node.items():
+    def walk(current, prefix):
+        if isinstance(current, dict):
+            for name, value in current.items():
                 path = f"{prefix}.{name}" if prefix else str(name)
                 put(path, value)
                 put(str(name), value)
                 walk(value, path)
-        elif isinstance(node, list):
-            for index, value in enumerate(node):
+        elif isinstance(current, list):
+            for index, value in enumerate(current):
                 walk(value, f"{prefix}[{index}]")
 
+    walk(node, "")
+    return profile
+
+
+def _session_identity_profile(state):
+    profile = {}
+    for key in ("identity", "profile", "user"):
+        blob = (state or {}).get(key)
+        if isinstance(blob, dict) and blob:
+            for name, value in _flatten_identity_node(blob).items():
+                profile.setdefault(name, value)
     for origin in (state or {}).get("origins") or []:
         for item in origin.get("localStorage") or []:
             name = str(item.get("name") or "")
             raw = item.get("value", "")
-            if not name:
+            if not name or any(hint in name.casefold() for hint in _IDENTITY_STORAGE_SKIP):
                 continue
             try:
-                parsed = json.loads(raw)
+                parsed = _unwrap_storage_json(json.loads(raw))
             except Exception:
-                put(name, raw)
                 continue
-            walk(parsed, name)
-            walk(parsed, "")
+            if not _looks_user_record(parsed):
+                continue
+            for key, value in _flatten_identity_node(parsed).items():
+                profile.setdefault(key, value)
     return profile
 
 
-def _resolve_current_user(field, state):
-    profile = _session_identity_profile(state)
+def _lookup_identity_field(profile, field):
     leaf = re.sub(r"[^a-z0-9]+", "", str(field or "").lower())
     for candidate in (str(field or ""), *(_CURRENT_USER_PROFILE_KEYS.get(leaf) or ())):
         if candidate in profile and profile[candidate] not in (None, ""):
             return profile[candidate]
     return None
+
+
+def _profile_from_user_payload(data):
+    if not isinstance(data, dict):
+        return {}
+    for candidate in (data.get("data"), data.get("user"), data):
+        if isinstance(candidate, dict) and _looks_user_record(candidate):
+            return _flatten_identity_node(candidate)
+    return {}
+
+
+def _live_identity_profile(headers):
+    global _LIVE_USER_PROFILE, _LIVE_USER_PROFILE_READY
+    if _LIVE_USER_PROFILE_READY:
+        return _LIVE_USER_PROFILE or {}
+    probes = [str(item) for item in (CONFIG.get("identity_probes") or []) if str(item)]
+    if not probes and BASE_URL:
+        probes = [urljoin(BASE_URL + "/", path.lstrip("/")) for path in _IDENTITY_PROBE_FALLBACKS]
+    profile = {}
+    if not probes or not headers:
+        _LIVE_USER_PROFILE = profile
+        _LIVE_USER_PROFILE_READY = True
+        return profile
+    for url in probes:
+        try:
+            response = httpx.get(url, headers=headers, timeout=15)
+        except Exception:
+            continue
+        if not response.is_success:
+            continue
+        try:
+            payload = response.json()
+        except Exception:
+            continue
+        extracted = _profile_from_user_payload(payload)
+        if extracted:
+            _LIVE_USER_PROFILE = extracted
+            _LIVE_USER_PROFILE_READY = True
+            return extracted
+    _LIVE_USER_PROFILE = profile
+    _LIVE_USER_PROFILE_READY = True
+    return profile
+
+
+def _resolve_current_user(field, state, headers=None):
+    value = _lookup_identity_field(_session_identity_profile(state), field)
+    if value is not None:
+        return value
+    return _lookup_identity_field(_live_identity_profile(headers), field)
 
 
 def _resolve_identity_value(item, state, headers):
@@ -3567,7 +3769,7 @@ def _resolve_identity_value(item, state, headers):
         source = f"current_user:{item.get('key') or item.get('path') or ''}"
     kind, _, rest = source.partition(":")
     if kind == "current_user":
-        return _resolve_current_user(rest, state)
+        return _resolve_current_user(rest, state, headers)
     if kind == "requestHeader":
         for key, value in (headers or {}).items():
             if str(key).lower() == rest.lower():
@@ -3641,6 +3843,26 @@ def _apply_array_item_system_fields(step, body):
                     row[key] = str(uuid4())
                 elif strategy == "index":
                     row[key] = index
+                elif strategy == "index_within_presence":
+                    system_keys = {str(item.get("key") or "") for item in field.get("rules") or []}
+                    caller_keys = [str(item) for item in (field.get("caller_keys") or []) if str(item)]
+                    names = caller_keys or [
+                        name for name in row
+                        if name not in system_keys and not str(name).startswith("_")
+                    ]
+                    signature = tuple(
+                        (name, "present" if row.get(name) not in (None, "") else "absent")
+                        for name in names
+                    )
+                    peers = [
+                        item for item in rows[:index]
+                        if isinstance(item, dict)
+                        and tuple(
+                            (name, "present" if item.get(name) not in (None, "") else "absent")
+                            for name in names
+                        ) == signature
+                    ]
+                    row[key] = len(peers)
                 elif strategy == "constant":
                     row[key] = copy.deepcopy(rule.get("value"))
                 elif strategy == "caller_presence":
@@ -3662,7 +3884,7 @@ def _system_values(step, body):
         value = (
             int(time.time() * 1000) if kind == "now_ms" else
             time.strftime("%Y-%m-%d") if kind == "now_date" else
-            time.strftime("%Y-%m-%dT%H:%M:%S") if kind == "now_iso" else
+            datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z") if kind == "now_iso" else
             str(uuid4())
         )
         deep_set(body, item.get("path") or "", value)
@@ -3681,6 +3903,8 @@ def _runtime_values(step, inputs):
             if name in values:
                 continue
             kind = str(field.get("kind") or field.get("strategy") or "")
+            if kind in {"array_item_system_fields"}:
+                continue
             if kind in {"date_span_days", "date_span_days_json"}:
                 start_name = str(field.get("start_field") or "")
                 end_name = str(field.get("end_field") or "")
@@ -4358,7 +4582,7 @@ def _runtime_step(step: dict) -> dict:
         "name", "kind", "strategy", "start_field", "end_field", "output_key",
         "output_format", "left_field", "right_field", "result_field",
         "container_field", "container_path", "item_field",
-        "array_container_path", "array_item_key", "rules",
+        "array_container_path", "array_item_key", "rules", "caller_keys",
     }
     packed["runtime_fields"] = [
         {key: value for key, value in item.items() if key in runtime_keys}
@@ -4633,10 +4857,19 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
             continue
         routes_dir.mkdir(parents=True, exist_ok=True)
         _write_text(routes_dir / f"{route_id}.md", _route_file_md(route, plans))
+    probes = [str(item) for item in (api_request.get("identity_probes") or []) if str(item)]
+    if not probes:
+        flow = None
+        try:
+            flow = _flow_spec(skill)
+        except ValueError:
+            flow = None
+        probes = [str(item) for item in ((getattr(flow, "meta", None) or {}).get("identity_probes") or []) if str(item)]
     config = {
         "tenant": tenant,
         "subsystem": str(skill.subsystem.value if hasattr(skill.subsystem, "value") else skill.subsystem),
         "base_url": _base_url(steps),
+        "identity_probes": probes,
     }
     _write_text(scripts / "client.py", _CLIENT_TEMPLATE.replace("__CONFIG__", repr(json.dumps(config, ensure_ascii=False))))
     from dano.execution.page import wire_format as wire_format_module

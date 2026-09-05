@@ -69,6 +69,10 @@ def _create_form_field_is_system_owned(step: FlowStep, param: ParamField) -> boo
         return True
     if _param_control_is_readonly(param):
         return True
+    if param.source_kind == "page_default" and not (
+        _param_has_editable_control_evidence(param) or _param_was_caller_typed(param)
+    ):
+        return True
     if _param_has_editable_control_evidence(param) or _param_was_caller_typed(param):
         # Structural page evidence outranks a field-name hint.  A field called
         # creator/status/id may still be a real editable business input.
@@ -138,7 +142,7 @@ def _apply_create_form_field_contracts(spec: FlowSpec) -> None:
     handwritten form value, not a system field.
     """
     caller_kinds = {
-        "user_input", "form_option", "page_default", "api_option",
+        "user_input", "form_option", "api_option",
         "page_enum", "static_enum", "manual_enum", "caller_input",
     }
     refresh_required = int(
@@ -180,6 +184,12 @@ def _apply_create_form_field_contracts(spec: FlowSpec) -> None:
                 _mark_create_form_caller_input(
                     param, reason="", refresh_required=refresh_required,
                 )
+                continue
+            if param.source_kind == "page_default":
+                if _param_has_editable_control_evidence(param) or _param_was_caller_typed(param):
+                    _mark_create_form_caller_input(
+                        param, reason="", refresh_required=refresh_required,
+                    )
                 continue
             if param.source_kind in caller_kinds:
                 _mark_create_form_caller_input(

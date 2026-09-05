@@ -5,14 +5,17 @@ from typing import Any
 import copy
 import hashlib
 import json
+import os
 import re
-from urllib.parse import urlencode, urlparse
+from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlparse
 from dano.execution.page.flow_spec_core.models import (
     FlowCapability,
     FlowSpec,
     FlowStep,
     ParamField,
     RequestFact,
+    RequestFacts,
     SelectBinding,
 )
 from dano.execution.page.request_capture import (
@@ -64,6 +67,10 @@ def _param_recorded_value(param: ParamField) -> Any:
         return copy.deepcopy(param.value)
     if param.default_value is not None:
         return copy.deepcopy(param.default_value)
+    if (param.type or "").lower() in {"array", "list-enum"}:
+        return []
+    if (param.type or "").lower() == "object":
+        return {}
     return ""
 
 
@@ -205,31 +212,48 @@ def _request_fact_for_step(spec: FlowSpec | None, step: FlowStep) -> RequestFact
     if not facts:
         return None
     request_id = str((step.source_meta or {}).get("request_id") or "")
+    method = (step.method or "").upper()
+    allow_empty_body = method in {"GET", "HEAD"}
     if request_id:
         for fact in facts:
-            if str(fact.request_id or "") == request_id and fact.post_data not in (None, ""):
+            if str(fact.request_id or "") != request_id:
+                continue
+            if fact.post_data not in (None, "") or allow_empty_body:
                 return fact
     usage = spec.request_facts.usage or {}
     for fact_id, item in usage.items():
         if str(getattr(item, "materialized_step_id", "") or "") != step.step_id:
             continue
         for fact in facts:
-            if str(fact.request_id or "") == str(fact_id) and fact.post_data not in (None, ""):
+            if str(fact.request_id or "") != str(fact_id):
+                continue
+            if fact.post_data not in (None, "") or allow_empty_body:
                 return fact
     from dano.execution.page.recording_facts import _request_path
 
-    method = (step.method or "").upper()
     step_path = _request_path({"url": step.path or step.url})
     matches = [
         fact
         for fact in facts
         if (fact.method or "").upper() == method
         and _request_path({"url": fact.path or fact.url}) == step_path
-        and fact.post_data not in (None, "")
+        and (fact.post_data not in (None, "") or allow_empty_body)
     ]
-    if len(matches) == 1:
-        return matches[0]
-    return None
+    if not matches:
+        return None
+    body_params = _step_body_params(step)
+    landed = [
+        fact
+        for fact in matches
+        if _body_lands_params(
+            _parsed_structured_body(fact.post_data, fact.content_type or step.content_type),
+            body_params,
+        )
+    ]
+    chosen = landed or matches
+    if len(chosen) == 1:
+        return chosen[0]
+    return chosen[-1]
 
 
 def _ensure_step_body_source(step: FlowStep, spec: FlowSpec | None = None) -> None:
@@ -271,6 +295,251 @@ def ensure_recorded_body_source(spec: FlowSpec) -> FlowSpec:
     """Fill missing write-step bodies from captured facts or declared body params."""
     for step in spec.steps or []:
         _ensure_step_body_source(step, spec)
+    return spec
+
+
+def _pi_evidence_body_text(body: Any, blobs: Path) -> str:
+    if isinstance(body, str) and body.strip():
+        return body
+    if not isinstance(body, dict):
+        return ""
+    text = body.get("text")
+    if isinstance(text, str) and text.strip():
+        return text
+    blob_id = str(body.get("blob_id") or "").strip()
+    if not blob_id.startswith("blob_"):
+        return ""
+    path = blobs / f"{blob_id}.bin"
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+_IDENTITY_PROBE_PATH_HINTS = (
+    "get-permission-info",
+    "get-info",
+    "/getinfo",
+    "user/profile",
+    "current-user",
+    "currentuser",
+    "user/info",
+)
+
+
+def collect_identity_probe_urls(directory: str | Path | None) -> list[str]:
+    """Keep recorded current-user APIs so runtime can resolve identity live."""
+    if directory is None:
+        return []
+    evidence = Path(directory) / "evidence.jsonl"
+    if not evidence.is_file():
+        return []
+    urls: list[str] = []
+    seen: set[str] = set()
+    for line in evidence.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if str(event.get("kind") or "") not in {"network_request", "network_response"}:
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        method = str(payload.get("method") or "GET").upper()
+        if method not in {"", "GET"}:
+            continue
+        url = str(payload.get("url") or "")
+        folded = url.casefold()
+        if not any(hint in folded for hint in _IDENTITY_PROBE_PATH_HINTS):
+            continue
+        clean = url.split("?", 1)[0]
+        if clean and clean not in seen:
+            seen.add(clean)
+            urls.append(clean)
+    return urls
+
+
+def recorded_write_facts_from_pi_evidence(directory: str | Path) -> list[RequestFact]:
+    """Turn PI evidence.jsonl write requests into RequestFacts. No page-specific paths."""
+    root = Path(directory)
+    evidence = root / "evidence.jsonl"
+    if not evidence.is_file():
+        return []
+    from dano.execution.page.recording_facts import _request_path
+
+    blobs = root / "blobs"
+    facts: list[RequestFact] = []
+    for line in evidence.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if str(event.get("kind") or "") != "network_request":
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        method = str(payload.get("method") or "").upper()
+        if method not in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"}:
+            continue
+        resource = str(payload.get("resource_type") or "").lower()
+        if resource and resource not in {"xhr", "fetch"}:
+            continue
+        url = str(payload.get("url") or "")
+        if re.search(r"(?i)login|refresh-token", url):
+            continue
+        post_data = _pi_evidence_body_text(payload.get("body"), blobs)
+        if method not in {"GET", "HEAD"} and not post_data:
+            continue
+        headers = payload.get("headers") if isinstance(payload.get("headers"), dict) else {}
+        content_type = str(headers.get("content-type") or headers.get("Content-Type") or "")
+        facts.append(RequestFact(
+            request_id=str(payload.get("request_id") or f"ev_{event.get('seq')}"),
+            sequence=event.get("seq"),
+            method=method,
+            url=url,
+            path=_request_path({"url": url}),
+            content_type=content_type,
+            post_data=post_data,
+        ))
+    return facts
+
+
+def _pi_recording_dir(recording_id: str) -> Path | None:
+    key = str(recording_id or "").strip()
+    if not key or not re.fullmatch(r"[A-Za-z0-9_-]+", key):
+        return None
+    roots: list[Path] = []
+    env = str(os.environ.get("PI_CHECK_DATA") or os.environ.get("DANO_PI_CHECK_DATA") or "").strip()
+    if env:
+        roots.append(Path(env))
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "Pi_check" / "data"
+        if candidate.is_dir():
+            roots.append(candidate)
+            break
+    for root in roots:
+        directory = root / key
+        if (directory / "evidence.jsonl").is_file():
+            return directory
+    return None
+
+
+def _attach_write_facts(spec: FlowSpec, facts: list[RequestFact]) -> None:
+    if spec.request_facts is None:
+        spec.request_facts = RequestFacts()
+    existing = {
+        str(item.request_id): item
+        for item in spec.request_facts.requests
+        if str(item.request_id or "")
+    }
+    for fact in facts:
+        current = existing.get(str(fact.request_id or ""))
+        if current is None:
+            spec.request_facts.requests.append(fact)
+            continue
+        if current.post_data in (None, "") and fact.post_data not in (None, ""):
+            current.post_data = fact.post_data
+            current.content_type = current.content_type or fact.content_type
+            current.url = current.url or fact.url
+            current.path = current.path or fact.path
+            current.method = current.method or fact.method
+
+
+def _fill_step_urls_from_facts(spec: FlowSpec) -> None:
+    for step in spec.steps or []:
+        if str(step.url or "").startswith(("http://", "https://")):
+            continue
+        fact = _request_fact_for_step(spec, step)
+        if fact is None or not str(fact.url or "").startswith(("http://", "https://")):
+            continue
+        step.url = str(fact.url).split("?", 1)[0]
+
+
+def _recorded_query_map(fact: RequestFact | None) -> dict[str, Any]:
+    if fact is None:
+        return {}
+    recorded: dict[str, Any] = {}
+    if isinstance(fact.query, dict):
+        recorded.update(fact.query)
+    parsed = urlparse(str(fact.url or ""))
+    for key, values in parse_qs(parsed.query, keep_blank_values=True).items():
+        if key not in recorded:
+            recorded[key] = values[0] if len(values) == 1 else values
+    return recorded
+
+
+def _json_object_query_value(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except Exception:  # noqa: BLE001
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def pack_recorded_json_query(query_template: dict[str, Any] | None, recorded: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Restore JSON query blobs that PI flattened into dotted child keys."""
+    if not isinstance(query_template, dict):
+        return query_template
+    packed = dict(query_template)
+    for raw_key, raw_value in (recorded or {}).items():
+        parsed = _json_object_query_value(raw_value)
+        if parsed is None:
+            continue
+        prefix = f"{raw_key}."
+        children = {
+            key[len(prefix):]: value
+            for key, value in list(packed.items())
+            if key.startswith(prefix)
+        }
+        if not children and raw_key in packed:
+            continue
+        nested = dict(parsed)
+        for child_key, value in children.items():
+            nested[child_key] = value
+            packed.pop(f"{raw_key}.{child_key}", None)
+        packed[raw_key] = nested
+    return packed
+
+
+def _backfill_param_values_from_bodies(spec: FlowSpec) -> None:
+    for step in spec.steps or []:
+        body = _parsed_structured_body(step.body_source, step.content_type)
+        if not isinstance(body, (dict, list)):
+            continue
+        for param in step.params or []:
+            if param.value not in (None, ""):
+                continue
+            if not str(param.path or "").startswith("body."):
+                continue
+            looked = _flow_path_lookup(body, _body_relative_path(param.path))
+            if looked is _FLOW_PATH_MISSING or looked in (None, ""):
+                continue
+            param.value = copy.deepcopy(looked)
+
+
+def hydrate_recorded_write_bodies(
+    spec: FlowSpec,
+    *,
+    evidence_dir: str | Path | None = None,
+    recording_id: str = "",
+) -> FlowSpec:
+    """Restore write bodies from captured evidence when PI left request_facts empty."""
+    key = recording_id or str((spec.meta or {}).get("recording_id") or "")
+    directory = Path(evidence_dir) if evidence_dir else _pi_recording_dir(key)
+    extra = recorded_write_facts_from_pi_evidence(directory) if directory is not None else []
+    probes = collect_identity_probe_urls(directory) if directory is not None else []
+    if extra:
+        _attach_write_facts(spec, extra)
+        if key and not (spec.meta or {}).get("recording_id"):
+            spec.meta = {**(spec.meta or {}), "recording_id": key}
+    if probes:
+        spec.meta = {**(spec.meta or {}), "identity_probes": probes}
+    ensure_recorded_body_source(spec)
+    _backfill_param_values_from_bodies(spec)
+    _fill_step_urls_from_facts(spec)
     return spec
 
 
@@ -807,6 +1076,7 @@ def _runtime_select_bindings(step: FlowStep) -> list[dict[str, Any]]:
 def _flow_step_to_api_step(
     step: FlowStep,
     *,
+    spec: FlowSpec | None = None,
     reject_unresolved_literals: bool = False,
 ) -> tuple[dict | None, list[str]]:
     errors: list[str] = []
@@ -818,7 +1088,7 @@ def _flow_step_to_api_step(
     if runtime_errors:
         return None, runtime_errors
     if not step.body_source:
-        _ensure_step_body_source(step)
+        _ensure_step_body_source(step, spec)
     if not step.body_source:
         body_params = [
             param for param in step.params
@@ -829,6 +1099,10 @@ def _flow_step_to_api_step(
             return None, errors
         if step.method.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
             query_template, params, samples, field_types, runtime_fields = _flow_step_query_template(step)
+            query_template = pack_recorded_json_query(
+                query_template,
+                _recorded_query_map(_request_fact_for_step(spec, step)),
+            )
             url_template, path_params, path_samples, path_types = _flow_step_url_template(step)
             selects = _runtime_select_bindings(step)
             apir = {
@@ -946,6 +1220,10 @@ def _flow_step_to_api_step(
         runtime_field["kind"] = str(runtime_field.get("strategy") or runtime_field.get("kind") or "")
         body_runtime_fields.append(runtime_field)
     query_template, query_params, query_samples, query_types, runtime_fields = _flow_step_query_template(step)
+    query_template = pack_recorded_json_query(
+        query_template,
+        _recorded_query_map(_request_fact_for_step(spec, step)),
+    )
     if query_template:
         apir["query_template"] = query_template
         apir["params"] = list(dict.fromkeys([*(apir.get("params") or []), *query_params]))
@@ -1049,8 +1327,10 @@ def flow_spec_to_api_request(
         )
     if not spec.steps:
         return None, ["FlowSpec 没有任何步骤，不能发布"]
+    hydrate_recorded_write_bodies(spec)
     if not _prepared:
         spec = prepare_flow_spec_for_publish(spec)
+        hydrate_recorded_write_bodies(spec)
     active_step_ids = _active_capability_step_ids(spec)
     strict_source_contract = int(
         (spec.meta or {}).get("stage_1_6_contract_version") or 0
@@ -1064,6 +1344,7 @@ def flow_spec_to_api_request(
             continue
         apir, step_errors = _flow_step_to_api_step(
             st,
+            spec=spec,
             reject_unresolved_literals=strict_source_contract,
         )
         if step_errors:
@@ -1214,6 +1495,9 @@ def flow_spec_to_api_request(
 
     if spec.goal:
         out["goal"] = spec.goal
+    probes = [str(item) for item in ((spec.meta or {}).get("identity_probes") or []) if str(item)]
+    if probes:
+        out["identity_probes"] = probes
     caps = list(spec.capabilities or [])
     if caps:
         compiled_by_id = {

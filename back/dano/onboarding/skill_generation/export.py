@@ -238,9 +238,15 @@ def _current_spec(body: dict[str, Any]) -> FlowSpec:
     if not isinstance(raw, dict) or not raw:
         raise SkillExportError(409, "录制结果没有可导出的 FlowSpec")
     try:
-        return FlowSpec.model_validate(raw)
+        spec = FlowSpec.model_validate(raw)
     except ValidationError as exc:
         raise SkillExportError(409, "录制结果 FlowSpec 无法用于导出") from exc
+    from dano.execution.page.flow_spec_core.request_contract import hydrate_recorded_write_bodies
+
+    recording_id = str(body.get("recording_id") or (spec.meta or {}).get("recording_id") or "")
+    if recording_id and not (spec.meta or {}).get("recording_id"):
+        spec.meta = {**(spec.meta or {}), "recording_id": recording_id}
+    return hydrate_recorded_write_bodies(spec, recording_id=recording_id)
 
 
 def _stable_skill_id(body: dict[str, Any], title: str) -> str:

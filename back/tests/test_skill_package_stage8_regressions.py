@@ -2821,8 +2821,10 @@ def test_export_projects_object_array_and_current_user_identity() -> None:
 
 
 def test_current_user_profile_reads_session_without_recorded_ids() -> None:
-    from dano.execution.page.request_capture import _resolve_current_user_profile
+    from dano.execution.page import request_capture
 
+    request_capture._LIVE_USER_PROFILE = None
+    request_capture._LIVE_USER_PROFILE_READY = False
     state = {
         "origins": [{
             "localStorage": [{
@@ -2832,7 +2834,266 @@ def test_current_user_profile_reads_session_without_recorded_ids() -> None:
         }],
     }
 
-    assert _resolve_current_user_profile("creator", state) == 7
-    assert _resolve_current_user_profile("deptId", state) == 88
-    assert _resolve_current_user_profile("creatorName", state) == "甲"
-    assert _resolve_current_user_profile("companyId", state) is None
+    assert request_capture._resolve_current_user_profile("creator", state) == 7
+    assert request_capture._resolve_current_user_profile("deptId", state) == 88
+    assert request_capture._resolve_current_user_profile("creatorName", state) == "甲"
+    assert request_capture._resolve_current_user_profile("companyId", state) is None
+
+
+def test_current_user_profile_ignores_app_branding_and_ciphertext() -> None:
+    from dano.execution.page import request_capture
+
+    request_capture._LIVE_USER_PROFILE = None
+    request_capture._LIVE_USER_PROFILE_READY = False
+    state = {
+        "origins": [{
+            "localStorage": [
+                {
+                    "name": "yudao-vben-antd-5.7.0-prod-preferences",
+                    "value": json.dumps({
+                        "value": {"app": {"name": "企业管理一体化平台"}, "copyright": {"companyName": "宇擎"}},
+                    }, ensure_ascii=False),
+                },
+                {
+                    "name": "yudao-vben-antd-5.7.0-prod-core-access",
+                    "value": "ᕡencrypted-access-blob-not-a-user",
+                },
+            ],
+        }],
+    }
+
+    assert request_capture._resolve_current_user_profile("creatorName", state) is None
+    assert request_capture._resolve_current_user_profile("creator", state) is None
+    assert request_capture._resolve_current_user_profile("companyName", state) is None
+
+
+def test_current_user_profile_reads_explicit_session_identity() -> None:
+    from dano.execution.page import request_capture
+
+    request_capture._LIVE_USER_PROFILE = None
+    request_capture._LIVE_USER_PROFILE_READY = False
+    state = {"identity": {"id": 1, "nickname": "擎天柱", "deptId": 103}}
+
+    assert request_capture._resolve_current_user_profile("creator", state) == 1
+    assert request_capture._resolve_current_user_profile("creatorName", state) == "擎天柱"
+    assert request_capture._resolve_current_user_profile("deptId", state) == 103
+
+
+def test_current_user_profile_uses_live_probe_instead_of_recorded_ids(monkeypatch) -> None:
+    from dano.execution.page import request_capture
+
+    request_capture._LIVE_USER_PROFILE = None
+    request_capture._LIVE_USER_PROFILE_READY = False
+
+    class _Response:
+        is_success = True
+
+        @staticmethod
+        def json():
+            return {"code": 0, "data": {"user": {"id": 4, "nickname": "乙", "deptId": 21}}}
+
+    monkeypatch.setattr(
+        request_capture.httpx,
+        "get",
+        lambda url, headers=None, timeout=15: _Response(),
+    )
+    value = request_capture._resolve_current_user_profile(
+        "creatorName",
+        {},
+        {"Authorization": "Bearer test-token"},
+        ["https://example.test/admin-api/system/auth/get-permission-info"],
+    )
+    assert value == "乙"
+    assert request_capture._resolve_current_user_profile(
+        "deptId",
+        {},
+        {"Authorization": "Bearer test-token"},
+        ["https://example.test/admin-api/system/auth/get-permission-info"],
+    ) == 21
+
+
+def test_runtime_values_skips_array_item_system_fields() -> None:
+    from dano.export.skill_package.renderer import _CLIENT_TEMPLATE
+
+    assert "if kind in {\"array_item_system_fields\"}" in _CLIENT_TEMPLATE or (
+        "array_item_system_fields" in _CLIENT_TEMPLATE
+        and "continue" in _CLIENT_TEMPLATE
+    )
+
+
+def test_token_like_value_rejects_encrypted_storage_blobs() -> None:
+    from dano.execution.page.request_capture import _token_like_value
+
+    assert _token_like_value("abcdefghijklmnopqrstuvwxyz012345") is True
+    assert _token_like_value("ᕡencrypted-access-blob-not-a-token") is False
+
+
+def test_array_item_rules_use_presence_index_and_opaque_row_keys() -> None:
+    from dano.execution.page.flow_materialization.field_contracts.dynamic_array import (
+        _infer_array_item_system_rules,
+    )
+
+    rows = [
+        {"content": "a", "progress": 0, "itemType": 1, "sort": 0, "_X_ROW_KEY": "row_91"},
+        {"content": "b", "progress": 30, "itemType": 1, "sort": 1, "_X_ROW_KEY": "row_92"},
+        {"content": "c", "itemType": 2, "sort": 0, "_X_ROW_KEY": "row_93"},
+        {"content": "d", "itemType": 2, "sort": 1, "_X_ROW_KEY": "row_94"},
+    ]
+    rules = {
+        item["key"]: item
+        for item in _infer_array_item_system_rules(rows, ["content", "progress"])
+    }
+    assert rules["itemType"]["strategy"] == "caller_presence"
+    assert rules["sort"]["strategy"] == "index_within_presence"
+    assert rules["_X_ROW_KEY"]["strategy"] == "uuid"
+
+
+def test_export_hydrates_write_body_from_pi_evidence(tmp_path) -> None:
+    from dano.execution.page.flow_spec_core.request_contract import hydrate_recorded_write_bodies
+
+    recorded_items = [
+        {"content": "已完成", "progress": 10, "itemType": 1, "sort": 0, "_X_ROW_KEY": "row_11"},
+        {"content": "计划", "itemType": 2, "sort": 0, "_X_ROW_KEY": "row_12"},
+    ]
+    body = {
+        "title": "日报",
+        "items": recorded_items,
+        "reportType": 1,
+        "creator": "9",
+        "deptId": 88,
+        "createTime": "2026-09-05T19:57:14.729Z",
+    }
+    evidence = tmp_path / "evidence.jsonl"
+    evidence.write_text(
+        json.dumps({
+            "seq": 3,
+            "kind": "network_request",
+            "payload": {
+                "request_id": "req_submit",
+                "method": "POST",
+                "url": "https://example.test/admin-api/records/submit",
+                "resource_type": "xhr",
+                "headers": {"content-type": "application/json"},
+                "body": {"stored": "inline", "text": json.dumps(body, ensure_ascii=False)},
+            },
+        }, ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+    spec = FlowSpec(
+        meta={"recording_id": "rec_evidence"},
+        capabilities=[
+            FlowCapability(
+                capability_id="cap_submit",
+                name="新增并提交",
+                title="新增并提交",
+                kind="command",
+                request_refs=[CapabilityRequestRef(step_id="step_submit", usage="execute")],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "title": "标题"},
+                        "items": {
+                            "type": "array",
+                            "title": "工作项",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "content": {"type": "string"},
+                                    "progress": {"type": "number"},
+                                },
+                            },
+                        },
+                    },
+                    "required": ["title"],
+                },
+            )
+        ],
+        steps=[
+            FlowStep(
+                step_id="step_submit",
+                method="POST",
+                path="/admin-api/records/submit",
+                params=[
+                    ParamField(key="title", path="body.title", source_kind="user_input", exposed_to_user=True),
+                    ParamField(key="items", path="body.items", type="array", source_kind="user_input", exposed_to_user=True, value=None),
+                    ParamField(key="reportType", path="body.reportType", source_kind="page_default", exposed_to_user=False, default_value=1),
+                    ParamField(key="creator", path="body.creator", source_kind="current_user", exposed_to_user=False, value=None),
+                    ParamField(key="deptId", path="body.deptId", source_kind="current_user", exposed_to_user=False, value=None),
+                    ParamField(key="createTime", path="body.createTime", source_kind="generated", exposed_to_user=False, value=None),
+                ],
+            )
+        ],
+    )
+    hydrate_recorded_write_bodies(spec, evidence_dir=tmp_path)
+    items = next(param for param in spec.steps[0].params if param.key == "items")
+    assert isinstance(items.value, list) and items.value[0]["itemType"] == 1
+
+    api_request = {
+        "capabilities": [{
+            "capability_id": "cap_submit",
+            "name": "新增并提交",
+            "title": "新增并提交",
+            "kind": "command",
+            "execution_contract": {
+                "steps": [{
+                    "step_id": "step_submit",
+                    "method": "POST",
+                    "path": "/admin-api/records/submit",
+                    "body_template": {
+                        "title": "{{title}}",
+                        "items": "{{items}}",
+                        "reportType": 1,
+                        "creator": "",
+                        "deptId": "",
+                        "createTime": "",
+                    },
+                }],
+            },
+            "input_schema": spec.capabilities[0].input_schema,
+        }],
+    }
+    plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), spec, api_request)
+    submit = _runtime_plan(plans[0])["steps"][0]
+    rules = {
+        item["key"]: item["strategy"]
+        for item in next(
+            field for field in submit.get("runtime_fields") or []
+            if field.get("kind") == "array_item_system_fields"
+        )["rules"]
+    }
+    assert submit["body_template"]["reportType"] == 1
+    assert "creator" not in submit["body_template"]
+    assert "createTime" not in submit["body_template"]
+    assert any(item.get("path") == "createTime" for item in submit.get("system_values") or [])
+    assert rules["itemType"] == "caller_presence"
+    assert rules["sort"] == "constant"
+    assert rules["_X_ROW_KEY"] == "uuid"
+    public = _public_schema(plans[0]["input_schema"])
+    assert "reportType" not in public["properties"]
+    assert public["properties"]["items"]["items"]["properties"]["content"]["type"] == "string"
+    assert "progress" not in (public["properties"]["items"]["items"].get("required") or [])
+    assert submit["body_template"]["reportType"] == 1
+
+
+def test_pack_recorded_json_query_keeps_system_children() -> None:
+    from dano.execution.page.flow_spec_core.request_contract import pack_recorded_json_query
+
+    packed = pack_recorded_json_query(
+        {
+            "activityId": "StartUserNode",
+            "processVariablesStr.startDate": "{{startDate}}",
+            "processVariablesStr.title": "{{title}}",
+        },
+        {
+            "activityId": "StartUserNode",
+            "processVariablesStr": json.dumps(
+                {"reportType": 1, "startDate": "2026-09-06", "title": "1"},
+                ensure_ascii=False,
+            ),
+        },
+    )
+    assert packed["activityId"] == "StartUserNode"
+    assert packed["processVariablesStr"]["reportType"] == 1
+    assert packed["processVariablesStr"]["startDate"] == "{{startDate}}"
+    assert packed["processVariablesStr"]["title"] == "{{title}}"

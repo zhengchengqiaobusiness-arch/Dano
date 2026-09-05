@@ -191,6 +191,7 @@ def pi_result_storage_body(
     subsystem: str,
     draft: dict[str, Any],
     request_count: int = 0,
+    recording_id: str = "",
 ) -> dict[str, Any]:
     from dano.onboarding.recording_results import (
         RECORDING_RESULT_KIND,
@@ -202,6 +203,12 @@ def pi_result_storage_body(
     goal_payload = dict(goal) if isinstance(goal, dict) else {"text": str(goal or "")}
     capabilities = list(draft.get("capabilities") or []) if isinstance(draft, dict) else []
     goal_text = str(goal_payload.get("intent") or goal_payload.get("text") or "")
+    stored = draft if isinstance(draft, dict) else {}
+    if recording_id and isinstance(draft, dict):
+        stored = dict(draft)
+        meta = dict(stored.get("meta") or {})
+        meta.setdefault("recording_id", recording_id)
+        stored["meta"] = meta
     return {
         "kind": RECORDING_RESULT_KIND,
         "action": action,
@@ -209,7 +216,8 @@ def pi_result_storage_body(
         "goal": goal_payload,
         "tenant": tenant,
         "subsystem": subsystem,
-        "flow_spec": draft,
+        "recording_id": recording_id,
+        "flow_spec": stored,
         "capability_count": len(capabilities),
         "request_count": skill_request_count(draft) or int(request_count or 0),
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -254,6 +262,7 @@ async def persist_pi_submitted_result(
             subsystem=scope.subsystem.value,
             draft=draft,
             request_count=request_count,
+            recording_id=recording_id,
         ),
     )
 
