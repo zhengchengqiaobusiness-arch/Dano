@@ -2,7 +2,7 @@ import type { EvidenceEvent, InputFormField, NetworkEvidence, UiEvidence } from 
 import { ASK_KEY } from "./heuristics.js";
 import { clockFromEpoch, dateDay, recordedClock } from "./date-format.js";
 
-const GENERATED_NAME = /^(el-id-\d+|el-[a-z]+-\d+|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i;
+const GENERATED_NAME = /^(el-id-\d+|el-[a-z]+-\d+|reka-v-\d+-form-item|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i;
 const PAGE_NAME = /^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i;
 
 export function isGeneratedFieldName(name?: string) {
@@ -29,6 +29,7 @@ export interface UiObservation {
   value?: unknown;
   type?: string;
   required?: boolean;
+  disabled?: boolean;
   options?: Array<{ value: unknown; label: string }>;
   rangeIndex?: number;
 }
@@ -182,6 +183,8 @@ function preferSpecificObservation(field: InputFormField, items: UiObservation[]
 }
 
 const SYNONYM_GROUPS = [
+  /\b(?:start|begin|from)\s*(?:date|time)?\b|开始日期|开始时间|起始日期|起始时间/i,
+  /\b(?:end|finish|to)\s*(?:date|time)?\b|结束日期|结束时间|截止日期|截止时间/i,
   /\b(?:count|qty|quantity)\b|数量/i,
   /\b(?:user|person|people)\s*count\b|人数/i,
   /(?:^|[^a-z])price(?:$|[^a-z])|单价|售价/i,
@@ -366,8 +369,8 @@ function observationCompatible(
   return sameSynonymGroup(field, item);
 }
 
-function looksReadonly(item: Pick<UiObservation, "type">) {
-  return /readonly|disabled/i.test(item.type || "");
+function looksReadonly(item: Pick<UiObservation, "type" | "disabled">) {
+  return item.disabled === true || /readonly|disabled/i.test(item.type || "");
 }
 
 
@@ -383,6 +386,10 @@ export function collectUiObservations(events: UiEvidence[]): UiObservation[] {
     const eventOptions = choiceEvent ? optionsOf(event) : undefined;
     const label = eventLabel(event);
     const controlType = choiceEvent ? "select" : (event.inputType || event.role);
+    const eventField = (event.form || []).find(field =>
+      Boolean(event.name && field.name === event.name)
+      || Boolean(label && field.label === label)
+    );
     const actionControl = (event.eventType === "click" || event.eventType === "submit")
       && (event.tag === "button" || event.tag === "a" || event.role === "button" || event.role === "link" || event.inputType === "button" || event.inputType === "submit");
     if (looksIdentityToken(event.name) && (event.value === undefined || event.value === "")) {
@@ -391,15 +398,16 @@ export function collectUiObservations(events: UiEvidence[]): UiObservation[] {
         label: label && label !== event.name ? label : event.text,
         value: event.name,
         type: controlType || (choiceEvent ? "select" : undefined),
+        disabled: eventField?.disabled,
         options: eventOptions
       });
       if (event.text && event.text !== event.name && event.text !== label) {
-        items.push({ name: undefined, label: event.text, value: event.text, type: controlType || (choiceEvent ? "select" : undefined) });
+        items.push({ name: undefined, label: event.text, value: event.text, type: controlType || (choiceEvent ? "select" : undefined), disabled: eventField?.disabled });
       }
     } else if (event.name && !isGeneratedFieldName(event.name)) {
-      items.push({ name: event.name, label, value: event.value, type: controlType, options: eventOptions });
+      items.push({ name: event.name, label, value: event.value, type: controlType, disabled: eventField?.disabled, options: eventOptions });
     } else if (label && !actionControl) {
-      items.push({ name: undefined, label, value: event.value, type: controlType, options: eventOptions });
+      items.push({ name: undefined, label, value: event.value, type: controlType, disabled: eventField?.disabled, options: eventOptions });
     } else if (eventOptions?.length) {
       const matches = (event.form || []).filter(field =>
         field.label && eventOptions.some(item => String(item.label || item.value).includes(field.label!))
@@ -411,6 +419,7 @@ export function collectUiObservations(events: UiEvidence[]): UiObservation[] {
           value: matches[0]!.value,
           type: matches[0]!.type,
           required: matches[0]!.required,
+          disabled: matches[0]!.disabled,
           options: eventOptions,
           rangeIndex: matches[0]!.rangeIndex
         });
@@ -424,6 +433,7 @@ export function collectUiObservations(events: UiEvidence[]): UiObservation[] {
         value: field.value,
         type: field.type,
         required: field.required,
+        disabled: field.disabled,
         options: optionsOf(event, field),
         rangeIndex: field.rangeIndex
       });
@@ -451,6 +461,9 @@ function mergeObservations(items: UiObservation[]) {
       ? (looksTextObservation(best) ? best.type : item.type)
       : (best.type || item.type),
     required: best.required === true || item.required === true,
+    disabled: best.disabled === false || item.disabled === false
+      ? false
+      : (best.disabled === true || item.disabled === true ? true : undefined),
     options: looksTextObservation(best) || looksTextObservation(item)
       ? undefined
       : ((item.options?.length || 0) > (best.options?.length || 0) ? item.options : best.options),
@@ -981,6 +994,7 @@ function adjacentDateSlots(owner?: UiEvidence) {
         value: field.value,
         type: field.type,
         required: field.required,
+        disabled: field.disabled,
         options: field.options,
         rangeIndex: field.rangeIndex
       });
@@ -1768,9 +1782,12 @@ export function relatedUiEvents(
     if (!raw) return "";
     try {
       const parsed = new URL(raw);
-      return `${parsed.origin}${parsed.pathname}`;
+      // A hash route is the real page identity in an SPA. Treating only the
+      // origin/path as the page key mixes list, detail and edit forms that all
+      // live under `/web/`.
+      return `${parsed.origin}${parsed.pathname}${parsed.hash.split("?")[0]}`;
     } catch {
-      return raw.split(/[?#]/, 1)[0] || raw;
+      return raw.split("?", 1)[0] || raw;
     }
   };
   const ownerPage = pageKey(owner?.pageUrl);

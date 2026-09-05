@@ -137,7 +137,10 @@ function lookupFor(field: InputFormField, catalog: CapabilityContract[], events:
 export function queryCandidateForField(field: InputFormField, catalog: CapabilityContract[], events: EvidenceEvent[] = []) {
   if (field.source !== "caller") return undefined;
   if (field.candidates?.type === "capability") return undefined;
-  if (!looksPickerField(field) && field.candidates?.type !== "static") return undefined;
+  if (!looksPickerField(field)
+    && field.widget !== "select"
+    && field.widget !== "multiselect"
+    && field.candidates?.type !== "static") return undefined;
   return lookupFor(field, catalog, events);
 }
 
@@ -148,6 +151,13 @@ export function attachCandidateSources(catalog: CapabilityContract[], events: Ev
       if (field.source !== "caller") return field;
       if (field.widget === "number" || field.widget === "date" || field.widget === "textarea") return field;
       if (/天数|数量|金额|单价|税率|库存/.test(field.label || "") && !looksPickerField(field)) return field;
+      // A normal text box is not a picker merely because a recorded list
+      // happens to contain the same sample text. Candidate APIs require real
+      // picker/enum UI evidence.
+      if (!looksPickerField(field)
+        && field.widget !== "select"
+        && field.widget !== "multiselect"
+        && field.candidates?.type !== "static") return field;
       const source = lookupFor(field, catalog.filter(item => item.id !== capability.id), events);
       const paths = source ? listPaths(source.outputSchema) : undefined;
       if (!source || !paths) return field;

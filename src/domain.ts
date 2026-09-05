@@ -18,6 +18,7 @@ export interface UiFieldSnapshot {
   type?: string;
   value?: unknown;
   required?: boolean;
+  disabled?: boolean;
   options?: Array<{ value: unknown; label: string }>;
   rangeIndex?: number;
 }

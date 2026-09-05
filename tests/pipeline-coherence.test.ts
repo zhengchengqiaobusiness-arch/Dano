@@ -155,6 +155,53 @@ test("reanalyze keeps verified shared lookups and resets this page's primaries",
   assert.equal(next.find(item => item.transport.pathTemplate.includes("/system/user/page"))?.validation.status, "verified");
 });
 
+test("reanalyze incrementally updates one capability without dropping previously verified fields or session evidence", () => {
+  const transport = {
+    method: "GET",
+    urlTemplate: "https://x/admin-api/oa/work-report/page",
+    origin: "https://x",
+    pathTemplate: "/admin-api/oa/work-report/page"
+  };
+  const field = (name: string, source: "caller" | "system", detail: string) => ({
+    path: `$.${name}`,
+    name,
+    label: name,
+    valueType: "string" as const,
+    source,
+    required: false,
+    requiredBasis: "not-observed" as const,
+    systemHandled: source === "system",
+    sourceDetail: detail,
+    widget: "text" as const
+  });
+  const old = cap({
+    id: "query-work-report",
+    operation: "query",
+    transport,
+    inputForm: [field("billCode", "caller", "旧会话已填写")],
+    evidence: [{ eventId: "old-query", sessionId: "old-session", kind: "network", at: "2026-09-05T01:00:00.000Z", status: 200 }],
+    validation: { version: 2, status: "verified", checks: [{ name: "recorded-network-evidence", ok: true, detail: "ok" }] }
+  });
+  const incoming = cap({
+    id: "query-work-report-new",
+    operation: "query",
+    transport,
+    inputForm: [field("companyId", "system", "新会话更新")],
+    evidence: [
+      { eventId: "old-query", sessionId: "old-session", kind: "network", at: "2026-09-05T01:00:00.000Z", status: 200 },
+      { eventId: "new-query", sessionId: "new-session", kind: "network", at: "2026-09-05T02:00:00.000Z", status: 200 }
+    ],
+    validation: { version: 2, status: "candidate", checks: [] }
+  });
+
+  const [next] = reanalyzeIncoming([incoming], [old]);
+  assert.ok(next);
+  assert.deepEqual(next.inputForm.map(item => item.name).sort(), ["billCode", "companyId"]);
+  assert.equal(next.inputForm.find(item => item.name === "companyId")?.sourceDetail, "新会话更新");
+  assert.deepEqual(next.evidence.map(item => item.eventId).sort(), ["new-query", "old-query"]);
+  assert.equal(next.validation.status, "candidate");
+});
+
 test("reanalyze drops impossible self-bindings when a transport is reclassified", () => {
   const old = cap({
     id: "query-post-seal",

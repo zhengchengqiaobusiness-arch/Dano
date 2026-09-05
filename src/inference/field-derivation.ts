@@ -3,7 +3,7 @@ import type { SemanticConcept } from "./field-resolver.js";
 import { id } from "../utils.js";
 import { flattenRequestValues, isPaginationField, nameTokens, requestValueAt, sameSynonymGroup, sameValue, semanticConcepts } from "./field-resolver.js";
 import { isSuccessfulNetworkEvidence, normalizeUrl } from "./heuristics.js";
-import { isNoiseCapability, isPageResultQuery, isPrimaryCapability, relatedResource } from "./export-scope.js";
+import { evidencePageKey, isNoiseCapability, isPageResultQuery, isPrimaryCapability, relatedResource } from "./export-scope.js";
 
 const WRITE_OPERATIONS = new Set(["create", "update", "review", "delete", "upload", "action"]);
 const PAGE_NAME = /^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i;
@@ -675,7 +675,8 @@ function fromApiMatch(
   index: LookupIndexEntry[],
   write?: CapabilityContract,
   mode: "write" | "query" = "write",
-  targetAt?: string
+  targetAt?: string,
+  targetPageUrl?: string
 ) {
   if (value === undefined || value === null || value === "") return undefined;
   const joins = requestJoins(sample);
@@ -692,7 +693,11 @@ function fromApiMatch(
       const exactLeafName = lastPathName(leaf.path).toLowerCase() === field.name.toLowerCase();
       if (isLowInformationValue(value) && !entry.triggeredByFieldChoice && !exactLeafName) continue;
       const via = leaf.row ? pickVia(field, joins, leaf.row) : causalLookupVia(field, joins, entry);
-      if (mode === "write" && !hasExplicitWriteCause(entry, via, write, field)) continue;
+      const samePageQueryCause = mode === "query"
+        && Boolean(event?.pageUrl && targetPageUrl)
+        && evidencePageKey(event?.pageUrl) === evidencePageKey(targetPageUrl)
+        && !entry.isPrimary;
+      if (!hasExplicitWriteCause(entry, via, write, field) && !samePageQueryCause) continue;
       if (leaf.row && !via) {
         const siblings = entry.leaves.filter(item => item.path === leaf.path);
         if (!siblings.length || siblings.some(item => !sameDerivedValue(item.value, value))) continue;
@@ -961,10 +966,18 @@ function evidenceInput(network: NetworkEvidence) {
     : query;
 }
 
-function observedAsLookupInput(field: InputFormField, value: unknown, index: LookupIndexEntry[], targetAt?: string) {
+function observedAsLookupInput(
+  field: InputFormField,
+  value: unknown,
+  index: LookupIndexEntry[],
+  targetAt?: string,
+  targetPageUrl?: string
+) {
   if (value === undefined || value === null || value === "") return false;
   return index.some(entry => {
     if (!entry.event || (targetAt && Date.parse(entry.event.at) > Date.parse(targetAt))) return false;
+    if (targetPageUrl && entry.event.pageUrl
+      && evidencePageKey(entry.event.pageUrl) !== evidencePageKey(targetPageUrl)) return false;
     return flattenRequestValues(evidenceInput(entry.event)).some(item =>
       item.name.toLowerCase() === field.name.toLowerCase() && sameDerivedValue(item.value, value)
     );
@@ -974,13 +987,14 @@ function observedAsLookupInput(field: InputFormField, value: unknown, index: Loo
 function evidenceSampleEvent(capability: CapabilityContract, events: EvidenceEvent[]) {
   const ids = new Set(capability.evidence.filter(item => item.kind === "network").map(item => item.eventId));
   let best: NetworkEvidence | undefined;
-  let size = -1;
+  let fieldCount = -1;
   for (const event of events) {
     if (event.kind !== "network" || !ids.has(event.id)) continue;
     const input = evidenceInput(event);
-    const nextSize = JSON.stringify(input ?? {}).length;
-    if (nextSize > size) {
-      size = nextSize;
+    const nextFieldCount = flattenRequestValues(input ?? {}).length;
+    if (nextFieldCount > fieldCount
+      || (nextFieldCount === fieldCount && (!best || Date.parse(event.at) > Date.parse(best.at)))) {
+      fieldCount = nextFieldCount;
       best = event;
     }
   }
@@ -1049,7 +1063,8 @@ export function attachDerivationRules(
   capability: CapabilityContract,
   mode: "write" | "query" = "write",
   index?: LookupIndexEntry[],
-  targetAt?: string
+  targetAt?: string,
+  targetPageUrl?: string
 ): { fields: InputFormField[]; bindings: DataBinding[] } {
   const lookupIndex = index || buildLookupIndex(events, catalog);
   const bindings: DataBinding[] = [];
@@ -1059,7 +1074,7 @@ export function attachDerivationRules(
     }
     if (shouldKeep(field, capability, fields)) return field;
     const value = requestValueAt(sample, field.path);
-    const from = fromApiMatch(field, value, sample, lookupIndex, capability, mode, targetAt);
+    const from = fromApiMatch(field, value, sample, lookupIndex, capability, mode, targetAt, targetPageUrl);
     if (from) {
       bindings.push({
         id: id("bind"),
@@ -1105,7 +1120,7 @@ export function attachDerivationRules(
   next = next.map(field => {
     if (shouldKeep(field, capability, next) || field.defaultRule) return field;
     const value = requestValueAt(sample, field.path);
-    if (mode === "write" && observedAsLookupInput(field, value, lookupIndex, targetAt)) {
+    if (mode === "write" && observedAsLookupInput(field, value, lookupIndex, targetAt, targetPageUrl)) {
       return {
         ...asCallerInput(field),
         sourceDetail: "该字段在写请求前作为已录制查询的同名输入，执行时由调用方提供，不能从查询结果或录制样本猜测"
@@ -1141,7 +1156,8 @@ export function attachCatalogDerivations(capabilities: CapabilityContract[], eve
       capability,
       WRITE_OPERATIONS.has(capability.operation) ? "write" : "query",
       index,
-      sampleEvent.at
+      sampleEvent.at,
+      sampleEvent.pageUrl
     );
     const existing = new Set(capability.bindings.map(item => `${item.fromCapabilityId}|${item.fromPath}|${item.toPath}`));
     return {

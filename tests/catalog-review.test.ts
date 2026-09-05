@@ -40,6 +40,17 @@ test("page query plus create are the only primaries when user page and simple-li
   assert.equal(review.primaryCount, 2);
 });
 
+test("a same-resource detail reload after save is a supporting lookup, not a third primary ability", () => {
+  const catalog = [
+    cap({ id: "query-work-report-page", operation: "query", transport: { method: "GET", urlTemplate: "https://x/admin-api/oa/work-report/page", origin: "https://x", pathTemplate: "/admin-api/oa/work-report/page" }, inputForm: [{ path: "$.billCode", name: "billCode", label: "单据编号", valueType: "string", source: "caller", required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面", widget: "text" }] }),
+    cap({ id: "create-work-report", operation: "create", transport: { method: "POST", urlTemplate: "https://x/admin-api/oa/work-report/save", origin: "https://x", pathTemplate: "/admin-api/oa/work-report/save" } }),
+    cap({ id: "query-work-report-get", operation: "query", transport: { method: "GET", urlTemplate: "https://x/admin-api/oa/work-report/get", origin: "https://x", pathTemplate: "/admin-api/oa/work-report/get" }, inputForm: [{ path: "$.id", name: "id", label: "id", valueType: "integer", source: "system", required: false, requiredBasis: "not-observed", systemHandled: true, sourceDetail: "保存后刷新详情", widget: "number", defaultRule: "literal:20" }] })
+  ];
+
+  assert.deepEqual(summarizeCatalog(catalog).primary.map(item => item.id), ["query-work-report-page", "create-work-report"]);
+  assert.equal(isPrimaryCapability(catalog[2]!, catalog), false);
+});
+
 test("unexplained write field blocks export and asks for re-analyze", () => {
   const catalog = [
     cap({

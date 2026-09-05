@@ -18,6 +18,7 @@ const LOOKUP_QUERY = /simple-list|dict-data|\/enum(?:\/|$)|get-count|get-current
 const PICKER_PAGE = /\/(?:user|dept|department|role|post|tenant|dict)\/(?:page|list)$/i;
 const PAGE_QUERY = /\/page$/i;
 const LIST_QUERY = /\/(?:list|search|query)$/i;
+const DETAIL_QUERY = /\/(?:get|detail|info)(?:[-_/].*)?$/i;
 
 const OPERATION_SEGMENT = /^(page|list|search|query|find|create|update|delete|save|submit|export|import|detail|info|count|get|add|edit|remove|complete|enable|disable)(?:[-_].+)?$/i;
 const OPERATION_PREFIX = /^(get|create|update|delete|save|submit|query|list|find|add|edit|remove|enable|disable|complete)/i;
@@ -206,7 +207,14 @@ export function isPrimaryCapability(capability: CapabilityContract, catalog: Cap
     return asks.includes(capability) && (hasBusinessCallerField(capability) || asks.length === 1);
   }
   if (writes.length) {
-    if (writes.some(item => sameResource(item.transport.pathTemplate, path))) return true;
+    if (writes.some(item => sameResource(item.transport.pathTemplate, path))) {
+      // A detail reload immediately after save is supporting evidence for the
+      // write result, not another user-facing "query" ability. A standalone
+      // detail recording can still be primary when no same-resource write is
+      // present in the reviewed slice.
+      if (DETAIL_QUERY.test(path) && !isPageResultQuery(capability)) return false;
+      return true;
+    }
     const shared = catalog.filter(item =>
       item.operation === "query"
       && !isLookupQueryPath(item.transport.pathTemplate || "")

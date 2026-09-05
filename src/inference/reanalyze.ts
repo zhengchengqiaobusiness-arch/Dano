@@ -20,6 +20,15 @@ function mergeVerifiedForm(previous: InputFormField[], incoming: InputFormField[
   return [...byPath.values()];
 }
 
+function mergeIncrementalForm(previous: InputFormField[], incoming: InputFormField[]) {
+  // The current successful observation is authoritative for fields it carries.
+  // A missing optional field only means that this particular request omitted it;
+  // it is not evidence that an already verified field stopped existing.
+  const byPath = new Map(previous.map(field => [field.path, { ...field }]));
+  for (const field of incoming) byPath.set(field.path, { ...field });
+  return [...byPath.values()];
+}
+
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
   if (!value || typeof value !== "object") return value;
@@ -132,12 +141,16 @@ export function reanalyzeIncoming(incoming: CapabilityContract[], existing: Capa
         const previous = old.inputForm.find(item => item.path === field.path);
         return previous && manualPaths.has(field.path) ? { ...previous } : { ...field };
       });
+    const sameOperation = old.operation === operation;
+    const incrementalForm = sameOperation
+      ? mergeIncrementalForm(old.inputForm, candidateForm)
+      : candidateForm;
     const keepVerified = !sessionPrimaryKeys.has(catalogTransportKey(candidate))
       && old.validation.status === "verified"
-      && (sameExecutionContract(old, candidate, candidateForm, bindings, operation)
-        || additiveOptionalLookupChange(old, candidate, candidateForm, bindings, operation));
+      && (sameExecutionContract(old, candidate, incrementalForm, bindings, operation)
+        || additiveOptionalLookupChange(old, candidate, incrementalForm, bindings, operation));
     const inputForm = applyHumanBindings(
-      keepVerified ? mergeVerifiedForm(old.inputForm, candidateForm) : candidateForm,
+      keepVerified ? mergeVerifiedForm(old.inputForm, incrementalForm) : incrementalForm,
       bindings
     );
     return {
@@ -152,7 +165,7 @@ export function reanalyzeIncoming(incoming: CapabilityContract[], existing: Capa
         reason: sideEffect ? "该操作会改变业务或文件数据" : undefined
       },
       inputForm,
-      evidence: keepVerified ? mergeEvidence(old.evidence, candidate.evidence) : candidate.evidence,
+      evidence: sameOperation ? mergeEvidence(old.evidence, candidate.evidence) : candidate.evidence,
       bindings,
       validation: keepVerified
         ? old.validation

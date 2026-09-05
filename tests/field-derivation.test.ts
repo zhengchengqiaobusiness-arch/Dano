@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { EvidenceEvent } from "../src/domain.js";
 import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
+import { finalizeCapabilities } from "../src/inference/finalize-capabilities.js";
 import { sameValue } from "../src/inference/field-resolver.js";
 
 function events(extra: EvidenceEvent[] = []): EvidenceEvent[] {
@@ -410,4 +411,85 @@ test("an unrelated detail response cannot become a write-field source by equal s
     assert.equal(field.source, "system", JSON.stringify(field));
     assert.equal(field.defaultRule, rule, JSON.stringify(field));
   }
+});
+
+test("an earlier same-resource detail reload cannot supply unrelated list-query defaults", () => {
+  const recorded: EvidenceEvent[] = [{
+    id: "net-detail", kind: "network", sessionId: "s", at: "2026-09-05T01:00:00.000Z",
+    pageUrl: "https://example.test/work-report/info",
+    request: { method: "GET", url: "https://example.test/admin-api/oa/work-report/get?id=20", resourceType: "xhr", headers: {}, query: { id: "20" } },
+    response: { status: 200, headers: {}, body: { code: 0, data: { id: 20, creator: "1", reportType: 1 } } }
+  }, {
+    id: "ui-query", kind: "ui", sessionId: "s", at: "2026-09-05T02:00:00.000Z",
+    pageUrl: "https://example.test/work-report/list", eventType: "click", text: "搜索", label: "搜索", tag: "button", role: "button",
+    form: [{ name: "billCode", label: "单据编号", type: "text", value: "RB" }]
+  }, {
+    id: "net-query", kind: "network", sessionId: "s", at: "2026-09-05T02:00:01.000Z",
+    pageUrl: "https://example.test/work-report/list", correlatedUiEvidenceId: "ui-query",
+    request: {
+      method: "GET",
+      url: "https://example.test/admin-api/oa/work-report/page?pageNo=1&pageSize=20&billCode=RB&creator=1&reportType=1",
+      resourceType: "xhr", headers: {},
+      query: { pageNo: "1", pageSize: "20", billCode: "RB", creator: "1", reportType: "1" }
+    },
+    response: { status: 200, headers: {}, body: { code: 0, data: { list: [], total: 0 } } }
+  }];
+
+  const query = buildCapabilityCandidates(recorded).find(item => item.transport.pathTemplate.endsWith("/work-report/page"))!;
+  assert.equal(query.inputForm.find(item => item.name === "billCode")?.source, "caller");
+  assert.equal(query.inputForm.find(item => item.name === "creator")?.source, "system");
+  assert.equal(query.inputForm.find(item => item.name === "creator")?.defaultRule, "literal:\"1\"");
+  assert.equal(query.inputForm.find(item => item.name === "reportType")?.source, "system");
+  assert.equal(query.inputForm.find(item => item.name === "reportType")?.defaultRule, "literal:\"1\"");
+  assert.equal(query.bindings.some(binding => binding.fromCapabilityId.includes("work-report-get")), false, JSON.stringify(query.bindings));
+});
+
+test("SPA list fields cannot leak into a write form and disabled controls stay system-owned", () => {
+  const recorded: EvidenceEvent[] = [{
+    id: "ui-list", kind: "ui", sessionId: "s", at: "2026-09-05T01:00:00.000Z",
+    pageUrl: "https://example.test/web/#/oa/workreport/daily-report-list", eventType: "snapshot",
+    form: [
+      { name: "creator", label: "申请人", type: "select", value: "1", disabled: false },
+      { name: "deptId", label: "申请部门", type: "select", value: 103, disabled: false },
+      { name: "processStatus", label: "单据状态", type: "select", value: -1, disabled: false },
+      { name: "companyId", label: "所属单位", type: "select", value: 101, disabled: false }
+    ]
+  }, {
+    id: "net-list", kind: "network", sessionId: "s", at: "2026-09-05T01:00:01.000Z",
+    pageUrl: "https://example.test/web/#/oa/workreport/daily-report-list",
+    request: { method: "GET", url: "https://example.test/admin-api/oa/work-report/page?pageNo=1&pageSize=20&creator=1&companyId=101", resourceType: "xhr", headers: {}, query: { pageNo: 1, pageSize: 20, creator: "1", companyId: 101 } },
+    response: { status: 200, headers: {}, body: { code: 0, data: { list: [{ id: 7, title: "测试日报" }], total: 1 } } }
+  }, {
+    id: "ui-save", kind: "ui", sessionId: "s", at: "2026-09-05T01:01:00.000Z",
+    pageUrl: "https://example.test/web/#/oa/workreport/work-report-info", eventType: "click",
+    text: "保存", label: "保存", tag: "button", role: "button",
+    form: [
+      { name: "reportType", label: "汇报类型", type: "select", value: 1, disabled: true },
+      { name: "reka-v-39-form-item", label: "开始日期", type: "date", value: "2026-09-05", disabled: false },
+      { name: "reka-v-41-form-item", label: "结束日期", type: "date", value: "2026-09-05", disabled: false },
+      { name: "title", label: "标题", type: "text", value: "测试日报", disabled: false }
+    ]
+  }, {
+    id: "net-save", kind: "network", sessionId: "s", at: "2026-09-05T01:01:01.000Z",
+    pageUrl: "https://example.test/web/#/oa/workreport/work-report-info", correlatedUiEvidenceId: "ui-save",
+    request: {
+      method: "POST", url: "https://example.test/admin-api/oa/work-report/save", resourceType: "xhr", headers: {}, query: {},
+      body: { creator: "1", companyId: 101, deptId: 103, processStatus: -1, reportType: 1, startDate: "2026-09-05", endDate: "2026-09-05", title: "测试日报" }
+    },
+    response: { status: 200, headers: {}, body: { code: 0, data: 8 } }
+  }];
+
+  const catalog = finalizeCapabilities(buildCapabilityCandidates(recorded), recorded);
+  const create = catalog.find(item => item.transport.pathTemplate.endsWith("/work-report/save"))!;
+  const byName = (name: string) => create.inputForm.find(item => item.name === name)!;
+  for (const [name, rule] of [["creator", "literal:\"1\""], ["companyId", "literal:101"], ["deptId", "literal:103"], ["processStatus", "literal:-1"], ["reportType", "literal:1"]] as const) {
+    assert.equal(byName(name).source, "system", JSON.stringify(byName(name)));
+    assert.equal(byName(name).defaultRule, rule, JSON.stringify(byName(name)));
+  }
+  assert.equal(byName("startDate").source, "caller", JSON.stringify(byName("startDate")));
+  assert.equal(byName("startDate").label, "开始日期");
+  assert.equal(byName("endDate").source, "caller", JSON.stringify(byName("endDate")));
+  assert.equal(byName("endDate").label, "结束日期");
+  assert.equal(byName("title").source, "caller");
+  assert.notEqual(byName("title").candidates?.type, "capability", JSON.stringify(byName("title")));
 });

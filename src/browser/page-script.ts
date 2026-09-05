@@ -991,6 +991,7 @@ export const PAGE_HELPERS = String.raw`
       type: field.kind,
       value: field.value,
       required: field.required,
+      disabled: field.disabled,
       invalid: field.invalid,
       options: field.options,
       rangeIndex: field.rangeIndex

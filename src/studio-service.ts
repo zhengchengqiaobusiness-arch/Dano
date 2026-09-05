@@ -12,7 +12,7 @@ import { fallbackPlan } from "./planner/fallback.js";
 import { applyPlanPolicy } from "./planner/policy.js";
 import { exportSkill } from "./export/skill-exporter.js";
 import { executeCapability } from "./execution/http-executor.js";
-import { capabilitiesForSession, relatedLookupCapabilities, reviewSessionIds, sessionBusinessPageKeys, sessionCatalogSlice } from "./inference/export-scope.js";
+import { capabilitiesForSession, relatedLookupCapabilities, sessionBusinessPageKeys, sessionCatalogSlice } from "./inference/export-scope.js";
 import { mergeCatalogByTransport, normalizeCatalog } from "./catalog/normalize.js";
 import { attachCatalogDerivations } from "./inference/field-derivation.js";
 import { reanalyzeIncoming } from "./inference/reanalyze.js";
@@ -171,13 +171,9 @@ export class StudioService {
     const session = current ? sessions.find(item => item.id === current) : undefined;
     if (session) await this.persistSessionPageKeys(session, scopeEvents);
     const catalog = await this.capabilities();
-    const ids = current ? reviewSessionIds(sessions, current, scopeEvents) : new Set<string>();
     const preliminary = sessionCatalogSlice(catalog, scopeEvents, scopeEvents);
-    const extraIds = this.sliceNeedsExtraEvents(preliminary, scopeEvents)
-      ? [...ids].filter(id => id !== current)
-      : [];
-    const extraEvents = extraIds.length
-      ? (await Promise.all(extraIds.map(id => this.sessionEvents(id)))).flat()
+    const extraEvents = this.sliceNeedsExtraEvents(preliminary, scopeEvents)
+      ? await this.eventsFromRefs(preliminary, scopeEvents)
       : [];
     return { current, session, scopeEvents, events: extraEvents.length ? [...scopeEvents, ...extraEvents] : scopeEvents, catalog };
   }
