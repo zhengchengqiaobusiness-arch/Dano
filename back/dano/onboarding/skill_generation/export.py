@@ -13,7 +13,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from dano.execution.page.flow_materialization.builder import apply_recorded_unknown_policy
 from dano.execution.page.flow_spec_core.models import FlowSpec
@@ -287,7 +287,10 @@ def _current_spec(body: dict[str, Any]) -> FlowSpec:
         raw = working if isinstance(working, dict) and working else None
     if not isinstance(raw, dict) or not raw:
         raise SkillExportError(409, "录制结果没有可导出的 FlowSpec")
-    return FlowSpec.model_validate(raw)
+    try:
+        return FlowSpec.model_validate(raw)
+    except ValidationError as exc:
+        raise SkillExportError(409, "录制结果 FlowSpec 无法用于导出") from exc
 
 
 def _stable_skill_id(body: dict[str, Any], title: str) -> str:

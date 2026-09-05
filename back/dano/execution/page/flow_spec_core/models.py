@@ -5,7 +5,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 _SYNC_HOOK: Callable[["FlowSpec"], "FlowSpec"] | None = None
@@ -218,6 +218,21 @@ class RequestFacts(BaseModel):
     option_sources: list[dict[str, Any]] = Field(default_factory=list)
     analysis: dict[str, RequestAnalysis] = Field(default_factory=dict)
     usage: dict[str, RequestUsage] = Field(default_factory=dict)
+
+    @field_validator("requests", mode="before")
+    @classmethod
+    def _coerce_request_items(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        coerced: list[Any] = []
+        for item in value:
+            if isinstance(item, str):
+                request_id = item.strip()
+                if request_id:
+                    coerced.append({"request_id": request_id})
+                continue
+            coerced.append(item)
+        return coerced
 
 
 class CapabilityRequestRef(BaseModel):

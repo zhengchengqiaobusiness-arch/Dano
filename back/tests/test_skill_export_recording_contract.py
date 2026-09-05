@@ -23,6 +23,7 @@ from dano.execution.page.flow_spec_core.request_contract import (
 from dano.export.skill_package.renderer import package_slug, render_skill_package
 from dano.onboarding.skill_generation.catalog import is_write_capability
 from dano.onboarding.skill_generation.export import (
+    _current_spec,
     build_export_skill_spec,
     export_recording_skill,
 )
@@ -120,6 +121,21 @@ def test_empty_nodes_do_not_wipe_declared_execute_refs() -> None:
     assert any(ref.usage == "execute" and ref.step_id == "step_query" for ref in cap.request_refs)
     assert cap.step_ids == ["step_query"]
     assert cap.nodes == []
+
+
+def test_pi_request_fact_ids_do_not_block_export_spec() -> None:
+    payload = _pi_recording_payload()
+    payload["request_facts"] = {
+        "requests": [
+            "req_729e8c50f32243359aef73b18df80fcb",
+            "req_9ab8ee2ee5e94029819ecffd2bd9f9b7",
+        ]
+    }
+    spec = _current_spec({"flow_spec": payload})
+    assert [fact.request_id for fact in spec.request_facts.requests] == [
+        "req_729e8c50f32243359aef73b18df80fcb",
+        "req_9ab8ee2ee5e94029819ecffd2bd9f9b7",
+    ]
 
 
 def test_loading_recording_result_keeps_request_refs_and_compiles_contract() -> None:
