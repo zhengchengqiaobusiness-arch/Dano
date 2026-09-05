@@ -256,7 +256,7 @@ test("leftover one-to-one does not bind a hidden token to an unrelated remark", 
   assert.notEqual(bound[0]?.label, "备注");
 });
 
-test("leftover one-to-one ignores invariant discriminators and binds the remaining visible field", () => {
+test("leftover one-to-one does not guess a remaining visible field", () => {
   const fields = [
     field({ name: "billType", path: "$.billType", source: "system", sourceDetail: "未解析" }),
     field({ name: "useInfo", path: "$.useInfo", source: "system", sourceDetail: "未解析" }),
@@ -272,8 +272,8 @@ test("leftover one-to-one ignores invariant discriminators and binds the remaini
     remark: "同一段测试内容"
   });
   assert.equal(bound.find(item => item.name === "billType")?.source, "system");
-  assert.equal(bound.find(item => item.name === "useInfo")?.source, "caller");
-  assert.equal(bound.find(item => item.name === "useInfo")?.label, "使用描述");
+  assert.equal(bound.find(item => item.name === "useInfo")?.source, "system");
+  assert.notEqual(bound.find(item => item.name === "useInfo")?.label, "使用描述");
 });
 
 test("a single start-date observation does not claim the end-date request field", () => {
@@ -358,7 +358,7 @@ test("frozen picker still blocks when the user query is not yet verified", () =>
   assert.match(review.summary, /选人|弹窗|验证/);
 });
 
-test("username-only user lists can still be a picker candidate source", () => {
+test("username-only user lists are not guessed without a unique recorded value", () => {
   const catalog = [
     cap({
       id: "create-leave",
@@ -381,12 +381,11 @@ test("username-only user lists can still be a picker candidate source", () => {
   ];
   const finalized = finalizeCapabilities(catalog, []);
   const picker = finalized[0]!.inputForm.find(item => item.name === "Activity_0ag2wyz")!;
-  assert.equal(picker.candidates?.type, "capability");
-  assert.equal(picker.candidates && picker.candidates.type === "capability" && picker.candidates.labelPath.endsWith(".username"), true);
+  assert.notEqual(picker.candidates?.type, "capability");
 });
 
 test("recalculate stays action and is still exportable as a primary", () => {
-  assert.equal(inferOperation(network("POST", "https://x/orders/recalculate") as any), "action");
+  assert.equal(inferOperation(network("POST", "https://x/orders/recalculate") as any), "unknown");
   const catalog = [
     cap({
       id: "recalculate",

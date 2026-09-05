@@ -1,3 +1,8 @@
+/**
+ * 文件级说明：字段归属 / 同义词 / leftover 绑定的主流判断已交给 `.pi/skills/infer-field-contract`。
+ * 本文件保留摊平请求、值比较、UI 观察收集，供校验和执行器使用。
+ * bind* 系列不再做业务猜测。旧引擎全文见 `field-resolver.ts.bak`。
+ */
 import type { EvidenceEvent, InputFormField, NetworkEvidence, UiEvidence } from "../domain.js";
 import { ASK_KEY } from "./heuristics.js";
 import { clockFromEpoch, dateDay, isDateOnly, isIsoInstant, recordedClock } from "./date-format.js";
@@ -123,7 +128,7 @@ function richTextPlain(value: unknown) {
     .trim();
 }
 
-export function sameValue(left: unknown, right: unknown) {
+export function sameValue(left: unknown, right: unknown): boolean {
   if (left === undefined || left === null || right === undefined || right === null || right === "") return false;
   if (Object.is(left, right)) return true;
   if (Array.isArray(left) || Array.isArray(right)) {
@@ -183,9 +188,11 @@ function isPromptLabel(label?: string) {
 function labelsEquivalent(left?: string, right?: string) {
   if (!left || !right) return false;
   if (left === right) return true;
+  const normalize = (value: string) => value.replace(/^\*+/, "").replace(/[：:]\s*$/, "").trim();
+  if (normalize(left) === normalize(right)) return true;
   const strippedLeft = emptyPromptLabel(left) || left;
   const strippedRight = emptyPromptLabel(right) || right;
-  return strippedLeft === strippedRight;
+  return normalize(strippedLeft) === normalize(strippedRight);
 }
 
 function preferLabeledObservation(items: UiObservation[]) {
@@ -966,20 +973,11 @@ export function resolveFieldOwnership(
   lists: RecordedList[] = [],
   sample?: unknown
 ): InputFormField {
-  if (PAGE_NAME.test(field.name)) {
-    return {
-      ...field,
-      source: "system",
-      systemHandled: true,
-      required: false,
-      defaultRule: literalRule(requestValue) || field.defaultRule || "literal:1",
-      sourceDetail: "列表分页由执行器按默认值补齐，调用方可覆盖，不要当成业务主键"
-    };
-  }
-  const matched = findObservation(field, scalarRequestValue(requestValue), observations, lists, sample);
-  if (matched && looksReadonly(matched)) return asReadonly(field, matched);
-  if (matched) return asCaller(field, matched, scalarRequestValue(requestValue), observations, lists);
-  return finalizeUnhandled(field);
+  void requestValue;
+  void observations;
+  void lists;
+  void sample;
+  return field;
 }
 
 function expandObservation(hit: UiObservation | undefined, observations: UiObservation[]) {
@@ -1059,26 +1057,10 @@ export function bindBySemanticLabel(
   sample: unknown,
   lists: RecordedList[] = []
 ): InputFormField[] {
-  const editable = leftoverEditable(fields, observations).filter(item => !pollutedLabel(item));
-  if (!editable.length) return fields;
-  return fields.map(field => {
-    if (field.source === "caller" || PAGE_NAME.test(field.name) || isReadonlyBound(field)) return field;
-    const value = requestValueAt(sample, field.path);
-    if (value === undefined || value === null || value === "") return field;
-    const scored = editable
-      .filter(item => !looksReadonly(item) && observationMatchesValue(item, value, lists))
-      .map(item => ({ item, score: semanticLabelScore(field, item) }))
-      .filter(hit => hit.score > 0)
-      .sort((left, right) => right.score - left.score || String(left.item.label || "").localeCompare(String(right.item.label || "")));
-    if (!scored.length || (scored[1] && scored[1].score === scored[0]!.score && scored[1].item.label !== scored[0]!.item.label)) return field;
-    const best = scored[0]!;
-    const competingScore = Math.max(0, ...fields
-      .filter(other => other.path !== field.path && other.name !== field.name && other.source !== "caller" && !PAGE_NAME.test(other.name) && !isReadonlyBound(other))
-      .filter(other => sameValue(requestValueAt(sample, other.path), value))
-      .map(other => semanticLabelScore(other, best.item)));
-    if (competingScore >= best.score) return field;
-    return bindObservation(field, best.item, value, observations, lists);
-  });
+  void observations;
+  void sample;
+  void lists;
+  return fields;
 }
 
 function nameIndex(name: string) {
@@ -1217,36 +1199,11 @@ export function bindLeftoverFields(
   lists: RecordedList[] = [],
   owner?: UiEvidence
 ): InputFormField[] {
-  fields = bindRepeatedDateRange(fields, owner, observations, sample, lists);
-  const leftoverObs = leftoverEditable(fields, observations);
-  const leftoverFields = fields.filter(field => {
-    if (field.source === "caller" || PAGE_NAME.test(field.name) || isReadonlyBound(field)) return false;
-    const value = requestValueAt(sample, field.path);
-    return !looksInvariantConstant(field, value) || leftoverExplainsValue(field, value, observations, fields);
-  });
-  if (leftoverObs.length === 1 && leftoverFields.length === 1) {
-    const field = leftoverFields[0]!;
-    const observation = leftoverObs[0]!;
-    const value = requestValueAt(sample, field.path);
-    if (observationCompatible(field, observation, value, lists)) {
-      return fields.map(item =>
-        item.path === field.path
-          ? asCaller(item, observation, value, observations, lists)
-          : item
-      );
-    }
-  }
-  const dateObs = leftoverObs.filter(looksDateControl);
-  const dateFields = leftoverFields.filter(looksDateControl);
-  const dateLabels = new Set(dateObs.map(item => item.label));
-  if (dateObs.length && dateFields.length && dateLabels.size === 1) {
-    return fields.map(item =>
-      dateFields.some(field => field.path === item.path)
-        ? asCaller(item, dateObs[0], requestValueAt(sample, item.path), observations, lists)
-        : item
-    );
-  }
-  return bindIndexedDateRange(fields, owner, observations, sample, lists);
+  void observations;
+  void sample;
+  void lists;
+  void owner;
+  return fields;
 }
 
 export function assignUniqueRemaining(
@@ -1255,56 +1212,10 @@ export function assignUniqueRemaining(
   sample: unknown,
   lists: RecordedList[] = []
 ): InputFormField[] {
-  const leftoverObs = leftoverEditable(fields, observations);
-  const leftoverFields = fields.filter(field => field.source !== "caller" && !PAGE_NAME.test(field.name) && !isReadonlyBound(field));
-  const bound = new Map<string, InputFormField>();
-  const boundPaths = new Set<string>();
-  for (const field of leftoverFields) {
-    const value = requestValueAt(sample, field.path);
-    if (value === undefined || value === null || value === "") continue;
-    const matches = leftoverObs.filter(item =>
-      !bound.has(item.label || "") && observationCompatible(field, item, value, lists)
-    );
-    const unique = [...new Map(matches.map(item => [item.label || "", item])).values()];
-    if (unique.length !== 1) continue;
-    const observation = unique[0]!;
-    const competitors = leftoverFields.filter(other =>
-      other.path !== field.path
-      && !boundPaths.has(other.path)
-      && observationCompatible(other, observation, requestValueAt(sample, other.path), lists)
-    );
-    if (competitors.length) continue;
-    bound.set(observation.label || field.path, bindObservation(field, observation, value, observations, lists));
-    boundPaths.add(field.path);
-  }
-  for (const field of leftoverFields) {
-    if (boundPaths.has(field.path) || !looksPickerField(field)) continue;
-    const value = requestValueAt(sample, field.path);
-    if (value === undefined || value === null || value === "") continue;
-    const fieldEntity = pickerEntity(field);
-    const pickerObs = leftoverObs.filter(item => {
-      if (bound.has(item.label || "") || !/picker|select|combobox/i.test(item.type || "")) return false;
-      const observationEntity = pickerEntity(item);
-      return !(fieldEntity && observationEntity && fieldEntity !== observationEntity);
-    });
-    const required = pickerObs.filter(item => item.required);
-    const pool = required.length ? required : pickerObs;
-    if (pool.length !== 1) continue;
-    const observation = pool[0]!;
-    const otherPickers = leftoverFields.filter(other =>
-      other.path !== field.path
-      && !boundPaths.has(other.path)
-      && looksPickerField(other)
-      && other.valueType !== "object"
-      && !other.path.endsWith("SelectAssignees")
-    );
-    if (otherPickers.length) continue;
-    bound.set(observation.label || field.path, bindObservation(field, observation, value, observations, lists));
-    boundPaths.add(field.path);
-  }
-  if (!bound.size) return fields;
-  const byPath = new Map([...bound.values()].map(field => [field.path, field]));
-  return fields.map(field => byPath.get(field.path) || field);
+  void observations;
+  void sample;
+  void lists;
+  return fields;
 }
 
 export function assignUniqueFromSamples(
@@ -1313,10 +1224,10 @@ export function assignUniqueFromSamples(
   samples: unknown[],
   lists: RecordedList[] = []
 ) {
-  return samples.reduce<InputFormField[]>(
-    (current, sample) => assignUniqueRemaining(current, observations, sample, lists),
-    fields
-  );
+  void observations;
+  void samples;
+  void lists;
+  return fields;
 }
 
 function uniqueAssignment<TField, TObs>(
@@ -1350,26 +1261,10 @@ export function bindByUniqueMatching(
   sample: unknown,
   lists: RecordedList[] = []
 ): InputFormField[] {
-  const leftoverObs = leftoverEditable(fields, observations);
-  const leftoverFields = fields.filter(field => field.source !== "caller" && !PAGE_NAME.test(field.name) && !isReadonlyBound(field));
-  if (leftoverFields.length < 2 || leftoverObs.length < leftoverFields.length) return fields;
-  const assignment = uniqueAssignment(leftoverFields, leftoverObs, (field, item) => {
-    const value = requestValueAt(sample, field.path);
-    if (value === undefined || value === null || value === "") return false;
-    if (looksTextObservation({ type: field.widget }) && looksChoiceObservation(item) && !sameSynonymGroup(field, item)) {
-      return false;
-    }
-    if (observationMatchesValue(item, value, lists)) return true;
-    if (!looksChoiceField(field) && !looksChoiceObservation(item)) return false;
-    const list = listForObservation(item, lists, value);
-    return Boolean(list && list.rows.some(row => sameValue(rowIdentity(row), value)));
-  });
-  if (!assignment) return fields;
-  const byPath = new Map(leftoverFields.map((field, index) => [
-    field.path,
-    bindObservation(field, leftoverObs[assignment[index]!]!, requestValueAt(sample, field.path), observations, lists)
-  ]));
-  return fields.map(field => byPath.get(field.path) || field);
+  void observations;
+  void sample;
+  void lists;
+  return fields;
 }
 
 function unlabeledCallers(fields: InputFormField[]) {
@@ -1510,33 +1405,10 @@ export function bindByLabelAffinity(
   sample: unknown,
   lists: RecordedList[] = []
 ): InputFormField[] {
-  const leftoverObs = leftoverEditable(fields, observations).filter(item => !pollutedLabel(item));
-  const leftoverFields = fields.filter(field => field.source !== "caller" && !PAGE_NAME.test(field.name) && !isReadonlyBound(field));
-  const bound = new Map<string, InputFormField>();
-  const used = new Set<string>();
-  for (const field of leftoverFields) {
-    const value = requestValueAt(sample, field.path);
-    if (value === undefined || value === null || value === "") continue;
-    const matches = leftoverObs.filter(item =>
-      !used.has(item.label || "")
-      && sameSynonymGroup(field, item)
-      && (observationCompatible(field, item, value, lists) || observationMatchesValue(item, value, lists))
-    );
-    const unique = [...new Map(matches.map(item => [item.label || "", item])).values()];
-    if (unique.length !== 1) continue;
-    const observation = unique[0]!;
-    const competitors = leftoverFields.filter(other =>
-      other.path !== field.path
-      && !bound.has(other.path)
-      && sameSynonymGroup(other, observation)
-      && observationCompatible(other, observation, requestValueAt(sample, other.path), lists)
-    );
-    if (competitors.length) continue;
-    bound.set(field.path, asCaller(field, observation, value, observations, lists));
-    if (observation.label) used.add(observation.label);
-  }
-  if (!bound.size) return fields;
-  return fields.map(field => bound.get(field.path) || field);
+  void observations;
+  void sample;
+  void lists;
+  return fields;
 }
 
 export function bindByRecordedOptions(
@@ -1545,21 +1417,10 @@ export function bindByRecordedOptions(
   sample: unknown,
   lists: RecordedList[] = []
 ): InputFormField[] {
-  const leftoverFields = fields.filter(field => field.source !== "caller" && !PAGE_NAME.test(field.name) && !isReadonlyBound(field));
-  const bound = new Map<string, InputFormField>();
-  for (const field of leftoverFields) {
-    const value = requestValueAt(sample, field.path);
-    if (value === undefined || value === null || value === "") continue;
-    if (value === 0 || value === 1 || value === true || value === false || value === "0" || value === "1") continue;
-    const hits = leftoverEditable(fields, observations).filter(item =>
-      item.options?.some(option => sameValue(option.value, value) || sameValue(option.label, value))
-    );
-    const unique = [...new Map(hits.map(item => [item.label || "", item])).values()];
-    if (unique.length !== 1) continue;
-    bound.set(field.path, asCaller(field, unique[0]!, value, observations, lists));
-  }
-  if (!bound.size) return fields;
-  return fields.map(field => bound.get(field.path) || field);
+  void observations;
+  void sample;
+  void lists;
+  return fields;
 }
 
 const QUALIFIER_LABEL: Record<string, string> = {
@@ -1755,53 +1616,11 @@ export function finalizeCallerFields(
   lists: RecordedList[] = [],
   owner?: UiEvidence
 ): InputFormField[] {
-  const relabeled = promoteChooserIdentities(
-    bindUnlabeledCallers(
-      bindByRecordedOptions(
-        bindByLabelAffinity(
-          bindIndexedDateRange(fields, owner, observations, sample, lists, true),
-          observations,
-          sample,
-          lists
-        ),
-        observations,
-        sample,
-        lists
-      ),
-      observations,
-      sample,
-      lists
-    ),
-    sample,
-    lists
-  );
-  const finalized = applyInvariantDefaults(
-    refineSharedCallerLabels(
-      attachUnresolvedHints(relabeled, observations, sample, lists).map(field =>
-        enrichFromObservations(field, observations, sample, lists)
-      ),
-      observations,
-      sample,
-      lists
-    ),
-    sample,
-    observations
-  );
-  const ranged = bindRepeatedDateRange(finalized, owner, observations, sample, lists);
-  const readonly = uniqueByLabel(observations.filter(item => item.label && looksReadonly(item) && !pollutedLabel(item)));
-  if (!readonly.length) return ranged;
-  return ranged.map(field => {
-    if (field.source === "caller" || (field.label !== field.name && /[^\x00-\x7f]/.test(field.label))) return field;
-    const value = requestValueAt(sample, field.path);
-    if (value === undefined || value === null || value === "") return field;
-    const scored = readonly
-      .filter(item => observationMatchesValue(item, value, lists))
-      .map(item => ({ item, score: readonlySemanticScore(field, item) }))
-      .filter(hit => hit.score > 0)
-      .sort((left, right) => right.score - left.score || String(left.item.label || "").localeCompare(String(right.item.label || "")));
-    if (!scored.length || (scored[1] && scored[1].score === scored[0]!.score && scored[1].item.label !== scored[0]!.item.label)) return field;
-    return { ...field, label: scored[0]!.item.label! };
-  });
+  void observations;
+  void sample;
+  void lists;
+  void owner;
+  return fields;
 }
 
 export function promoteUnboundFillable(
@@ -1809,32 +1628,9 @@ export function promoteUnboundFillable(
   observations: UiObservation[],
   sample: unknown
 ): InputFormField[] {
-  const leftoverObs = leftoverEditable(fields, observations);
-  if (!leftoverObs.length) return fields;
-  const eligible = fields.filter(field =>
-    field.source !== "caller" && !PAGE_NAME.test(field.name) && !isReadonlyBound(field)
-  );
-  const matches = eligible.map(field => {
-    const value = requestValueAt(sample, field.path);
-    const matching = leftoverObs.filter(item =>
-      sameValue(item.value, value) || Boolean(dateDay(value) && dateDay(item.value) === dateDay(value))
-    );
-    return { field, matching };
-  });
-  const labelUses = new Map<string, number>();
-  for (const item of matches) {
-    if (item.matching.length !== 1 || looksReadonly(item.matching[0]!)) continue;
-    const label = item.matching[0]!.label || "";
-    if (!label) continue;
-    labelUses.set(label, (labelUses.get(label) || 0) + 1);
-  }
-  return fields.map(field => {
-    const hit = matches.find(item => item.field.path === field.path);
-    if (!hit || hit.matching.length !== 1) return field;
-    const observation = hit.matching[0]!;
-    if (!observation.label || looksReadonly(observation) || (labelUses.get(observation.label) || 0) !== 1) return field;
-    return asCaller(field, observation, requestValueAt(sample, field.path), observations, []);
-  });
+  void observations;
+  void sample;
+  return fields;
 }
 
 export function parseCollectionLeafPath(path: string) {
@@ -1849,7 +1645,7 @@ export function isCollectionMetadataKey(key: string) {
   return /^(itemType|_X_ROW_KEY|_X_ID|rowKey|row_key|sort|index)$/i.test(key);
 }
 
-export function requestValueAt(sample: unknown, path: string) {
+export function requestValueAt(sample: unknown, path: string): unknown {
   const indexed = parseCollectionLeafPath(path);
   if (indexed && indexed.index !== "*") {
     const rows = collectionRowsAt(sample, indexed.prefix);
@@ -1864,7 +1660,7 @@ export function requestValueAt(sample: unknown, path: string) {
   return undefined;
 }
 
-export function collectionRowsAt(sample: unknown, collectionPath: string) {
+export function collectionRowsAt(sample: unknown, collectionPath: string): Record<string, unknown>[] {
   const value = requestValueAt(sample, collectionPath);
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
@@ -2027,42 +1823,11 @@ export function attachOptionalNamedFilters(
   query = false,
   owner?: UiEvidence
 ): InputFormField[] {
-  if (!query) return fields;
-  const ownerNames = new Set(owner?.form ? formNames(owner.form) : []);
-  if (!ownerNames.size) return fields;
-  const leftover = leftoverEditable(fields, observations);
-  const extra: InputFormField[] = [];
-  const taken = new Set(fields.map(field => field.name));
-  for (const observation of leftover) {
-    const name = realFieldName(observation.name);
-    if (!name || !ownerNames.has(name) || taken.has(name) || PAGE_NAME.test(name)) continue;
-    if (fields.some(field => field.path === `$.${name}` || field.name === name)) continue;
-    taken.add(name);
-    extra.push({
-      path: `$.${name}`,
-      name,
-      label: observation.label || name,
-      valueType: "string",
-      source: "caller",
-      required: false,
-      requiredBasis: "not-observed",
-      systemHandled: false,
-      widget: widgetFromObservation({
-        path: `$.${name}`,
-        name,
-        label: observation.label || name,
-        valueType: "string",
-        source: "caller",
-        required: false,
-        requiredBasis: "not-observed",
-        systemHandled: false,
-        sourceDetail: "",
-        widget: "text"
-      }, observation),
-      sourceDetail: "页面有筛选控件；有值时按页面字段名传递，空则省略，与未选时不传该键一致"
-    });
-  }
-  return extra.length ? [...fields, ...extra] : fields;
+  void observations;
+  void sample;
+  void query;
+  void owner;
+  return fields;
 }
 
 function formNames(form: NonNullable<UiEvidence["form"]>) {

@@ -153,7 +153,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_analyze",
     label: "Analyze recorded capabilities",
-    description: "Infer atomic business capabilities from recorded evidence. OpenAI refinement is used only when configured.",
+    description: "Cluster recorded evidence, then let Pi skills infer-field-contract and judge-primary-capability fill field ownership, rules, and primary/lookup/noise roles. Does not invent endpoints or request keys.",
     parameters: parameters({
       sessionId: { type: "string" },
       noLlm: { type: "boolean" }
@@ -168,6 +168,39 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
           text: `本次会话识别主能力 ${summary.primary.length} 项：${primaryTitles}。字段候选接口 ${summary.lookups.length} 个，后台轮询 ${summary.noise.length} 项不会进入 Skill。主能力只统计本次会话页面的查询/新建/修改/审核/删除，不要把其它页已有能力当成这次的补录对象。用户分页、产品下拉、库存带出不是主能力。分析后必须验证，验证未通过不能导出。`
         }],
         details: caps
+      };
+    }
+  });
+
+  pi.registerTool({
+    name: "business_skill_infer_fields",
+    label: "Infer field contracts with Pi",
+    description: "Run the infer-field-contract Pi skill on a recorded session. Binds existing request keys only; does not invent fields. Prefer business_skill_analyze which already includes this step.",
+    parameters: parameters({
+      sessionId: { type: "string" }
+    }),
+    async execute(_id, params: any) {
+      const caps = await studio.analyze(params.sessionId || lastRecordingSessionId, true);
+      return {
+        content: [{ type: "text", text: `已按 infer-field-contract 处理 ${caps.length} 个能力的字段合同。` }],
+        details: caps.map(item => ({ id: item.id, role: item.role, fields: item.inputForm.map(field => ({ path: field.path, source: field.source, rule: field.defaultRule })) }))
+      };
+    }
+  });
+
+  pi.registerTool({
+    name: "business_skill_judge_primary",
+    label: "Judge primary capabilities with Pi",
+    description: "Run the judge-primary-capability Pi skill on a recorded session. Marks primary / lookup / noise. Prefer business_skill_analyze which already includes this step.",
+    parameters: parameters({
+      sessionId: { type: "string" }
+    }),
+    async execute(_id, params: any) {
+      const caps = await studio.analyze(params.sessionId || lastRecordingSessionId, true);
+      const summary = summarizeCatalog(caps);
+      return {
+        content: [{ type: "text", text: `主能力 ${summary.primary.length}，lookup ${summary.lookups.length}，噪声 ${summary.noise.length}。` }],
+        details: caps.map(item => ({ id: item.id, operation: item.operation, role: item.role, title: item.title }))
       };
     }
   });

@@ -96,11 +96,23 @@ test("a second review with the same findings stops instead of analyzing again", 
   const recordingsDir = path.join(temporary, "recordings");
   const catalogDir = path.join(temporary, "catalog");
   const events: EvidenceEvent[] = [{
+    id: "ui-submit",
+    kind: "ui",
+    sessionId: "now",
+    at: "2026-09-05T08:00:01.000Z",
+    pageUrl: DOC_FORM,
+    eventType: "click",
+    text: "确定",
+    label: "确定",
+    tag: "button",
+    role: "button"
+  }, {
     id: "net-create",
     kind: "network",
     sessionId: "now",
     at: "2026-09-05T08:00:02.000Z",
     pageUrl: DOC_FORM,
+    correlatedUiEvidenceId: "ui-submit",
     request: {
       method: "POST",
       url: "https://example.test/oa/doc/submit",
@@ -123,6 +135,7 @@ test("a second review with the same findings stops instead of analyzing again", 
       defaultRule: "from:query-ghost:$.id"
     }],
     evidence: [{ eventId: "net-create", sessionId: "now", kind: "network", at: "2026-09-05T08:00:02.000Z", status: 200 }],
+    validation: { version: 2, status: "candidate", checks: [] },
     bindings: [{
       id: "human-missing",
       fromCapabilityId: "query-ghost",
@@ -144,6 +157,7 @@ test("a second review with the same findings stops instead of analyzing again", 
     eventsFile: path.join(dir, "events.jsonl")
   });
   await appendJsonl(path.join(dir, "events.jsonl"), events[0]);
+  await appendJsonl(path.join(dir, "events.jsonl"), events[1]);
   await writeJson(path.join(catalogDir, "capabilities.json"), [create] as CapabilityContract[]);
   const studio = studioOf(temporary);
   const first = await studio.review("now");

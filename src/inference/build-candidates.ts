@@ -1,3 +1,8 @@
+/**
+ * 文件级说明：本文件只按 method+path 聚类证据并摊出请求键。
+ * 字段归属和主能力由 Pi Skill 判断；精确同名/独值拼接在 `pi-skill-runtime`。
+ * 旧绑定流水线见 `build-candidates.ts.bak`。
+ */
 import type {
   CapabilityContract,
   EvidenceEvent,
@@ -6,8 +11,16 @@ import type {
   UiEvidence
 } from "../domain.js";
 import { inferOperation, inferUiOperationIntent, isSuccessfulNetworkEvidence, normalizeUrl, operationConfidence } from "./heuristics.js";
-import { attachCatalogDerivations } from "./field-derivation.js";
-import { assignUniqueFromSamples, attachOptionalNamedFilters, bindByLabelAffinity, bindByRecordedOptions, bindBySemanticLabel, bindByUniqueMatching, bindLeftoverFields, collectUiObservations, finalizeCallerFields, flattenRequestValues, owningFormEvent, preferRequestValueType, promoteUnboundFillable, recordedLists, relatedUiEvents, requestValueAt, resolveFieldOwnership, sameFormShape, splitSectionedCollectionFields } from "./field-resolver.js";
+import {
+  collectUiObservations,
+  flattenRequestValues,
+  owningFormEvent,
+  preferRequestValueType,
+  relatedUiEvents,
+  sameFormShape,
+  splitSectionedCollectionFields,
+  uiNameMatches
+} from "./field-resolver.js";
 import { mergeSchemas, schemaFromValue } from "../schema.js";
 import { slugify } from "../utils.js";
 
@@ -52,6 +65,35 @@ function widgetFromUiType(type: string): InputFormField["widget"] {
   if (kind === "textarea") return "textarea";
   if (kind === "date" || kind === "datetime" || kind === "daterange") return "date";
   return "text";
+}
+
+function observationLabel(label?: string) {
+  const raw = String(label || "").trim().replace(/^(请输入|请选择|请填写)\s*/, "");
+  return raw || undefined;
+}
+
+function applyNamedObservations(fields: InputFormField[], observations: ReturnType<typeof collectUiObservations>) {
+  return fields.map(field => {
+    const named = observations.find(item => uiNameMatches(item.name, field.name));
+    if (!named) return field;
+    const options = named.options?.length
+      ? named.options.map(item => ({ value: item.value, label: String(item.label || item.value) }))
+      : undefined;
+    const disabled = named.disabled === true || /readonly|disabled/i.test(String(named.type || ""));
+    return {
+      ...field,
+      label: observationLabel(named.label) || field.label,
+      source: disabled ? field.source : "caller",
+      systemHandled: disabled ? field.systemHandled : false,
+      required: named.required === true || field.required,
+      requiredBasis: named.required === true ? "ui-required" as const : field.requiredBasis,
+      widget: named.type ? widgetFromUiType(named.type) : field.widget,
+      candidates: options?.length ? { type: "static" as const, values: options } : field.candidates,
+      sourceDetail: disabled
+        ? "页面只读展示，由选择其它字段后自动带出。调用方不要手填"
+        : "页面同名控件，由调用方提供"
+    };
+  });
 }
 
 function uiFieldToForm(field: NonNullable<UiEvidence["form"]>[number]): InputFormField | undefined {
@@ -271,7 +313,6 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
     let inputSchema = {};
     let outputSchema = {};
     const forms = new Map<string, InputFormField>();
-    const directUiNames = new Set<string>();
 
     for (const event of group) {
       inputSchema = mergeSchemas(inputSchema, schemaFromValue(requestInput(event)));
@@ -291,7 +332,6 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
         }
       }
       if (correlated?.name) {
-        directUiNames.add(correlated.name);
         const observed = correlated.options?.length
           ? correlated.options.map(o => ({ value: o.value, label: String(o.label || o.value) }))
           : correlated.visibleOptions?.length
@@ -374,10 +414,10 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
           return relatedUiEvents(event, uiById, requestInput(event));
         });
         const observations = collectUiObservations(nearbyUi);
-        const lists = recordedLists(network);
-        for (const field of inferred) {
+        const merged = inferred.map(field => {
           const seen = observed.get(field.path);
-          const merged: InputFormField = seen ? {
+          if (!seen) return field;
+          return {
             ...field,
             ...seen,
             valueType: preferRequestValueType(field.valueType, seen.valueType),
@@ -388,63 +428,17 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
               ? "multiselect"
               : seen.widget || field.widget,
             candidates: seen.candidates || field.candidates
-          } : field;
-          forms.set(field.path, resolveFieldOwnership(merged, requestValueAt(sample, merged.path), observations, lists, sample));
-        }
+          };
+        });
+        const byPath = new Map(merged.map(field => [field.path, field]));
         for (const [fieldPath, field] of observed) {
-          const isTransportInput = normalized.urlTemplate.includes(`{${field.name}}`);
-          const isDirectInteraction = directUiNames.has(field.name);
-          if (!forms.has(fieldPath) && (isTransportInput || isDirectInteraction)) {
-            forms.set(fieldPath, resolveFieldOwnership(field, requestValueAt(sample, field.path), observations, lists, sample));
-          }
+          if (byPath.has(fieldPath)) continue;
+          if (normalized.urlTemplate.includes(`{${field.name}}`)) byPath.set(fieldPath, field);
         }
-        const samples = group.map(requestInput);
-        return attachOptionalNamedFilters(
-          splitSectionedCollectionFields(
-            finalizeCallerFields(
-              promoteUnboundFillable(
-                bindByRecordedOptions(
-                  bindByLabelAffinity(
-                    bindByUniqueMatching(
-                      assignUniqueFromSamples(
-                        bindLeftoverFields(
-                          bindBySemanticLabel([...forms.values()], observations, sample, lists),
-                          observations,
-                          sample,
-                          lists,
-                          owner
-                        ),
-                        observations,
-                        samples,
-                        lists
-                      ),
-                      observations,
-                      sample,
-                      lists
-                    ),
-                    observations,
-                    sample,
-                    lists
-                  ),
-                  observations,
-                  sample,
-                  lists
-                ),
-                observations,
-                sample
-              ),
-              observations,
-              sample,
-              lists,
-              owner
-            ),
-            observations,
-            sample
-          ),
+        return splitSectionedCollectionFields(
+          applyNamedObservations([...byPath.values()], observations),
           observations,
-          sample,
-          operation === "query",
-          owner
+          sample
         );
       })(),
       evidence,
@@ -475,5 +469,5 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
     });
   }
 
-  return attachCatalogDerivations(result, events);
+  return result;
 }

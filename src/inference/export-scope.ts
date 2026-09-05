@@ -1,3 +1,7 @@
+/**
+ * 文件级说明：主能力 / lookup / 噪声的主流判断已交给 `.pi/skills/judge-primary-capability`。
+ * 本文件只做会话切片和 `capability.role` 读取。旧路径正则全文见 `export-scope.ts.bak`。
+ */
 import type { CapabilityContract, EvidenceEvent } from "../domain.js";
 import { ASK_KEY } from "./heuristics.js";
 import { isPaginationField, pickerEntity } from "./field-resolver.js";
@@ -5,8 +9,9 @@ import { isPaginationField, pickerEntity } from "./field-resolver.js";
 const NOISE_PATH = /\/im\/|notify-message|unread-count|online-status|get-permission-info|captcha|tenant\/get-by-website|tenant\/get-id-by-name|\/user\/get-current$|\/auth\/login|\/auth\/logout|process-instance|process-definition/i;
 
 export function isNoiseCapability(capability: CapabilityContract) {
+  if (capability.role === "noise") return true;
   if (capability.operation === "authenticate") return true;
-  return NOISE_PATH.test(capability.transport.pathTemplate || capability.transport.urlTemplate);
+  return NOISE_PATH.test(capability.transport?.pathTemplate || "");
 }
 
 export function hasBusinessCallerField(capability: CapabilityContract) {
@@ -270,60 +275,26 @@ export function reviewSessionIds(
 }
 
 export function isPrimaryCapability(capability: CapabilityContract, catalog: CapabilityContract[] = []) {
-  if (isNoiseCapability(capability)) return false;
+  if (capability.role === "noise" || isNoiseCapability(capability)) return false;
+  if (capability.role === "lookup") return false;
+  if (capability.role === "primary") return true;
   if (capability.operation === "download") return true;
   if (isWriteCapability(capability)) return true;
   if (capability.operation !== "query") return false;
-  const path = capability.transport.pathTemplate || capability.transport.urlTemplate || "";
-  if (isLookupQueryPath(path)) return false;
+  const path = capability.transport.pathTemplate || "";
+  if (isLookupQueryPath(path) || directoryLookupEntity(path)) return false;
   const writes = catalog.filter(isWriteCapability);
-  const asks = catalog.filter(item => isAskQuery(item) && !isLookupQueryPath(item.transport.pathTemplate || ""));
-  if (asks.length) {
-    if (writes.some(item => sameResource(item.transport.pathTemplate, path))) return true;
-    return asks.includes(capability) && (hasBusinessCallerField(capability) || asks.length === 1);
-  }
-  if (writes.length) {
-    if (writes.some(item => sameResource(item.transport.pathTemplate, path))) {
-      // A detail reload immediately after save is supporting evidence for the
-      // write result, not another user-facing "query" ability. A standalone
-      // detail recording can still be primary when no same-resource write is
-      // present in the reviewed slice.
-      if (DETAIL_QUERY.test(path)) return false;
-      return true;
-    }
-    const shared = catalog.filter(item =>
-      item.operation === "query"
-      && !isLookupQueryPath(item.transport.pathTemplate || "")
-      && writes.some(write => sameResource(write.transport.pathTemplate, item.transport.pathTemplate))
-    );
-    if (shared.length) return false;
-  }
-  if (isPageResultQuery(capability)) {
-    const otherLists = catalog.filter(item =>
-      item !== capability
-      && isPageResultQuery(item)
-      && !PICKER_PAGE.test(item.transport.pathTemplate || "")
-    );
-    if (PICKER_PAGE.test(path) && (writes.length || otherLists.length || pageQueries(catalog).some(item => !PICKER_PAGE.test(item.transport.pathTemplate || "")))) {
-      return false;
-    }
-    if (hasBusinessCallerField(capability)) return true;
-    if (SUMMARY_QUERY.test(path) && capability.inputForm.some(field => !isPaginationField(field.name))) return true;
-    const pageResults = catalog.filter(item => isPageResultQuery(item) && !PICKER_PAGE.test(item.transport.pathTemplate || ""));
-    if (pageResults.length === 1) return true;
-  }
-  if (writes.length) {
-    const businessQueries = catalog.filter(item =>
-      item.operation === "query" && !isNoiseCapability(item) && !isLookupQueryPath(item.transport.pathTemplate || "")
-    );
-    return businessQueries.length === 1 || hasBusinessCallerField(capability);
-  }
-  if (hasBusinessCallerField(capability) && (LIST_QUERY.test(path) || isPageResultQuery(capability))) return true;
-  if (PICKER_PAGE.test(path)) return false;
-  const businessQueries = catalog.filter(item =>
-    item.operation === "query" && !isNoiseCapability(item) && !isLookupQueryPath(item.transport.pathTemplate || "")
+  if (writes.length && DETAIL_QUERY.test(path)) return false;
+  if (isAskQuery(capability)) return true;
+  const pageQueries = catalog.filter(item =>
+    item.operation === "query"
+    && !isNoiseCapability(item)
+    && isPageResultQuery(item)
   );
-  return businessQueries.length === 1;
+  if (pageQueries.length && !isPageResultQuery(capability)) return false;
+  return hasBusinessCallerField(capability)
+    || isPageResultQuery(capability)
+    || catalog.filter(item => item.operation === "query" && item.role !== "noise").length === 1;
 }
 
 export function isCandidateSourceCapability(capability: CapabilityContract, catalog: CapabilityContract[]) {
@@ -368,7 +339,8 @@ export function exportableCapabilities(capabilities: CapabilityContract[], match
 export function summarizeCatalog(capabilities: CapabilityContract[]) {
   const primary = capabilities.filter(capability => isPrimaryCapability(capability, capabilities));
   const lookups = capabilities.filter(capability =>
-    !primary.includes(capability) && isCandidateSourceCapability(capability, capabilities)
+    !primary.includes(capability)
+    && (capability.role === "lookup" || isCandidateSourceCapability(capability, capabilities))
   );
   const noise = capabilities.filter(isNoiseCapability);
   return { primary, lookups, noise };

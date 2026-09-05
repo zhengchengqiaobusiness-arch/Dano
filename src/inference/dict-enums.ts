@@ -1,3 +1,7 @@
+/**
+ * 文件级说明：字典枚举挂接已交给 `.pi/skills/infer-field-contract`。
+ * 旧实现见 `dict-enums.ts.bak`。
+ */
 import type { CapabilityContract, EvidenceEvent, InputFormField } from "../domain.js";
 import { looksPickerField, recordedLists } from "./field-resolver.js";
 
@@ -56,11 +60,6 @@ function applyRecordedList(field: InputFormField, lists: ReturnType<typeof recor
   };
 }
 
-export function attachDictEnums(catalog: CapabilityContract[], events: EvidenceEvent[]) {
-  const lists = recordedLists(events.filter(event => event.kind === "network"));
-  if (!lists.length) return catalog;
-  return catalog.map(capability => ({
-    ...capability,
-    inputForm: capability.inputForm.map(field => applyRecordedList(field, lists))
-  }));
+export function attachDictEnums(catalog: CapabilityContract[], _events: EvidenceEvent[]) {
+  return catalog;
 }

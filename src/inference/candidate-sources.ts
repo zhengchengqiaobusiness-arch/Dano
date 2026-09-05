@@ -1,3 +1,9 @@
+/**
+ * 文件级说明：动态候选挂接的主流判断已交给 `.pi/skills/infer-field-contract`。
+ * TypeScript 只做「列表行 id 唯一对应」的证据拼接，见 `pi-skill-runtime.applyExactCandidateJoin`。
+ * `attachCandidateSources` / `queryCandidateForField` 不再用路径正则猜 lookup。
+ * 旧实现见 `candidate-sources.ts.bak`。
+ */
 import type { CapabilityContract, CandidateRule, EvidenceEvent, InputFormField, UiEvidence } from "../domain.js";
 import { looksDirectoryPicker, looksPickerField, pickerEntity, recordedLists } from "./field-resolver.js";
 
@@ -197,62 +203,16 @@ function lookupFor(field: InputFormField, catalog: CapabilityContract[], events:
     || pickUnique(byPicker);
 }
 
-export function queryCandidateForField(field: InputFormField, catalog: CapabilityContract[], events: EvidenceEvent[] = []) {
-  if (field.source !== "caller") return undefined;
-  if (field.candidates?.type === "capability") return undefined;
-  if (!looksPickerField(field)
-    && !looksDirectoryPicker(field)
-    && field.widget !== "select"
-    && field.widget !== "multiselect"
-    && field.candidates?.type !== "static") return undefined;
-  return lookupFor(field, catalog, events);
+export function queryCandidateForField(
+  _field: InputFormField,
+  _catalog: CapabilityContract[],
+  _events: EvidenceEvent[] = []
+) {
+  return undefined;
 }
 
-export function attachCandidateSources(catalog: CapabilityContract[], events: EvidenceEvent[] = []): CapabilityContract[] {
-  return catalog.map(capability => ({
-    ...capability,
-    inputForm: capability.inputForm.map(field => {
-      if (field.source !== "caller") return field;
-      if (field.widget === "number" || field.widget === "date" || field.widget === "textarea") return field;
-      if (/天数|数量|金额|单价|税率|库存/.test(field.label || "") && !looksPickerField(field)) return field;
-      // A normal text box is not a picker merely because a recorded list
-      // happens to contain the same sample text. Candidate APIs require real
-      // picker/enum UI evidence.
-      if (!looksPickerField(field)
-        && !looksDirectoryPicker(field)
-        && field.widget !== "select"
-        && field.widget !== "multiselect"
-        && field.candidates?.type !== "static") return field;
-      const source = lookupFor(field, catalog.filter(item => item.id !== capability.id), events);
-      const paths = source ? listPaths(source.outputSchema) : undefined;
-      if (!source || !paths) {
-        if (field.candidates?.type === "capability") {
-          const existing = catalog.find(item => item.id === field.candidates!.capabilityId);
-          if (existing && usableCandidateSource(field, existing, events)) return field;
-          const { candidates: _candidates, ...rest } = field;
-          return {
-            ...rest,
-            sourceDetail: /已录制查询接口|data\.list/.test(rest.sourceDetail || "")
-              ? "页面有筛选控件；有值时按页面字段名传递，空则省略，与未选时不传该键一致"
-              : rest.sourceDetail
-          };
-        }
-        return field;
-      }
-      const candidates: CandidateRule = {
-        type: "capability",
-        capabilityId: source.id,
-        valuePath: paths.valuePath,
-        labelPath: paths.labelPath
-      };
-      return {
-        ...field,
-        widget: field.valueType === "array" ? "multiselect" : "select",
-        candidates,
-        sourceDetail: `调用方从已录制查询接口选择，不要写死录制样本。接口 ${source.transport.method} ${source.transport.pathTemplate}，值 ${paths.valuePath}，显示 ${paths.labelPath}`
-      };
-    })
-  }));
+export function attachCandidateSources(catalog: CapabilityContract[], _events: EvidenceEvent[] = []): CapabilityContract[] {
+  return catalog;
 }
 
 export function describeFieldHandling(field: InputFormField) {

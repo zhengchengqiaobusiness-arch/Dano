@@ -1,3 +1,9 @@
+/**
+ * 文件级说明：from:/computed: 推导的主流判断已交给 `.pi/skills/infer-field-contract`。
+ * `attachCatalogDerivations` / `attachDerivationRules` 不再猜测规则，只原样返回。
+ * 本文件保留规则语法解析与 evidenceSample，供执行器和审核校验使用。
+ * 旧推导引擎全文见 `field-derivation.ts.bak`。
+ */
 import type { CapabilityContract, DataBinding, EvidenceEvent, InputFormField, NetworkEvidence } from "../domain.js";
 import type { SemanticConcept } from "./field-resolver.js";
 import { id } from "../utils.js";
@@ -623,7 +629,7 @@ function buildLookupIndex(events: EvidenceEvent[], catalog: CapabilityContract[]
   for (const event of events) {
     if (event.kind !== "network" || !isSuccessfulNetworkEvidence(event)) continue;
     const capability = capabilityForEvent(event, catalog);
-    if (!capability) continue;
+    if (!capability || isNoiseCapability(capability)) continue;
     const leaves = responseHits(event.response!.body);
     const leavesByValue = new Map<string, IndexedLeaf[]>();
     for (const leaf of leaves) {
@@ -1098,145 +1104,18 @@ function asUnresolved(field: InputFormField): InputFormField {
 
 export function attachDerivationRules(
   fields: InputFormField[],
-  sample: unknown,
-  events: EvidenceEvent[],
-  catalog: CapabilityContract[],
-  capability: CapabilityContract,
-  mode: "write" | "query" = "write",
-  index?: LookupIndexEntry[],
-  targetAt?: string,
-  targetPageUrl?: string
+  _sample?: unknown,
+  _events?: EvidenceEvent[],
+  _catalog?: CapabilityContract[],
+  _capability?: CapabilityContract,
+  _mode?: "write" | "query",
+  _index?: LookupIndexEntry[],
+  _targetAt?: string,
+  _targetPageUrl?: string
 ): { fields: InputFormField[]; bindings: DataBinding[] } {
-  const lookupIndex = index || buildLookupIndex(events, catalog);
-  const bindings: DataBinding[] = [];
-  let next = fields.map(field => {
-    if (field.path.includes("[*].") && field.source !== "caller" && !collectionLeafUniform(sample, field.path)) {
-      return {
-        ...field,
-        source: "system" as const,
-        systemHandled: true,
-        required: false,
-        defaultRule: undefined,
-        sourceDetail: "该明细列在各行结构或取值不同，由整表录制原值按行补齐，不把其中一行的值套到其它行"
-      };
-    }
-    if (isAssembledObjectField(field, fields)) {
-      return asAssembled(field, fields.filter(item => item.path.startsWith(`${field.path}.`) || item.path.startsWith(`${field.path}[`)));
-    }
-    if (isAssembledCollectionField(field, fields)) {
-      return asAssembledCollection(field, requestValueAt(sample, field.path));
-    }
-    if (shouldKeep(field, capability, fields)) return field;
-    const value = requestValueAt(sample, field.path);
-    const from = fromApiMatch(field, value, sample, lookupIndex, capability, mode, targetAt, targetPageUrl);
-    if (from) {
-      bindings.push({
-        id: id("bind"),
-        fromCapabilityId: from.capabilityId,
-        fromPath: from.fromPath,
-        toPath: field.path,
-        confidence: 1,
-        evidenceIds: [from.eventId],
-        approved: true,
-        approvalSource: "evidence",
-        approvedAt: new Date().toISOString(),
-        note: `选择「${viaLabel(fields, from.via)}」后从录制查询响应唯一带出`
-      });
-      return asFrom(field, from, fields, value);
-    }
-    if (field.defaultRule && (mode === "write" || !field.defaultRule.startsWith("literal:"))) return field;
-    return field;
-  });
-
-  if (mode === "write") {
-    next = applyComputed(next, sample, capability);
-
-    const computedOperands = new Set(
-      next.filter(field => field.defaultRule?.startsWith("computed:")).flatMap(field => operandNames(parseComputedRule(field.defaultRule || "") || ""))
-    );
-    next = next.map(field => {
-      if (field.source === "caller" || field.defaultRule || PAGE_NAME.test(field.name)) return field;
-      if (!computedOperands.has(field.name)) return field;
-      if (field.source === "binding") return field;
-      return asCallerInput(field);
-    });
-    next = applyComputed(next, sample, capability);
-    next = attachCallerOverrides(next, sample);
-  }
-
-  next = next.map(field => {
-    if (shouldKeep(field, capability, next) || field.defaultRule) return field;
-    const copied = uniqueCopySource(field, next, sample);
-    return copied ? asCopy(field, copied) : field;
-  });
-  if (mode === "write") next = applyComputed(next, sample, capability);
-
-  next = next.map(field => {
-    if (shouldKeep(field, capability, next) || field.defaultRule) return field;
-    const value = requestValueAt(sample, field.path);
-    if (mode === "write" && observedAsLookupInput(field, value, lookupIndex, targetAt, targetPageUrl)) {
-      return {
-        ...asCallerInput(field),
-        sourceDetail: "该字段在写请求前作为已录制查询的同名输入，执行时由调用方提供，不能从查询结果或录制样本猜测"
-      };
-    }
-    if (field.path.includes("[*].") && !collectionLeafUniform(sample, field.path)) {
-      if (field.source === "caller") {
-        return {
-          ...field,
-          required: field.required && collectionLeafPresentOnEveryRow(sample, field.path)
-        };
-      }
-      return {
-        ...field,
-        source: "system",
-        systemHandled: true,
-        required: false,
-        defaultRule: undefined,
-        sourceDetail: "该明细列在各行结构或取值不同，由整表录制原值按行补齐，不把其中一行的值套到其它行"
-      };
-    }
-    const rule = recordedLiteralRule(field, value);
-    if (rule) return asRecordedSystemValue(field, rule, value);
-    if (mode === "query") return field;
-    return asUnresolved(field);
-  });
-
-  return { fields: next, bindings };
+  return { fields, bindings: [] };
 }
 
-export function attachCatalogDerivations(capabilities: CapabilityContract[], events: EvidenceEvent[]) {
-  const pending = capabilities.filter(capability =>
-    capability.validation?.status !== "verified"
-    && (WRITE_OPERATIONS.has(capability.operation) || capability.operation === "query")
-  );
-  if (!pending.length) return capabilities;
-  const index = buildLookupIndex(events, capabilities);
-  return capabilities.map(capability => {
-    if (capability.validation?.status === "verified") return capability;
-    if (!WRITE_OPERATIONS.has(capability.operation) && capability.operation !== "query") return capability;
-    const sampleEvent = evidenceSampleEvent(capability, events);
-    if (!sampleEvent) return capability;
-    const sample = evidenceInput(sampleEvent);
-    const derived = attachDerivationRules(
-      capability.inputForm,
-      sample,
-      events,
-      capabilities,
-      capability,
-      WRITE_OPERATIONS.has(capability.operation) ? "write" : "query",
-      index,
-      sampleEvent.at,
-      sampleEvent.pageUrl
-    );
-    const existing = new Set(capability.bindings.map(item => `${item.fromCapabilityId}|${item.fromPath}|${item.toPath}`));
-    return {
-      ...capability,
-      inputForm: derived.fields,
-      bindings: [
-        ...capability.bindings,
-        ...derived.bindings.filter(item => !existing.has(`${item.fromCapabilityId}|${item.fromPath}|${item.toPath}`))
-      ]
-    };
-  });
+export function attachCatalogDerivations(capabilities: CapabilityContract[], _events: EvidenceEvent[]) {
+  return capabilities;
 }

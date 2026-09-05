@@ -1,3 +1,7 @@
+/**
+ * 文件级说明：控件怎么填、是下拉还是选人，主流判断已交给 `.pi/skills/operate-form-controls`。
+ * 本文件只向页面注入快照/取证原语。组件库 class 清单的旧全文见 `page-script.ts.bak`。
+ */
 export const PAGE_HELPERS = String.raw`
   const clean = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 12000);
   const generatedName = (value) => /^(el-id-\d+|el-[a-z]+-\d+|reka-v-[a-z0-9-]+|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i.test(String(value || ""));
@@ -1129,6 +1133,58 @@ return markLabeledControl(root, payload.name, payload.mark);`
 export const UI_RECORDER_SCRIPT = `(() => {
   if (window.__BSS_RECORDER_INSTALLED__) return;
   window.__BSS_RECORDER_INSTALLED__ = true;
+  window.__bssLinkedRecords = window.__bssLinkedRecords || [];
+  const rememberLinkedRecords = (data) => {
+    const add = (obj) => {
+      if (!obj || typeof obj !== "object" || Array.isArray(obj)) return;
+      const keys = Object.keys(obj);
+      if (keys.length < 2 || keys.length > 80) return;
+      if (!(keys.includes("id") || keys.some(key => /(Id|ID)$/.test(key)))) return;
+      if (!(keys.includes("name") || keys.some(key => /(Name|Title|Label)$/.test(key)))) return;
+      window.__bssLinkedRecords.push(obj);
+      if (window.__bssLinkedRecords.length > 400) window.__bssLinkedRecords.splice(0, 200);
+    };
+    const walk = (value, depth) => {
+      if (!value || typeof value !== "object" || depth > 4) return;
+      if (Array.isArray(value)) {
+        for (const item of value.slice(0, 80)) walk(item, depth + 1);
+        return;
+      }
+      add(value);
+      if (value.data) walk(value.data, depth + 1);
+      if (value.list) walk(value.list, depth + 1);
+      if (value.rows) walk(value.rows, depth + 1);
+      if (value.records) walk(value.records, depth + 1);
+    };
+    walk(data, 0);
+  };
+  const rawFetch = window.fetch;
+  if (typeof rawFetch === "function") {
+    window.fetch = async function(...args) {
+      const response = await rawFetch.apply(this, args);
+      try {
+        const copy = response.clone();
+        const type = String(copy.headers.get("content-type") || "");
+        if (type.includes("json")) rememberLinkedRecords(await copy.json());
+      } catch { /* ignore */ }
+      return response;
+    };
+  }
+  const rawOpen = XMLHttpRequest.prototype.open;
+  const rawSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    this.__bssUrl = url;
+    return rawOpen.call(this, method, url, ...rest);
+  };
+  XMLHttpRequest.prototype.send = function(...args) {
+    this.addEventListener("load", () => {
+      try {
+        const type = String(this.getResponseHeader("content-type") || "");
+        if (type.includes("json") && this.responseText) rememberLinkedRecords(JSON.parse(this.responseText));
+      } catch { /* ignore */ }
+    });
+    return rawSend.apply(this, args);
+  };
   ${PAGE_HELPERS}
 
   const send = (eventType, rawTarget) => {

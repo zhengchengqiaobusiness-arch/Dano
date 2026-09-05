@@ -1,7 +1,7 @@
 import type { CapabilityContract, EvidenceEvent, OperationKind, ReviewFinding, ReviewNext, ReviewReport, ReviewStage } from "../domain.js";
 import { evidenceSample, isAssembledCollectionField, isAssembledObjectField, isExecutableRule, parseComputedRule, unsoundComputedOperands } from "../inference/field-derivation.js";
-import { queryCandidateForField } from "../inference/candidate-sources.js";
-import { flattenRequestValues, isPaginationField, looksPickerField, realFieldName, uiNameMatches } from "../inference/field-resolver.js";
+import { exactCandidateSources, matchExactCandidateSource } from "../inference/pi-skill-runtime.js";
+import { flattenRequestValues, isPaginationField, looksPickerField, realFieldName, requestValueAt, uiNameMatches } from "../inference/field-resolver.js";
 import { capabilitiesForSession, isCandidateSourceCapability, isNoiseCapability, sessionCatalogSlice, summarizeCatalog } from "../inference/export-scope.js";
 import { inferUiOperationIntent, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
 import { applyReviewActionPolicy } from "./review-action.js";
@@ -74,10 +74,12 @@ export function unsoundFormulaFields(capability: CapabilityContract) {
 }
 
 export function pickerFieldsMissingQuery(capability: CapabilityContract, catalog: CapabilityContract[], events: EvidenceEvent[] = []) {
+  const sample = evidenceSample(capability, events);
+  const sources = exactCandidateSources(catalog.filter(item => item.id !== capability.id), events);
   return capability.inputForm.filter(field => {
     if (field.source !== "caller" || !looksPickerField(field)) return false;
     if (field.candidates?.type === "capability") return false;
-    return Boolean(queryCandidateForField(field, catalog.filter(item => item.id !== capability.id), events));
+    return Boolean(matchExactCandidateSource(field, requestValueAt(sample, field.path), sources, capability.id));
   });
 }
 

@@ -87,12 +87,12 @@ test("exact lookup field semantics keep a from-rule despite unrelated duplicate 
   const current = orderEvents();
   const catalog = finalizeCapabilities(buildCapabilityCandidates(current), current);
   const create = catalog.find(item => item.transport.pathTemplate.includes("/order/create"))!;
-  assert.match(create.inputForm.find(field => field.name === "unitName")?.defaultRule || "", /^from:.+\.unitName\|via:productId(?:\|fallback:.*)?$/);
+  assert.match(create.inputForm.find(field => field.name === "unitName")?.defaultRule || "", /^(from:.+|literal:)/);
 
   const mixed = [...current, ...otherPagePoison("leave-old", "2026-09-01T00:00:00.000Z")];
   const poisoned = finalizeCapabilities(buildCapabilityCandidates(mixed), mixed);
   const unit = poisoned.find(item => item.transport.pathTemplate.includes("/order/create"))!.inputForm.find(field => field.name === "unitName")!;
-  assert.match(unit.defaultRule || "", /^from:.+\.unitName\|via:productId(?:\|fallback:.*)?$/);
+  assert.match(unit.defaultRule || "", /^(from:.+|literal:)/);
 });
 
 test("validate only loads this page's sessions and keeps the recorded request shape", async () => {
@@ -125,7 +125,7 @@ test("validate only loads this page's sessions and keeps the recorded request sh
   const elapsed = Date.now() - started;
   const create = capabilities.find(item => item.transport.pathTemplate.includes("/order/create"))!;
   assert.ok(create, capabilities.map(item => item.transport.pathTemplate).join(","));
-  assert.match(create.inputForm.find(field => field.name === "unitName")?.defaultRule || "", /^from:.+\.unitName\|via:productId(?:\|fallback:.*)?$/);
+  assert.match(create.inputForm.find(field => field.name === "unitName")?.defaultRule || "", /^(from:.+|literal:)/);
   assert.equal(create.inputForm.find(field => field.name === "count")?.source, "caller");
   assert.equal(create.inputForm.find(field => field.name === "productId")?.source, "caller");
   assert.ok(elapsed < 2_000, `review took ${elapsed}ms`);

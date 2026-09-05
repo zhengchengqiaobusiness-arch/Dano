@@ -14,7 +14,7 @@ import { exportSkill } from "./export/skill-exporter.js";
 import { executeCapability } from "./execution/http-executor.js";
 import { capabilitiesForSession, evidencePageKey, sessionBusinessPageKeys, sessionCatalogSlice, usableRelatedLookups } from "./inference/export-scope.js";
 import { mergeCatalogByTransport, normalizeCatalog } from "./catalog/normalize.js";
-import { attachCatalogDerivations } from "./inference/field-derivation.js";
+import { applyPiCatalogJudgment } from "./inference/pi-skill-runtime.js";
 import { reanalyzeIncoming } from "./inference/reanalyze.js";
 import { reviewSession } from "./review/catalog-review.js";
 import { rerecordBlockedMessage, reviewFindingSignature, sameReviewPage } from "./review/review-action.js";
@@ -207,10 +207,13 @@ export class StudioService {
     if (session) await this.persistSessionPageKeys(session, events);
     const existing = await this.capabilities();
 
-    let candidates = buildCapabilityCandidates(events);
-    if (useLlm && this.reasoner.available()) {
-      candidates = await Promise.all(candidates.map(c => this.reasoner.refineCapability(c)));
-    }
+    let candidates = await applyPiCatalogJudgment(
+      buildCapabilityCandidates(events),
+      events,
+      this.reasoner,
+      this.config.rootDir,
+      useLlm
+    );
 
     candidates = reanalyzeIncoming(candidates, existing);
     candidates = mergeCatalogByTransport(candidates, existing);
@@ -218,11 +221,14 @@ export class StudioService {
     const related = usableRelatedLookups(candidates, scoped, events);
     const extra = await this.eventsFromRefs([...scoped, ...related], events);
     const allEvents = extra.length ? [...events, ...extra] : events;
-    const derived = attachCatalogDerivations(
+    const judged = await applyPiCatalogJudgment(
       [...scoped, ...related.filter(item => !scoped.some(current => current.id === item.id))],
-      allEvents
+      allEvents,
+      this.reasoner,
+      this.config.rootDir,
+      useLlm
     );
-    candidates = mergeCatalogByTransport(derived, candidates);
+    candidates = mergeCatalogByTransport(judged, candidates);
     const slice = sessionCatalogSlice(candidates, allEvents, events);
     const finalized = finalizeSessionSlice(slice, allEvents, candidates);
     await this.writeCatalog(mergeCatalogByTransport(finalized, candidates));
@@ -321,9 +327,12 @@ export class StudioService {
       : [];
     const events = extra.length ? [...scoped.events, ...extra] : scoped.events;
     const related = usableRelatedLookups(catalog, slice, scoped.scopeEvents);
-    const derived = attachCatalogDerivations(
+    const derived = await applyPiCatalogJudgment(
       [...slice, ...related.filter(item => !slice.some(current => current.id === item.id))],
-      events
+      events,
+      this.reasoner,
+      this.config.rootDir,
+      true
     );
     const merged = mergeCatalogByTransport(derived, catalog);
     const nextSlice = sessionCatalogSlice(merged, events, scoped.scopeEvents);

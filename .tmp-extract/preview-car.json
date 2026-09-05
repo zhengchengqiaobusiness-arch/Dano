@@ -1,0 +1,219 @@
+{
+  "rawQuery": [
+    {
+      "source": "system",
+      "name": "pageNo",
+      "label": "pageNo",
+      "defaultRule": "literal:1",
+      "detail": "列表分页由执行器按默认值补齐，调用方可覆盖，不要当成业务主键"
+    },
+    {
+      "source": "system",
+      "name": "pageSize",
+      "label": "pageSize",
+      "defaultRule": "literal:20",
+      "detail": "列表分页由执行器按默认值补齐，调用方可覆盖，不要当成业务主键"
+    },
+    {
+      "source": "system",
+      "name": "companyId",
+      "label": "*所属公司",
+      "defaultRule": "literal:\"\"",
+      "detail": "没有页面输入、已证实关联或计算证据；系统执行时原样补齐录制成功请求中的值 \"\"，调用方不必提供"
+    }
+  ],
+  "rawCreate": [
+    {
+      "source": "caller",
+      "name": "companyId",
+      "label": "*所属公司",
+      "detail": "页面固定枚举，调用方直接选择，不要写成录制时的固定样本",
+      "candidates": "static"
+    },
+    {
+      "source": "binding",
+      "name": "companyName",
+      "label": "*所属公司",
+      "defaultRule": "from:query-get-dept-company-list:$.data[*].name|via:companyId|fallback:宇擎源码",
+      "detail": "选择「*所属公司」后，从已录制查询 GET /admin-api/system/dept/company-list 的 $.data[*].name 带出；带不"
+    },
+    {
+      "source": "caller",
+      "name": "carNo",
+      "label": "*车牌号",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始输入格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "carName",
+      "label": "车辆名称",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始输入格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "status",
+      "label": "状态",
+      "detail": "页面固定枚举，调用方直接选择，不要写成录制时的固定样本",
+      "candidates": "static"
+    },
+    {
+      "source": "caller",
+      "name": "carType",
+      "label": "*车型",
+      "detail": "页面固定枚举，调用方直接选择，不要写成录制时的固定样本",
+      "candidates": "static"
+    },
+    {
+      "source": "caller",
+      "name": "carCls",
+      "label": "*分类",
+      "detail": "页面固定枚举，调用方直接选择，不要写成录制时的固定样本",
+      "candidates": "static"
+    },
+    {
+      "source": "caller",
+      "name": "brand",
+      "label": "*品牌型号",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始输入格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "seatNum",
+      "label": "车座",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始输入格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "barePrice",
+      "label": "裸车价",
+      "detail": "调用方按页面原始格式提供（integer），保持页面数字格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "forceInsuranceDate",
+      "label": "交强险到期日期",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始日期格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "businessInsuranceDate",
+      "label": "商业险到期日期",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始日期格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "yearCheckDate",
+      "label": "年检日期",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始日期格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "sort",
+      "label": "显示顺序",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始输入格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "remark",
+      "label": "备注",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始输入格式，不要改成录制样本"
+    }
+  ],
+  "finalizedCreate": [
+    {
+      "source": "caller",
+      "name": "companyId",
+      "label": "*所属公司",
+      "detail": "页面固定枚举，调用方直接选择，不要写成录制时的固定样本",
+      "candidates": "static"
+    },
+    {
+      "source": "binding",
+      "name": "companyName",
+      "label": "*所属公司",
+      "defaultRule": "from:query-get-dept-company-list:$.data[*].name|via:companyId|fallback:宇擎源码",
+      "detail": "选择「*所属公司」后，从已录制查询 GET /admin-api/system/dept/company-list 的 $.data[*].name 带出；带不"
+    },
+    {
+      "source": "caller",
+      "name": "carNo",
+      "label": "*车牌号",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始输入格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "carName",
+      "label": "车辆名称",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始输入格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "status",
+      "label": "状态",
+      "detail": "页面固定枚举，调用方直接选择，不要写成录制时的固定样本",
+      "candidates": "static"
+    },
+    {
+      "source": "caller",
+      "name": "carType",
+      "label": "*车型",
+      "detail": "页面固定枚举，调用方直接选择，不要写成录制时的固定样本",
+      "candidates": "static"
+    },
+    {
+      "source": "caller",
+      "name": "carCls",
+      "label": "*分类",
+      "detail": "页面固定枚举，调用方直接选择，不要写成录制时的固定样本",
+      "candidates": "static"
+    },
+    {
+      "source": "caller",
+      "name": "brand",
+      "label": "*品牌型号",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始输入格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "seatNum",
+      "label": "车座",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始输入格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "barePrice",
+      "label": "裸车价",
+      "detail": "调用方按页面原始格式提供（integer），保持页面数字格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "forceInsuranceDate",
+      "label": "交强险到期日期",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始日期格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "businessInsuranceDate",
+      "label": "商业险到期日期",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始日期格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "yearCheckDate",
+      "label": "年检日期",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始日期格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "sort",
+      "label": "显示顺序",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始输入格式，不要改成录制样本"
+    },
+    {
+      "source": "caller",
+      "name": "remark",
+      "label": "备注",
+      "detail": "调用方按页面原始格式提供（string），保持页面原始输入格式，不要改成录制样本"
+    }
+  ]
+}

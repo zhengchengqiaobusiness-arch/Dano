@@ -168,6 +168,7 @@ export interface CapabilityContract {
     note?: string;
   };
   bindings: DataBinding[];
+  role?: "primary" | "lookup" | "noise";
   validation: {
     version?: number;
     status: "candidate" | "verified" | "rejected";
@@ -175,7 +176,7 @@ export interface CapabilityContract {
     verifiedAt?: string;
   };
   generated: {
-    source: "heuristic" | "openai";
+    source: "heuristic" | "openai" | "pi-skill";
     model?: string;
     generatedAt: string;
   };

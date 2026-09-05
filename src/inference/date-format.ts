@@ -49,7 +49,9 @@ export function normalizeDateString(value: string, clock?: string) {
 export function dateDay(value: unknown) {
   if (typeof value === "string") {
     const match = value.trim().match(DATE_TIME) || value.trim().match(DATE_ONLY);
-    return match?.[1];
+    if (match?.[1]) return match[1];
+    if (/^\d{11,}$/.test(value.trim())) return dateDay(Number(value.trim()));
+    return undefined;
   }
   if (typeof value === "number" && Number.isFinite(value) && value > 10_000_000_000) {
     const shifted = new Date(value + BUSINESS_TZ_OFFSET_MS);
@@ -60,6 +62,7 @@ export function dateDay(value: unknown) {
 }
 
 export function clockFromEpoch(value: unknown) {
+  if (typeof value === "string" && /^\d{11,}$/.test(value.trim())) return clockFromEpoch(Number(value.trim()));
   if (typeof value !== "number" || !Number.isFinite(value) || value < 10_000_000_000) return undefined;
   const shifted = new Date(value + BUSINESS_TZ_OFFSET_MS);
   if (Number.isNaN(shifted.getTime())) return undefined;

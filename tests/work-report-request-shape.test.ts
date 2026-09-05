@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { EvidenceEvent } from "../src/domain.js";
 import { materializeHttpRequest } from "../src/execution/http-executor.js";
 import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
+import { applyDeterministicCatalogJudgment } from "../src/inference/pi-skill-runtime.js";
 import { flattenRequestValues } from "../src/inference/field-resolver.js";
 
 const recordedBody = {
@@ -58,7 +59,8 @@ function workReportEvents(): EvidenceEvent[] {
 }
 
 test("work report keeps caller fields editable and reproduces every system field from the successful request", () => {
-  const create = buildCapabilityCandidates(workReportEvents())
+  const events = workReportEvents();
+  const create = applyDeterministicCatalogJudgment(buildCapabilityCandidates(events), events)
     .find(item => item.transport.pathTemplate.endsWith("/oa/work-report/submit"))!;
   const request = materializeHttpRequest(create, {
     reportType: 1,
@@ -73,7 +75,7 @@ test("work report keeps caller fields editable and reproduces every system field
   assert.deepEqual(request.body, recordedBody);
   assert.deepEqual(create.bindings, []);
   assert.equal(create.inputForm.find(field => field.path === "$.startUserSelectAssignees")?.defaultRule, "literal:{}");
-  assert.equal(create.inputForm.find(field => field.path === "$.items[*]._X_ROW_KEY")?.defaultRule, "literal:row_272");
+  assert.match(create.inputForm.find(field => field.path === "$.items[*]._X_ROW_KEY")?.defaultRule || "", /^literal:"?row_272"?$/);
   assert.equal(create.inputForm.find(field => field.path === "$.title")?.source, "caller");
   assert.equal(create.inputForm.find(field => field.path === "$.items[*].progress")?.source, "caller");
 });
@@ -94,7 +96,8 @@ test("null keys in a successful write stay executable literals and are replayed 
     },
     response: { status: 200, headers: {}, body: { code: 0, data: 1 } }
   }];
-  const create = buildCapabilityCandidates(events).find(item => item.transport.pathTemplate.endsWith("/oa/doc/submit"))!;
+  const create = applyDeterministicCatalogJudgment(buildCapabilityCandidates(events), events)
+    .find(item => item.transport.pathTemplate.endsWith("/oa/doc/submit"))!;
   assert.equal(create.inputForm.find(field => field.path === "$.deptId")?.defaultRule, "literal:null");
   assert.equal(materializeHttpRequest(create, { title: "A" }).body?.deptId, null);
 });

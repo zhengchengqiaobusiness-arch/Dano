@@ -1,0 +1,309 @@
+{
+  "sampleKeys": [
+    "creator",
+    "creatorName",
+    "companyId",
+    "companyName",
+    "deptId",
+    "deptName",
+    "processStatus",
+    "createTime",
+    "attachments",
+    "applyDate",
+    "useType",
+    "pickupMethod",
+    "applyReason",
+    "remark",
+    "items",
+    "startUserSelectAssignees"
+  ],
+  "sample": {
+    "creator": "1",
+    "creatorName": "擎天柱",
+    "companyId": null,
+    "companyName": null,
+    "deptId": 103,
+    "deptName": null,
+    "processStatus": -1,
+    "createTime": "2026-09-05T16:33:38.812Z",
+    "attachments": [],
+    "applyDate": "2026-09-05",
+    "useType": 1,
+    "pickupMethod": 1,
+    "applyReason": "日常办公用品领用",
+    "remark": "",
+    "items": [
+      {
+        "supplyId": 33,
+        "supplyName": "打印机",
+        "supplySpec": null,
+        "supplyUnit": null,
+        "managementType": 2,
+        "applyQuantity": 1
+      }
+    ],
+    "startUserSelectAssignees": {}
+  },
+  "failing": [
+    {
+      "path": "$.createTime",
+      "name": "createTime",
+      "label": "*领用日期时间",
+      "widget": "date",
+      "required": false,
+      "value": "2026-09-05T16:33:38.812Z",
+      "ui": false,
+      "row": false,
+      "backed": false,
+      "sourceDetail": "调用方按页面原始格式提供（string），页面按 YYYY-MM-DD 填写，请求使用 YYYY-MM-DD 16:33:38，不要改成录制样本"
+    }
+  ],
+  "allCaller": [
+    {
+      "path": "$.createTime",
+      "name": "createTime",
+      "label": "*领用日期时间",
+      "widget": "date",
+      "required": false,
+      "value": "2026-09-05T16:33:38.812Z",
+      "ui": false,
+      "row": false,
+      "backed": false,
+      "sourceDetail": "调用方按页面原始格式提供（string），页面按 YYYY-MM-DD 填写，请求使用 YYYY-MM-DD 16:33:38，不要改成录制样本"
+    },
+    {
+      "path": "$.attachments",
+      "name": "attachments",
+      "label": "提交意见",
+      "widget": "textarea",
+      "required": false,
+      "value": [],
+      "ui": true,
+      "row": false,
+      "backed": true,
+      "sourceDetail": "调用方按页面原始格式提供（array），保持页面原始输入格式，不要改成录制样本"
+    },
+    {
+      "path": "$.applyDate",
+      "name": "applyDate",
+      "label": "*领用日期",
+      "widget": "date",
+      "required": false,
+      "value": "2026-09-05",
+      "ui": true,
+      "row": false,
+      "backed": true,
+      "sourceDetail": "调用方按页面原始格式提供（string），保持页面原始日期格式，不要改成录制样本"
+    },
+    {
+      "path": "$.useType",
+      "name": "useType",
+      "label": "*使用类型",
+      "widget": "select",
+      "required": false,
+      "value": 1,
+      "ui": true,
+      "row": false,
+      "cand": "static",
+      "backed": true,
+      "sourceDetail": "页面固定枚举，调用方直接选择，不要写成录制时的固定样本"
+    },
+    {
+      "path": "$.pickupMethod",
+      "name": "pickupMethod",
+      "label": "*领取方式",
+      "widget": "select",
+      "required": false,
+      "value": 1,
+      "ui": true,
+      "row": false,
+      "cand": "static",
+      "backed": true,
+      "sourceDetail": "页面固定枚举，调用方直接选择，不要写成录制时的固定样本"
+    },
+    {
+      "path": "$.applyReason",
+      "name": "applyReason",
+      "label": "*申请事由",
+      "widget": "textarea",
+      "required": false,
+      "value": "日常办公用品领用",
+      "ui": true,
+      "row": false,
+      "backed": true,
+      "sourceDetail": "调用方按页面原始格式提供（string），保持页面原始输入格式，不要改成录制样本"
+    },
+    {
+      "path": "$.remark",
+      "name": "remark",
+      "label": "备注",
+      "widget": "textarea",
+      "required": false,
+      "value": "",
+      "ui": true,
+      "row": false,
+      "backed": true,
+      "sourceDetail": "调用方按页面原始格式提供（string），保持页面原始输入格式，不要改成录制样本"
+    }
+  ],
+  "uniqueObs": [
+    {
+      "name": "form_item_reason",
+      "label": "提交意见",
+      "value": "",
+      "type": "textarea",
+      "disabled": false
+    },
+    {
+      "label": "*领用日期",
+      "value": "2026-09-05",
+      "type": "date"
+    },
+    {
+      "name": "useType",
+      "label": "*使用类型",
+      "value": "个人使用",
+      "type": "select"
+    },
+    {
+      "name": "pickupMethod",
+      "label": "*领取方式",
+      "value": "自取",
+      "type": "select"
+    },
+    {
+      "name": "applyReason",
+      "label": "*申请事由",
+      "value": "日常办公用品领用申请",
+      "type": "textarea"
+    },
+    {
+      "name": "remark",
+      "label": "备注",
+      "value": "",
+      "type": "textarea"
+    },
+    {
+      "name": "form_item_reason",
+      "label": "提交意见",
+      "value": "",
+      "type": "textarea"
+    },
+    {
+      "label": "*领用日期",
+      "value": "2026-09-05",
+      "type": "date",
+      "disabled": false
+    },
+    {
+      "name": "useType",
+      "label": "*使用类型",
+      "value": "个人使用",
+      "type": "select",
+      "disabled": false
+    },
+    {
+      "name": "pickupMethod",
+      "label": "*领取方式",
+      "value": "自取",
+      "type": "select",
+      "disabled": false
+    },
+    {
+      "name": "applyReason",
+      "label": "*申请事由",
+      "value": "日常办公用品领用申请",
+      "type": "textarea",
+      "disabled": false
+    },
+    {
+      "name": "remark",
+      "label": "备注",
+      "value": "",
+      "type": "textarea",
+      "disabled": false
+    },
+    {
+      "name": "remark",
+      "label": "备注",
+      "value": "",
+      "disabled": false
+    },
+    {
+      "name": "applyReason",
+      "label": "*申请事由",
+      "value": "日常办公用品领用申请",
+      "disabled": false
+    },
+    {
+      "name": "remark",
+      "label": "备注",
+      "value": "样例-请输入备注",
+      "type": "textarea",
+      "disabled": false
+    },
+    {
+      "name": "remark",
+      "label": "备注",
+      "value": "样例-请输入备注",
+      "type": "textarea"
+    },
+    {
+      "name": "remark",
+      "label": "备注",
+      "value": "样例-请输入备注",
+      "disabled": false
+    },
+    {
+      "name": "applyReason",
+      "label": "*申请事由",
+      "value": "样例-请输入申请事由",
+      "type": "textarea",
+      "disabled": false
+    },
+    {
+      "name": "applyReason",
+      "label": "*申请事由",
+      "value": "样例-请输入申请事由",
+      "type": "textarea"
+    },
+    {
+      "name": "applyReason",
+      "label": "*申请事由",
+      "value": "样例-请输入申请事由",
+      "disabled": false
+    },
+    {
+      "name": "applyReason",
+      "label": "*申请事由",
+      "value": "",
+      "type": "textarea",
+      "disabled": false
+    },
+    {
+      "name": "applyReason",
+      "label": "*申请事由",
+      "value": "",
+      "type": "textarea"
+    },
+    {
+      "name": "applyReason",
+      "label": "*申请事由",
+      "value": "日常办公用品领用",
+      "type": "textarea"
+    },
+    {
+      "name": "applyReason",
+      "label": "*申请事由",
+      "value": "日常办公用品领用",
+      "type": "textarea",
+      "disabled": false
+    },
+    {
+      "name": "applyReason",
+      "label": "*申请事由",
+      "value": "日常办公用品领用",
+      "disabled": false
+    }
+  ]
+}

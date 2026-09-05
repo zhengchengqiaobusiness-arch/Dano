@@ -1,3 +1,8 @@
+/**
+ * 文件级说明：操作类型的主流判断已交给 `.pi/skills/judge-primary-capability`。
+ * 本文件只保留 HTTP 成功/登录失败、URL 模板，以及精确按钮文案 / 分页问数字段等取证原语。
+ * 旧正则引擎全文见 `heuristics.ts.bak`。
+ */
 import type { NetworkEvidence, OperationKind, UiEvidence } from "../domain.js";
 
 const REVIEW = /approve|approval|audit|review|reject|pass|审核|审批|通过|驳回|拒绝|复核/i;
@@ -9,7 +14,7 @@ const AUTHENTICATE = /(?:^|[\/_-])(login|logout|sign-in|signout|refresh-token|ca
 const UPLOAD = /upload|import|上传|导入/i;
 const DOWNLOAD = /download|export|下载|导出/i;
 const PAGING_KEY = /^(pageNo|pageNum|page|pageSize|pageIndex|current|size|limit|offset)$/i;
-const SEARCH_KEY = /^(gjz|gjc|keyword|keyWord|keywords|search|searchKey|searchText|queryKey|q|query)$/i;
+export const SEARCH_KEY = /^(gjz|gjc|keyword|keyWord|keywords|search|searchKey|searchText|queryKey|q|query)$/i;
 export const ASK_KEY = /^(sys_query|userQuery|question|prompt|queryText|askText)$/i;
 const READ_LAST = /^(get|select|query|search|find|list|page|load|fetch)/i;
 const READ_SUFFIX = /(?:List|Page|Search|Query|Find)$/;
@@ -27,20 +32,17 @@ const BUSINESS_FAILURE = /失败|错误|异常|不能为空|不正确|无权限|
 const FAILURE_CODE = /^(?:fail(?:ed|ure)?|error|invalid|denied|unauthori[sz]ed|forbidden)$/i;
 const LOGIN_FAILURE = /未登录|请(?:先|重新)?登录|登录(?:失效|过期|超时)|会话(?:失效|过期|超时)|(?:access|auth|refresh)[-_ ]?token(?:\s+is)?\s*(?:invalid|expired)|unauthenticated|login\s*(?:required|expired)/i;
 
-export function inferUiOperationIntent(text?: string, pageUrl = ""): OperationKind | undefined {
+export function inferUiOperationIntent(text?: string, _pageUrl = ""): OperationKind | undefined {
   const label = String(text || "").replace(/\s+/g, "").replace(/^[^A-Za-z0-9\u4e00-\u9fff]+/, "");
   if (!label || /^(重置|取消|关闭|返回|reset|cancel|close|back)$/i.test(label)) return undefined;
-  if (UI_QUERY.test(label)) return "query";
-  if (UI_CREATE.test(label)) return "create";
-  if (UI_UPDATE.test(label)) return "update";
-  if (UI_DELETE.test(label)) return "delete";
-  if (UI_REVIEW.test(label)) return "review";
-  if (UI_DOWNLOAD.test(label)) return "download";
-  if (UI_ACTION.test(label)) return "action";
-  if (!UI_COMMIT.test(label)) return undefined;
-  if (/(?:^|[/_-])(add|new|create)(?:[/_?-]|$)|新增|新建|创建/i.test(pageUrl)) return "create";
-  if (/(?:^|[/_-])(edit|modify|update)(?:[/_?-]|$)|修改|编辑/i.test(pageUrl)) return "update";
-  return "action";
+  if (/^(搜索|查询|检索|search|query)$/i.test(label)) return "query";
+  if (/^(新增|新建|创建|add|create)$/i.test(label)) return "create";
+  if (/^(修改|编辑|更新|edit|update)$/i.test(label)) return "update";
+  if (/^(删除|delete|remove)$/i.test(label)) return "delete";
+  if (/^(审核|审批|通过|驳回|approve|reject)$/i.test(label)) return "review";
+  if (/^(导出|下载|export|download)$/i.test(label)) return "download";
+  if (/^(保存|提交|确定|save|submit|confirm)$/i.test(label)) return undefined;
+  return undefined;
 }
 
 function nonemptyError(value: unknown) {
@@ -176,33 +178,21 @@ export function normalizeUrl(rawUrl: string) {
 
 export function inferOperation(event: NetworkEvidence, ui?: UiEvidence, activeFormIntent?: OperationKind): OperationKind {
   const method = event.request.method.toUpperCase();
-  const endpoint = new URL(event.request.url).pathname;
-  const actionSignal = [
-    event.request.url,
-    ui?.text,
-    ui?.label,
-    ui?.name
-  ].filter(Boolean).join(" ");
-  const pageSignal = [event.pageUrl, ui?.pageUrl].filter(Boolean).join(" ");
-
   if (method === "DELETE") return "delete";
-  if (AUTHENTICATE.test(endpoint)) return "authenticate";
-  if (UPLOAD.test(endpoint)) return "upload";
-  if (DOWNLOAD.test(endpoint)) return "download";
   if (method === "GET" || method === "HEAD") return "query";
-  if (CREATE.test(endpoint) || /submit-process|start-process|startProcess/i.test(endpoint)) return "create";
+  if (method === "PATCH" || method === "PUT") return "update";
   const uiIntent = inferUiOperationIntent(ui?.text || ui?.label, ui?.pageUrl || event.pageUrl || "");
   if (uiIntent && uiIntent !== "action") return uiIntent;
   if ((activeFormIntent === "create" || activeFormIntent === "update") && isFormCommit(ui)) return activeFormIntent;
   if (uiIntent) return uiIntent;
-  if (CREATE.test(actionSignal)) return "create";
-  if (REVIEW.test(actionSignal) || (REVIEW.test(pageSignal) && REVIEW.test(actionSignal))) return "review";
-  if (DELETE.test(actionSignal)) return "delete";
-  if (method === "POST" && (QUERY.test(actionSignal) || looksRecordedQuery(event) || looksScalarLookup(event))) return "query";
-  if (method === "PATCH" || method === "PUT") return "update";
-  if (UPDATE.test(endpoint)) return "update";
-  if (UPDATE.test(actionSignal)) return "update";
-  if (method === "POST") return "action";
+  if (method === "POST" && looksRecordedQuery(event)) return "query";
+  if (method === "POST" && isFormCommit(ui)) {
+    const haystack = `${event.request.url} ${ui?.pageUrl || ""} ${ui?.text || ""} ${ui?.label || ""}`;
+    if (CREATE.test(haystack)) return "create";
+    if (UPDATE.test(haystack)) return "update";
+    return "action";
+  }
+  if (method === "POST") return "unknown";
   return "unknown";
 }
 

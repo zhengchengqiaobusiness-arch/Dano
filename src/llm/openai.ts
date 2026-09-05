@@ -48,6 +48,21 @@ export class OpenAIReasoner {
     return Boolean(this.client);
   }
 
+  async parseStructured<T>(instructions: string, input: string, schema: z.ZodType<T>, name: string): Promise<T | undefined> {
+    if (!this.client) return undefined;
+    try {
+      const response = await this.client.responses.parse({
+        model: this.model,
+        instructions,
+        input,
+        text: { format: zodTextFormat(schema, name) }
+      });
+      return (response.output_parsed ?? undefined) as T | undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   async refineCapability(capability: CapabilityContract): Promise<CapabilityContract> {
     if (!this.client) return capability;
     const allowedEvidence = new Set(capability.evidence.map(e => e.eventId));

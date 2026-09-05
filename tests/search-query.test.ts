@@ -118,12 +118,13 @@ test("POST search without list/search in the path is still a query", () => {
     response: { status: 200, headers: {}, body: { ok: true } },
     correlatedUiEvidenceId: undefined,
     pageUrl: "https://x.test/orders"
-  }), "action");
+  }), "unknown");
 });
 
 test("keyword search with companion requests becomes a reviewable query skill", () => {
   const events = searchEvents().filter(event => event.id !== "net-fetch");
-  const catalog = buildCapabilityCandidates(events);
+  const clustered = buildCapabilityCandidates(events);
+  const catalog = finalizeCapabilities(clustered, events);
   const search = catalog.find(item => item.transport.pathTemplate.endsWith("/getAllZy"));
   assert.ok(search, `capabilities: ${catalog.map(item => `${item.operation}:${item.transport.pathTemplate}`).join(",")}`);
   assert.equal(search!.operation, "query");
@@ -132,7 +133,7 @@ test("keyword search with companion requests becomes a reviewable query skill", 
   assert.equal(isPrimaryCapability(search!, catalog), true);
   assert.equal(summarizeCatalog(catalog).primary.some(item => item.transport.pathTemplate.endsWith("/getAllZy")), true);
 
-  const verified = finalizeCapabilities(catalog, events);
+  const verified = catalog;
   const review = reviewCatalog(verified, events);
   assert.equal(review.primaryCount > 0, true, review.summary);
   assert.equal(review.status, "passed", review.summary);

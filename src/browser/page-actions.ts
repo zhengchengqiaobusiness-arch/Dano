@@ -1,3 +1,8 @@
+/**
+ * 文件级说明：表单策略的主流判断已交给 `.pi/skills/operate-form-controls`。
+ * 本文件只提供 click/fill/choose/snapshot 原语，供 Pi 按 snapshot 逐项操作。
+ * 旧组件库百科全书见 `page-actions.ts.bak`。
+ */
 import type { Frame, Locator, Page } from "playwright";
 import type { OperationKind } from "../domain.js";
 import { PATCH_VUE_FORM_COMPANIONS } from "./form-companions.js";
