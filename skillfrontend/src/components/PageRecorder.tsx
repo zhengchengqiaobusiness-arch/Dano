@@ -472,6 +472,21 @@ const REPLAY_SKIP_HINTS = ["跳过回放取证", "仍无法登录", "录制会�
 
 const DEFAULT_RECORDING_GOAL_TEMPLATE = "请将我接下来在页面中实际完成的每项业务操作分别生成一个可调用能力。";
 
+function looksLikeRecordingGoal(text: string) {
+  const value = String(text || "").trim();
+  if (!value || value === DEFAULT_RECORDING_GOAL_TEMPLATE) return true;
+  if (/^请将我接下来|^请把我接下来|^请根据我接下来|^请将接下来|^请把接下来/.test(value)) return true;
+  return /生成一个可调用能力|分别生成一个|每项业务操作|接下来在页面中实际完成/.test(value);
+}
+
+function historySkillName(item: RecordingResultSummary) {
+  const title = String(item.title || "").trim();
+  if (title && !looksLikeRecordingGoal(title)) return title;
+  const goal = String(item.goal_summary || "").trim();
+  if (goal && !looksLikeRecordingGoal(goal)) return goal;
+  return "未命名录制";
+}
+
 const STATUS_LABELS: Record<WorkflowStatus, string> = {
   idle: "等待开始",
   recording: "录制中",
@@ -687,6 +702,7 @@ export default function PageRecorder({
   const [keepResult, setKeepResult] = useState(false);
   const [resumeOnly, setResumeOnly] = useState(false);
   const [thoughts, setThoughts] = useState<ThoughtChunk[]>([]);
+  const assistantLogRef = useRef<HTMLDivElement | null>(null);
   const [expandedTools, setExpandedTools] = useState<Record<number, boolean>>({});
   const [cancelling, setCancelling] = useState(false);
   const [history, setHistory] = useState<RecordingResultSummary[]>([]);
@@ -828,6 +844,12 @@ export default function PageRecorder({
     }
     reachedStageRef.current = reachedStage;
   }, [reachedStage, resumeOnly]);
+
+  useEffect(() => {
+    const node = assistantLogRef.current;
+    if (!node) return;
+    node.scrollTop = node.scrollHeight;
+  }, [thoughts]);
 
   function appendThought(chunk: ThoughtChunk) {
     setThoughts((current) => {
@@ -1027,19 +1049,34 @@ export default function PageRecorder({
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "client stop");
   }
 
-  function canAutoReconnectRecording() {
-    const status = snapshotRef.current?.status;
-    const initType = socketInitRef.current?.type;
-    if (["published", "editable", "failed", "cancelled"].includes(status || "")) {
-      return false;
+  function markRecordingDisconnected(reason: string) {
+    const current = snapshotRef.current;
+    const detail = reason || "后台录制进程已断开";
+    finishRequestedRef.current = false;
+    setFinishRequested(false);
+    setConnecting(false);
+    if (!current || ["failed", "cancelled", "published", "editable"].includes(current.status)) {
+      message.error(detail);
+      return;
     }
-    if (initType === "start") {
-      return ["recording", "processing", "waiting_operator"].includes(status || "");
+    const failed: WorkflowSnapshot = {
+      ...current,
+      status: "failed",
+      error: detail,
+      progress: {
+        step: "ready",
+        label: detail,
+        round: current.progress?.round || 0,
+      },
+    };
+    snapshotRef.current = failed;
+    setSnapshot(failed);
+    if (!resumeOnlyRef.current) {
+      setKeepResult(Boolean(current.draft));
+      setAssistantOpen(true);
     }
-    if (initType === "resume_verification") {
-      return ["processing", "waiting_operator"].includes(status || "");
-    }
-    return false;
+    appendThought({ kind: "text", text: detail });
+    message.error(detail);
   }
 
   function send(payload: Record<string, unknown>) {
@@ -1422,36 +1459,20 @@ export default function PageRecorder({
       wsRef.current = null;
       setConnected(false);
       setConnecting(false);
+      stopReconnect();
       if (cancellingRef.current) {
         applyCancelledSnapshot();
         return;
       }
-      if (closingRef.current || !canAutoReconnectRecording()) {
-        const resumeDisconnected = socketInitRef.current?.type === "resume_verification"
-          && snapshotRef.current?.status === "processing";
-        const neverStarted = acceptNextSnapshotRef.current
-          && snapshotRef.current?.status === "processing"
-          && snapshotRef.current.progress.label === "正在启动机器验证";
-        if (resumeDisconnected || neverStarted) {
-          const failed: WorkflowSnapshot = {
-            ...snapshotRef.current,
-            status: "failed",
-            error: "分析连接已断开",
-            progress: { step: "ready", label: "分析连接已断开，请重新继续分析", round: 0 },
-          };
-          snapshotRef.current = failed;
-          setSnapshot(failed);
-          acceptNextSnapshotRef.current = false;
-        }
-        return;
+      if (closingRef.current) return;
+      const status = snapshotRef.current?.status;
+      if (["recording", "processing", "waiting_operator"].includes(status || "")) {
+        markRecordingDisconnected(
+          status === "processing"
+            ? "后台分析进程已断开，前台已停止等待"
+            : "后台录制进程已断开，本次录制已中断",
+        );
       }
-      reconnectAttemptRef.current += 1;
-      const delay = Math.min(5000, 500 * (2 ** Math.min(4, reconnectAttemptRef.current)));
-      reconnectTimerRef.current = window.setTimeout(() => {
-        reconnectTimerRef.current = null;
-        if (!canAutoReconnectRecording()) return;
-        openRecordingSocket(actionRef.current);
-      }, delay);
     };
   }
 
@@ -2425,7 +2446,7 @@ export default function PageRecorder({
                 return (
                   <div>
                     <div>
-                      {(item.title || "").trim() || (item.goal_summary || "").trim() || "未命名录制"}
+                      {historySkillName(item)}
                       <Tag color={lifecycle.color as "success"} style={{ marginLeft: 8 }}>{lifecycle.label}</Tag>
                     </div>
                     <div style={{ fontSize: 12, color: "#999" }}>{item.action}</div>
@@ -3694,6 +3715,13 @@ export default function PageRecorder({
           />
         </Card>
       ) : null}
+      {thoughts.length ? (
+        <Card size="small" title="实时输出" styles={{ body: { padding: 8 } }}>
+          <div ref={assistantLogRef} style={{ maxHeight: "58vh", overflow: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
+            {thoughts.map((item, index) => renderThoughtBlock(item, index))}
+          </div>
+        </Card>
+      ) : null}
       {(snapshot?.insights || []).length ? (
         <Card size="small" title="实时分析候选" styles={{ body: { padding: 0 } }}>
           <List
@@ -3709,9 +3737,9 @@ export default function PageRecorder({
             )}
           />
         </Card>
-      ) : (snapshot?.activity || []).length || snapshot?.question
+      ) : thoughts.length || (snapshot?.activity || []).length || snapshot?.question
         ? null
-        : <Empty description={status === "recording" ? "捕获到业务事实后显示分析结论" : "暂无分析结论"} />}
+        : <Empty description={status === "recording" ? "操作页面后会在这里同步后台输出" : "暂无分析结论"} />}
     </Space>
   );
 

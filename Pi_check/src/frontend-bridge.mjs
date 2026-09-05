@@ -65,7 +65,14 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
       };
     };
 
-    const think = (text) => send(ws, { type: "thought", kind: "text", text });
+    const think = (payload) => {
+      const thought = typeof payload === "string"
+        ? { kind: "text", text: payload }
+        : (payload && typeof payload === "object" ? payload : null);
+      if (!thought) return;
+      if (!thought.text && thought.kind !== "tool") return;
+      send(ws, { type: "thought", ...thought });
+    };
 
     const stopFrames = () => {
       if (session.frames) {
@@ -135,7 +142,7 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
         }
         if (type === "start") {
           session.action = String(message.resume_action || newAction());
-          session.title = String(message.title || message.goal_text || "");
+          session.title = String(message.title || "").trim();
           logPiOnly("正在启动 PI；旧录制逻辑绝不启动");
           think("PI 是唯一语义决策者；旧录制逻辑绝不启动。正在启动 PI。");
           send(ws, snapshot("recording", {
@@ -149,6 +156,7 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
             action: session.action,
             storageState: message.storage_state || null,
             viewport: message.viewport || null,
+            onThought: think,
           });
           session.recordingId = started.id;
           const browser = controller.browserOf?.(started.id);
@@ -249,7 +257,19 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
       }
     });
 
-    ws.on("close", () => stopFrames());
+    ws.on("close", () => {
+      stopFrames();
+      const recordingId = session.recordingId;
+      if (!recordingId) return;
+      let view = null;
+      try {
+        view = controller.view(recordingId);
+      } catch {
+        return;
+      }
+      if (!view || view.status === "succeeded" || view.hasFinalResult) return;
+      controller.cancel(recordingId).catch(() => {});
+    });
   });
 
   return wss;
