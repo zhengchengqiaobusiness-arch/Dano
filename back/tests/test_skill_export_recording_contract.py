@@ -12,6 +12,7 @@ from dano.execution.page.flow_spec import FlowSpec, flow_spec_to_api_request
 from dano.execution.page.flow_spec_core.models import (
     CapabilityRequestRef,
     FlowCapability,
+    FlowLink,
     FlowStep,
     ParamField,
     RequestFact,
@@ -446,6 +447,149 @@ def test_existing_body_source_is_kept() -> None:
 
     prepared = ensure_recorded_body_source(spec)
     assert json.loads(prepared.steps[0].body_source) == {"title": "已有", "other": 9}
+
+
+def test_hidden_query_constant_is_baked_not_a_caller_placeholder() -> None:
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="step_lookup",
+                name="读取定义",
+                method="GET",
+                path="/api/definitions/get",
+                params=[
+                    ParamField(
+                        key="key",
+                        path="query.key",
+                        category="user_param",
+                        source_kind="constant",
+                        exposed_to_user=False,
+                        default_value="order_create",
+                    )
+                ],
+            )
+        ]
+    )
+
+    api_request, errors = flow_spec_to_api_request(spec)
+
+    assert errors == []
+    assert api_request is not None
+    assert api_request["query_template"] == {"key": "order_create"}
+    assert "key" not in (api_request.get("params") or [])
+
+
+def test_previous_response_query_is_not_a_caller_placeholder() -> None:
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="step_preview",
+                method="GET",
+                path="/api/preview",
+                params=[
+                    ParamField(
+                        key="definitionId",
+                        path="query.definitionId",
+                        source_kind="previous_response",
+                        exposed_to_user=False,
+                    )
+                ],
+            )
+        ]
+    )
+
+    api_request, errors = flow_spec_to_api_request(spec)
+
+    assert errors == []
+    assert api_request is not None
+    assert "definitionId" not in (api_request.get("params") or [])
+    assert "{{definitionId}}" not in json.dumps(api_request.get("query_template") or {})
+
+
+def test_declared_preflight_link_is_compiled_without_verification() -> None:
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="cap_submit",
+                name="submit_record",
+                title="提交记录",
+                kind="command",
+                request_refs=[
+                    CapabilityRequestRef(step_id="step_def", usage="preflight"),
+                    CapabilityRequestRef(step_id="step_preview", usage="preflight"),
+                    CapabilityRequestRef(step_id="step_submit", usage="execute"),
+                ],
+                input_schema={
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}},
+                    "required": ["title"],
+                },
+            )
+        ],
+        steps=[
+            FlowStep(
+                step_id="step_def",
+                method="GET",
+                path="/api/definitions/get",
+                params=[
+                    ParamField(
+                        key="key",
+                        path="query.key",
+                        source_kind="constant",
+                        exposed_to_user=False,
+                        default_value="record_flow",
+                    )
+                ],
+            ),
+            FlowStep(
+                step_id="step_preview",
+                method="GET",
+                path="/api/preview",
+                params=[
+                    ParamField(
+                        key="definitionId",
+                        path="query.definitionId",
+                        source_kind="previous_response",
+                        exposed_to_user=False,
+                    )
+                ],
+            ),
+            FlowStep(
+                step_id="step_submit",
+                method="POST",
+                path="/api/records/submit",
+                params=[
+                    ParamField(
+                        key="title",
+                        path="body.title",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                    )
+                ],
+            ),
+        ],
+        links=[
+            FlowLink(
+                source_step_id="step_def",
+                target_step_id="step_preview",
+                source_path="data.id",
+                target_path="query.definitionId",
+            )
+        ],
+    )
+
+    api_request, errors = flow_spec_to_api_request(spec, _embed_capability_steps=True)
+
+    assert errors == []
+    execution = api_request["capabilities"][0]["execution_contract"]
+    lookup = next(step for step in execution["steps"] if step["step_id"] == "step_def")
+    preview = next(step for step in execution["steps"] if step["step_id"] == "step_preview")
+    assert lookup["query_template"] == {"key": "record_flow"}
+    assert "key" not in (lookup.get("params") or [])
+    assert "{{definitionId}}" not in json.dumps(preview.get("query_template") or {})
+    assert execution["links"]
+    assert execution["links"][0]["source_path"] == "data.id"
+    assert execution["links"][0]["target_path"] == "query.definitionId"
 
 
 def test_command_kind_follows_execute_http_method() -> None:

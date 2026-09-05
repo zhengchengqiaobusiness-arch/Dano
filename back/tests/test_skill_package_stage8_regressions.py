@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from uuid import UUID
 
-from dano.execution.page.flow_spec import FlowCapability, FlowSpec
+from dano.execution.page.flow_spec import FlowCapability, FlowSpec, flow_spec_to_api_request
 from dano.execution.page.flow_spec_core.models import (
     CapabilityRelation,
     CapabilityRequestRef,
+    FlowLink,
     FlowStep,
     ParamField,
 )
@@ -1637,3 +1639,151 @@ def test_result_then_playbook_renders_combination_route_and_readable_scripts(tmp
     assert "提交 query" not in contract
     assert "本场" not in contract
     assert (folder / "references" / "routes" / "查询工作汇报统计-然后-新增并提交工作日报.md").exists()
+
+
+def test_export_bakes_system_preflight_and_keeps_system_body_fields() -> None:
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="cap_submit",
+                name="submit_record",
+                title="提交记录",
+                kind="command",
+                request_refs=[
+                    CapabilityRequestRef(step_id="step_def", usage="preflight"),
+                    CapabilityRequestRef(step_id="step_preview", usage="preflight"),
+                    CapabilityRequestRef(step_id="step_submit", usage="execute"),
+                ],
+                input_schema={
+                    "type": "object",
+                    "properties": {"title": {"type": "string", "title": "标题"}},
+                    "required": ["title"],
+                },
+            )
+        ],
+        steps=[
+            FlowStep(
+                step_id="step_def",
+                method="GET",
+                path="/api/definitions/get",
+                params=[
+                    ParamField(
+                        key="key",
+                        path="query.key",
+                        category="user_param",
+                        source_kind="constant",
+                        exposed_to_user=False,
+                        default_value="record_flow",
+                    )
+                ],
+            ),
+            FlowStep(
+                step_id="step_preview",
+                method="GET",
+                path="/api/preview",
+                params=[
+                    ParamField(
+                        key="definitionId",
+                        path="query.definitionId",
+                        category="user_param",
+                        source_kind="previous_response",
+                        exposed_to_user=False,
+                    ),
+                    ParamField(
+                        key="activityId",
+                        path="query.activityId",
+                        category="user_param",
+                        source_kind="constant",
+                        exposed_to_user=False,
+                        default_value="StartNode",
+                    ),
+                ],
+            ),
+            FlowStep(
+                step_id="step_submit",
+                method="POST",
+                path="/api/records/submit",
+                params=[
+                    ParamField(
+                        key="title",
+                        path="body.title",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                    ParamField(
+                        key="ownerId",
+                        path="body.ownerId",
+                        type="number",
+                        source_kind="current_user",
+                        exposed_to_user=False,
+                        default_value=9,
+                    ),
+                ],
+            ),
+        ],
+        links=[
+            FlowLink(
+                source_step_id="step_def",
+                target_step_id="step_preview",
+                source_path="data.id",
+                target_path="query.definitionId",
+            )
+        ],
+    )
+    compiled, errors = flow_spec_to_api_request(spec, _embed_capability_steps=True)
+    assert errors == []
+    skill = type("Skill", (), {"api_request": compiled})()
+
+    plans = _capability_plans(skill, spec, compiled)
+    runtime = _runtime_plan(plans[0])
+
+    assert "key" not in (plans[0]["input_schema"].get("properties") or {})
+    lookup, preview, submit = runtime["steps"]
+    assert lookup["query_template"] == {"key": "record_flow"}
+    assert "key" not in (lookup.get("params") or [])
+    assert preview["query_template"] == {"activityId": "StartNode"}
+    assert "{{definitionId}}" not in json.dumps(preview.get("query_template") or {})
+    assert submit["body_template"]["title"] == "{{title}}"
+    assert submit["body_template"]["ownerId"] == 9
+    assert runtime["links"]
+    assert runtime["links"][0]["read_path"] == "data.id"
+    assert runtime["links"][0]["write_path"] == "query.definitionId"
+
+
+def test_validator_rejects_system_placeholder_asked_of_caller(tmp_path: Path) -> None:
+    script = tmp_path / "scripts" / "submit.py"
+    script.parent.mkdir(parents=True)
+    plan = {
+        "name": "submit",
+        "input_schema": {"type": "object", "properties": {"title": {"type": "string"}}},
+        "steps": [{
+            "query_template": {"key": "{{key}}"},
+            "body_template": {"title": "{{title}}"},
+        }],
+    }
+    script.write_text(
+        "import json\nPLAN = json.loads(" + json.dumps(json.dumps(plan, ensure_ascii=False)) + ")\n",
+        encoding="utf-8",
+    )
+    forms = tmp_path / "references" / "INPUT_FORMS.md"
+    forms.parent.mkdir(parents=True)
+    forms.write_text("## 提交 (`submit`)\n\n- `title`\n", encoding="utf-8")
+    issues: list[dict] = []
+
+    _check_input_fact_alignment(
+        tmp_path,
+        {
+            "capabilities": [{
+                "name": "submit",
+                "title": "提交",
+                "script": "scripts/submit.py",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}},
+                },
+            }],
+        },
+        issues,
+    )
+
+    assert any(item["code"] == "script_system_param_as_caller" for item in issues)
