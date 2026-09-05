@@ -13,11 +13,11 @@ _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _UNRESOLVED_SOURCE_KINDS = frozenset({"", "unknown", "ambiguous"})
 
 
-def promote_unconfirmed_write_fields(spec: FlowSpec) -> FlowSpec:
-    """Turn unresolved recorded write samples into caller inputs for export."""
+def list_unconfirmed_write_fields(spec: FlowSpec) -> list[str]:
+    """List write fields whose source is still unknown. Do not guess a caller/system split."""
 
-    view = spec.model_copy(deep=True)
-    for step in view.steps or []:
+    found: list[str] = []
+    for step in spec.steps or []:
         if str(step.method or "").upper() not in _WRITE_METHODS:
             continue
         for param in step.params or []:
@@ -29,14 +29,16 @@ def promote_unconfirmed_write_fields(spec: FlowSpec) -> FlowSpec:
                 continue
             if str(param.source_kind or "unknown").strip().lower() not in _UNRESOLVED_SOURCE_KINDS:
                 continue
-            param.category = "user_param"
-            param.source_kind = "user_input"
-            param.exposed_to_user = True
-            param.editable = True
-            param.required = True
-            param.source = {"kind": "user_input", "path": param.path}
-            param.reason = "来源未确认，导出时改为由调用方提供，不把录制样例当作运行时常量"
-    return view
+            label = str(param.label or param.key or param.path or "").strip()
+            step_name = str(step.name or step.step_id or "").strip()
+            found.append(f"{step_name}:{label}" if step_name else label)
+    return [item for item in found if item]
+
+
+def promote_unconfirmed_write_fields(spec: FlowSpec) -> FlowSpec:
+    """Compatibility no-op. Incomplete fields must block export, not be guessed as caller input."""
+
+    return spec.model_copy(deep=True)
 
 
 def build_export_view(spec: FlowSpec, selected_capability_ids: list[str]) -> FlowSpec:

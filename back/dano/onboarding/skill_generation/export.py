@@ -18,6 +18,7 @@ from dano.execution.page.flow_spec_core.models import FlowSpec
 from dano.onboarding.skill_generation.catalog import capability_ref
 from dano.onboarding.skill_generation.export_view import (
     build_export_view,
+    list_unconfirmed_write_fields,
     promote_unconfirmed_write_fields,
 )
 from dano.onboarding.skill_generation.models import (
@@ -225,6 +226,49 @@ def _log_export(
         )
     except Exception:  # noqa: BLE001 - export logging must not fail the request
         pass
+
+
+def _text_items(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        text = raw.strip()
+        return [text] if text else []
+    if not isinstance(raw, list):
+        return []
+    items: list[str] = []
+    for item in raw:
+        if isinstance(item, str):
+            text = item.strip()
+        elif isinstance(item, dict):
+            text = str(item.get("reason") or item.get("message") or item.get("detail") or "").strip()
+        else:
+            text = str(item or "").strip()
+        if text:
+            items.append(text)
+    return items
+
+
+def _pi_unresolved(body: dict[str, Any]) -> list[str]:
+    buckets = [body]
+    for key in ("flow_spec", "draft"):
+        value = body.get(key)
+        if isinstance(value, dict):
+            buckets.append(value)
+            meta = value.get("meta")
+            if isinstance(meta, dict):
+                buckets.append(meta)
+    found: list[str] = []
+    for bucket in buckets:
+        found.extend(_text_items(bucket.get("unresolved")))
+    return list(dict.fromkeys(found))
+
+
+def _incomplete_export_reasons(body: dict[str, Any], spec: FlowSpec) -> list[str]:
+    reasons = _pi_unresolved(body)
+    reasons.extend(
+        f"写入字段来源未确认：{item}"
+        for item in list_unconfirmed_write_fields(spec)
+    )
+    return list(dict.fromkeys(item for item in reasons if item))
 
 
 def _current_spec(body: dict[str, Any]) -> FlowSpec:
@@ -457,6 +501,19 @@ async def export_recording_skill(
         )
         raise SkillExportError(400, "导出目录不能为空")
     spec = _current_spec(body)
+    incomplete = _incomplete_export_reasons(body, spec)
+    if incomplete:
+        detail = "证据不足或能力未闭合，已阻止导出残缺 Skill：" + "；".join(incomplete[:8])
+        _log_export(
+            "skill.export.failed",
+            summary="证据不足，拒绝导出残缺 Skill",
+            status="failed",
+            level="error",
+            result_id=str(result_id),
+            title=title,
+            errors=incomplete,
+        )
+        raise SkillExportError(409, detail)
     from dano.onboarding.recording_stage_seven import working_fingerprint
 
     fingerprint = working_fingerprint(spec)

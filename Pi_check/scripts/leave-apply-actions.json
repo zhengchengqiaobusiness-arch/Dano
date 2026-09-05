@@ -1,0 +1,5 @@
+[
+  { "action": "wait", "timeout": 2500 },
+  { "action": "click_text", "text": "发起请假" },
+  { "action": "wait", "timeout": 2500 }
+]

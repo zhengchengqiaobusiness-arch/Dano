@@ -1,0 +1,5 @@
+[
+  { "action": "wait", "timeout": 2800 },
+  { "action": "exercise_list" },
+  { "action": "wait", "timeout": 2000 }
+]

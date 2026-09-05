@@ -13,7 +13,7 @@ test("证据索引只投影已有字段，不分类也不补能力", () => {
     {
       seq: 1,
       kind: "interaction",
-      payload: { kind: "click", tag: "SPAN", name: "", text: "确 认删除", href: "https://example.com/#/list" },
+      payload: { kind: "click", tag: "SPAN", name: "", text: "确 认删除", href: "https://example.com/#/list", placeholder: "请输入单据编号", label: "单据编号" },
     },
     {
       seq: 2,
@@ -32,6 +32,15 @@ test("证据索引只投影已有字段，不分类也不补能力", () => {
       payload: { text: "should not appear" },
     },
     {
+      seq: 5,
+      kind: "network_request",
+      payload: {
+        method: "GET",
+        url: "https://example.com/assets/app.js",
+        resource_type: "script",
+      },
+    },
+    {
       seq: 4,
       kind: "page_navigated",
       payload: { url: "https://example.com/#/list" },
@@ -46,6 +55,8 @@ test("证据索引只投影已有字段，不分类也不补能力", () => {
     name: "",
     text: "确 认删除",
     href: "https://example.com/#/list",
+    placeholder: "请输入单据编号",
+    label: "单据编号",
   });
   assert.deepEqual(index.items[1], {
     seq: 2,
@@ -55,6 +66,7 @@ test("证据索引只投影已有字段，不分类也不补能力", () => {
     resource_type: "xhr",
   });
   assert.equal(index.items[2].kind, "page_navigated");
+  assert.ok(!index.items.some((item) => item.resource_type === "script"));
   assert.ok(!JSON.stringify(index).includes("secret"));
   assert.ok(!JSON.stringify(index).includes("should not appear"));
 });

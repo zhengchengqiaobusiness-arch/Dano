@@ -52,7 +52,7 @@ export function looksLoggedIn(state) {
   const origins = Array.isArray(state?.origins) ? state.origins : [];
   for (const item of origins) {
     const rows = Array.isArray(item?.localStorage) ? item.localStorage : [];
-    if (rows.some((row) => /access_token|ACCESS_TOKEN|token/i.test(String(row?.name || "")) && String(row?.value || "").trim())) {
+    if (rows.some((row) => /access_token|ACCESS_TOKEN|token|core-access/i.test(String(row?.name || "")) && String(row?.value || "").trim())) {
       return true;
     }
   }

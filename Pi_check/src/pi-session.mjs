@@ -127,7 +127,7 @@ export class LivePiSession {
     const finalPrompt = this.#promptNow(
       `${this.#instructions}\n证据已冻结，最新 seq=${this.#latestSeq}。现在必须调用 submit_recording_result。\n` +
         "先调 list_recording_index 看完全场 interaction 和 xhr/fetch，再抽读正文。不要逐条读 console，也不要只读前半场。\n" +
-        "提交前自检：索引里每个带确认的写入（提交/保存/撤回/删除等，看按钮不看系统名）都要有能力或 unresolved。选择器弹层不是新能力。标签用当前页控件文案。同一 path 不能既是调用方又是系统。input_schema.required 必须等于 caller params 的 required。from_path 必须能在对应响应里读到。每个 param 必须有 reason。计算字段写公式。接口枚举写 source_url 和本场 {label,value} 并标明是否完整。页面枚举列出当场全部选项。回填字段写 from_step_id/from_path 和能不能改。灰底计算/自动编号/行主键不要进 input_schema。option_source 只挂本能力表单上的下拉。日期用 date/datetime。不要把分页列表刷新挂进撤回/删除。不要写 capabilities[].fields。\n" +
+        "提交前自检：索引里每个带确认的写入（提交/保存/撤回/删除等，看按钮不看系统名）都要有能力或 unresolved。选择器弹层不是新能力。标签用当前页控件文案。筛选条看得见的输入即使空着也要留下或 unresolved。同一 path 不能既是调用方又是系统。input_schema.required 必须等于 caller params 的 required。from_path 必须能在对应响应里读到。每个 param 必须有 reason。计算字段写公式。接口枚举写 source_url 和本场 {label,value} 并标明是否完整。页面枚举列出当场全部选项。没打开过的下拉不要编 enum_options。回填字段写 from_step_id/from_path 和能不能改。灰底计算/自动编号/行主键不要进 input_schema。option_source 只挂本能力表单上的下拉，附件/审批进度是 fact_check。GET 详情 execute 只写请求里的主键，不要把响应展示字段写成 body.*。日期用 date/datetime。不要把分页列表刷新挂进撤回/删除。不要写 capabilities[].fields。\n" +
         "若你已经写过 submit_recording_draft，把完整 result 立刻提交为 final=true。草稿不会自动变成结果。这是唯一结果来源。",
     );
     const timeoutTask = sleep(Math.max(1000, timeoutMs)).then(() => {

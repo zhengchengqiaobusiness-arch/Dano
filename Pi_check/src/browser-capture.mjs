@@ -74,6 +74,57 @@ export function shouldFlushFrame(event) {
   return false;
 }
 
+async function clickFirstVisible(page, texts, timeout = 1200) {
+  for (const text of texts) {
+    const loc = page.getByText(text, { exact: false });
+    const count = await loc.count().catch(() => 0);
+    for (let index = 0; index < Math.min(count, 6); index += 1) {
+      const item = loc.nth(index);
+      if (!(await item.isVisible().catch(() => false))) continue;
+      await item.click({ timeout }).catch(() => {});
+      return true;
+    }
+  }
+  return false;
+}
+
+async function exerciseListPage(page) {
+  await clickFirstVisible(page, ["展开筛选", "高级搜索", "展开"]);
+  await page.waitForTimeout(300);
+  const selects = page.locator(
+    ".el-form .el-select, .el-form .ant-select, form .el-select, .search-form .el-select, .ant-pro-table-search .ant-select, .el-table-filter",
+  );
+  const selectCount = await selects.count().catch(() => 0);
+  for (let index = 0; index < Math.min(selectCount, 12); index += 1) {
+    await selects.nth(index).click({ timeout: 800 }).catch(() => {});
+    await page.waitForTimeout(450);
+    await page.keyboard.press("Escape").catch(() => {});
+    await page.waitForTimeout(150);
+  }
+  const dates = page.locator(".el-date-editor, .ant-picker");
+  const dateCount = await dates.count().catch(() => 0);
+  for (let index = 0; index < Math.min(dateCount, 4); index += 1) {
+    await dates.nth(index).click({ timeout: 800 }).catch(() => {});
+    await page.waitForTimeout(350);
+    await page.keyboard.press("Escape").catch(() => {});
+  }
+  const inputs = page.locator(
+    ".el-form input.el-input__inner, .search-form input, .ant-pro-table-search input:not([readonly]), form input[type='text']",
+  );
+  const inputCount = await inputs.count().catch(() => 0);
+  for (let index = 0; index < Math.min(inputCount, 8); index += 1) {
+    const box = inputs.nth(index);
+    if (!(await box.isVisible().catch(() => false))) continue;
+    const readonly = await box.getAttribute("readonly").catch(() => null);
+    if (readonly !== null) continue;
+    await box.fill("1", { timeout: 800 }).catch(() => {});
+  }
+  await clickFirstVisible(page, ["搜索", "查询"]);
+  await page.waitForTimeout(800);
+  await clickFirstVisible(page, ["查看", "详情"]);
+  await page.waitForTimeout(800);
+}
+
 function headerEntries(headers) {
   if (!headers) return [];
   if (Array.isArray(headers)) return headers;
@@ -241,6 +292,8 @@ export class PlaywrightBrowser {
       await page.keyboard.press(value);
     } else if (kind === "wait") {
       await page.waitForTimeout(Number(timeout) || 800);
+    } else if (kind === "exercise_list") {
+      await exerciseListPage(page);
     } else {
       throw new Error(`不支持的页面动作: ${kind || "(empty)"}`);
     }
@@ -458,6 +511,17 @@ async function installContextHooks(context, handle, append) {
         // ignore
       }
     };
+    const fieldHint = (target) => {
+      const node = target && target.closest ? target : null;
+      const control = node?.closest?.("input, textarea, select, .el-select, .el-input, .ant-select, .ant-picker") || node;
+      const item = control?.closest?.(".el-form-item, .ant-form-item, .el-form-item__content, label") || control;
+      const labelNode = item?.querySelector?.(".el-form-item__label, .ant-form-item-label, label");
+      return {
+        placeholder: String(control?.getAttribute?.("placeholder") || target?.placeholder || ""),
+        aria_label: String(control?.getAttribute?.("aria-label") || ""),
+        label: String(labelNode?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 80),
+      };
+    };
     document.addEventListener("click", (event) => {
       const target = event.target;
       send("click", {
@@ -465,6 +529,7 @@ async function installContextHooks(context, handle, append) {
         id: target?.id || "",
         name: target?.getAttribute?.("name") || "",
         text: String(target?.innerText || "").slice(0, 200),
+        ...fieldHint(target),
       });
     }, true);
     document.addEventListener("input", (event) => {
@@ -474,6 +539,7 @@ async function installContextHooks(context, handle, append) {
         id: target?.id || "",
         name: target?.name || "",
         value: String(target?.value ?? ""),
+        ...fieldHint(target),
       });
     }, true);
     document.addEventListener("change", (event) => {
@@ -483,6 +549,7 @@ async function installContextHooks(context, handle, append) {
         id: target?.id || "",
         name: target?.name || "",
         value: String(target?.value ?? ""),
+        ...fieldHint(target),
       });
     }, true);
     document.addEventListener("submit", (event) => {

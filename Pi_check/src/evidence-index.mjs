@@ -34,16 +34,20 @@ export function buildEvidenceIndex(events) {
         name: String(payload.name || ""),
         text: String(payload.text || payload.value || ""),
         href: String(payload.href || ""),
+        placeholder: String(payload.placeholder || ""),
+        label: String(payload.label || ""),
       });
       continue;
     }
     if (kind === "network_request") {
+      const resourceType = String(payload.resource_type || "").toLowerCase();
+      if (resourceType && resourceType !== "xhr" && resourceType !== "fetch") continue;
       items.push({
         seq,
         kind,
         method: String(payload.method || ""),
         path: compactUrl(payload.url),
-        resource_type: String(payload.resource_type || ""),
+        resource_type: resourceType || String(payload.resource_type || ""),
       });
       continue;
     }

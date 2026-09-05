@@ -1,0 +1,7 @@
+[
+  { "action": "wait", "timeout": 2500 },
+  { "action": "click_text", "text": "搜索" },
+  { "action": "wait", "timeout": 1500 },
+  { "action": "click_text", "text": "查看" },
+  { "action": "wait", "timeout": 2500 }
+]
