@@ -6,13 +6,14 @@ import { authenticationFailureReason, businessResponseFailureReason, inferUiOper
 export const FORM_ITEMS = ".el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [data-slot='form-item'], [class*='form-item']";
 export const FORM_LABELS = "label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label, [data-slot='form-label']";
 export const DIALOGS = "[role='dialog']:visible, [role='alertdialog']:visible, .el-dialog:visible, .el-drawer:visible, .ant-modal:visible, .ant-drawer-content:visible, .arco-modal:visible, .arco-drawer:visible";
-export const DROPDOWNS = ".el-select-dropdown:visible, .el-select__popper:visible, .el-popper.el-select__popper:visible, .el-cascader__dropdown:visible, .el-autocomplete-suggestion:visible, .ant-select-dropdown:visible, .arco-select-dropdown:visible, .arco-select-popup:visible, .arco-tree-select-popup:visible, .arco-cascader-popup:visible, .arco-trigger-popup:visible, [class*='select-popup']:visible, [class*='tree-select-popup']:visible, [class*='cascader-popup']:visible, [class*='trigger-popup']:visible, [role='listbox']:visible";
+export const PORTAL_MENUS = "[data-reka-popper-content-wrapper], [data-radix-popper-content-wrapper], [data-state='open'][data-slot='popover-content'], [data-state='open'][data-slot='select-content'], [data-state='open'][data-slot='combobox-content'], [data-state='open'][data-slot='dropdown-menu-content']";
+export const DROPDOWNS = ".el-select-dropdown:visible, .el-select__popper:visible, .el-popper.el-select__popper:visible, .el-cascader__dropdown:visible, .el-autocomplete-suggestion:visible, .ant-select-dropdown:visible, .arco-select-dropdown:visible, .arco-select-popup:visible, .arco-tree-select-popup:visible, .arco-cascader-popup:visible, .arco-trigger-popup:visible, [class*='select-popup']:visible, [class*='tree-select-popup']:visible, [class*='cascader-popup']:visible, [class*='trigger-popup']:visible, [role='listbox']:visible, [data-reka-popper-content-wrapper]:visible, [data-radix-popper-content-wrapper]:visible, [data-state='open'][data-slot='popover-content']:visible, [data-state='open'][data-slot='select-content']:visible, [data-state='open'][data-slot='combobox-content']:visible, [data-state='open'][data-slot='dropdown-menu-content']:visible";
 export const DATE_PANELS = ".el-picker-panel:visible, .el-popper.el-date-picker:visible, .el-picker__popper:visible, .el-date-range-picker:visible, .el-time-panel:visible, .ant-picker-dropdown:visible, .arco-picker-container:visible, [class*='picker-dropdown']:visible, [class*='picker-panel']:visible";
 const ACTIVE_DATE_OVERLAYS = ".ant-picker-dropdown:visible, .el-picker__popper:visible, .el-popper.el-date-picker:visible, .el-date-range-picker:visible, .el-date-picker:visible, .arco-picker-container:visible, [class*='picker-dropdown']:visible";
 const PICKER_DIALOG = /picker-panel|picker-dropdown|picker__popper|el-date-picker|el-date-range-picker|el-time-panel|el-time-picker|ant-picker-dropdown|arco-picker-container|datepicker/i;
 export const OPTION_ITEMS = "[role='option'], [role='treeitem'], .el-select-dropdown__item, .el-cascader-node, .el-tree-node__content, .el-autocomplete-suggestion__list li, .ant-select-item-option, .ant-select-tree-title, .ant-cascader-menu-item, .arco-select-option, .arco-tree-node-title, .arco-cascader-option, .n-base-select-option";
 export const DIALOG_CHOICES = "[role='option'], [role='treeitem'], [role='listitem'], [role='row'], tbody tr, .el-table__body .el-table__row, .el-tree-node__content, .el-cascader-node, [role='radio'], .el-checkbox";
-export const WIDGET_SURFACES = "xpath=ancestor-or-self::*[contains(@class,'el-select__wrapper') or contains(@class,'el-input__wrapper') or contains(@class,'el-date-editor') or contains(@class,'ant-select-selector') or contains(@class,'ant-picker') or contains(@class,'arco-select-view') or contains(@class,'arco-picker') or contains(@class,'picker-range') or contains(@class,'date-editor')][1]";
+export const WIDGET_SURFACES = "xpath=ancestor-or-self::*[contains(@class,'el-select__wrapper') or contains(@class,'el-input__wrapper') or contains(@class,'el-date-editor') or contains(@class,'ant-select-selector') or contains(@class,'ant-picker') or contains(@class,'arco-select-view') or contains(@class,'arco-picker') or contains(@class,'picker-range') or contains(@class,'date-editor') or @role='combobox' or contains(@data-slot,'select-trigger') or contains(@data-slot,'combobox-trigger')][1]";
 export const BUSY_SPINNERS = "body > .loading:visible, .el-loading-mask:visible, .el-overlay.is-loading:visible, .nprogress-busy:visible, .ant-spin-spinning:visible, .arco-spin-loading:visible, [aria-busy='true']:visible";
 
 export interface FormField {
@@ -448,7 +449,7 @@ export class PageActions {
 
   async isNavigationTarget(locator: Locator) {
     return locator.first().evaluate(el => {
-      const inPicker = el.closest(".el-select-dropdown,.ant-select-dropdown,.el-picker-panel,.el-cascader__dropdown,[role='listbox'],[role='dialog'],.el-dialog,.ant-modal");
+      const inPicker = el.closest(".el-select-dropdown,.ant-select-dropdown,.el-picker-panel,.el-cascader__dropdown,[role='listbox'],[role='tree'],[role='dialog'],.el-dialog,.ant-modal,[data-reka-popper-content-wrapper],[data-radix-popper-content-wrapper]");
       if (inPicker) return false;
       if (el.closest("[class*='process'], [class*='workflow'], [class*='user-select'], [class*='add-user']")) return false;
       return Boolean(el.closest("nav, .el-menu, .ant-menu, .el-menu-item, .ant-menu-item, .el-pagination, .ant-pagination"));
@@ -462,6 +463,7 @@ export class PageActions {
       const isChooserHost = (node: Element) => {
         const cls = String(node.className || "");
         if (node.getAttribute("role") === "combobox" && !node.matches("input, textarea")) return true;
+        if (/^(select-trigger|combobox-trigger)$/.test(node.getAttribute("data-slot") || "")) return true;
         if (/(?:^|\s)(el-select__wrapper|ant-select-selector|arco-select-view)/.test(cls)) return true;
         return /(?:^|\s)(el-select|ant-select|arco-select|n-select|el-cascader|el-date-editor|ant-picker|arco-picker)(?:\s|$)/.test(cls);
       };
@@ -487,10 +489,10 @@ export class PageActions {
   private async hostClick(locator: Locator) {
     await locator.evaluate(el => {
       if (!(el instanceof Element)) return;
-      const host = el.closest(".el-select, .ant-select, .arco-select, .n-select, .el-cascader, .el-date-editor, .ant-picker, .arco-picker")
+      const host = el.closest(".el-select, .ant-select, .arco-select, .n-select, .el-cascader, .el-date-editor, .ant-picker, .arco-picker, [role='combobox'], [data-slot='select-trigger'], [data-slot='combobox-trigger']")
         || (el instanceof HTMLElement ? el : el.parentElement);
       const surface = host instanceof Element
-        ? host.querySelector(".el-select__wrapper, .el-input__wrapper, .ant-select-selector, .arco-select-view, .el-select__selected-item, .el-input, .ant-picker-input")
+        ? host.querySelector(".el-select__wrapper, .el-input__wrapper, .ant-select-selector, .arco-select-view, .el-select__selected-item, .el-input, .ant-picker-input, [role='combobox'], [data-slot='select-trigger'], [data-slot='combobox-trigger']")
         : null;
       const target = (surface instanceof HTMLElement ? surface : host instanceof HTMLElement ? host : null);
       if (!target) return;
@@ -649,7 +651,8 @@ export class PageActions {
       };
       const dialogs = vis("[role='dialog'], [role='alertdialog'], .el-dialog, .el-drawer, .ant-modal, .arco-modal")
         .filter((el) => !/picker-panel|picker-dropdown|picker__popper|el-date-picker|el-date-range-picker|el-time-panel|el-time-picker|ant-picker-dropdown|arco-picker-container|datepicker/i.test(String(el.className || "")));
-      const kitDrops = vis(".el-select-dropdown, .el-select__popper, .el-cascader__dropdown, .el-autocomplete-suggestion, .ant-select-dropdown, .arco-select-dropdown, .arco-select-popup, .arco-tree-select-popup, .arco-cascader-popup, .arco-trigger-popup, [class*='select-popup'], [class*='tree-select-popup'], [class*='cascader-popup'], [class*='trigger-popup'], [role='listbox']");
+      const kitDrops = vis(".el-select-dropdown, .el-select__popper, .el-cascader__dropdown, .el-autocomplete-suggestion, .ant-select-dropdown, .arco-select-dropdown, .arco-select-popup, .arco-tree-select-popup, .arco-cascader-popup, .arco-trigger-popup, [class*='select-popup'], [class*='tree-select-popup'], [class*='cascader-popup'], [class*='trigger-popup'], [role='listbox'], [data-reka-popper-content-wrapper], [data-radix-popper-content-wrapper], [data-state='open'][data-slot='popover-content'], [data-state='open'][data-slot='select-content'], [data-state='open'][data-slot='combobox-content'], [data-state='open'][data-slot='dropdown-menu-content']")
+        .filter((el) => el.querySelector("[role='option'], [role='treeitem'], [role='listbox'], [role='tree']"));
       const looseDrops = vis("ul").filter((el) => el.querySelector("[role='option'], .el-select-dropdown__item, .ant-select-item-option"));
       const drops = [...new Set([...kitDrops, ...looseDrops])];
       const dates = vis(".el-picker-panel, .el-popper.el-date-picker, .el-picker__popper, .el-date-range-picker, .el-time-panel, .ant-picker-dropdown, .arco-picker-container, [class*='picker-panel'], [class*='picker-dropdown']");
@@ -701,7 +704,7 @@ export class PageActions {
     await this.completeChooserDialog();
     await this.dismissTransientOverlays();
     const surface = target.locator(WIDGET_SURFACES);
-    const nested = target.locator(".el-select__wrapper, .el-input__wrapper, .ant-select-selector, .arco-select-view, [class*='arco-select-view']");
+    const nested = target.locator(".el-select__wrapper, .el-input__wrapper, .ant-select-selector, .arco-select-view, [class*='arco-select-view'], [role='combobox'], [data-slot='select-trigger'], [data-slot='combobox-trigger']");
     const clickable = (await surface.count())
       ? surface.first()
       : (await nested.count()) ? nested.first() : target;
@@ -952,7 +955,7 @@ export class PageActions {
     if (!root) throw new Error("No open select dropdown");
     const item = root.locator(OPTION_ITEMS).filter({ visible: true }).first();
     await item.waitFor({ state: "visible", timeout: 1_200 });
-    const navigates = await item.evaluate(el => Boolean(el.closest("nav, aside, .el-menu, .ant-menu, a[href]")) && !el.closest(".el-select-dropdown, .ant-select-dropdown, [role='listbox']"));
+    const navigates = await item.evaluate(el => Boolean(el.closest("nav, aside, .el-menu, .ant-menu, a[href]")) && !el.closest(".el-select-dropdown, .ant-select-dropdown, [role='listbox'], [role='tree'], [data-reka-popper-content-wrapper], [data-radix-popper-content-wrapper]"));
     if (navigates) throw new Error("Visible option is a navigation item; not clicking it");
     return ((await item.innerText()) || "").replace(/\s+/g, " ").trim();
   }
@@ -974,7 +977,7 @@ export class PageActions {
     const value = ((await item.innerText()) || "").replace(/\s+/g, " ").trim() || await this.firstVisibleOption(scope);
     const fieldMeta = await target.evaluate(el => {
       const attrs = ["name", "data-field", "data-name", "data-key", "data-model"];
-      const generated = /^(el-id-\d+|el-[a-z]+-\d+|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i;
+      const generated = /^(el-id-\d+|el-[a-z]+-\d+|reka-v-[a-z0-9-]+|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i;
       let name: string | undefined;
       let node: Element | null = el;
       for (let i = 0; i < 8 && node; i++, node = node.parentElement) {
@@ -1231,8 +1234,8 @@ export class PageActions {
       await this.clickSafely(await this.clickTarget(selector), "field");
       return "true";
     };
-    if (field.kind === "select") return [choose];
-    if (field.kind === "picker") return [pick];
+    if (field.kind === "select") return [choose, pick];
+    if (field.kind === "picker") return [pick, choose];
     if (field.kind === "text" && /请输入.+(编码|名称|code|name)$/i.test(placeholder || String(field.label || ""))) {
       return [choose, pick, type];
     }
@@ -1481,15 +1484,20 @@ export class PageActions {
     await this.completeChooserDialog();
     const filled: Array<Record<string, unknown>> = [];
     const failed: Array<Record<string, unknown>> = [];
+    const failedKeys = new Set<string>();
     const startUrl = this.page().url();
     let dateOffset = 0;
+    const fieldKey = (field: FormField) => `${field.scope || ""}|${field.label}|${field.selector || ""}|${field.groupIndex ?? field.rangeIndex ?? 0}`;
     const run = async (fields: FormField[]) => {
       for (const field of fields) {
+        const key = fieldKey(field);
+        if (failedKeys.has(key)) continue;
         const offset = field.kind === "date" ? dateOffset++ : 0;
         try {
           const result = await this.fillOneField(field, startUrl, offset);
           if (!result.skipped) filled.push(result);
         } catch (error: any) {
+          failedKeys.add(key);
           failed.push({ label: field.label, selector: field.selector || `label=${field.label}`, kind: field.kind, error: String(error?.message || error) });
         }
       }
@@ -1504,7 +1512,7 @@ export class PageActions {
         if (!expansion.expanded) expansionFailures.push({ label: expansion.name || "业务明细", error: "点击添加控件后没有出现可填写字段" });
         after = await this.captureFields();
       }
-      const leftover = (after.todoFields || []).filter(field => !field.skip && !field.disabled);
+      const leftover = (after.todoFields || []).filter(field => !field.skip && !field.disabled && !failedKeys.has(fieldKey(field)));
       if (!leftover.length) {
         if (expansion.attempted) continue;
         if (await this.revealHiddenSections()) {
@@ -1526,7 +1534,7 @@ export class PageActions {
     if (!this.formReady(after, startUrl)) {
       if (await this.revealHiddenSections()) {
         after = await this.captureFields();
-        await run((after.todoFields || []).filter(field => !field.skip && !field.disabled));
+        await run((after.todoFields || []).filter(field => !field.skip && !field.disabled && !failedKeys.has(fieldKey(field))));
         after = await this.captureFields();
       }
     }

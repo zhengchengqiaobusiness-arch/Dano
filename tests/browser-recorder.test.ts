@@ -3502,6 +3502,207 @@ test("exercise-form keeps a filled tree-select and picks a tree node for the emp
   }
 });
 
+test("exercise-form opens a Reka tree combobox instead of retrying a generated form-item id", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-reka-tree-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>领用申请管理</title></head><body>
+      <form>
+        <div id="reka-v-13-form-item" data-slot="form-item" class="form-item">
+          <label data-slot="form-label" for="dept-trigger">申请部门</label>
+          <button id="dept-trigger" type="button" role="combobox" aria-expanded="false" aria-haspopup="tree" aria-label="申请部门" data-slot="select-trigger">
+            <span data-slot="select-value">请选择申请部门</span>
+          </button>
+          <input type="hidden" name="deptId" value="">
+        </div>
+        <label>单据编号<input name="billCode" placeholder="请输入单据编号"></label>
+        <button type="submit">查询</button>
+      </form>
+      <div id="dept-pop" data-reka-popper-content-wrapper hidden style="position:fixed;left:40px;top:80px;background:#fff;border:1px solid #ccc;z-index:40;padding:8px">
+        <div role="tree">
+          <div role="treeitem">广州分公司</div>
+          <div role="treeitem">研发部</div>
+        </div>
+      </div>
+      <script>
+        const trigger = document.getElementById("dept-trigger");
+        const pop = document.getElementById("dept-pop");
+        const hidden = document.querySelector("[name=deptId]");
+        trigger.addEventListener("click", () => {
+          const open = pop.hidden;
+          pop.hidden = !open;
+          pop.dataset.state = open ? "open" : "closed";
+          trigger.setAttribute("aria-expanded", open ? "true" : "false");
+        });
+        pop.addEventListener("mousedown", event => {
+          const item = event.target.closest("[role=treeitem]");
+          if (!item) return;
+          trigger.querySelector("[data-slot=select-value]").textContent = item.textContent;
+          hidden.value = item.textContent === "广州分公司" ? "103" : "106";
+          pop.hidden = true;
+          pop.dataset.state = "closed";
+          trigger.setAttribute("aria-expanded", "false");
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "reka-tree");
+    const before: any = await recorder.control({ action: "snapshot" });
+    const dept = (before.formFields || []).find((field: any) => field.label === "申请部门");
+    assert.ok(dept, JSON.stringify(before.formFields));
+    assert.equal(dept.filled, false, JSON.stringify(dept));
+    assert.equal(/reka-v-/.test(String(dept.selector || "")), false, dept.selector);
+    const filled: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(filled.ok, true, JSON.stringify({ todo: filled.todoFields, failed: filled.failed, fields: filled.formFields }));
+    const after = (filled.formFields || []).find((field: any) => field.label === "申请部门");
+    assert.match(String(after?.value || ""), /广州分公司|研发部/);
+    assert.ok((filled.failed || []).length < 3, JSON.stringify(filled.failed));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exercise-form fills a Reka listbox select and ignores a closed ghost portal", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-reka-listbox-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>领用申请管理</title></head><body>
+      <div data-slot="popover-content" style="position:fixed;left:0;top:0;width:80px;height:20px;opacity:0.2">ghost</div>
+      <form>
+        <div data-slot="form-item" class="form-item">
+          <label data-slot="form-label" for="status-trigger">单据状态</label>
+          <button id="status-trigger" type="button" role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-label="单据状态" data-slot="select-trigger">
+            <span data-slot="select-value">请选择单据状态</span>
+          </button>
+        </div>
+        <button type="submit">查询</button>
+      </form>
+      <div id="status-pop" data-reka-popper-content-wrapper hidden style="position:fixed;left:40px;top:80px;background:#fff;border:1px solid #ccc;z-index:40;padding:8px">
+        <div data-state="open" data-slot="select-content" role="listbox">
+          <div role="option">未提交</div>
+          <div role="option">审批中</div>
+        </div>
+      </div>
+      <script>
+        const trigger = document.getElementById("status-trigger");
+        const pop = document.getElementById("status-pop");
+        trigger.addEventListener("click", () => {
+          const open = pop.hidden;
+          pop.hidden = !open;
+          trigger.setAttribute("aria-expanded", open ? "true" : "false");
+        });
+        pop.addEventListener("mousedown", event => {
+          const item = event.target.closest("[role=option]");
+          if (!item) return;
+          trigger.querySelector("[data-slot=select-value]").textContent = item.textContent;
+          pop.hidden = true;
+          trigger.setAttribute("aria-expanded", "false");
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "reka-listbox");
+    const filled: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(filled.ok, true, JSON.stringify({ todo: filled.todoFields, failed: filled.failed, fields: filled.formFields }));
+    const status = (filled.formFields || []).find((field: any) => field.label === "单据状态");
+    assert.match(String(status?.value || ""), /未提交|审批中/);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exercise-form reads a searchable Reka combobox value from the sibling slot", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-reka-search-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>领用申请表单</title></head><body>
+      <form>
+        <div data-slot="form-item" class="form-item">
+          <label data-slot="form-label" for="use-type">*使用类型</label>
+          <span data-slot="select-value">请选择</span>
+          <input id="use-type" role="combobox" type="search" aria-haspopup="listbox" aria-label="*使用类型" name="useType" placeholder="请选择" value="">
+        </div>
+        <button type="submit">提交</button>
+      </form>
+      <div id="type-pop" data-reka-popper-content-wrapper hidden style="position:fixed;left:40px;top:80px;background:#fff;border:1px solid #ccc;z-index:40;padding:8px">
+        <div role="listbox">
+          <div role="option">个人使用</div>
+          <div role="option">部门使用</div>
+        </div>
+      </div>
+      <script>
+        const input = document.getElementById("use-type");
+        const pop = document.getElementById("type-pop");
+        const shown = document.querySelector("[data-slot=select-value]");
+        input.addEventListener("click", () => { pop.hidden = false; });
+        pop.addEventListener("mousedown", event => {
+          const item = event.target.closest("[role=option]");
+          if (!item) return;
+          shown.textContent = item.textContent;
+          input.value = "";
+          pop.hidden = true;
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "reka-search");
+    const filled: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(filled.ok, true, JSON.stringify({ todo: filled.todoFields, failed: filled.failed, fields: filled.formFields }));
+    const field = (filled.formFields || []).find((item: any) => /使用类型/.test(item.label || ""));
+    assert.match(String(field?.value || ""), /个人使用|部门使用/);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 function parseFieldInstant(value?: string) {
   const text = String(value || "");
   const match = text.match(/(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}(?::\d{2})?))?/);

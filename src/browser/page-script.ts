@@ -1,6 +1,6 @@
 export const PAGE_HELPERS = String.raw`
   const clean = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 12000);
-  const generatedName = (value) => /^(el-id-\d+|el-[a-z]+-\d+|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i.test(String(value || ""));
+  const generatedName = (value) => /^(el-id-\d+|el-[a-z]+-\d+|reka-v-[a-z0-9-]+|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i.test(String(value || ""));
   const isVisible = (el) => {
     if (!(el instanceof Element)) return false;
     if (el.hidden || el.getAttribute("aria-hidden") === "true") return false;
@@ -41,7 +41,7 @@ export const PAGE_HELPERS = String.raw`
   const FORM_ITEM_SEL = '.el-form-item, .ant-form-item, .arco-form-item, .n-form-item, .van-field, [data-slot="form-item"], [class*="form-item"]:not([class*="form-item__"]):not([class*="form-item-"])';
   const FORM_LABEL_SEL = 'label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label, [data-slot="form-label"]';
   const DIALOG_SEL = '[role="dialog"], [role="alertdialog"], .el-dialog, .el-drawer, .el-overlay-dialog, .ant-modal, .ant-drawer, .arco-modal, .arco-drawer';
-  const PICKER_SEL = '.el-picker-panel, .el-select-dropdown, .el-cascader__dropdown, .el-picker__popper, .el-popper.el-date-picker, .el-date-range-picker, .el-time-panel, .ant-picker-dropdown, .ant-select-dropdown, .arco-picker-container, .arco-select-dropdown, .arco-select-popup, .arco-tree-select-popup, .arco-cascader-popup, .arco-trigger-popup, [class*="picker-panel"], [class*="picker-dropdown"], [class*="select-popup"], [class*="trigger-popup"]';
+  const PICKER_SEL = '.el-picker-panel, .el-select-dropdown, .el-cascader__dropdown, .el-picker__popper, .el-popper.el-date-picker, .el-date-range-picker, .el-time-panel, .ant-picker-dropdown, .ant-select-dropdown, .arco-picker-container, .arco-select-dropdown, .arco-select-popup, .arco-tree-select-popup, .arco-cascader-popup, .arco-trigger-popup, [class*="picker-panel"], [class*="picker-dropdown"], [class*="select-popup"], [class*="trigger-popup"], [data-reka-popper-content-wrapper], [data-radix-popper-content-wrapper], [data-state="open"][data-slot="popover-content"], [data-state="open"][data-slot="select-content"], [data-state="open"][data-slot="combobox-content"]';
   const CHOOSER_TITLE = /选择(用户|人员|员工|审批|部门|项目|角色|岗位|成员|产品|供应商|商品|客户|物料|仓库|账户)|选人|选部门|(用户|人员|产品|供应商)选择/;
   const OPTION_SEL = '[role="option"], [role="menuitem"], [role="treeitem"], .el-select-dropdown__item, .el-cascader-node, .el-tree-node__content, .el-autocomplete-suggestion__list li, .ant-select-item-option, .ant-select-tree-title, .ant-cascader-menu-item, .arco-select-option, .arco-tree-node-title, .arco-cascader-option, .n-base-select-option';
   const EMPTY_VALUE = /^(请选择|请输入|请填写|请挑选|select|please select|please enter|please choose|choose|yyyy-mm-dd|年\/月\/日)/i;
@@ -243,6 +243,7 @@ export const PAGE_HELPERS = String.raw`
       const role = node.getAttribute("role") || "";
       if (/input-wrapper|suffix|caret|search|selection-item|selected-item|placeholder|(?:^|\s)el-select__selection(?:\s|$)/i.test(cls)) continue;
       if (role === "combobox" && !node.matches("input, textarea")) return node;
+      if (/^(select-trigger|combobox-trigger)$/.test(node.getAttribute("data-slot") || "")) return node;
       if (/(?:^|\s)(el-select__wrapper|ant-select-selector|arco-select-view)/.test(cls)) return node;
       if (/(?:^|\s)(el-select|ant-select|arco-select|n-select|el-cascader|el-date-editor|ant-picker|arco-picker)(?:\s|$)/.test(cls)) return node;
       if (/(?:^|\s|_|-)(select|picker|cascader|date-editor)(?:\s|$|_)/i.test(cls) && !/dropdown|panel|item|option/i.test(cls)) return node;
@@ -252,11 +253,17 @@ export const PAGE_HELPERS = String.raw`
 
   const hostDisplay = (host) => {
     if (!(host instanceof Element)) return "";
-    const skip = (node) => node.closest("[class*='input-wrapper'], [class*='search'], [class*='suffix'], [class*='caret']");
-    return [...host.querySelectorAll("[class*='selected'], [class*='selection-item'], [class*='placeholder'], [class*='tag'], [class*='value']")]
+    const skip = (node) => node.closest("[class*='input-wrapper'], [class*='search'], [class*='suffix'], [class*='caret'], [class*='icon'], [class*='arrow']");
+    const slotted = [...host.querySelectorAll("[class*='selected'], [class*='selection-item'], [class*='placeholder'], [class*='tag'], [class*='value'], [data-slot$='-value'], [data-slot='select-value'], [data-slot='combobox-value']")]
       .filter((node) => !skip(node))
       .map((node) => clean(node.textContent))
-      .find((text) => text && !EMPTY_VALUE.test(text) && !PLUS_ONLY.test(text)) || "";
+      .find((text) => text && !EMPTY_VALUE.test(text) && !PLUS_ONLY.test(text));
+    if (slotted) return slotted;
+    if (host.getAttribute("role") === "combobox" || /^(select-trigger|combobox-trigger)$/.test(host.getAttribute("data-slot") || "")) {
+      const own = clean(host.textContent);
+      if (own && !EMPTY_VALUE.test(own) && !PLUS_ONLY.test(own)) return own;
+    }
+    return "";
   };
 
   const isChooserFilter = (el) => {
@@ -275,10 +282,16 @@ export const PAGE_HELPERS = String.raw`
       const own = clean(el.value);
       if (own && !EMPTY_VALUE.test(own)) return own;
     }
-    const host = chooserHostOf(el);
-    const shown = hostDisplay(host);
-    if (shown) return shown;
+    const hosts = [chooserHostOf(el), el.parentElement, el.closest("[data-slot='form-item'], [class*='form-item']"), el];
+    for (const host of hosts) {
+      const shown = hostDisplay(host);
+      if (shown) return shown;
+    }
     if (isChooserFilter(el)) return "";
+    if (el.getAttribute("role") === "combobox") {
+      const own = clean(el instanceof HTMLInputElement ? el.value : el.textContent);
+      if (own && !EMPTY_VALUE.test(own)) return own;
+    }
     if (el.isContentEditable) return clean(el.textContent);
     return "";
   };
@@ -315,7 +328,7 @@ export const PAGE_HELPERS = String.raw`
     if (type === "radio" || role === "radio") return "radio";
     if (/^(date|datetime-local|time|month|week)$/.test(type) || /日期|时间|(^|[^a-z])date|time/i.test(blob)) return "date";
     if (el.closest(".el-date-editor, .el-date-picker, .ant-picker, .arco-picker")) return "date";
-    if (/dialog/i.test(popup)) return "picker";
+    if (/dialog|tree/i.test(popup)) return "picker";
     if (el.closest(".el-select, .ant-select, .arco-select, .n-select, .el-cascader") || /(?:^|\s)(el-select|ant-select|arco-select|n-select)/.test(String(el.className || ""))) return "select";
     if (el instanceof HTMLSelectElement || role === "combobox" || /listbox|menu/i.test(popup) || el.closest("[role='combobox']")) return "select";
     if (selectPlaceholder && !isChooserFilter(el)) return "picker";
@@ -361,7 +374,7 @@ export const PAGE_HELPERS = String.raw`
   };
 
   const collectOptionRecords = (root) => {
-    const dropdowns = [...document.querySelectorAll(".el-select-dropdown, .el-cascader__dropdown, .el-autocomplete-suggestion, .ant-select-dropdown, .arco-select-dropdown, .arco-select-popup, .arco-tree-select-popup, .arco-cascader-popup, .arco-trigger-popup, [class*='select-popup'], [class*='tree-select-popup'], [class*='cascader-popup'], [class*='trigger-popup'], [role='listbox']")].filter(isVisible);
+    const dropdowns = [...document.querySelectorAll(".el-select-dropdown, .el-cascader__dropdown, .el-autocomplete-suggestion, .ant-select-dropdown, .arco-select-dropdown, .arco-select-popup, .arco-tree-select-popup, .arco-cascader-popup, .arco-trigger-popup, [class*='select-popup'], [class*='tree-select-popup'], [class*='cascader-popup'], [class*='trigger-popup'], [role='listbox'], [data-reka-popper-content-wrapper], [data-radix-popper-content-wrapper], [data-state='open'][data-slot='popover-content'], [data-state='open'][data-slot='select-content'], [data-state='open'][data-slot='combobox-content']")].filter(isVisible);
     const searchRoot = dropdowns.at(-1) || root || document;
     return [...searchRoot.querySelectorAll(OPTION_SEL)]
       .filter((el) => isVisible(el)
@@ -530,7 +543,7 @@ export const PAGE_HELPERS = String.raw`
     }
     const type = (el.getAttribute("type") || "").toLowerCase();
     if (/hidden|submit|reset|image/.test(type)) return false;
-    if (el.matches("button, [role='button']") && !isPickerSlot(el) && !/dialog|listbox|menu/i.test(el.getAttribute("aria-haspopup") || "") && el.getAttribute("role") !== "combobox") return false;
+    if (el.matches("button, [role='button']") && !isPickerSlot(el) && !/dialog|listbox|menu|tree/i.test(el.getAttribute("aria-haspopup") || "") && el.getAttribute("role") !== "combobox") return false;
     return true;
   };
 
@@ -770,7 +783,8 @@ export const PAGE_HELPERS = String.raw`
     if (!isVisible(el) && !(chooserHostOf(el) && isVisible(chooserHostOf(el)))) return null;
     if (el.closest(PICKER_SEL + ", " + CHROME_SEL + ", thead, .el-table__header, .el-table__header-wrapper, .ant-table-thead")) return null;
     const type = (el.getAttribute("type") || "").toLowerCase();
-    if (/hidden|submit|button|reset|image/.test(type)) return null;
+    if (/hidden|submit|reset|image/.test(type)) return null;
+    if (type === "button" && el.getAttribute("role") !== "combobox" && !/dialog|listbox|menu|tree/i.test(el.getAttribute("aria-haspopup") || "")) return null;
     const official = formItemLabel(item) || labelOf(el) || nearbyLabel(el) || tableHeaderOf(el) || nameOf(el) || "";
     const label = distinctLabel(el, official, 0, 1);
     if (!label) return null;
