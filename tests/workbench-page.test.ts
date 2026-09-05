@@ -15,6 +15,29 @@ test("page session ids are accepted only in the workbench format", () => {
   assert.equal(isPageSessionId("page_***"), false);
 });
 
+test("reset forgets the last recording so the next chat is independent", async () => {
+  const page = new WorkbenchPage("page_clearsession", {
+    rootDir: ".",
+    dataDir: ".business-skill-studio",
+    recordingsDir: ".business-skill-studio/recordings",
+    catalogDir: ".business-skill-studio/catalog",
+    profileDir: ".business-skill-studio/browser-profile",
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  }, "http://127.0.0.1:4310", value => value, () => {});
+  page.lastRecordingSessionId = "rec_previous_trip";
+  const events: any[] = [];
+  page.broadcast = payload => { events.push(payload); };
+
+  await page.reset();
+
+  assert.equal(page.lastRecordingSessionId, undefined);
+  assert.equal(page.transcriptOpen, false);
+  assert.equal(page.pi.status().ready, false);
+  assert.equal(events.some(event => event.type === "session_reset"), true);
+});
+
 test("Pi RPC exposes processId so workbench abort/dispose does not throw", () => {
   const bridge = new PiRpcBridge(".", "http://127.0.0.1:4310", "token");
   assert.equal(typeof bridge.processId, "function");

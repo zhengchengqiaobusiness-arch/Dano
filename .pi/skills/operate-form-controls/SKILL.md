@@ -27,7 +27,7 @@ You decide how to use the current `snapshot`. The browser tool only clicks and t
 - Do not click the page title, mask, pagination, or sidebar to dismiss a popup.
 - Do not press Escape.
 - Login page: do not type. Wait for manual takeover.
-- `exercise-form` is an optional mechanical helper, not the judgment. If it fails, finish the leftover `todoFields` with primitives.
+- When the user requires every field except upload, the first `exercise-form` is the authoritative whole-form action. If it fails, finish leftover `todoFields` with primitives.
 - Three consecutive real failures → stop and wait for manual takeover. Do not loop.
 
 ## Success

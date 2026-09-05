@@ -837,7 +837,7 @@ function connectEvents() {
     if (event.type === "manual_takeover_completed" || event.type === "manual_takeover_cancelled") showManualTakeover();
     if (event.type === "skills_changed" && state.view === "skills") void loadSkills();
     if (event.type === "studio_shutdown") showToast("Studio 服务已停止，页面保留");
-    if (event.type === "agent_error") showToast(event.message || "Pi 连接异常");
+    if (event.type === "agent_error" && !state.clearingSession) showToast(event.message || "Pi 连接异常");
   };
   stream.onerror = () => {
     updateAgentStatus(false, false);

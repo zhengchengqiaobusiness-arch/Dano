@@ -17,6 +17,7 @@ export class PiRpcBridge {
   private readonly listeners = new Set<EventListener>();
   private readonly pendingUiRequests = new Set<string>();
   private suppressEvents = false;
+  private stopping = false;
 
   constructor(
     private readonly cwd: string,
@@ -42,6 +43,8 @@ export class PiRpcBridge {
   }
 
   async start() {
+    this.stopping = false;
+    this.suppressEvents = false;
     if (this.child && this.child.exitCode === null) return;
     const rpcEntry = path.join(
       this.cwd,
@@ -81,6 +84,7 @@ export class PiRpcBridge {
       "snapshot.formFields/todoFields are the visible field checklist, including empty assignee wells in a process rail. The node title is not a filled value. When the user requires every field filled except upload, the first exercise-form call is authoritative and must fill all currently visible eligible fields in one pass; never decompose the initial form into one-field calls. A second or third call may repair only returned todoFields, newly revealed rows/fields, tree choices, format constraints, or a returned failure. Then call submit-form. submit-form follows a nested confirmation dialog, checks both HTTP and the response business envelope, and reselects an explicitly named missing chooser before automatically retrying. The first or second failed automatic operation is not a stop: re-read the current scope and repair the returned evidence; after a failed direct selector, use a newly grounded selector instead of blindly replaying the unchanged selector. Only actual failures consume the repair budget, and a successful automatic operation clears the consecutive-failure streak. On the third consecutive failed automatic operation, the current tool request pauses, Studio switches to manual mode, and a takeover card tells the person what to do. A snapshot never requests takeover by itself. Do not issue another tool call or stop/analyze while takeover is pending; wait until the person clicks 我已完成，继续自动执行. The tool then returns resumedAfterManualTakeover with a fresh snapshot; continue from it. The budget is per page/form scope. Never loop snapshot-click-snapshot or make a fourth consecutive failed repair. record_stop itself refuses to close the browser while a required operation lacks a business-success response. Locate must be unique for that field; never the first input in the dialog. Choosers click that field's shell once and pick a visible option, tree node, or dialog row, not a typed sample. Do not export a planned write without a successful write response.",
         "If snapshot.recentUserActions or filled controls already show the user's manual operation, keep those values. Still fill remaining empty fields when complete coverage was requested. Manual clicks or typing in Pi automatic mode must leave the same field labels, final values, options and write request as exercise-form; a bare click without a form inventory cannot export a Skill. When the user says 手动录制完毕, record_stop and analyze this session; do not start a new recording just because Chinese labels do not match request keys. If review cannot uniquely bind a brought-out write field but this session already has the write request, or the catalog already has a same-resource lookup, do not record_start; analyze that write session. Do not edit capabilities.json to freeze a recorded sample. A picker-only rerecord will drop 新建 from the catalog.",
         "The user can send follow-up messages while you are working. Read the new instruction and continue; do not ignore already recorded manual input.",
+        "A workbench 清空历史 starts an independent conversation. Do not mention previous URLs, recordings, missing second links, or earlier analyze/validate results unless they appear in the current user message. If the current message has one URL, do not ask for a second URL from an earlier chat.",
         "Prefer snapshot selectors that start with placeholder=, label=, role=, or text=. Never use generated #el-id-* selectors or long CSS paths such as div.el-select__wrapper > div.el-select__selection. Table cells use the visible column header as label=.",
         "For dropdowns and comboboxes, use action=choose with selector plus the visible option text in one call. Do not click the inner input and wait for a 30s timeout.",
         "For dates, fill or choose the field with YYYY-MM-DD. Never click text=2 or a calendar CSS cell on the whole page, and never click the dim overlay or blank area outside a dialog.",
@@ -110,13 +114,16 @@ export class PiRpcBridge {
     this.child.on("exit", code => {
       this.ready = false;
       this.streaming = false;
+      const expected = this.stopping;
+      this.stopping = false;
       const error = new Error(`Pi process exited with code ${code ?? "unknown"}`);
       for (const request of this.pending.values()) {
         clearTimeout(request.timer);
         request.reject(error);
       }
       this.pending.clear();
-      this.emit({ type: "agent_process_exit", code });
+      if (expected) return;
+      this.emit({ type: "agent_process_exit", code, message: `Pi process stopped with code ${code ?? "unknown"}` });
     });
 
     await this.request({ type: "get_state" }, 20_000);
@@ -180,9 +187,22 @@ export class PiRpcBridge {
 
   stop() {
     this.ready = false;
+    this.streaming = false;
+    this.suppressEvents = true;
+    this.stopping = true;
+    this.cancelPendingUi();
+    const error = new Error("Pi process stopped");
+    for (const request of this.pending.values()) {
+      clearTimeout(request.timer);
+      request.reject(error);
+    }
+    this.pending.clear();
     const child = this.child;
     this.child = undefined;
-    if (!child?.pid) return;
+    if (!child?.pid) {
+      this.stopping = false;
+      return;
+    }
     if (process.platform === "win32") {
       spawn("taskkill", ["/F", "/T", "/PID", String(child.pid)], { stdio: "ignore", windowsHide: true });
       return;

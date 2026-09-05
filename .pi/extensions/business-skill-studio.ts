@@ -22,6 +22,15 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
 
   const studio = new StudioService();
   let lastRecordingSessionId: string | undefined;
+
+  const requireConversationSession = (params: { sessionId?: string } = {}) => {
+    const sessionId = (typeof params.sessionId === "string" ? params.sessionId.trim() : "") || lastRecordingSessionId;
+    if (!sessionId) {
+      throw new Error("当前对话还没有录制证据。请先接入业务系统并完成录制；不要使用上一轮会话的录制、链接或分析结果。");
+    }
+    return sessionId;
+  };
+
   const browserServiceUrl = process.env.BSS_BROWSER_SERVICE_URL?.replace(/\/+$/, "");
   const browserServiceToken = process.env.BSS_BROWSER_SERVICE_TOKEN;
 
@@ -54,6 +63,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
     : studio.recorder.control(command);
 
   pi.on("session_shutdown", async () => {
+    lastRecordingSessionId = undefined;
     if (!browserServiceUrl && studio.recorder.isActive()) await studio.stopRecording().catch(() => {});
   });
 
@@ -159,7 +169,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       noLlm: { type: "boolean" }
     }),
     async execute(_id, params: any) {
-      const caps = await studio.analyze(params.sessionId || lastRecordingSessionId, !params.noLlm);
+      const caps = await studio.analyze(requireConversationSession(params), !params.noLlm);
       const summary = summarizeCatalog(caps);
       const primaryTitles = summary.primary.map(item => item.title).join("、") || "无";
       return {
@@ -180,7 +190,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       sessionId: { type: "string" }
     }),
     async execute(_id, params: any) {
-      const caps = await studio.analyze(params.sessionId || lastRecordingSessionId, true);
+      const caps = await studio.analyze(requireConversationSession(params), true);
       return {
         content: [{ type: "text", text: `已按 infer-field-contract 处理 ${caps.length} 个能力的字段合同。` }],
         details: caps.map(item => ({ id: item.id, role: item.role, fields: item.inputForm.map(field => ({ path: field.path, source: field.source, rule: field.defaultRule })) }))
@@ -196,7 +206,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       sessionId: { type: "string" }
     }),
     async execute(_id, params: any) {
-      const caps = await studio.analyze(params.sessionId || lastRecordingSessionId, true);
+      const caps = await studio.analyze(requireConversationSession(params), true);
       const summary = summarizeCatalog(caps);
       return {
         content: [{ type: "text", text: `主能力 ${summary.primary.length}，lookup ${summary.lookups.length}，噪声 ${summary.noise.length}。` }],
@@ -213,7 +223,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       sessionId: { type: "string" }
     }),
     async execute(_id, params: any) {
-      const { capabilities, review } = await studio.review(params.sessionId || lastRecordingSessionId);
+      const { capabilities, review } = await studio.review(requireConversationSession(params));
       const gate = review.next === "re-record"
         ? "允许补录：仅补缺失的主操作或其成功响应。"
         : review.status === "passed"
@@ -333,7 +343,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       sessionId: { type: "string" }
     }, ["name"]),
     async execute(_id, params: any) {
-      const result = await studio.exportManaged(params.name, true, params.sessionId || lastRecordingSessionId);
+      const result = await studio.exportManaged(params.name, true, requireConversationSession(params));
       return {
         content: [{
           type: "text",

@@ -411,7 +411,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
       if (page.mode !== "automatic") throw new Error("当前是手动录制模式；请在前端切换到 Pi 自动点击后再让 Pi 启动浏览器");
       const url = parseBrowserUrl(body.url);
       const gate = await studio.evaluateRerecord(url);
-      if (!gate.allowed) {
+      if (!gate.allowed && page.lastRecordingSessionId) {
         sendJson(response, 200, { blocked: true, started: false, message: gate.message });
         return;
       }

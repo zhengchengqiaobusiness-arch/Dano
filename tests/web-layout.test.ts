@@ -87,11 +87,16 @@ test("recording workbench can clear conversation history in one click", async ()
   assert.match(server, /pathname === "\/api\/session\/clear"/);
   assert.match(resetWorkbench, /this\.recorder\.disposeAndKill\("clear"\)/);
   assert.match(resetWorkbench, /abortWork\("clear"\)/);
-  assert.match(resetWorkbench, /beginFreshConversation/);
+  assert.match(resetWorkbench, /lastRecordingSessionId = undefined/);
+  assert.match(resetWorkbench, /this\.pi\.stop\(\)/);
+  assert.doesNotMatch(resetWorkbench, /beginFreshConversation|ensureStarted/);
   assert.match(resetWorkbench, /this\.transcript\.clear\(\)/);
+  assert.match(bridge, /this\.stopping = true/);
   assert.match(bridge, /async beginFreshConversation\(\)[\s\S]*type: "new_session"/);
   assert.match(bridge, /this\.suppressEvents = true/);
   assert.match(bridge, /async newSession\(\)[\s\S]*type: "new_session"/);
+  assert.match(bridge, /清空历史 starts an independent conversation/);
+  assert.match(app, /agent_error["'] && !state\.clearingSession/);
 });
 
 test("starting a recording keeps the workbench conversation", async () => {
@@ -114,6 +119,7 @@ test("starting a recording keeps the workbench conversation", async () => {
   const internalStart = server.match(/pathname === "\/internal\/browser\/start"[\s\S]*?return;\s*\}/)?.[0] || "";
   assert.doesNotMatch(openRoute, /evaluateRerecord/);
   assert.match(internalStart, /evaluateRerecord/);
+  assert.match(internalStart, /!gate\.allowed && page\.lastRecordingSessionId/);
   assert.match(internalStart, /blocked: true/);
 });
 
@@ -247,6 +253,9 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.match(bridge, /Do not call business_skill_record_start after validate unless/);
   assert.match(bridge, /stop and report; do not analyze, validate, or record again/);
   assert.match(extension, /session\?\.blocked/);
+  assert.match(extension, /requireConversationSession/);
+  assert.match(extension, /当前对话还没有录制证据/);
+  assert.match(extension, /lastRecordingSessionId = undefined/);
   assert.match(extension, /不要再 business_skill_analyze \/ validate \/ record_start/);
   assert.match(await readFile(path.join(root, ".pi", "skills", "business-skill-studio", "SKILL.md"), "utf8"), /do not start another analyze\/validate\/recording loop/);
   assert.match(extension, /本次识别主能力|本次录制主能力|已导出主能力/);

@@ -284,6 +284,9 @@ export class WorkbenchPage {
   async reset() {
     this.epoch += 1;
     this.transcriptOpen = false;
+    this.lastRecordingSessionId = undefined;
+    this.coverageContinuations = 0;
+    this.coverageContinuationPending = false;
     await this.abortWork("clear");
     if (this.recorder.isActive() || this.recorder.browserProcessId()) {
       const pid = this.recorder.browserProcessId();
@@ -292,13 +295,13 @@ export class WorkbenchPage {
       this.onLog("BROWSER", "Active recording was discarded so the next conversation starts clean.");
       await this.rememberLogin();
     }
-    if (this.pi.status().ready) {
-      await this.pi.beginFreshConversation().catch(error => {
-        this.onLog("WARN", `Failed to start a new Pi session: ${error instanceof Error ? error.message : String(error)}`);
-      });
+    const pid = this.pi.processId();
+    if (pid || this.pi.status().ready || this.pi.status().running) {
+      this.pi.stop();
+      if (pid) this.onLog("PROCESS", formatProcessLog("CLOSE", "pi-rpc", { pid, page: this.id, reason: "clear" }));
     }
     this.transcript.clear();
-    this.broadcast({ type: "agent_status", ready: this.pi.status().ready, streaming: false });
+    this.broadcast({ type: "agent_status", ready: false, streaming: false });
     this.broadcast({ type: "browser_changed" });
     this.broadcast({ type: "session_reset", epoch: this.epoch, pageSession: this.id });
   }
