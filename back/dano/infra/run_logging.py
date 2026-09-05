@@ -629,7 +629,10 @@ def _field_paths(value: Any, prefix: str = "") -> list[str]:
 
 def _reason_code(message: str) -> str:
     text = message.casefold()
-    if "canonical published capability contract" in text:
+    if (
+        "canonical published capability contract" in text
+        or "没有可写出的能力执行合同" in message
+    ):
         return "CANONICAL_CAPABILITY_CONTRACT_MISSING"
     if "invalid published flowspec" in text:
         return "INVALID_PUBLISHED_FLOWSPEC"

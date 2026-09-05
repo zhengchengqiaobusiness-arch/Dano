@@ -816,6 +816,45 @@ def _capability_step_summary(step: FlowStep) -> dict[str, Any]:
     }
 
 
+_EXECUTABLE_REF_USAGES = frozenset({"execute", "preflight"})
+
+
+def _capability_ref_step_ids(
+    cap: FlowCapability,
+    *,
+    usages: frozenset[str] | None = None,
+) -> list[str]:
+    ids: list[str] = []
+    for ref in _ordered_capability_request_refs(getattr(cap, "request_refs", None) or []):
+        step_id = str(getattr(ref, "step_id", "") or "").strip()
+        usage = str(getattr(ref, "usage", "") or "execute")
+        if not step_id:
+            continue
+        if usages is not None and usage not in usages:
+            continue
+        if step_id not in ids:
+            ids.append(step_id)
+    return ids
+
+
+def _capability_declared_step_ids(cap: FlowCapability) -> list[str]:
+    """Executable membership: node plan, then recording request_refs, then step_ids."""
+    ids = _capability_call_step_ids_from_nodes(getattr(cap, "nodes", None) or [])
+    seen = set(ids)
+    for step_id in _capability_ref_step_ids(cap, usages=_EXECUTABLE_REF_USAGES):
+        if step_id not in seen:
+            ids.append(step_id)
+            seen.add(step_id)
+    if ids:
+        return ids
+    for step_id in getattr(cap, "step_ids", None) or []:
+        step_id = str(step_id or "").strip()
+        if step_id and step_id not in seen:
+            ids.append(step_id)
+            seen.add(step_id)
+    return ids
+
+
 def _capability_node_step_ids(cap: FlowCapability) -> list[str]:
     return _capability_call_step_ids_from_nodes(cap.nodes or [])
 

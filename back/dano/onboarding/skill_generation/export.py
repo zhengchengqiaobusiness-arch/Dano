@@ -407,6 +407,19 @@ def build_export_skill_spec(
     )
 
 
+def _has_execution_contracts(api_request: dict[str, Any]) -> bool:
+    capabilities = [
+        item for item in (api_request.get("capabilities") or [])
+        if isinstance(item, dict)
+    ]
+    return bool(capabilities) and all(
+        isinstance(item.get("execution_contract"), dict)
+        and isinstance(item["execution_contract"].get("steps"), list)
+        and item["execution_contract"]["steps"]
+        for item in capabilities
+    )
+
+
 def _minimal_export_skill(
     view: FlowSpec,
     *,
@@ -415,42 +428,25 @@ def _minimal_export_skill(
     title: str,
     plan: SkillPlan,
 ) -> Any:
+    """Compile a SkillSpec from this recording's export view. Do not require a prior publish."""
+    from dano.execution.page.flow_spec import flow_spec_release_payload, flow_spec_to_api_request
+    from dano.export.skill_package.renderer import restore_compiled_capability_schemas
     from dano.orchestrator.types import SkillSpec
     from dano.shared.enums import RiskLevel, Subsystem
 
+    api_request, errors = flow_spec_to_api_request(view, _embed_capability_steps=True)
+    if errors or not api_request or not _has_execution_contracts(api_request):
+        raise SkillExportError(
+            409,
+            "导出视图无法编译为 Skill 包：" + "；".join(errors or ["缺少能力执行合同"]),
+        )
+    api_request = restore_compiled_capability_schemas(api_request, view)
     plan_payload = plan.model_dump(mode="json")
-    api_request = {
-        "capabilities": [
-            {
-                "capability_id": cap.capability_id,
-                "name": cap.name,
-                "title": cap.title or cap.name,
-                "kind": cap.kind,
-                "step_ids": list(cap.step_ids or []),
-                "input_schema": dict(cap.input_schema or {}),
-                "output_schema": dict(cap.output_schema or {}),
-                "requires_human_confirm": cap.requires_human_confirm,
-            }
-            for cap in view.capabilities
-        ],
-        "capability_relations": [
-            relation.model_dump(mode="json")
-            for relation in (view.capability_relations or [])
-        ],
-        "steps": [
-            {
-                "step_id": step.step_id,
-                "method": step.method,
-                "path": step.path,
-                "url": step.url or step.path,
-            }
-            for step in view.steps
-        ],
-        "_skill_plan": plan_payload,
-        "_release_snapshot": {
-            "skill_plan": plan_payload,
-            "flow_spec": view.model_dump(mode="json"),
-        },
+    api_request["_skill_plan"] = plan_payload
+    api_request["_release_snapshot"] = {
+        **dict(api_request.get("_release_snapshot") or {}),
+        "skill_plan": plan_payload,
+        "flow_spec": flow_spec_release_payload(view),
     }
     sub_str, _, action = skill_id.partition(".")
     return SkillSpec(
@@ -464,7 +460,7 @@ def _minimal_export_skill(
         api_request=api_request,
         call_metadata={"skill_plan": plan_payload},
         capabilities=list(api_request["capabilities"]),
-        capability_relations=list(api_request["capability_relations"]),
+        capability_relations=list(api_request.get("capability_relations") or []),
     )
 
 
@@ -642,7 +638,7 @@ async def export_recording_skill(
         except SkillExportError as exc:
             _log_export(
                 "skill.export.build_fallback",
-                summary="正式编译失败，改用最小导出包",
+                summary="发布准备态编译失败，改从本场导出视图重新编译",
                 status="warning",
                 level="warning",
                 result_id=str(result_id),

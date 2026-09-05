@@ -22,6 +22,7 @@ from dano.execution.page.request_capture import (
 )
 from dano.execution.page.flow_materialization.field_contracts.common import (
     _looks_audit_system_leaf,
+    _param_control_kinds,
     _param_field_manually_edited,
     _param_control_is_readonly,
     _param_group_prefix,
@@ -212,11 +213,17 @@ def _restore_selected_option_projections(spec: FlowSpec) -> None:
                     for item in target_controls
                 }
                 distinct_local_control = bool(
-                    target_ids
-                    and not target_ids.issubset(selector_ids)
-                    and (
-                        not selector_groups
-                        or bool(target_groups.intersection(selector_groups))
+                    (
+                        _param_has_editable_control_evidence(target)
+                        and not (_param_control_kinds(target) & {"select", "combobox"})
+                    )
+                    or (
+                        target_ids
+                        and not target_ids.issubset(selector_ids)
+                        and (
+                            not selector_groups
+                            or bool(target_groups.intersection(selector_groups))
+                        )
                     )
                 )
                 if distinct_local_control:

@@ -79,7 +79,10 @@ def _scrub(node: Any, key: str = "") -> Any:
 
 def _export_reason_code(exc: BaseException) -> str:
     text = str(exc).casefold()
-    if "canonical published capability contract" in text:
+    if (
+        "canonical published capability contract" in text
+        or "没有可写出的能力执行合同" in str(exc)
+    ):
         return "CANONICAL_CAPABILITY_CONTRACT_MISSING"
     if "invalid published flowspec" in text:
         return "INVALID_PUBLISHED_FLOWSPEC"
@@ -172,21 +175,81 @@ def _filter_plans_for_export(plans: list[dict], skill) -> list[dict]:  # noqa: A
     return kept
 
 
+def _has_embedded_execution_steps(capabilities: list[dict]) -> bool:
+    return bool(capabilities) and all(
+        isinstance(item, dict)
+        and isinstance(item.get("execution_contract"), dict)
+        and isinstance(item["execution_contract"].get("steps"), list)
+        and item["execution_contract"]["steps"]
+        for item in capabilities
+    )
+
+
+def _synthesize_execution_contracts(api_request: dict) -> dict:
+    """Build execution_contract.steps from this recording's compiled steps and membership."""
+    published = dict(api_request)
+    steps = _steps(published)
+    by_id = {
+        str(step.get("step_id") or ""): step
+        for step in steps
+        if str(step.get("step_id") or "")
+    }
+    capabilities: list[dict] = []
+    for cap in published.get("capabilities") or []:
+        if not isinstance(cap, dict):
+            continue
+        item = dict(cap)
+        execution = dict(item.get("execution_contract") or {})
+        owned = [
+            dict(step) for step in (execution.get("steps") or [])
+            if isinstance(step, dict)
+        ]
+        if not owned:
+            step_ids = _capability_call_step_ids(item, by_id)
+            owned = [dict(by_id[step_id]) for step_id in step_ids if step_id in by_id]
+        if owned:
+            execution["steps"] = owned
+            item["execution_contract"] = execution
+        capabilities.append(item)
+    published["capabilities"] = capabilities
+    return published
+
+
 def _compiled_request(skill, spec) -> dict:  # noqa: ANN001
-    del spec
     published = dict(skill.api_request or {})
     capabilities = [
         item for item in (published.get("capabilities") or [])
         if isinstance(item, dict)
     ]
-    if not capabilities or any(
-        not isinstance(item.get("execution_contract"), dict)
-        or not isinstance(item["execution_contract"].get("steps"), list)
-        or not item["execution_contract"]["steps"]
-        for item in capabilities
+    if _has_embedded_execution_steps(capabilities):
+        return published
+    flow = spec if spec is not None else _flow_spec(skill)
+    if flow is not None:
+        from dano.execution.page.flow_spec import flow_spec_to_api_request
+
+        compiled, _errors = flow_spec_to_api_request(flow, _embed_capability_steps=True)
+        compiled_caps = [
+            item for item in (compiled or {}).get("capabilities") or []
+            if isinstance(item, dict)
+        ]
+        if compiled and _has_embedded_execution_steps(compiled_caps):
+            return {
+                **compiled,
+                "_skill_plan": published.get("_skill_plan") or compiled.get("_skill_plan"),
+                "_release_snapshot": (
+                    published.get("_release_snapshot") or compiled.get("_release_snapshot")
+                ),
+            }
+    synthesized = _synthesize_execution_contracts(published)
+    if _has_embedded_execution_steps(
+        [item for item in (synthesized.get("capabilities") or []) if isinstance(item, dict)]
     ):
-        raise ValueError(f"{skill.skill_id} has no canonical published capability contract")
-    return published
+        return synthesized
+    raise ValueError(
+        f"{skill.skill_id} 没有可写出的能力执行合同。"
+        "必须能从本场录制 FlowSpec 或能力 request_refs 编译出 execution_contract.steps，"
+        "而不是依赖已经发布过的目录资产"
+    )
 
 
 def _steps(api_request: dict) -> list[dict]:

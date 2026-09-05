@@ -543,6 +543,22 @@ def _default_capability_nodes(
     return _capability_call_nodes(steps)
 
 
+def _materialize_capability_call_nodes_from_membership(
+    spec: FlowSpec, cap: FlowCapability,
+) -> None:
+    """Turn declared request_refs/step_ids into call nodes when the node plan omits them.
+
+    Recording results (and any producer that only writes membership) must still
+    compile. Empty nodes are not an instruction to delete the capability.
+    """
+    from dano.execution.page.capability_refs import _capability_declared_step_ids
+
+    known = {step.step_id for step in spec.steps}
+    for step_id in _capability_declared_step_ids(cap):
+        if step_id in known:
+            _add_step_id_to_capability(spec, cap, step_id)
+
+
 def _add_step_id_to_capability(spec: FlowSpec, cap: FlowCapability, step_id: str) -> None:
     """Insert one call node in stable captured-step order."""
     if not step_id or step_id in _capability_call_step_ids_from_nodes(cap.nodes or []):
@@ -689,9 +705,7 @@ def _normalize_capability_references(spec: FlowSpec) -> FlowSpec:
     for cap in spec.capabilities or []:
         cap.nodes = clean_nodes(cap.nodes or [], [])
         legacy_refs = list(cap.request_refs or [])
-        for ref in legacy_refs:
-            if ref.usage == "preflight" and valid_step_id(ref.step_id):
-                _add_step_id_to_capability(spec, cap, ref.step_id)
+        _materialize_capability_call_nodes_from_membership(spec, cap)
         _sync_capability_order(spec, cap)
         if not cap.locked:
             membership_by_step = {ref.step_id: ref for ref in cap.request_refs if ref.step_id}

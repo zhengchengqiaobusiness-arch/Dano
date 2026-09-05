@@ -543,7 +543,16 @@ def _prune_auth_materializations(spec: FlowSpec) -> None:
 
 
 def _sync_capability_order(spec: FlowSpec, cap: FlowCapability) -> None:
-    """Refresh derived membership views from the executable node plan."""
+    """Refresh derived membership views from the executable node plan.
+
+    Recording results often declare membership only via request_refs/step_ids.
+    If there is no node plan yet, keep that declaration. Rebuilding from empty
+    nodes would delete the only executable contract.
+    """
+    from dano.execution.page.capability_refs import _capability_call_step_ids_from_nodes
+
+    if not _capability_call_step_ids_from_nodes(cap.nodes or []):
+        return
     by_id = {step.step_id: step for step in spec.steps}
     legacy_refs = list(cap.request_refs or [])
     # Option-source calls belong to the capability's supporting evidence and

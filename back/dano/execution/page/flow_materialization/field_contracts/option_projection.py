@@ -655,6 +655,37 @@ def _group_option_source_request_ids(members: list[ParamField]) -> tuple[bool, s
     return anchored, request_ids
 
 
+def _selected_option_projection_source(
+    sibling: ParamField,
+    *,
+    selector_path: str,
+    selector_param: str,
+    source_url: str,
+    source_step_id: str,
+    source_request_id: str,
+    response_path: str,
+) -> dict[str, Any]:
+    """Rebuild a selected-row projection without dropping an established caller override."""
+    previous = dict(sibling.source or {})
+    source = {
+        "kind": "selected_option_field",
+        "selector_path": selector_path,
+        "selector_param": selector_param,
+        "source_url": source_url,
+        "source_step_id": source_step_id,
+        "source_request_id": source_request_id,
+        "response_path": response_path,
+        "target_path": sibling.path,
+    }
+    if previous.get("kind") == "selected_option_field" and (
+        previous.get("allow_caller_override") or previous.get("caller_override")
+    ):
+        source["allow_caller_override"] = True
+    if previous.get("kind") == "selected_option_field" and previous.get("required_state"):
+        source["required_state"] = previous["required_state"]
+    return source
+
+
 def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
     """Project write-body siblings from the unique captured option row they share."""
     modern_contract = int(
@@ -876,16 +907,15 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
                             primary_selector.exposed_to_user = True
                             primary_selector.editable = True
                         sibling.source_kind = "selected_option_field"
-                        sibling.source = {
-                            "kind": "selected_option_field",
-                            "selector_path": primary_selector.path,
-                            "selector_param": primary_selector.key,
-                            "source_url": source_url,
-                            "source_step_id": source_step.step_id if source_step is not None else "",
-                            "source_request_id": request_id,
-                            "response_path": response_path,
-                            "target_path": sibling.path,
-                        }
+                        sibling.source = _selected_option_projection_source(
+                            sibling,
+                            selector_path=primary_selector.path,
+                            selector_param=primary_selector.key,
+                            source_url=source_url,
+                            source_step_id=source_step.step_id if source_step is not None else "",
+                            source_request_id=request_id,
+                            response_path=response_path,
+                        )
                         sibling.required = False
                         _apply_selected_option_field_caller_ownership(sibling)
                         sibling.reason = (
@@ -950,16 +980,15 @@ def _infer_selected_option_row_fields(spec: FlowSpec) -> None:
                         )
                 ), None)
                 sibling.source_kind = "selected_option_field"
-                sibling.source = {
-                    "kind": "selected_option_field",
-                    "selector_path": selector.path if selector is not None else "",
-                    "selector_param": selector.key if selector is not None else "",
-                    "source_url": source_url,
-                    "source_step_id": source_step.step_id if source_step is not None else "",
-                    "source_request_id": request_id,
-                    "response_path": response_path,
-                    "target_path": sibling.path,
-                }
+                sibling.source = _selected_option_projection_source(
+                    sibling,
+                    selector_path=selector.path if selector is not None else "",
+                    selector_param=selector.key if selector is not None else "",
+                    source_url=source_url,
+                    source_step_id=source_step.step_id if source_step is not None else "",
+                    source_request_id=request_id,
+                    response_path=response_path,
+                )
                 projected_value = _flow_path_lookup(row, response_path)
                 if isinstance(projected_value, str) or isinstance(sibling.value, str):
                     sibling.type = "string"

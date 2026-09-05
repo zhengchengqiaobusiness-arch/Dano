@@ -605,7 +605,11 @@ def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
     _sync_link_sources(current.steps, current.links)
     by_step_id = {step.step_id: step for step in current.steps}
     public_anchor_ids = set(_public_capability_anchor_step_ids(current))
+    from dano.execution.page.capability_nodes import (
+        _materialize_capability_call_nodes_from_membership,
+    )
     for capability in current.capabilities:
+        _materialize_capability_call_nodes_from_membership(current, capability)
         changed = True
         while changed:
             changed = False
