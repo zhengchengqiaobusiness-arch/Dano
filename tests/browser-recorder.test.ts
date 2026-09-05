@@ -3703,6 +3703,72 @@ test("exercise-form reads a searchable Reka combobox value from the sibling slot
   }
 });
 
+test("exercise-form reads an Ant searchable select from selection-item, not the search class on the host", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-ant-search-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>领用申请管理</title></head><body>
+      <form>
+        <div class="ant-form-item">
+          <label class="ant-form-item-label" for="status-input">单据状态</label>
+          <div class="ant-select ant-select-show-search">
+            <div class="ant-select-selector">
+              <span class="ant-select-selection-item"></span>
+              <span class="ant-select-selection-search">
+                <input id="status-input" class="ant-select-selection-search-input" role="combobox" type="search" name="processStatus" value="">
+              </span>
+            </div>
+          </div>
+        </div>
+        <button type="submit">查询</button>
+      </form>
+      <div class="ant-select-dropdown" id="status-drop" hidden style="position:fixed;left:40px;top:80px;background:#fff;border:1px solid #ccc;z-index:50;padding:8px">
+        <div class="rc-virtual-list-holder-inner">
+          <div class="ant-select-item ant-select-item-option" role="option">未提交</div>
+          <div class="ant-select-item ant-select-item-option" role="option">审批中</div>
+        </div>
+      </div>
+      <script>
+        const input = document.getElementById("status-input");
+        const drop = document.getElementById("status-drop");
+        const item = document.querySelector(".ant-select-selection-item");
+        document.querySelector(".ant-select").addEventListener("click", () => { drop.hidden = false; });
+        drop.addEventListener("mousedown", event => {
+          const opt = event.target.closest(".ant-select-item-option");
+          if (!opt) return;
+          item.textContent = opt.textContent;
+          input.value = "";
+          drop.hidden = true;
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "ant-search");
+    const filled: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(filled.ok, true, JSON.stringify({ todo: filled.todoFields, failed: filled.failed, fields: filled.formFields }));
+    const status = (filled.formFields || []).find((field: any) => field.label === "单据状态");
+    assert.match(String(status?.value || ""), /未提交|审批中/);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 function parseFieldInstant(value?: string) {
   const text = String(value || "");
   const match = text.match(/(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}(?::\d{2})?))?/);

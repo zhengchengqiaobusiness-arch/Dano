@@ -7,7 +7,7 @@ export const FORM_ITEMS = ".el-form-item, .ant-form-item, .arco-form-item, .n-fo
 export const FORM_LABELS = "label, .el-form-item__label, .ant-form-item-label, .arco-form-item-label, .n-form-item-label, .van-field__label, [data-slot='form-label']";
 export const DIALOGS = "[role='dialog']:visible, [role='alertdialog']:visible, .el-dialog:visible, .el-drawer:visible, .ant-modal:visible, .ant-drawer-content:visible, .arco-modal:visible, .arco-drawer:visible";
 export const PORTAL_MENUS = "[data-reka-popper-content-wrapper], [data-radix-popper-content-wrapper], [data-state='open'][data-slot='popover-content'], [data-state='open'][data-slot='select-content'], [data-state='open'][data-slot='combobox-content'], [data-state='open'][data-slot='dropdown-menu-content']";
-export const DROPDOWNS = ".el-select-dropdown:visible, .el-select__popper:visible, .el-popper.el-select__popper:visible, .el-cascader__dropdown:visible, .el-autocomplete-suggestion:visible, .ant-select-dropdown:visible, .arco-select-dropdown:visible, .arco-select-popup:visible, .arco-tree-select-popup:visible, .arco-cascader-popup:visible, .arco-trigger-popup:visible, [class*='select-popup']:visible, [class*='tree-select-popup']:visible, [class*='cascader-popup']:visible, [class*='trigger-popup']:visible, [role='listbox']:visible, [data-reka-popper-content-wrapper]:visible, [data-radix-popper-content-wrapper]:visible, [data-state='open'][data-slot='popover-content']:visible, [data-state='open'][data-slot='select-content']:visible, [data-state='open'][data-slot='combobox-content']:visible, [data-state='open'][data-slot='dropdown-menu-content']:visible";
+export const DROPDOWNS = ".el-select-dropdown:visible, .el-select__popper:visible, .el-popper.el-select__popper:visible, .el-cascader__dropdown:visible, .el-autocomplete-suggestion:visible, .ant-select-dropdown:visible, .ant-tree-select-dropdown:visible, .arco-select-dropdown:visible, .arco-select-popup:visible, .arco-tree-select-popup:visible, .arco-cascader-popup:visible, .arco-trigger-popup:visible, [class*='select-popup']:visible, [class*='tree-select-popup']:visible, [class*='cascader-popup']:visible, [class*='trigger-popup']:visible, [role='listbox']:visible, [data-reka-popper-content-wrapper]:visible, [data-radix-popper-content-wrapper]:visible, [data-state='open'][data-slot='popover-content']:visible, [data-state='open'][data-slot='select-content']:visible, [data-state='open'][data-slot='combobox-content']:visible, [data-state='open'][data-slot='dropdown-menu-content']:visible";
 export const DATE_PANELS = ".el-picker-panel:visible, .el-popper.el-date-picker:visible, .el-picker__popper:visible, .el-date-range-picker:visible, .el-time-panel:visible, .ant-picker-dropdown:visible, .arco-picker-container:visible, [class*='picker-dropdown']:visible, [class*='picker-panel']:visible";
 const ACTIVE_DATE_OVERLAYS = ".ant-picker-dropdown:visible, .el-picker__popper:visible, .el-popper.el-date-picker:visible, .el-date-range-picker:visible, .el-date-picker:visible, .arco-picker-container:visible, [class*='picker-dropdown']:visible";
 const PICKER_DIALOG = /picker-panel|picker-dropdown|picker__popper|el-date-picker|el-date-range-picker|el-time-panel|el-time-picker|ant-picker-dropdown|arco-picker-container|datepicker/i;
@@ -554,10 +554,24 @@ export class PageActions {
     const page = this.page();
     const dropdowns = page.locator(DROPDOWNS);
     const count = await dropdowns.count();
-    for (let index = count - 1; index >= 0; index -= 1) {
+    let best: Locator | undefined;
+    let bestScore = -1;
+    for (let index = 0; index < count; index += 1) {
       const dropdown = dropdowns.nth(index);
-      if (await dropdown.locator(OPTION_ITEMS).filter({ visible: true }).count()) return dropdown;
+      const options = await dropdown.locator(OPTION_ITEMS).filter({ visible: true }).count();
+      if (!options) continue;
+      const score = await dropdown.evaluate(el => {
+        const style = getComputedStyle(el);
+        const z = Number(style.zIndex) || 0;
+        const pos = style.position === "fixed" || style.position === "absolute" ? 1000 : 0;
+        return pos + z + Math.min(el.getBoundingClientRect().height, 400);
+      }).catch(() => 0);
+      if (score >= bestScore) {
+        bestScore = score;
+        best = dropdown;
+      }
     }
+    if (best) return best;
     const loose = page.locator("ul:visible, [role='listbox']:visible").filter({
       has: page.locator(OPTION_ITEMS)
     }).last();

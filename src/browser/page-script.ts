@@ -253,7 +253,7 @@ export const PAGE_HELPERS = String.raw`
 
   const hostDisplay = (host) => {
     if (!(host instanceof Element)) return "";
-    const skip = (node) => node.closest("[class*='input-wrapper'], [class*='search'], [class*='suffix'], [class*='caret'], [class*='icon'], [class*='arrow']");
+    const skip = (node) => node.closest("[class*='input-wrapper'], [class*='selection-search'], [class*='search-input'], [class*='select-view-input'], [class*='suffix'], [class*='caret'], [class*='icon'], [class*='arrow']");
     const slotted = [...host.querySelectorAll("[class*='selected'], [class*='selection-item'], [class*='placeholder'], [class*='tag'], [class*='value'], [data-slot$='-value'], [data-slot='select-value'], [data-slot='combobox-value']")]
       .filter((node) => !skip(node))
       .map((node) => clean(node.textContent))
