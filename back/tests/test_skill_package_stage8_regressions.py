@@ -10,11 +10,13 @@ from dano.execution.page.flow_spec_core.models import (
     CapabilityRelation,
     CapabilityRequestRef,
     FlowStep,
+    ParamField,
 )
 from dano.export.skill_package.renderer import (
     _capabilities_md,
     _capability_plans,
     _consumer_contract,
+    consume_upstream_input_schema,
     _field_label,
     _format_list_py,
     _handbook_text,
@@ -620,7 +622,7 @@ def test_package_validator_only_requires_caller_visible_form_fields(tmp_path: Pa
     forms.parent.mkdir(parents=True)
     forms.write_text(
         "# Native input forms\n\n## 查看销售订单详情 (`detail`)\n\n"
-        "该能力没有调用方字段，不调用 `ask_user_question`。\n",
+        "该能力没有可收集字段，不调用 `ask_user_question`。\n",
         encoding="utf-8",
     )
     contract = {
@@ -1172,7 +1174,7 @@ def test_rendered_package_is_executable_and_contains_no_generation_vocabulary(tm
     assert validation["ok"] is True
     for marker in (
         "__dano_runtime", "source_step", "source_url", "source_method",
-        "source_body", "source_content_type", "x-options", "录制页面", "历史样本",
+        "source_body", "source_content_type", '"x-options"', "录制页面", "历史样本",
         "step_id", "failed_step", "link_id", "verification_id",
     ):
         assert marker not in packed
@@ -1187,9 +1189,10 @@ def test_rendered_package_is_executable_and_contains_no_generation_vocabulary(tm
 
 
 def test_business_labels_and_complete_dynamic_data_source_are_rendered() -> None:
-    assert _field_label("id", {}) == "记录编号"
-    assert _field_label("ids", {}) == "记录编号（可多选）"
-    assert _field_label("items", {}) == "明细"
+    assert _field_label("id", {}) == "id"
+    assert _field_label("ids", {}) == "ids"
+    assert _field_label("items", {}) == "items"
+    assert _field_label("id", {"title": "记录编号"}) == "记录编号"
     forms = _input_forms_md([{
         "name": "update_order",
         "title": "修改销售订单",
@@ -1231,7 +1234,7 @@ def test_public_schema_does_not_turn_items_field_into_a_fake_property() -> None:
     })
 
     assert set(schema["properties"]) == {"items"}
-    assert schema["properties"]["items"]["label"] == "明细"
+    assert schema["properties"]["items"]["label"] == "items"
 
 
 def test_list_formatter_contains_only_public_output_schema() -> None:
@@ -1288,10 +1291,13 @@ def test_options_and_input_forms_use_the_same_field_option_labels() -> None:
         "type": "string",
         "title": "统计周期",
         "enum": ["1", "2", "3"],
-        "x-options-snapshot": [
+        "x-options": [
             {"id": "1", "label": "周期甲"},
             {"id": "2", "label": "周期乙"},
             {"id": "3", "label": "周期丙"},
+        ],
+        "x-options-snapshot": [
+            {"id": "9", "label": "历史样本"},
         ],
     }
     plans = [{
@@ -1305,10 +1311,174 @@ def test_options_and_input_forms_use_the_same_field_option_labels() -> None:
 
     forms = _input_forms_md(plans)
     options = _options_md(plans)
+    public = _public_schema({"type": "object", "properties": {"reportType": field}})
+    packed = public["properties"]["reportType"]
 
     assert "周期甲" in forms
     assert "周期甲" in options
     assert forms.count("周期甲") >= 1
+    assert "历史样本" not in forms
+    assert "历史样本" not in options
+    assert packed["enum"] == ["1", "2", "3"]
+    assert packed["x-enum-options"][0] == {"id": "1", "label": "周期甲"}
+    assert "x-options" not in packed
+
+
+def test_export_keeps_capability_schema_and_does_not_add_compiled_fields() -> None:
+    compiled = {
+        "type": "object",
+        "properties": {
+            "reportType": {"type": "string", "enum": ["1", "2", "3"], "title": "compiled"},
+            "companyId": {"type": "string", "title": "公司"},
+        },
+        "required": ["reportType", "companyId"],
+    }
+    capability = {
+        "type": "object",
+        "properties": {
+            "reportType": {
+                "type": "string",
+                "title": "日报 / 周报 / 月报",
+                "x-options": [{"label": "日报", "value": "1"}],
+            },
+            "startDate": {"type": "date", "title": "开始日期"},
+        },
+        "required": ["reportType"],
+    }
+
+    schema = consume_upstream_input_schema(compiled, capability)
+
+    assert set(schema["properties"]) == {"reportType", "startDate"}
+    assert schema["required"] == ["reportType"]
+    assert schema["properties"]["reportType"]["title"] == "日报 / 周报 / 月报"
+    assert "companyId" not in schema["properties"]
+
+
+def test_export_projects_capability_param_enum_options_without_inventing() -> None:
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="stats",
+                name="查询工作汇报统计",
+                title="查询工作汇报统计",
+                kind="query",
+                step_ids=["step_statistics"],
+                request_refs=[CapabilityRequestRef(step_id="step_statistics", usage="execute")],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "reportType": {
+                            "type": "string",
+                            "title": "日报 / 周报 / 月报",
+                            "enum": ["1", "2", "3"],
+                        }
+                    },
+                    "required": ["reportType"],
+                },
+            ),
+            FlowCapability(
+                capability_id="create",
+                name="新增并提交工作日报",
+                title="新增并提交工作日报",
+                kind="command",
+                step_ids=["step_submit"],
+                request_refs=[CapabilityRequestRef(step_id="step_submit", usage="execute")],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "reportType": {
+                            "type": "string",
+                            "title": "汇报类型",
+                            "enum": ["1", "2", "3"],
+                        }
+                    },
+                    "required": ["reportType"],
+                },
+            ),
+        ],
+        steps=[
+            FlowStep(
+                step_id="step_statistics",
+                method="GET",
+                path="/stats",
+                params=[
+                    ParamField(
+                        path="query.reportType",
+                        key="reportType",
+                        type="enum",
+                        source_kind="page_enum",
+                        exposed_to_user=True,
+                        enum_options=[
+                            {"label": "日报", "value": "1"},
+                            {"label": "周报", "value": "2"},
+                            {"label": "月报", "value": "3"},
+                        ],
+                    )
+                ],
+            ),
+            FlowStep(
+                step_id="step_submit",
+                method="POST",
+                path="/submit",
+                params=[
+                    ParamField(
+                        path="body.reportType",
+                        key="reportType",
+                        type="string",
+                        source_kind="page_default",
+                        exposed_to_user=True,
+                    )
+                ],
+            ),
+        ],
+    )
+    api_request = {
+        "capabilities": [
+            {
+                "capability_id": "stats",
+                "name": "查询工作汇报统计",
+                "title": "查询工作汇报统计",
+                "kind": "query",
+                "execution_contract": {
+                    "steps": [{"step_id": "step_statistics", "method": "GET", "path": "/stats"}],
+                },
+                "input_schema": spec.capabilities[0].input_schema,
+            },
+            {
+                "capability_id": "create",
+                "name": "新增并提交工作日报",
+                "title": "新增并提交工作日报",
+                "kind": "command",
+                "execution_contract": {
+                    "steps": [{"step_id": "step_submit", "method": "POST", "path": "/submit"}],
+                },
+                "input_schema": spec.capabilities[1].input_schema,
+            },
+        ],
+    }
+
+    plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), spec, api_request)
+    query = next(item for item in plans if item["name"] == "查询工作汇报统计")
+    write = next(item for item in plans if item["name"] == "新增并提交工作日报")
+    forms = _input_forms_md(plans)
+    options = _options_md(plans)
+    public_query = _public_schema(query["input_schema"])["properties"]["reportType"]
+    public_write = _public_schema(write["input_schema"])["properties"]["reportType"]
+
+    assert query["input_schema"]["properties"]["reportType"]["x-options"] == [
+        {"label": "日报", "value": "1"},
+        {"label": "周报", "value": "2"},
+        {"label": "月报", "value": "3"},
+    ]
+    assert "x-options" not in write["input_schema"]["properties"]["reportType"]
+    assert public_query["enum"] == ["1", "2", "3"]
+    assert public_query["x-enum-options"][0] == {"id": "1", "label": "日报"}
+    assert public_write["enum"] == ["1", "2", "3"]
+    assert "x-enum-options" not in public_write
+    assert '"label": "日报"' in forms
+    assert "| 日报 | `1` |" in options
+    assert "### 新增并提交工作日报 / `reportType`" in options
+    assert options.split("### 新增并提交工作日报 / `reportType`", 1)[1].count("| 日报 |") == 0
 
 
 def test_public_schema_scrubs_implementation_and_recording_leaks() -> None:
@@ -1345,7 +1515,7 @@ def test_public_schema_scrubs_implementation_and_recording_leaks() -> None:
     assert "URL参数" not in packed
     assert "当前禁用" not in packed
     assert schema["properties"]["items"]["description"] == "按当前请求提供符合 schema 的 JSON 数组。"
-    assert schema["properties"]["items"]["label"] == "明细"
+    assert schema["properties"]["items"]["label"] == "items"
     assert schema["properties"]["endDate"]["label"] == "结束日期"
 
 

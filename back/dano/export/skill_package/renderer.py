@@ -136,10 +136,27 @@ def _safe_text(value: Any) -> str:
     return str(_scrub(str(value or ""))).replace("\r", " ").strip()
 
 
+_CALLER_TEXT_REPLACEMENTS = (
+    ("该步骤仍缺的调用方字段", "该步骤仍缺的字段"),
+    ("没有调用方字段", "没有可收集字段"),
+    ("无调用方必填", "无必填"),
+    ("无调用方输入", "无输入"),
+    ("调用方已提供", "用户已提供"),
+    ("由调用方提供", "由用户提供"),
+    ("该操作调用方字段", "该操作字段"),
+    ("给出的调用方字段", "给出的字段"),
+    ("缺少的调用方输入", "缺少的输入"),
+    ("调用方字段", "当前步骤仍缺的字段"),
+    ("调用方输入", "当前步骤输入"),
+    ("调用方", "用户"),
+)
+
+
 def _handbook_text(value: Any) -> str:
     text = _safe_text(value)
-    text = text.replace("该步骤仍缺的调用方字段", "该步骤仍缺的字段")
-    return text.replace("调用方字段", "当前步骤仍缺的字段")
+    for old, new in _CALLER_TEXT_REPLACEMENTS:
+        text = text.replace(old, new)
+    return text
 
 
 def _flow_spec(skill):  # noqa: ANN001, ANN202
@@ -236,7 +253,19 @@ def _compiled_request(skill, spec) -> dict:  # noqa: ANN001
         if isinstance(item, dict)
     ]
     if _has_embedded_execution_steps(capabilities):
-        return published
+        if all(
+            isinstance(item.get("input_schema"), dict)
+            and (item["input_schema"].get("properties") or item["input_schema"].get("required"))
+            for item in capabilities
+        ):
+            return published
+        flow = spec
+        if flow is None:
+            try:
+                flow = _flow_spec(skill)
+            except ValueError:
+                flow = None
+        return restore_compiled_capability_schemas(published, flow)
     flow = spec if spec is not None else _flow_spec(skill)
     if flow is not None:
         from dano.execution.page.flow_spec import flow_spec_to_api_request
@@ -392,7 +421,7 @@ def _verified_links(spec, step_ids: list[str]) -> list[dict]:  # noqa: ANN001
 
 
 def consume_upstream_input_schema(compiled: Any, upstream: Any) -> dict[str, Any]:
-    """Copy capability schema facts. Restore dropped fields; never invent route fields."""
+    """Project the capability schema as-is. Do not merge compiled extras onto it."""
     packed = dict(compiled) if isinstance(compiled, dict) else {}
     fact = dict(upstream) if isinstance(upstream, dict) else {}
     packed_props = packed.get("properties") if isinstance(packed.get("properties"), dict) else {}
@@ -400,26 +429,29 @@ def consume_upstream_input_schema(compiled: Any, upstream: Any) -> dict[str, Any
     if not fact_props and not packed_props:
         return {"type": "object", "properties": {}, "required": []}
     if fact_props:
-        properties = {}
-        for name, field in fact_props.items():
-            packed_field = packed_props.get(name)
-            if isinstance(field, dict) and isinstance(packed_field, dict):
-                properties[str(name)] = {**packed_field, **field}
-            else:
-                properties[str(name)] = field
+        properties = {
+            str(name): deepcopy(field) if isinstance(field, dict) else field
+            for name, field in fact_props.items()
+        }
+        required_source = fact
+        extra_source = fact
     else:
-        properties = dict(packed_props)
+        properties = {
+            str(name): deepcopy(field) if isinstance(field, dict) else field
+            for name, field in packed_props.items()
+        }
+        required_source = packed
+        extra_source = packed
     required: list[str] = []
-    for field in [*(fact.get("required") or []), *(packed.get("required") or [])]:
+    for field in required_source.get("required") or []:
         name = str(field)
         if name in properties and name not in required:
             required.append(name)
     schema: dict[str, Any] = {"type": "object", "properties": dict(properties), "required": required}
-    for source in (fact, packed):
-        for key, value in source.items():
-            if key in {"type", "properties", "required"}:
-                continue
-            schema[key] = value
+    for key, value in extra_source.items():
+        if key in {"type", "properties", "required"}:
+            continue
+        schema[key] = deepcopy(value)
     return schema
 
 
@@ -512,7 +544,64 @@ def _stage8_input_schema(
         ):
             raw.pop(key, None)
         if source and source in str(raw.get("description") or ""):
-            raw["description"] = "没有已确认的可达绑定时，由调用方提供并通过输入校验。"
+            raw["description"] = "没有已确认的可达绑定时，由用户提供并通过输入校验。"
+    return packed
+
+
+def _capability_owned_params(spec, cap: dict) -> dict[str, Any]:  # noqa: ANN001
+    """Read caller params from the same capability. Do not invent fields or options."""
+    if spec is None:
+        return {}
+    keys = {str(cap.get("capability_id") or ""), str(cap.get("name") or "")} - {""}
+    owned = None
+    for item in spec.capabilities or []:
+        if str(item.capability_id or "") in keys or str(item.name or "") in keys:
+            owned = item
+            break
+    if owned is None:
+        return {}
+    step_ids = {str(step_id) for step_id in (owned.step_ids or []) if str(step_id)}
+    for ref in owned.request_refs or []:
+        step_id = getattr(ref, "step_id", None) or (ref.get("step_id") if isinstance(ref, dict) else "")
+        if step_id:
+            step_ids.add(str(step_id))
+    params: dict[str, Any] = {}
+    for step in spec.steps or []:
+        if str(step.step_id) not in step_ids:
+            continue
+        for param in step.params or []:
+            if getattr(param, "exposed_to_user", True) is False:
+                continue
+            name = str(param.key or "")
+            if name and name not in params:
+                params[name] = param
+    return params
+
+
+def _attach_capability_param_options(schema: dict[str, Any], spec, cap: dict) -> dict[str, Any]:  # noqa: ANN001
+    packed = deepcopy(schema)
+    properties = packed.get("properties") if isinstance(packed.get("properties"), dict) else {}
+    if not properties:
+        return packed
+    owned = _capability_owned_params(spec, cap)
+    for name, field in properties.items():
+        if not isinstance(field, dict):
+            continue
+        param = owned.get(str(name))
+        if param is None:
+            continue
+        if param.enum_options and not (field.get("x-enum-options") or field.get("x-options")):
+            field["x-options"] = list(param.enum_options)
+            if param.enum_value_map and not field.get("x-enum-value-map"):
+                field["x-enum-value-map"] = dict(param.enum_value_map)
+        source = param.source if isinstance(getattr(param, "source", None), dict) else {}
+        if (
+            str(getattr(param, "source_kind", "") or "") == "api_option"
+            and source.get("source_url")
+            and not field.get("x-dano-option-source")
+            and not field.get("x-options-source-meta")
+        ):
+            field["x-options-source-meta"] = dict(source)
     return packed
 
 
@@ -523,14 +612,14 @@ def _upstream_capability_schema(spec, skill, cap: dict) -> dict[str, Any]:  # no
             if str(item.capability_id or "") in keys or str(item.name or "") in keys:
                 schema = getattr(item, "input_schema", None)
                 if isinstance(schema, dict) and (schema.get("properties") or schema.get("required")):
-                    return dict(schema)
+                    return _attach_capability_param_options(dict(schema), spec, cap)
     for item in getattr(skill, "capabilities", None) or []:
         if not isinstance(item, dict):
             continue
         if str(item.get("capability_id") or "") in keys or str(item.get("name") or "") in keys:
             schema = item.get("input_schema") or item.get("parameters")
             if isinstance(schema, dict) and (schema.get("properties") or schema.get("required")):
-                return dict(schema)
+                return _attach_capability_param_options(dict(schema), spec, cap)
     return {}
 
 
@@ -574,10 +663,17 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
         if script in used_scripts:
             script += "_" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:6]
         used_scripts.add(script)
-        schema = consume_upstream_input_schema(
-            cap.get("input_schema") or cap.get("parameters") or {},
-            {} if capability_owned else _upstream_capability_schema(spec, skill, cap),
+        compiled_schema = cap.get("input_schema") or cap.get("parameters") or {}
+        compiled_props = (
+            compiled_schema.get("properties")
+            if isinstance(compiled_schema, dict)
+            else {}
         )
+        schema = consume_upstream_input_schema(
+            compiled_schema,
+            {} if compiled_props else _upstream_capability_schema(spec, skill, cap),
+        )
+        schema = _attach_capability_param_options(schema, spec, cap)
         schema = _stage8_input_schema(schema, cap, confirmed_derived)
         step_ids = (
             list(by_id)
@@ -771,26 +867,11 @@ def _field_label(name: str, field: dict) -> str:
         raw = _safe_text(field.get("description"))
         if (
             raw
-            and not raw.startswith(("由调用方", "按当前请求", "运行时"))
+            and not raw.startswith(("由调用方", "由用户", "按当前请求", "运行时"))
             and _consumer_field_description(raw, field) == raw
         ):
             explicit = raw
-    if explicit and explicit.casefold() != str(name).casefold():
-        return explicit
-    business_fallbacks = {
-        "id": "记录编号",
-        "ids": "记录编号（可多选）",
-        "items": "明细",
-        "customerid": "客户",
-        "orderid": "订单编号",
-        "ordertime": "订单时间",
-        "productid": "商品",
-        "creator": "创建人",
-        "remark": "备注",
-        "no": "业务编号",
-    }
-    normalized = re.sub(r"[_\-\s]+", "", str(name)).casefold()
-    return business_fallbacks.get(normalized, explicit or str(name))
+    return explicit or str(name)
 
 
 def _option_source(field: dict) -> dict | None:
@@ -826,57 +907,53 @@ def _option_source(field: dict) -> dict | None:
     return data_source
 
 
-def _field_options(field: dict) -> list[dict]:
-    raw_options = (
-        field.get("x-enum-options")
-        or field.get("x-options")
-        or field.get("x-options-snapshot")
-    )
-    if isinstance(raw_options, list):
-        options: list[dict] = []
-        for raw in raw_options:
-            if isinstance(raw, dict):
-                value = raw.get("id", raw.get("value"))
-                label = raw.get("label", raw.get("name", value))
-            else:
-                value = raw
-                label = raw
-            if value is not None:
-                options.append({"id": value, "label": str(label)})
-        if options:
-            return options
-    values = list(field.get("enum") or [])
-    labels = dict(field.get("x-enum-value-map") or {})
+def _normalize_enum_options(raw_options: list) -> list[dict]:
     options: list[dict] = []
-    if labels:
-        for label, value in labels.items():
+    for raw in raw_options:
+        if isinstance(raw, dict):
+            value = raw.get("id", raw.get("value"))
+            label = raw.get("label", raw.get("name", value))
+        else:
+            value = raw
+            label = raw
+        if value is not None:
             options.append({"id": value, "label": str(label)})
-    else:
-        options.extend({"id": value, "label": str(value)} for value in values)
     return options
 
 
-def _static_field_options(field: dict) -> list[dict]:
-    """Return only schema-owned fixed values, never recorded runtime snapshots."""
-    raw_options = field.get("x-enum-options")
-    if isinstance(raw_options, list):
-        options: list[dict] = []
-        for raw in raw_options:
-            if isinstance(raw, dict):
-                value = raw.get("id", raw.get("value"))
-                label = raw.get("label", raw.get("name", value))
-            else:
-                value = raw
-                label = raw
-            if value is not None:
-                options.append({"id": value, "label": str(label)})
-        if options:
+def _capability_enum_options(field: dict) -> list[dict]:
+    """Return capability-owned choices only. Never recorded runtime snapshots."""
+    raw_options = field.get("x-enum-options") or field.get("x-options")
+    if isinstance(raw_options, list) and raw_options:
+        return _normalize_enum_options(raw_options)
+    return []
+
+
+def _field_options(field: dict) -> list[dict]:
+    options = _capability_enum_options(field)
+    if options:
+        value_map = dict(field.get("x-enum-value-map") or {})
+        if not value_map:
             return options
+        resolved: list[dict] = []
+        for item in options:
+            label = str(item.get("label"))
+            raw_id = item.get("id")
+            if str(raw_id) == label and label in value_map:
+                resolved.append({"id": value_map[label], "label": label})
+            else:
+                resolved.append(item)
+        return resolved
     values = list(field.get("enum") or [])
     labels = dict(field.get("x-enum-value-map") or {})
     if labels:
         return [{"id": value, "label": str(label)} for label, value in labels.items()]
     return [{"id": value, "label": str(value)} for value in values]
+
+
+def _static_field_options(field: dict) -> list[dict]:
+    """Return only schema-owned fixed values, never recorded runtime snapshots."""
+    return _field_options(field)
 
 
 def _is_caller_field(field: dict) -> bool:
@@ -1332,7 +1409,7 @@ def _capability_form_section(plan: dict) -> list[str]:
         for name, raw in caller_properties.items()
     ]
     if not questions:
-        lines.extend(["该能力没有调用方字段，不调用 `ask_user_question`。", ""])
+        lines.extend(["该能力没有可收集字段，不调用 `ask_user_question`。", ""])
         return lines
     request = {"title": title, "questions": questions}
     lines.extend([
@@ -1374,7 +1451,7 @@ def _input_forms_bundle(plans: list[dict]) -> tuple[str, dict[str, str]]:
     header = [
         "# 输入表单",
         "",
-        "本文件只投影能力契约中的调用方字段。当前步骤缺少字段时才阅读对应能力章节。每次需要向用户提问时，必须原生调用 `ask_user_question`；禁止在普通文本、Markdown、XML 或 `<question>` 标签中模拟工具调用。",
+        "本文件只投影能力契约中的字段。当前步骤缺少字段时才阅读对应能力章节。每次需要向用户提问时，必须原生调用 `ask_user_question`；禁止在普通文本、Markdown、XML 或 `<question>` 标签中模拟工具调用。",
         "",
         "## 通用规则",
         "",
@@ -1772,11 +1849,11 @@ def _operation_collect_hint(plan: dict) -> str:
         if required:
             fields = "、".join(f"`{name}`" for name in required)
             return f"{title}：收集契约中的必填字段（{fields}），执行前确认。"
-        return f"{title}：收集该操作调用方字段，执行前确认。"
+        return f"{title}：收集该操作字段，执行前确认。"
     if required:
         fields = "、".join(f"`{name}`" for name in required)
         return f"{title}：收集契约中的必填字段（{fields}）。"
-    return f"{title}：只收集用户本次给出的调用方字段。"
+    return f"{title}：只收集用户本次给出的字段。"
 
 
 def _title_for_plan_ref(plans: list[dict], cap_id: str) -> str:
@@ -2012,7 +2089,7 @@ def _capabilities_md(skill, plans: list[dict]) -> str:  # noqa: ANN001
     for item in plans:
         write = bool(item.get("is_write"))
         confirm = bool(item.get("requires_confirmation"))
-        required = "、".join(f"`{name}`" for name in _required_fields(item)) or "无调用方必填"
+        required = "、".join(f"`{name}`" for name in _required_fields(item)) or "无必填"
         if confirm:
             risk = "执行前必须确认；结果未知不得重试" if write else "执行前必须确认"
         elif write:
@@ -2150,7 +2227,7 @@ def _route_file_md(route: dict, plans: list[dict]) -> str:
                     and item.get("field")
                     and (allowed is None or str(item.get("field")) in allowed)
                 )
-            ) or ("按已有契约收集" if allowed is not None else "当前步骤缺少的调用方输入")
+            ) or ("按已有契约收集" if allowed is not None else "当前步骤缺少的输入")
             nxt = "继续下一步" if index + 1 < len(steps) else "按完成条件结束"
             if step.get("checkpoint"):
                 nxt = "在交接点停问，用户选定后再继续"
@@ -2295,7 +2372,7 @@ def _operations_md(skill, plans: list[dict], spec) -> str:  # noqa: ANN001
             "|---|---|---|---|",
         ])
         if not properties:
-            lines.append("| （无） | object | 否 | 无调用方输入 |")
+            lines.append("| （无） | object | 否 | 无输入 |")
         for name, raw in properties.items():
             field = raw if isinstance(raw, dict) else {}
             description = _safe_text(field.get("description") or field.get("title") or name).replace("|", "\\|")
@@ -3338,6 +3415,21 @@ def _public_schema(node: Any, key: str = "") -> Any:
                     str(result.get("description")),
                     result,
                 )
+        if not dynamic_options:
+            owned = _capability_enum_options(node)
+            if owned:
+                result["x-enum-options"] = owned
+                result["enum"] = [item["id"] for item in owned]
+                value_map = dict(node.get("x-enum-value-map") or {})
+                if not value_map:
+                    value_map = {
+                        str(item["label"]): item["id"]
+                        for item in owned
+                        if str(item.get("label")) != str(item.get("id"))
+                    }
+                if value_map:
+                    result["x-enum-value-map"] = value_map
+        result.pop("x-options", None)
         if (
             key
             and key not in {"properties", "patternProperties", "$defs", "definitions"}
@@ -3522,8 +3614,10 @@ def _consumer_route(route: dict, plans: list[dict]) -> dict:
             "required_fields": list(item.get("required_fields") or []),
             "choice_source": item.get("choice_source") or "previous_result",
             "selection_mode": item.get("selection_mode") or "single",
-            "resume_when": item.get("resume_when") or "用户已选定有效目标并通过输入校验",
-            "on_cancel": item.get("on_cancel") or "停止并报告未执行",
+            "resume_when": _handbook_text(
+                item.get("resume_when") or "用户已选定有效目标并通过输入校验"
+            ),
+            "on_cancel": _handbook_text(item.get("on_cancel") or "停止并报告未执行"),
         }
         for item in (route.get("checkpoints") or [])
         if isinstance(item, dict)
@@ -3549,8 +3643,8 @@ def _consumer_route(route: dict, plans: list[dict]) -> dict:
             "confirm_before_execute": bool(item.get("confirm_before_execute"))
             or operation(item.get("capability_id")) in write_names
             or str(item.get("capability_id") or "") in write_names,
-            "done_when": item.get("done_when") or "结果可核对",
-            "on_failure": item.get("on_failure") or "停止并报告未执行",
+            "done_when": _handbook_text(item.get("done_when") or "结果可核对"),
+            "on_failure": _handbook_text(item.get("on_failure") or "停止并报告未执行"),
         }
         for item in (route.get("steps") or [])
         if isinstance(item, dict)
@@ -3571,7 +3665,7 @@ def _consumer_route(route: dict, plans: list[dict]) -> dict:
     return {
         "route_id": _public_route_id(route, plans),
         "name": route.get("name") or _public_route_id(route, plans),
-        "when_to_use": route.get("when_to_use") or route.get("name") or "",
+        "when_to_use": _handbook_text(route.get("when_to_use") or route.get("name") or ""),
         "operation_sequence": [
             operation(item) for item in (route.get("capability_sequence") or []) if str(item)
         ],
@@ -3586,8 +3680,8 @@ def _consumer_route(route: dict, plans: list[dict]) -> dict:
         "composition_mode": route.get("composition_mode") or "atomic",
         "steps": steps,
         "checkpoints": checkpoints,
-        "done_when": route.get("done_when") or "结果可核对",
-        "failure_behavior": route.get("failure_behavior") or "失败即停止",
+        "done_when": _handbook_text(route.get("done_when") or "结果可核对"),
+        "failure_behavior": _handbook_text(route.get("failure_behavior") or "失败即停止"),
         "examples": examples,
     }
 

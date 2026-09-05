@@ -666,7 +666,12 @@ def _check_input_fact_alignment(root: Path, contract: dict, issues: list[dict]) 
                     f"INPUT_FORMS.md missing caller fields from {name or title}: {', '.join(missing)}",
                     forms_path,
                 ))
-        elif section and "没有调用方字段" not in section and title:
+        elif (
+            section
+            and "没有调用方字段" not in section
+            and "没有可收集字段" not in section
+            and title
+        ):
             issues.append(_issue(
                 "input_form_invented_field",
                 f"INPUT_FORMS.md must not invent caller fields for {name or title}",
