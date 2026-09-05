@@ -121,6 +121,8 @@ const SUBMIT_LABEL = /^(确认提交|确认保存|提交申请|保存并提交|�
 const CANCEL_LABEL = /取消|关闭|重置|reset|cancel|close|back/i;
 
 export class PageActions {
+  private readonly expandedRepeatables = new Set<string>();
+
   constructor(private readonly host: PageActionHost) {}
 
   private page() {
@@ -1370,20 +1372,32 @@ export class PageActions {
     void startUrl;
   }
 
-  private async expandRepeatableRows() {
-    const addRow = /^(新增一行|添加一行|加一行|添加明细|新增明细)$/;
+  private async expandRepeatableRows(attempted: Set<string>) {
+    const addRow = /^(新增一行|添加一行|加一行|添加明细|新增明细|(?:添加|新增).{1,16}(?:项|行|明细|条目|记录|内容|计划|工作))$/;
     const genericAdd = /^\s*(添加|新增)\s*$/;
+    const excluded = /附件|上传|文件/;
     const before = (await this.captureFields()).formFields || [];
     const snapshot = await this.captureSnapshot();
-    const control = (snapshot.controls || []).find(item =>
-      addRow.test(String(item.text || item.label || "").replace(/\s+/g, ""))
-      && (!snapshot.scope || !item.scope || item.scope === snapshot.scope)
-    );
+    const controls = (snapshot.controls || []).filter(item => {
+      const name = String(item.text || item.label || "").replace(/\s+/g, "");
+      return addRow.test(name)
+        && !excluded.test(name)
+        && (!snapshot.scope || !item.scope || item.scope === snapshot.scope);
+    });
+    const control = controls.find(item => {
+      const name = String(item.text || item.label || "").replace(/\s+/g, "");
+      const key = `${this.page().url()}|${String(item.selector || "")}|${name}`;
+      return !attempted.has(key) && !this.expandedRepeatables.has(key);
+    });
     let contextualAdd: Locator | undefined;
+    let contextualKey = "";
     if (!control) {
       const candidates = this.page().locator("button, [role='button']").filter({ visible: true }).filter({ hasText: genericAdd });
       for (let index = 0; index < await candidates.count(); index += 1) {
         const candidate = candidates.nth(index);
+        const text = String(await candidate.innerText().catch(() => "")).replace(/\s+/g, "");
+        const key = `${this.page().url()}|contextual:${index}|${text}`;
+        if (attempted.has(key) || this.expandedRepeatables.has(key)) continue;
         const belongsToRepeatableSection = await candidate.evaluate((element) => {
           let node = element.parentElement;
           for (let depth = 0; node && depth < 7; depth += 1, node = node.parentElement) {
@@ -1395,24 +1409,34 @@ export class PageActions {
         }).catch(() => false);
         if (belongsToRepeatableSection) {
           contextualAdd = candidate;
+          contextualKey = key;
           break;
         }
       }
     }
     const name = String(control?.text || control?.label || await contextualAdd?.innerText().catch(() => "") || "").replace(/\s+/g, "");
-    if (!control && !contextualAdd && snapshot.scope !== "dialog") return false;
+    // No matching control means there is no repeatable section to expand. Do
+    // not manufacture a dialog fallback: that used to count every pass as a
+    // failed retry even though no add-row control existed on the page.
+    if (!control && !contextualAdd) return { attempted: false, expanded: false, name: "" };
+    const key = control
+      ? `${this.page().url()}|${String(control.selector || "")}|${name}`
+      : contextualKey || `${this.page().url()}|dialog|${name}`;
+    attempted.add(key);
     try {
       if (control?.selector) await this.click(String(control.selector));
       else if (contextualAdd) await this.clickSafely(contextualAdd, "button");
-      else await this.page().getByRole("button", { name: addRow }).first().click({ timeout: 1_500 });
+      else return { attempted: false, expanded: false, name: "" };
     } catch {
-      if (!name) return false;
+      if (!name) return { attempted: true, expanded: false, name };
       await this.page().locator(`${DIALOGS} button, ${DIALOGS} [role='button']`).filter({ hasText: name }).first()
         .click({ timeout: 1_200 }).catch(() => {});
     }
     await this.waitForPageQuiet(600);
     const after = (await this.captureFields()).formFields || [];
-    return after.some(field => !before.some(item => item.selector === field.selector && item.label === field.label));
+    const expanded = after.some(field => !before.some(item => item.selector === field.selector && item.label === field.label));
+    if (expanded) this.expandedRepeatables.add(key);
+    return { attempted: true, expanded, name };
   }
 
   private submitControl(snapshot: PageSnapshot) {
@@ -1471,20 +1495,19 @@ export class PageActions {
       }
     };
     let after = await this.captureSnapshot();
-    let expanded = false;
-    for (let pass = 0; pass < 2 && this.page().url() === startUrl; pass += 1) {
-      if (!expanded && await this.expandRepeatableRows()) {
-        expanded = true;
+    const attemptedRepeatables = new Set<string>();
+    const expansionFailures: Array<Record<string, unknown>> = [];
+    const maxPasses = Math.max(6, Math.min(32, (after.controls || []).length + 6));
+    for (let pass = 0; pass < maxPasses && this.page().url() === startUrl; pass += 1) {
+      const expansion = await this.expandRepeatableRows(attemptedRepeatables);
+      if (expansion.attempted) {
+        if (!expansion.expanded) expansionFailures.push({ label: expansion.name || "业务明细", error: "点击添加控件后没有出现可填写字段" });
         after = await this.captureFields();
       }
       const leftover = (after.todoFields || []).filter(field => !field.skip && !field.disabled);
       if (!leftover.length) {
+        if (expansion.attempted) continue;
         if (await this.revealHiddenSections()) {
-          after = await this.captureFields();
-          continue;
-        }
-        if (!expanded && await this.expandRepeatableRows()) {
-          expanded = true;
           after = await this.captureFields();
           continue;
         }
@@ -1512,12 +1535,12 @@ export class PageActions {
     const leftoverFailed = failed.filter(item =>
       (after.formFields || []).some(field => field.label === item.label && !field.filled && !field.skip && !field.disabled)
     );
-    const ok = this.formReady(after, startUrl) && leftoverFailed.length === 0;
+    const ok = this.formReady(after, startUrl) && leftoverFailed.length === 0 && expansionFailures.length === 0;
     return {
       ok,
       scope: after.scope,
       filled,
-      failed: leftoverFailed,
+      failed: [...leftoverFailed, ...expansionFailures],
       errors: after.errors || [],
       todoFields: after.todoFields || [],
       todoCount: after.todoCount ?? (after.todoFields || []).length,

@@ -858,6 +858,68 @@ test("business account configuration with login-name and password fields is not 
   }
 });
 
+test("exercise-form expands and fills every visible business detail section in one pass", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "work-report-repeatables-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body>
+      <form class="ant-form">
+        <label>工作总结<textarea name="todayContent" placeholder="请输入工作总结"></textarea></label>
+        <section aria-label="已完成工作">
+          <h2>已完成工作</h2>
+          <button id="add-work" type="button">添加工作项</button>
+          <div id="work-rows"></div>
+        </section>
+        <section aria-label="工作计划">
+          <h2>工作计划</h2>
+          <button id="add-plan" type="button">添加计划项</button>
+          <div id="plan-rows"></div>
+        </section>
+        <section aria-label="附件信息">
+          <h2>附件信息</h2>
+          <button id="upload" type="button">上传附件</button>
+        </section>
+        <button type="submit">保存</button>
+      </form>
+      <script>
+        document.getElementById("add-work").addEventListener("click", () => {
+          if (document.querySelector("[name='items[0].content']")) return;
+          document.getElementById("work-rows").innerHTML = '<label>工作内容<input name="items[0].content" placeholder="请输入工作内容"></label>';
+        });
+        document.getElementById("add-plan").addEventListener("click", () => {
+          if (document.querySelector("[name='items[1].content']")) return;
+          document.getElementById("plan-rows").innerHTML = '<label>计划内容<input name="items[1].content" placeholder="请输入计划内容"></label>';
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "work-report-repeatables", undefined, ["create"], true);
+    const exercised: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(exercised.ok, true, JSON.stringify(exercised));
+    assert.equal((exercised.formFields || []).some((field: any) => field.name === "items[0].content" && field.filled), true, JSON.stringify(exercised.formFields));
+    assert.equal((exercised.formFields || []).some((field: any) => field.name === "items[1].content" && field.filled), true, JSON.stringify(exercised.formFields));
+    assert.equal((exercised.formFields || []).some((field: any) => /附件/.test(field.label || "")), false, JSON.stringify(exercised.formFields));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("HTTP 200 business code 401 pauses for login immediately without consuming three repair attempts", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-login-expired-"));
   let queryCount = 0;
