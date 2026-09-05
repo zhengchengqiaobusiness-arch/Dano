@@ -1181,6 +1181,8 @@ def test_rendered_package_is_executable_and_contains_no_generation_vocabulary(tm
     assert "组合行必须按该行步骤顺序执行" in handbook
     assert "不要把多条路线合并" not in handbook
     assert "scripts/format_list.py" in handbook
+    assert "按用户说明办理" in handbook
+    assert "没有已确认绑定" in handbook
 
 
 def test_business_labels_and_complete_dynamic_data_source_are_rendered() -> None:
@@ -1336,7 +1338,7 @@ def test_public_schema_scrubs_implementation_and_recording_leaks() -> None:
     assert "placeholder" not in packed
     assert "URL参数" not in packed
     assert "当前禁用" not in packed
-    assert schema["properties"]["items"]["description"] == "由调用方按当前请求提供符合 schema 的 JSON 数组。"
+    assert schema["properties"]["items"]["description"] == "按当前请求提供符合 schema 的 JSON 数组。"
     assert schema["properties"]["items"]["label"] == "明细"
     assert schema["properties"]["endDate"]["label"] == "结束日期"
 
@@ -1450,6 +1452,8 @@ def test_result_then_playbook_renders_combination_route_and_readable_scripts(tmp
     assert playbook in handbook
     assert "references/routes/查询工作汇报统计-然后-新增并提交工作日报.md" in handbook
     assert "确认哪些项目仍需新增" in handbook
+    assert "按用户说明办理" in handbook
+    assert "没有已确认绑定" in handbook
     assert "name: 日报填写" in handbook
     assert "capability_" not in "\n".join(scripts)
     assert "查询工作汇报统计.py" in scripts

@@ -303,8 +303,14 @@ def _annotate_bindings(
     return annotated
 
 
-def _clean_when(value: Any, fallback: str) -> str:
+def _normalize_intent_text(value: Any) -> str:
     text = str(value or "").strip()
+    text = re.sub(r"\s*[,，]\s*", "，", text)
+    return re.sub(r" {2,}", " ", text)
+
+
+def _clean_when(value: Any, fallback: str) -> str:
+    text = _normalize_intent_text(value)
     if text and not _is_recording_copy(text):
         return text
     return fallback
@@ -399,7 +405,7 @@ def _build_composition(
     description = str(request.business_description or "").strip()
     page = _page_object_name(request, selected)
     if _has_custom_playbook(request):
-        summary = _truncate_playbook(description)
+        summary = _truncate_playbook(_normalize_intent_text(description))
     else:
         actions = "、".join(titles) if titles else "已打包操作"
         summary = (
@@ -409,7 +415,10 @@ def _build_composition(
     notes: list[str] = []
     combinations = [route for route in routes if len(route.capability_sequence) > 1]
     if _has_custom_playbook(request) and combinations:
-        notes.append(f"组合约定：{description}")
+        notes.append(
+            f"按用户说明办理：{_normalize_intent_text(description)}。"
+            "只在用户原话对应组合行时按该行顺序执行；无已确认绑定就在交接点停问，不得自动带入。"
+        )
     reads = [cap for cap in selected if not is_write_capability(cap, spec)]
     writes = [cap for cap in selected if is_write_capability(cap, spec)]
     if reads and writes:
@@ -610,7 +619,7 @@ def _route(
                 before_step=step_key,
                 required_fields=user_fields,
                 prompt=(
-                    f"请确认哪些项目仍需新增，并由调用方提供「{_cap_title(cap)}」的结构化内容（{field_labels}）；"
+                    f"请根据「{_cap_title(prev)}」的结果确认哪些项目仍需新增，再按「{_cap_title(cap)}」输入表单补齐结构化内容（{field_labels}，以及该步骤仍缺的字段）；"
                     "不得把查询结果直接当作新增输入"
                     if create_handoff
                     else
@@ -1104,7 +1113,7 @@ def propose_deterministic_plan(
         if when and when not in triggers and not _is_recording_copy(when):
             triggers.append(when)
     composition_summary, composition_notes = _build_composition(request, selected, routes, spec)
-    summary = request.business_description.strip()
+    summary = _normalize_intent_text(request.business_description.strip())
     if is_stock_playbook(summary):
         summary = composition_summary or "、".join(_cap_title(cap) for cap in selected)
     return SkillPlan(

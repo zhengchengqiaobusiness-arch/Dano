@@ -765,7 +765,7 @@ def _field_label(name: str, field: dict) -> str:
         raw = _safe_text(field.get("description"))
         if (
             raw
-            and not raw.startswith(("由调用方", "运行时"))
+            and not raw.startswith(("由调用方", "按当前请求", "运行时"))
             and _consumer_field_description(raw, field) == raw
         ):
             explicit = raw
@@ -1594,9 +1594,14 @@ def _composition_rules(skill) -> list[str]:  # noqa: ANN001
     summary = _safe_text(plan.get("composition_summary") or plan.get("summary"))
     extras = 0
     for item in notes:
-        if item.startswith("组合路线「") or item.startswith("用户描述中的先后"):
+        if item.startswith("用户描述中的先后"):
             continue
         if item.startswith("组合约定：") and summary and item[5:].strip() == summary:
+            lines.append(
+                f"- 按用户说明办理：{summary}。"
+                "无已确认绑定时先做前一步，停问后再做后一步，不得自动带入。"
+            )
+            extras += 1
             continue
         lines.append(f"- {item}")
         extras += 1
@@ -1671,9 +1676,14 @@ def _on_demand_resources(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
     return lines
 
 
+def _intent_key(value: str) -> str:
+    return re.sub(r"\s+", "", re.sub(r"\s*[,，]\s*", "，", _safe_text(value)))
+
+
 def _applicable_sections(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
     plan = _skill_plan_payload(skill)
     identity = _safe_text(plan.get("composition_summary") or plan.get("summary"))
+    identity_key = _intent_key(identity)
     lines = ["## 适用场景", ""]
     lines.append("- 用户原话能对应「选择工作流」中恰好一行时使用。")
     route_whens = {
@@ -1688,6 +1698,7 @@ def _applicable_sections(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
             not example
             or _is_recording_copy(example)
             or example == identity
+            or _intent_key(example) == identity_key
             or example in "\n".join(lines)
         ):
             continue
@@ -1699,7 +1710,12 @@ def _applicable_sections(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
             break
     if added == 0:
         for when in route_whens:
-            if not when or when == identity or when in "\n".join(lines):
+            if (
+                not when
+                or when == identity
+                or _intent_key(when) == identity_key
+                or when in "\n".join(lines)
+            ):
                 continue
             lines.append(f"- 例如：{when}")
             added += 1
@@ -3252,17 +3268,17 @@ def _consumer_field_description(text: str, field: dict | None = None) -> str:
     if "页面枚举选项" in node:
         return "从当前业务枚举中选择有效值。"
     if any(marker in node for marker in ("录制", "occurrence", "样本", "预填")):
-        return "由调用方根据当前请求提供并通过输入校验。"
+        return "按当前请求提供，并通过输入校验。"
     if any(marker in node for marker in _CONSUMER_DESC_LEAKS):
         kind = str((field or {}).get("type") or "")
         fmt = str((field or {}).get("format") or "")
         if kind == "array":
-            return "由调用方按当前请求提供符合 schema 的 JSON 数组。"
+            return "按当前请求提供符合 schema 的 JSON 数组。"
         if kind == "object":
-            return "由调用方按当前请求提供符合 schema 的 JSON 对象。"
+            return "按当前请求提供符合 schema 的 JSON 对象。"
         if kind in {"date", "datetime"} or fmt in {"date", "date-time"}:
-            return "由调用方按当前请求提供，并符合声明的日期格式。"
-        return "由调用方按当前请求提供。"
+            return "按当前请求提供，并符合声明的日期格式。"
+        return "按当前请求提供。"
     return node
 
 
