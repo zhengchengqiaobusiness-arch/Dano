@@ -90,6 +90,14 @@ def session_path_if_exists(tenant: str, subsystem: str) -> str | None:
 # ── 导出目录:页面配一次 → 持久化 → 自动发布(录完)复用同一目录,二者一致 ──
 _EXPORT_CONF = _DIR / ".export-dir"
 _EXPORT_HISTORY_CONF = _DIR / ".export-dirs"
+LINUX_EXPORT_DIR = "/opt/dano/runtime-data/.agents/skills/"
+
+
+def default_export_dir() -> str:
+    """Skill 页与能力页共用的默认导出目录。Linux 部署落到 runtime-data。"""
+    if sys.platform.startswith("linux"):
+        return LINUX_EXPORT_DIR
+    return str(Path(__file__).resolve().parents[4] / "export")
 
 
 def save_export_dir(path: str) -> None:
@@ -112,8 +120,9 @@ def save_export_dir(path: str) -> None:
         log.warning("export_dir.save_failed", error=str(e))
 
 
-def get_export_dir(default: str) -> str:
-    """导出目录优先级:页面配过的(持久化)> DANO_EXPORT_DIR 环境变量 > 传入默认。"""
+def get_export_dir(default: str | None = None) -> str:
+    """导出目录优先级:页面配过的(持久化)> DANO_EXPORT_DIR 环境变量 > 平台默认。"""
+    default = default or default_export_dir()
     import os
 
     def compatible(path: str) -> bool:

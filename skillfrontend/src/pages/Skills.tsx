@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Table, Tag, Button, Space, Typography, message, Empty, Modal, Input, Alert, Popconfirm, Select } from "antd";
 import { ReloadOutlined, ExportOutlined, DeleteOutlined, KeyOutlined, PauseCircleOutlined, CheckCircleOutlined } from "@ant-design/icons";
-import { listSkills, exportAgentSkills, getExportDirectory, deleteSkill, freezeSkill, resumeSkill, SkillManifest, SkillExportMode } from "../api/skills";
+import { listSkills, exportAgentSkills, getExportDirectory, saveExportDirectory, deleteSkill, freezeSkill, resumeSkill, SkillManifest, SkillExportMode } from "../api/skills";
 import TokenModal from "../components/TokenModal";
 import { TENANT_NAME } from "../api/client";
 import { rememberExportDir, rememberedExportDir } from "../api/recording";
@@ -54,14 +54,36 @@ export default function Skills() {
 
   async function loadExportDir() {
     try {
-      setExportDir(await getExportDirectory() || rememberedExportDir());
+      const dir = await getExportDirectory();
+      if (dir) {
+        rememberExportDir(dir);
+        setExportDir(dir);
+        return;
+      }
     } catch {
-      setExportDir(rememberedExportDir());
+      // fall back to the last local copy only when the backend is unreachable
+    }
+    setExportDir(rememberedExportDir());
+  }
+
+  async function persistExportDir(raw: string) {
+    const next = raw.trim();
+    if (!next) return;
+    rememberExportDir(next);
+    try {
+      const saved = await saveExportDirectory(next);
+      if (saved) {
+        rememberExportDir(saved);
+        setExportDir(saved);
+      }
+    } catch {
+      setExportDir(next);
     }
   }
 
   async function doExport() {
     const outDir = exportDir.trim();
+    if (outDir) await persistExportDir(outDir);
     setExporting(true);
     try {
       const r = await exportAgentSkills(outDir, exportMode);
@@ -214,6 +236,7 @@ export default function Skills() {
         <Input
           value={exportDir}
           onChange={(e) => setExportDir(e.target.value)}
+          onBlur={(e) => void persistExportDir(e.target.value)}
           placeholder="默认读取后端导出目录配置"
           onPressEnter={doExport}
         />
@@ -229,7 +252,7 @@ export default function Skills() {
           ]}
         />
         <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 10, marginBottom: 0 }}>
-          自包含包优先读取 DANO_AUTH_HEADERS；代理包使用 DANO_URL、DANO_TENANT_KEY。
+          自包含包按 DANO_TENANT_KEYS_JSON 向后台取最新令牌；DANO_AUTH_HEADERS 仅作显式覆盖。代理包使用 DANO_URL 与租户密钥。
         </Typography.Paragraph>
       </Modal>
     </div>

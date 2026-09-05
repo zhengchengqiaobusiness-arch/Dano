@@ -70,7 +70,7 @@ import {
   selectRecordingResultToResume,
 } from "../api/recordingResume";
 import type { SkillGenerationRequest } from "../api/recording";
-import { getExportDirectory } from "../api/skills";
+import { getExportDirectory, saveExportDirectory } from "../api/skills";
 import type {
   RecordingResultDetail,
   RecordingResultSummary,
@@ -795,6 +795,36 @@ export default function PageRecorder({
   const [skillForbiddenActions, setSkillForbiddenActions] = useState("");
   const [skillOutDir, setSkillOutDir] = useState(rememberedExportDir);
   const [resultMeta, setResultMeta] = useState<RecordingResultDetail | null>(null);
+
+  async function loadSharedExportDir() {
+    try {
+      const dir = await getExportDirectory();
+      if (dir) {
+        rememberExportDir(dir);
+        setSkillOutDir(dir);
+        return;
+      }
+    } catch {
+      // fall back to the last local copy only when the backend is unreachable
+    }
+    const remembered = rememberedExportDir();
+    if (remembered) setSkillOutDir(remembered);
+  }
+
+  async function persistSharedExportDir(raw: string) {
+    const next = raw.trim();
+    if (!next) return;
+    rememberExportDir(next);
+    try {
+      const saved = await saveExportDirectory(next);
+      if (saved) {
+        rememberExportDir(saved);
+        setSkillOutDir(saved);
+      }
+    } catch {
+      setSkillOutDir(next);
+    }
+  }
   const [savingResult, setSavingResult] = useState(false);
 
   const status = snapshot?.status || "idle";
@@ -860,6 +890,10 @@ export default function PageRecorder({
       machineVerification,
     }));
   }, [startUrl, goalText, title, machineVerification]);
+
+  useEffect(() => {
+    void loadSharedExportDir();
+  }, []);
 
   useEffect(() => {
     if (resumeOnly) {
@@ -1886,10 +1920,7 @@ export default function PageRecorder({
     setSkillExampleRequests(savedExamples);
     setSkillSuccessCriteria(saved.successCriteria?.trim() || resultMeta?.skill_export_success_criteria?.trim() || "");
     setSkillForbiddenActions(saved.forbiddenActions?.trim() || resultMeta?.skill_export_forbidden_actions?.trim() || "");
-    setSkillOutDir(rememberedExportDir());
-    void getExportDirectory()
-      .then((dir) => setSkillOutDir(dir || rememberedExportDir()))
-      .catch(() => setSkillOutDir(rememberedExportDir()));
+    void loadSharedExportDir();
     setSkillExportOutcome(null);
     setSkillClarifications([]);
     setSkillExportErrors([]);
@@ -1939,7 +1970,7 @@ export default function PageRecorder({
     }
     try {
       const outDir = skillOutDir.trim();
-      if (outDir) rememberExportDir(outDir);
+      if (outDir) await persistSharedExportDir(outDir);
       const outcome = await exportRecordingSkill(resultId, skillExportRequest());
       if (outcome.status === "needs_clarification" || (outcome.clarification_questions || []).length) {
         setSkillExportOutcome({ ...outcome, status: "needs_clarification" });
@@ -4024,6 +4055,7 @@ export default function PageRecorder({
                 style={{ marginTop: 6 }}
                 value={skillOutDir}
                 onChange={(event) => setSkillOutDir(event.target.value)}
+                onBlur={(event) => void persistSharedExportDir(event.target.value)}
                 placeholder="默认读取后端导出目录配置"
                 disabled={skillExporting}
               />

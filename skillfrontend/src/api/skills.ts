@@ -155,6 +155,11 @@ export async function getExportDirectory(): Promise<string> {
   return String(data?.out_dir || "").trim();
 }
 
+export async function saveExportDirectory(out_dir: string): Promise<string> {
+  const { data } = await api.put("/export/directory", { out_dir });
+  return String(data?.out_dir || out_dir).trim();
+}
+
 export async function exportAgentSkills(out_dir: string, mode: SkillExportMode = "package"): Promise<{ out_dir: string; mode: SkillExportMode; count: number; written: string[]; removed_frozen_folders?: string[] }> {
   const { data } = await api.post("/export/agent-skills", { out_dir, mode });
   return data;

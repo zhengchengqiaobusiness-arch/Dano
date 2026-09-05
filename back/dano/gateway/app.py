@@ -1342,7 +1342,9 @@ _EXPORT_STAGE_SUFFIX = re.compile(r"^[A-Za-z0-9_]{6,}$")
 
 
 def _default_export_dir() -> str:
-    return str(Path(__file__).resolve().parents[3] / "export")
+    from dano.execution.page.sessions import default_export_dir
+
+    return default_export_dir()
 
 
 def _normalize_export_dir(raw: str) -> str:
@@ -1928,14 +1930,34 @@ async def tool_options(req: ToolOptionsReq, x_tenant_key: str | None = Header(de
 
 
 class ExportSkillsReq(BaseModel):
-    out_dir: str = ""               # 空则写入仓库 export/;不要再套 agent-skills 等额外目录
+    out_dir: str = ""               # 空则用 Skill 页已保存目录或平台默认
     mode: Literal["proxy", "package", "both"] = "package"
+
+
+class ExportDirectoryReq(BaseModel):
+    out_dir: str
 
 
 @app.get("/export/directory")
 async def export_directory(x_tenant_key: str | None = Header(default=None)) -> dict:
-    """返回当前导出目录：页面配过的配置文件 > DANO_EXPORT_DIR > 仓库 export/。"""
+    """返回当前导出目录：Skill 页保存的配置 > DANO_EXPORT_DIR > 平台默认。"""
     await _auth_tenant(x_tenant_key)
+    return {"out_dir": _current_export_dir()}
+
+
+@app.put("/export/directory")
+async def put_export_directory(
+    req: ExportDirectoryReq,
+    x_tenant_key: str | None = Header(default=None),
+) -> dict:
+    """Skill 页与能力页共用同一导出目录，改一处两边都读到。"""
+    await _auth_tenant(x_tenant_key)
+    from dano.execution.page.sessions import save_export_dir
+
+    cleaned = _normalize_export_dir(req.out_dir)
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="out_dir 不能为空")
+    save_export_dir(cleaned)
     return {"out_dir": _current_export_dir()}
 
 
