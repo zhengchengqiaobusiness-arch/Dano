@@ -194,7 +194,7 @@ def write_capability_ids(spec) -> set[str]:  # noqa: ANN001
     return {
         str(cap.capability_id or cap.name)
         for cap in spec.capabilities
-        if is_write_capability(cap)
+        if is_write_capability(cap, spec)
     }
 
 

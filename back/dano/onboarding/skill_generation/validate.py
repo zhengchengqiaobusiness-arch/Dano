@@ -154,9 +154,9 @@ def validate_skill_plan(
     _validate_handbook_language(result, plan)
     _validate_intent_coverage(result, plan)
     _validate_no_silent_sequence(result, plan, spec)
-    _validate_route_execution_contracts(result, plan, caps)
+    _validate_route_execution_contracts(result, plan, caps, spec)
     _validate_forbidden_routes(result, plan)
-    _validate_done_when_matches_route(result, plan, caps)
+    _validate_done_when_matches_route(result, plan, caps, spec)
     return result
 
 
@@ -177,13 +177,14 @@ def _validate_done_when_matches_route(
     result: PlanValidation,
     plan: SkillPlan,
     caps: dict[str, FlowCapability],
+    spec: FlowSpec,
 ) -> None:
     write_markers = ("写入已确认", "写操作已确认")
     for route in plan.routes:
         writes = [
             cap_id
             for cap_id in route.capability_sequence
-            if caps.get(cap_id) and is_write_capability(caps[cap_id])
+            if caps.get(cap_id) and is_write_capability(caps[cap_id], spec)
         ]
         if writes:
             continue
@@ -254,6 +255,7 @@ def _validate_route_execution_contracts(
     result: PlanValidation,
     plan: SkillPlan,
     caps: dict[str, FlowCapability],
+    spec: FlowSpec,
 ) -> None:
     for route in plan.routes:
         if len(route.capability_sequence) > 1 and not route.examples:
@@ -267,7 +269,7 @@ def _validate_route_execution_contracts(
                 cap = caps.get(step.capability_id)
                 if cap is None:
                     continue
-                needs_confirm = bool(cap.requires_human_confirm) or is_write_capability(cap)
+                needs_confirm = bool(cap.requires_human_confirm) or is_write_capability(cap, spec)
                 if needs_confirm != bool(step.confirm_before_execute):
                     result.error(
                         f"路线 {route.route_id} 步骤 {step.step_key} 的确认点必须与能力契约一致"
@@ -300,12 +302,12 @@ def _validate_route_execution_contracts(
                 dependent = False
                 for cap_id in route.capability_sequence[1:]:
                     cap = caps.get(cap_id)
-                    if cap is not None and is_write_capability(cap) and _needs_user_or_prior(cap):
+                    if cap is not None and is_write_capability(cap, spec) and _needs_user_or_prior(cap):
                         dependent = True
                 if dependent:
                     result.error(f"路线 {route.route_id} 没有确认绑定，必须设置人工交接点")
         failure = str(route.failure_behavior or "")
-        if any(caps.get(cap_id) and is_write_capability(caps[cap_id]) for cap_id in route.capability_sequence):
+        if any(caps.get(cap_id) and is_write_capability(caps[cap_id], spec) for cap_id in route.capability_sequence):
             if "不得重试" not in failure and "不能重试" not in failure:
                 result.error(f"路线 {route.route_id} 写结果未知时必须禁止自动重试")
         user_fields = [
@@ -390,17 +392,17 @@ def _validate_route(
         used.add(cap.capability_id or cap_id)
         if capability_ref(cap) not in verified and cap.name not in verified:
             result.error(f"路线 {route.route_id} 引用了不可导出能力: {cap_id}")
-        if is_write_capability(cap):
+        if is_write_capability(cap, spec):
             write_caps.append(cap)
     needs_confirm = any(
-        caps[cap_id].requires_human_confirm or is_write_capability(caps[cap_id])
+        caps[cap_id].requires_human_confirm or is_write_capability(caps[cap_id], spec)
         for cap_id in route.capability_sequence
         if cap_id in caps
     )
     if needs_confirm != bool(route.requires_confirmation):
         result.error(f"路线 {route.route_id} 的确认要求必须与能力契约一致")
     for cap in write_caps:
-        if is_risk_write(cap) and not _route_mentions_risk(route, cap):
+        if is_risk_write(cap, spec) and not _route_mentions_risk(route, cap):
             result.error(
                 f"路线 {route.route_id} 的风险操作 {cap.title or cap.name} 必须明确提示确认"
             )

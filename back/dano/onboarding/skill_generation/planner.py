@@ -111,8 +111,8 @@ def _route_done_when(request: SkillGenerationRequest, writes: list[FlowCapabilit
     return "已返回可核对的查询结果"
 
 
-def _family(cap: FlowCapability) -> str:
-    return capability_family(cap)
+def _family(cap: FlowCapability, spec: FlowSpec | None = None) -> str:
+    return capability_family(cap, spec)
 
 
 def _text(request: SkillGenerationRequest) -> str:
@@ -130,8 +130,8 @@ def _mentions(text: str, hints: tuple[str, ...]) -> bool:
     return any(hint in text for hint in hints)
 
 
-def _score_capability(cap: FlowCapability, text: str) -> int:
-    family = _family(cap)
+def _score_capability(cap: FlowCapability, text: str, spec: FlowSpec | None = None) -> int:
+    family = _family(cap, spec)
     score = 0
     title = f"{cap.title} {cap.name} {cap.intent}"
     if cap.title and cap.title in text:
@@ -203,15 +203,15 @@ def _select_capabilities(
     if request.planning_mode == PlanningMode.DYNAMIC:
         return available, unused
     text = _text(request)
-    scored = [(cap, _score_capability(cap, text)) for cap in available]
+    scored = [(cap, _score_capability(cap, text, spec)) for cap in available]
     mentioned = [cap for cap, score in scored if score > 0]
     if not mentioned:
         selected = list(available)
     else:
         selected = mentioned
-        families = {_family(cap) for cap in selected}
+        families = {_family(cap, spec) for cap in selected}
         if "write" in families and "query" not in families and _mentions(text, _LOOKUP_HINTS):
-            selected.extend(cap for cap in available if _family(cap) == "query" and cap not in selected)
+            selected.extend(cap for cap in available if _family(cap, spec) == "query" and cap not in selected)
     selected_ids = {capability_ref(cap) for cap in selected}
     unused.extend(
         UnusedCapability(
@@ -255,8 +255,8 @@ def _required_user_inputs(cap: FlowCapability, bound_inputs: set[str]) -> list[s
     ]
 
 
-def _step_ids_for(sequence: list[FlowCapability]) -> list[str]:
-    families = [_family(cap) for cap in sequence]
+def _step_ids_for(sequence: list[FlowCapability], spec: FlowSpec | None = None) -> list[str]:
+    families = [_family(cap, spec) for cap in sequence]
     totals = {family: families.count(family) for family in set(families)}
     seen: dict[str, int] = {}
     ids: list[str] = []
@@ -365,9 +365,9 @@ def _truncate_playbook(text: str, limit: int = 800) -> str:
     return value[:limit].rstrip() + "…"
 
 
-def _operation_when(cap: FlowCapability) -> str:
+def _operation_when(cap: FlowCapability, spec: FlowSpec | None = None) -> str:
     title = _cap_title(cap)
-    family = _family(cap)
+    family = _family(cap, spec)
     if family == "query":
         return f"只要{title}，不要改也不要写"
     if family == "option":
@@ -393,6 +393,7 @@ def _build_composition(
     request: SkillGenerationRequest,
     selected: list[FlowCapability],
     routes: list[SkillRoute],
+    spec: FlowSpec | None = None,
 ) -> tuple[str, list[str]]:
     titles = [_cap_title(cap) for cap in selected]
     description = str(request.business_description or "").strip()
@@ -409,8 +410,8 @@ def _build_composition(
     combinations = [route for route in routes if len(route.capability_sequence) > 1]
     if _has_custom_playbook(request) and combinations:
         notes.append(f"组合约定：{description}")
-    reads = [cap for cap in selected if not is_write_capability(cap)]
-    writes = [cap for cap in selected if is_write_capability(cap)]
+    reads = [cap for cap in selected if not is_write_capability(cap, spec)]
+    writes = [cap for cap in selected if is_write_capability(cap, spec)]
     if reads and writes:
         notes.append("只要只读操作时，只执行对应只读操作，不得执行写入。")
     if combinations:
@@ -492,25 +493,25 @@ def _is_create(cap: FlowCapability) -> bool:
     )
 
 
-def _step_done_when(cap: FlowCapability) -> str:
+def _step_done_when(cap: FlowCapability, spec: FlowSpec | None = None) -> str:
     title = _cap_title(cap)
-    if is_write_capability(cap):
+    if is_write_capability(cap, spec):
         return f"「{title}」已展示影响、获得确认且返回成功；未配置只读回查时不得宣称业务状态已复核"
     return f"「{title}」已返回可核对的业务结果"
 
 
-def _step_failure(cap: FlowCapability) -> str:
+def _step_failure(cap: FlowCapability, spec: FlowSpec | None = None) -> str:
     title = _cap_title(cap)
-    if is_write_capability(cap):
+    if is_write_capability(cap, spec):
         return f"「{title}」失败、结果未知或用户取消时立即停止，不得静默重试"
     return f"「{title}」失败或结果为空时停止，并说明未继续后续步骤"
 
 
-def _placeholder_request(sequence: list[FlowCapability], fallback: str) -> str:
+def _placeholder_request(sequence: list[FlowCapability], fallback: str, spec: FlowSpec | None = None) -> str:
     titles = [_cap_title(cap) for cap in sequence if _cap_title(cap)]
     if len(titles) > 1:
         tail = "，再".join(titles[1:])
-        if _family(sequence[0]) == "query":
+        if _family(sequence[0], spec) == "query":
             last = sequence[-1]
             if _is_create(last):
                 return f"先帮我{titles[0]}，确认哪些项目还需要处理后再{tail}"
@@ -521,10 +522,10 @@ def _placeholder_request(sequence: list[FlowCapability], fallback: str) -> str:
     return fallback
 
 
-def _sequence_when(sequence: list[FlowCapability]) -> str:
+def _sequence_when(sequence: list[FlowCapability], spec: FlowSpec | None = None) -> str:
     head = _cap_title(sequence[0]) if sequence else "前一步"
     tail = _cap_title(sequence[-1]) if sequence else "后一步"
-    if sequence and _family(sequence[0]) == "query":
+    if sequence and _family(sequence[0], spec) == "query":
         last = sequence[-1]
         if _is_create(last):
             return f"用户要先用「{head}」核对已有记录，再用「{tail}」补充尚未存在的项目"
@@ -545,7 +546,7 @@ def _route(
     spec: FlowSpec | None = None,
 ) -> SkillRoute:
     cap_ids = [capability_ref(cap) for cap in sequence]
-    step_ids = _step_ids_for(sequence)
+    step_ids = _step_ids_for(sequence, spec)
     annotated = _annotate_bindings(sequence, step_ids, bindings)
     bound_by_cap: dict[str, set[str]] = {}
     for binding in annotated:
@@ -597,8 +598,8 @@ def _route(
             and not independent
             and _needs_target(cap)
         ):
-            previous_is_write = is_write_capability(prev)
-            create_handoff = _family(prev) == "query" and _is_create(cap)
+            previous_is_write = is_write_capability(prev, spec)
+            create_handoff = _family(prev, spec) == "query" and _is_create(cap)
             field_labels = "、".join(f"`{field}`" for field in user_fields) or "必要字段"
             checkpoint = HumanCheckpoint(
                 after_step=step_ids[index - 1],
@@ -626,7 +627,7 @@ def _route(
             if steps:
                 steps[-1] = steps[-1].model_copy(update={"checkpoint": checkpoint})
             mode = CompositionMode.HANDOFF
-        confirm = bool(cap.requires_human_confirm) or is_write_capability(cap)
+        confirm = bool(cap.requires_human_confirm) or is_write_capability(cap, spec)
         steps.append(RouteStep(
             step_key=step_key,
             capability_id=cap_id,
@@ -634,15 +635,15 @@ def _route(
             bindings=pair,
             checkpoint=None,
             confirm_before_execute=confirm,
-            done_when=_step_done_when(cap),
-            on_failure=_step_failure(cap),
+            done_when=_step_done_when(cap, spec),
+            on_failure=_step_failure(cap, spec),
         ))
     required = list(dict.fromkeys(required))
-    writes = [cap for cap in sequence if is_write_capability(cap)]
+    writes = [cap for cap in sequence if is_write_capability(cap, spec)]
     confirmation = [
         _cap_title(cap)
         for cap in sequence
-        if cap.requires_human_confirm or is_write_capability(cap)
+        if cap.requires_human_confirm or is_write_capability(cap, spec)
     ]
     done = _route_done_when(request, writes)
     cleaned_when = _clean_when(
@@ -658,7 +659,7 @@ def _route(
     keep_provided_example = example_request in provided_examples and (
         (
             len(sequence) > 1
-            and all(_score_capability(cap, example_request) > 0 for cap in sequence)
+            and all(_score_capability(cap, example_request, spec) > 0 for cap in sequence)
         )
         or (
             len(sequence) == 1
@@ -668,7 +669,7 @@ def _route(
     if not keep_provided_example:
         if example_request in provided_examples:
             example_request = cleaned_when
-        example_request = _placeholder_request(sequence, example_request)
+        example_request = _placeholder_request(sequence, example_request, spec)
     failure = "任一能力失败立即停止；写操作结果不明时不得重试，先用已有只读能力核查。用户取消或候选无效时停止并报告未执行。"
     if request.forbidden_actions:
         failure = f"{failure} 禁止：{request.forbidden_actions}"
@@ -785,7 +786,7 @@ def _compile_branch_route(
         return branch.unresolved[0] if branch.unresolved else f"无法解释「{branch.trigger}」"
     if (
         len(sequence) == 1
-        and is_write_capability(sequence[0])
+        and is_write_capability(sequence[0], spec)
         and _mentions(branch.trigger, _LOOKUP_HINTS)
     ):
         sequence = _append_lookup(sequence, queries, branch.trigger)
@@ -793,11 +794,11 @@ def _compile_branch_route(
     for left, right in zip(sequence, sequence[1:], strict=False):
         bindings.extend(_relation_pair(spec, left, right))
     if len(sequence) == 1:
-        when = _operation_when(sequence[0])
-        if branch.target_given and is_write_capability(sequence[0]):
+        when = _operation_when(sequence[0], spec)
+        if branch.target_given and is_write_capability(sequence[0], spec):
             when = f"要执行「{_cap_title(sequence[0])}」且目标或必要字段已经给出"
     else:
-        when = branch.trigger if len(branch.trigger) <= 80 else _sequence_when(sequence)
+        when = branch.trigger if len(branch.trigger) <= 80 else _sequence_when(sequence, spec)
     return _route(
         route_id=_stable_route_id(sequence),
         name=" → ".join(_cap_title(cap) for cap in sequence),
@@ -819,7 +820,7 @@ def _confirmed_relation_routes(
     options: list[FlowCapability],
 ) -> list[SkillRoute]:
     routes: list[SkillRoute] = []
-    writes = [cap for cap in selected if is_write_capability(cap)]
+    writes = [cap for cap in selected if is_write_capability(cap, spec)]
     for write in writes:
         if capability_ref(write) not in mentioned and write.name not in mentioned:
             continue
@@ -858,10 +859,10 @@ _TARGET_FIELD_NAMES = frozenset({
 })
 
 
-def _is_lookup_capability(cap: FlowCapability) -> bool:
+def _is_lookup_capability(cap: FlowCapability, spec: FlowSpec | None = None) -> bool:
     title = _cap_title(cap)
     return (
-        _family(cap) == "query"
+        _family(cap, spec) == "query"
         and not any(token in title for token in ("详情", "详细", "导出", "下载"))
         and any(token in title for token in ("查询", "搜索", "筛选", "检索", "列表"))
     )
@@ -886,7 +887,7 @@ def _selection_handoff_routes(
 ) -> list[SkillRoute]:
     """Plan lookup → select → operate without inventing an automatic binding."""
 
-    lookups = [cap for cap in selected if _is_lookup_capability(cap)]
+    lookups = [cap for cap in selected if _is_lookup_capability(cap, spec)]
     if not lookups:
         return []
     lookup = lookups[0]
@@ -938,7 +939,7 @@ def _atomic_fallback_routes(
         routes.append(_route(
             route_id=_stable_route_id(sequence),
             name=_cap_title(cap),
-            when_to_use=_operation_when(cap),
+            when_to_use=_operation_when(cap, spec),
             sequence=sequence,
             bindings=[],
             request=request,
@@ -958,7 +959,7 @@ def propose_deterministic_plan(
     text = _text(request)
     by_family: dict[str, list[FlowCapability]] = {"query": [], "option": [], "write": [], "other": []}
     for cap in selected:
-        by_family.setdefault(_family(cap), []).append(cap)
+        by_family.setdefault(_family(cap, spec), []).append(cap)
     queries = by_family.get("query") or []
     options = by_family.get("option") or []
     writes = by_family.get("write") or []
@@ -1044,7 +1045,7 @@ def propose_deterministic_plan(
             routes.append(_route(
                 route_id=_stable_route_id(selected[:1]),
                 name=_cap_title(selected[0]),
-                when_to_use=_operation_when(selected[0]),
+                when_to_use=_operation_when(selected[0], spec),
                 sequence=selected[:1],
                 bindings=[],
                 request=request,
@@ -1098,7 +1099,7 @@ def propose_deterministic_plan(
         when = str(route.when_to_use or "").strip()
         if when and when not in triggers and not _is_recording_copy(when):
             triggers.append(when)
-    composition_summary, composition_notes = _build_composition(request, selected, routes)
+    composition_summary, composition_notes = _build_composition(request, selected, routes, spec)
     summary = request.business_description.strip()
     if is_stock_playbook(summary):
         summary = composition_summary or "、".join(_cap_title(cap) for cap in selected)

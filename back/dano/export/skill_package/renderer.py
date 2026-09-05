@@ -3391,6 +3391,13 @@ def _consumer_route(route: dict, plans: list[dict]) -> dict:
         for item in (route.get("checkpoints") or [])
         if isinstance(item, dict)
     ]
+    write_names = {
+        str(key)
+        for plan in plans
+        if plan.get("is_write") or plan.get("requires_confirmation")
+        for key in (plan.get("name"), plan.get("title"), plan.get("capability_id"))
+        if key
+    }
     steps = [
         {
             "operation": operation(item.get("capability_id")),
@@ -3402,7 +3409,9 @@ def _consumer_route(route: dict, plans: list[dict]) -> dict:
                 for source in (item.get("input_sources") or [])
                 if isinstance(source, dict) and source.get("field")
             ],
-            "confirm_before_execute": bool(item.get("confirm_before_execute")),
+            "confirm_before_execute": bool(item.get("confirm_before_execute"))
+            or operation(item.get("capability_id")) in write_names
+            or str(item.get("capability_id") or "") in write_names,
             "done_when": item.get("done_when") or "结果可核对",
             "on_failure": item.get("on_failure") or "停止并报告未执行",
         }
@@ -3432,7 +3441,11 @@ def _consumer_route(route: dict, plans: list[dict]) -> dict:
         "required_user_inputs": list(route.get("required_user_inputs") or []),
         "bindings": bindings,
         "preconditions": list(route.get("preconditions") or []),
-        "requires_confirmation": bool(route.get("requires_confirmation")),
+        "requires_confirmation": bool(route.get("requires_confirmation")) or any(
+            str(item) in write_names or operation(item) in write_names
+            for item in (route.get("capability_sequence") or [])
+            if str(item)
+        ) or any(step.get("confirm_before_execute") for step in steps),
         "composition_mode": route.get("composition_mode") or "atomic",
         "steps": steps,
         "checkpoints": checkpoints,

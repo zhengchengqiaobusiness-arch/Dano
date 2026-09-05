@@ -21,12 +21,14 @@ from dano.execution.page.flow_spec_core.request_contract import (
     ensure_recorded_body_source,
 )
 from dano.export.skill_package.renderer import package_slug, render_skill_package
+from dano.onboarding.skill_generation.catalog import is_write_capability
 from dano.onboarding.skill_generation.export import (
     build_export_skill_spec,
     export_recording_skill,
 )
 from dano.onboarding.skill_generation.models import SkillGenerationRequest
 from dano.onboarding.skill_generation.planner import propose_deterministic_plan
+from dano.onboarding.skill_generation.validate import validate_skill_plan
 
 
 def _pi_recording_payload() -> dict:
@@ -428,3 +430,97 @@ def test_existing_body_source_is_kept() -> None:
 
     prepared = ensure_recorded_body_source(spec)
     assert json.loads(prepared.steps[0].body_source) == {"title": "已有", "other": 9}
+
+
+def test_command_kind_follows_execute_http_method() -> None:
+    write = FlowCapability(
+        capability_id="cap_cmd",
+        name="handle_record",
+        title="办理记录",
+        kind="command",
+        request_refs=[CapabilityRequestRef(step_id="step_w", usage="execute")],
+    )
+    lookup = FlowCapability(
+        capability_id="cap_lookup",
+        name="lookup_record",
+        title="核对记录",
+        kind="command",
+        request_refs=[CapabilityRequestRef(step_id="step_r", usage="execute")],
+    )
+    posted_query = FlowCapability(
+        capability_id="cap_search",
+        name="search_records",
+        title="搜索",
+        kind="query",
+        request_refs=[CapabilityRequestRef(step_id="step_q", usage="execute")],
+    )
+    spec = FlowSpec(
+        capabilities=[write, lookup, posted_query],
+        steps=[
+            FlowStep(step_id="step_w", method="POST", path="/api/write"),
+            FlowStep(step_id="step_r", method="GET", path="/api/read"),
+            FlowStep(step_id="step_q", method="POST", path="/api/search"),
+        ],
+    )
+
+    assert is_write_capability(write, spec) is True
+    assert is_write_capability(lookup, spec) is False
+    assert is_write_capability(posted_query, spec) is False
+    assert is_write_capability(write) is False
+
+
+def test_command_kind_write_route_requires_confirmation(tmp_path: Path) -> None:
+    payload = _pi_recording_payload()
+    payload["capabilities"][1]["kind"] = "command"
+    payload["capabilities"][1]["name"] = "handle_record"
+    payload["capabilities"][1]["title"] = "办理记录"
+    spec = FlowSpec.model_validate(payload)
+    request = SkillGenerationRequest(
+        title="业务办理",
+        business_description="查询记录，然后办理记录。",
+        out_dir=str(tmp_path),
+    )
+    verified = {cap.capability_id for cap in spec.capabilities}
+    plan = propose_deterministic_plan(spec, request, verified, "fp-command-write")
+    checked = validate_skill_plan(
+        plan,
+        spec,
+        verified_capability_ids=verified,
+        expected_fingerprint="fp-command-write",
+    )
+    assert checked.ok, checked.errors
+
+    write_routes = [
+        route for route in plan.routes
+        if "cap_create" in route.capability_sequence
+    ]
+    assert write_routes
+    for route in write_routes:
+        assert route.requires_confirmation is True
+        write_steps = [step for step in route.steps if step.capability_id == "cap_create"]
+        assert write_steps
+        assert all(step.confirm_before_execute for step in write_steps)
+
+    skill = build_export_skill_spec(
+        spec,
+        tenant="test",
+        skill_id="oa.action_abcd1234abcd1234abcd1234abcd1234",
+        title="业务办理",
+        plan=plan,
+    )
+    slug = render_skill_package(skill, str(tmp_path), tenant="test")
+    contract = json.loads((tmp_path / slug / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
+    write_caps = [
+        item for item in contract.get("capabilities") or []
+        if item.get("name") in {"handle_record", "create_record"} or item.get("is_write")
+    ]
+    assert write_caps
+    assert all(item.get("requires_confirmation") and item.get("is_write") for item in write_caps)
+    for route in contract.get("routes") or []:
+        sequence = list(route.get("operation_sequence") or [])
+        if not any(name in sequence for name in ("handle_record", "办理记录", "create_record")):
+            continue
+        assert route.get("requires_confirmation") is True
+        for step in route.get("steps") or []:
+            if step.get("operation") in {"handle_record", "办理记录", "create_record"}:
+                assert step.get("confirm_before_execute") is True

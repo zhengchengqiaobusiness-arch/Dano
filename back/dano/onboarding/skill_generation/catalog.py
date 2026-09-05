@@ -11,6 +11,7 @@ from dano.execution.page.request_identity import normalized_request_path
 RISK_WRITE_KINDS = frozenset({
     "delete", "withdraw", "submit", "submit_batch", "approve", "reject",
 })
+_WRITE_EXECUTE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _CONFIRMED_EVIDENCE = frozenset({"user_confirmed", "manual", "manual_relation", "typed_capability_contract"})
 
 
@@ -27,16 +28,44 @@ def capability_by_id(spec: FlowSpec) -> dict[str, FlowCapability]:
     return index
 
 
-def is_write_capability(cap: FlowCapability) -> bool:
+def _ref_is_write_execute(ref: Any) -> bool:
+    if str(getattr(ref, "usage", "") or "") != "execute":
+        return False
+    return str(getattr(ref, "method", "") or "").upper() in _WRITE_EXECUTE_METHODS
+
+
+def _capability_has_write_execute(spec: FlowSpec | None, cap: FlowCapability) -> bool:
+    if any(_ref_is_write_execute(ref) for ref in cap.request_refs or []):
+        return True
+    if spec is None:
+        return False
+    steps = {step.step_id: step for step in spec.steps or []}
+    execute_ids = {
+        str(ref.step_id)
+        for ref in cap.request_refs or []
+        if str(ref.usage or "") == "execute" and str(ref.step_id or "")
+    }
+    if not execute_ids:
+        execute_ids = {str(item) for item in cap.step_ids or [] if str(item)}
+    return any(
+        str(steps[step_id].method or "").upper() in _WRITE_EXECUTE_METHODS
+        for step_id in execute_ids
+        if step_id in steps
+    )
+
+
+def is_write_capability(cap: FlowCapability, spec: FlowSpec | None = None) -> bool:
     kind = str(cap.kind or "").strip().lower()
     if kind in WRITE_CAPABILITY_KINDS:
         return True
     if kind in READ_CAPABILITY_KINDS:
         return False
+    if _capability_has_write_execute(spec, cap):
+        return True
     return bool(cap.requires_human_confirm)
 
 
-def capability_family(cap: FlowCapability) -> str:
+def capability_family(cap: FlowCapability, spec: FlowSpec | None = None) -> str:
     """Classify a packed capability for route compilation. Does not invent kinds."""
     kind = str(cap.kind or "").strip().lower()
     title = f"{cap.title} {cap.name} {cap.intent}"
@@ -44,7 +73,7 @@ def capability_family(cap: FlowCapability) -> str:
         return "option"
     if kind in READ_CAPABILITY_KINDS or any(token in title for token in ("查询", "查看", "列表", "检索", "筛选")):
         return "query"
-    if is_write_capability(cap) or any(token in title for token in ("提交", "保存", "审批", "写入", "新建", "编辑", "更新")):
+    if is_write_capability(cap, spec) or any(token in title for token in ("提交", "保存", "审批", "写入", "新建", "编辑", "更新")):
         return "write"
     return kind or "other"
 
@@ -87,7 +116,7 @@ def distinct_stage8_capabilities(
     primary_keys = {
         key
         for cap in primary
-        if not is_write_capability(cap)
+        if not is_write_capability(cap, spec)
         for key in _execute_endpoint_keys(spec, cap)
     }
     kept: list[FlowCapability] = []
@@ -96,7 +125,7 @@ def distinct_stage8_capabilities(
         refs = {capability_ref(cap), str(cap.name or "")}
         duplicate = bool(
             refs & fallback_refs
-            and not is_write_capability(cap)
+            and not is_write_capability(cap, spec)
             and _execute_endpoint_keys(spec, cap) & primary_keys
         )
         if duplicate:
@@ -106,8 +135,8 @@ def distinct_stage8_capabilities(
     return kept, duplicates
 
 
-def is_risk_write(cap: FlowCapability) -> bool:
-    return str(cap.kind or "").strip().lower() in RISK_WRITE_KINDS or is_write_capability(cap)
+def is_risk_write(cap: FlowCapability, spec: FlowSpec | None = None) -> bool:
+    return str(cap.kind or "").strip().lower() in RISK_WRITE_KINDS or is_write_capability(cap, spec)
 
 
 def schema_properties(schema: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -273,7 +302,7 @@ def public_capability_catalog(spec: FlowSpec, verified_ids: set[str]) -> list[di
             "title": cap.title or cap.name,
             "kind": cap.kind,
             "intent": cap.intent,
-            "write": is_write_capability(cap),
+            "write": is_write_capability(cap, spec),
             "requires_confirmation": bool(cap.requires_human_confirm),
             "input_schema": dict(cap.input_schema or {}),
             "output_schema": dict(cap.output_schema or {}),
