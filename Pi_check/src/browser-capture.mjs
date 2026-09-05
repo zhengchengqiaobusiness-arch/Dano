@@ -9,6 +9,7 @@
 
 import { randomUUID } from "node:crypto";
 import { logPiOnly } from "./policy.mjs";
+import { collectVisibleControlsInPage } from "./visible-controls.mjs";
 import {
   isLoginUrl,
   looksLoggedIn,
@@ -193,6 +194,23 @@ async function waitForPageReady(page) {
   await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
 }
 
+async function snapshotVisibleControls(page, handle, append, reason) {
+  if (!page || page.isClosed?.() || handle.closed) return;
+  let controls = [];
+  try {
+    controls = await page.evaluate(collectVisibleControlsInPage);
+  } catch {
+    return;
+  }
+  if (!Array.isArray(controls) || !controls.length) return;
+  await append("visible_control", {
+    page_id: handle.pageIds.get(page) || "",
+    url: page.url(),
+    reason: String(reason || ""),
+    controls,
+  });
+}
+
 export class PlaywrightBrowser {
   constructor({ browser, context, page, recordingId, targetUrl = "" }) {
     this.browser = browser;
@@ -209,6 +227,7 @@ export class PlaywrightBrowser {
     this.sealed = {};
     this.lastPointerMoveAt = 0;
     this.sawLoginPage = false;
+    this.snapshotVisibleControls = async () => {};
     this.viewport = DEFAULT_VIEWPORT;
     this.deviceScaleFactor = 1;
     if (page) this.adoptPage(page);
@@ -372,6 +391,11 @@ export class PlaywrightBrowser {
 
   async close() {
     try {
+      await this.snapshotVisibleControls("closing");
+    } catch {
+      // 控件快照失败不得改写结果
+    }
+    try {
       await this.persistSession();
     } catch {
       // 保存登录态失败不得改写结果
@@ -491,6 +515,10 @@ export async function createPlaywrightBrowser({ recording, appendEvidence }) {
     reason: "page_ready",
     image: blob,
   });
+  await snapshotVisibleControls(page, handle, append, "page_ready");
+  handle.snapshotVisibleControls = (reason = "manual") => (
+    snapshotVisibleControls(handle.livePage(), handle, append, reason)
+  );
   await handle.persistSession().catch(() => false);
   return handle;
 }
@@ -588,6 +616,8 @@ async function attachPage(page, handle, append, rememberBody) {
       is_main: frame === page.mainFrame(),
     });
     if (frame !== page.mainFrame()) return;
+    await page.waitForTimeout(500).catch(() => {});
+    await snapshotVisibleControls(page, handle, append, "navigated");
     if (isLoginUrl(frame.url())) {
       handle.sawLoginPage = true;
       return;

@@ -66,6 +66,9 @@ test("13. 完成一次真实浏览器录制", async (t) => {
   const events = await harness.files.readEvidence(started.id);
   assert.ok(events.some((event) => event.kind === "network_request"));
   assert.ok(events.some((event) => event.kind === "interaction" || event.kind === "screenshot"));
+  const controls = events.find((event) => event.kind === "visible_control");
+  assert.ok(controls);
+  assert.ok((controls.payload?.controls || []).some((item) => item.name === "days" || item.label.includes("天数")));
   assert.deepEqual(stopped.result.e2e, "browser");
 });
 

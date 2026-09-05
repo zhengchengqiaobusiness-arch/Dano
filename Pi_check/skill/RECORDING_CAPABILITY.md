@@ -66,7 +66,7 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 
 ### 用索引建台账，不要靠抽样
 
-`list_recording_manifest` 只有计数。必须先调 `list_recording_index`，看完全场 interaction 文案、xhr/fetch 的 METHOD+path、页面跳转，再按需 `read_evidence_item` 读正文。不要只读前半场。
+`list_recording_manifest` 只有计数。必须先调 `list_recording_index`，看完全场 interaction 文案、xhr/fetch 的 METHOD+path、network_response、`visible_control`、截图和页面跳转，再按需 `read_evidence_item` 读正文。请求/响应正文在 `payload.body.text` 或 `body.blob_id`。`read_response_blob` 只接受 `blob_` 开头的 id，不要把 `request_id` 当 blob，也不要编造截图 blob_id。看完关键请求就 `submit_recording_result`，禁止把完整 result 写在对话里。不要只读前半场。
 
 索引对齐方法（换任何页面都这样做）：
 
@@ -80,6 +80,24 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 - 选择器弹层（标题像「选择××」、表格单选+确认）、日期面板、展开收起 → 不是新能力，挂到打开它的那个字段所在能力。
 - 同一动作做两遍只保留一项能力。有确认按钮+写请求却没有能力、又没有 `unresolved`，就是失败。没有对应写请求就不要编造能力。
 - 证据引用必须是本场真实 seq。不要把后一轮的序号写到前一轮。
+
+### 陌生页解题步骤（换任何页都走这一遍）
+
+不要套某系统的 URL 或字段名。对本场每个独立动作，按下面四步自己对齐：
+
+1. **切能力**：点过的独立业务按钮 + 随后真正改数据或查询的请求 = 一项能力。一个能力恰好一个 `execute`。打开表单、选项、提交后回读挂到该能力，不要另开能力。
+2. **摊开 execute 请求形状**：把这条请求的每个 query/body 键列出来。同一键出现几次就建几个 param，共用这个 path。一个数组只建一个数组 path；行差别写在行内字段。
+3. **摊开当前页控件**：读该动作所在页的 `visible_control` 和点过的 interaction。每个控件看 `region`（filter/form/table）、`label`/`placeholder`/`name`、`control_kind`（input/select/date/textarea/upload/readonly）、`required_mark`、`readonly`。
+4. **逐键对上控件，决定调用方还是系统**：
+   - 对得上**可改**控件（input/select/date/textarea/upload，且非 readonly）→ **调用方**。即使本场没改、这次 query/body 没带这个键，也留下可选调用方字段。`path` 用控件 `name` 或同页已发出请求里的同义键。对不上 path 就写入 `unresolved`，不要假装控件不存在。
+   - 对得上灰框 / readonly / 自动编号 → **系统**。
+   - 请求里有、控件上没有：登录用户/组织且初始加载请求就自动带上 → **系统**，`source_kind=current_user`，reason 写「运行时取当前登录身份」，**禁止**把本场的用户 ID、公司 ID 写成永远不变的 `constant` 固定值。
+   - 请求里有、控件上没有：行类型判别、行序号、前端行键、空附件数组、前端时间戳、空审批人对象 → **系统**，`source_kind=constant`，`default_value` = 本场请求原值。
+   - 其余对不上的请求键 → **系统**，按请求原值提交，不要猜公式。
+
+禁止把 `visible_control` 里看得见的日期、下拉、附件写成「不可见 / 不可改 / 系统固定」。  
+点「添加××行」产生的行类型码不是调用方控件，不要放进 `input_schema`。  
+分页只留在真正执行查询的那个能力的系统字段。
 
 ## 字段必须出现在页面能读到的两个位置
 
@@ -128,8 +146,8 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 - 灰底只读、保存时自动生成的单号、合计行、金额/税额/优惠后金额这类算出来的格子 → 系统。来源 `computed` / `generated` / `previous_response`。不要标成“自动计算，可修改”，也不要放进 `input_schema`。
 - 列表行点进查看/编辑/删除/审批时带出的主键、明细行 ID、流程实例 ID → `selected_record_identity` 或 `previous_response`，**系统**。不要放进 `input_schema`。
 - 选项接口顺便带回的显示名、条码、库存、单位等，人不能单独填 → 系统，`selected_option_field` / `previous_response`。
-- 打开编辑时 GET 详情回填、提交时原样带回、表单上根本没有的字段（创建人、创建时间、入库数）→ 系统。
-- 登录态、Cookie、分页、流程定义 Key、单据类型 → 系统。
+- 打开编辑时 GET 详情回填、提交时原样带回、表单上根本没有对应可改控件的字段（创建人只读、前端时间戳、入库数）→ 系统。
+- 登录态、Cookie、分页、流程定义 Key → 系统。页面上能改的类型/状态下拉、日期、附件仍是调用方，不要因为本场没改就收成系统。
 
 更细的来源：
 
@@ -172,7 +190,7 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 3. **必填**：看当前页星号或校验文案，不看你是否刚好填过。没有星号不要标必填，除非校验文案证明必填。`input_schema.required` 必须列出全部 `exposed_to_user=true` 且 `required=true` 的 key。只写一边，页面会显示成全可选。
 4. **放大镜 / 表格选择器**：这是一个 `api_option` 调用方字段，提交行主键。`enum_options` 用选项接口返回的 `{label,value}`，value 是行 id，不是表格行号。选择器弹层里的公司/编号/名称筛选属于弹层内部，不要提升成父列表或父表单的调用方字段，除非父页面自己也有这个控件。
 5. **选项接口顺便带回、灰底展示的编号/保管人/部门**：`selected_option_field`，系统。
-6. **页面加载就自动带上、筛选条上没有的当前用户 / 当前组织**：系统。`reason` 写「运行时取当前登录身份」，不要把本场的 `1`、`101` 写成永远不变的 `constant` 固定值。
+6. **页面加载就自动带上、筛选条和表单都没有对应可改控件的当前用户 / 当前组织**：系统。`source_kind=current_user`，`reason` 写「运行时取当前登录身份」，不要把本场的用户 ID、公司 ID 写成永远不变的 `constant` 固定值，也不要因此写进 `input_schema`。
 7. **开关**的标签用控件原文（开启/关闭），不要抄另一页的是/否。
 8. **没打开过的下拉**：不要编 `enum_options`，也不要用列表单元格或另一页的值冒充选项。请求里已经带着的值：留下调用方字段，`options_complete=false`，只写当场看到的项。没进请求、也没打开过：仍按可见筛选项留下调用方可选字段，不要编选项，也不要因此写入 `unresolved`。打开过的必须列当场全部选项，并标 `options_complete=true`。
 9. **同一 path 只能有一种归属**。禁止同一个 `query.xxx` / `body.xxx` 既写成调用方又写成系统。重复键可以对应多个 param，但归属必须相同，执行时仍发原键。禁止把一个数组 path 拆成多个调用方字段。
@@ -290,7 +308,7 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 3. 每个能力的 `request_refs` 都是 `{step_id, usage}` 对象，并能在 `steps` 里找到同名 `step_id`。
 4. 每个 step 的 `params` 都是数组，数组元素都有 `key` 和 `path`。
 5. 结果里没有 `capabilities[].fields`。
-6. 人能填/能选的筛选、表单、下拉都在调用方字段里，并且都在 `input_schema`；灰框/计算/自动编号/行主键只在 params 且 `exposed_to_user=false`。
+6. 人能填/能选的筛选、表单、下拉、日期、附件都在调用方字段里，并且都在 `input_schema`；`visible_control` 里可改的控件没有被写成系统。灰框/计算/自动编号/行主键/行类型码只在 params 且 `exposed_to_user=false`。
 7. 从列表行或上一步响应带出的主键/流程实例 ID 是系统字段，不是调用方输入，不要写进 `input_schema`。
 8. 登录态和分页只出现在真正执行查询的那个能力的系统字段里，不要污染撤回/删除。
 9. 写过“还做了查看/编辑/进度”却没有对应能力，就是失败，必须补能力或写入 `unresolved`。
@@ -304,12 +322,13 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 17. `option_source` 只对应本能力可见下拉。附件/审批/流程定义不是 option_source。
 18. 没打开过的下拉里没有编造的 `enum_options`。
 19. GET 详情 execute 没有把响应展示字段写成请求 `body.*`。
+20. 已对照 `visible_control`：可改日期/下拉/附件都在调用方；登录身份是 `current_user` 不是写死数字；行类型码/行键只在系统 params。
 
 ## 泛化
 
 - 本 Skill 不绑定任何具体业务页、系统名或字段名。上面的例子只说明形状，不是某页的补丁。
-- 只根据本场点击、输入、请求、响应、截图判断。
-- 换一个页面也走同一套台账 / 切分 / 编排 / 字段形状规则：控件决定调用方，请求形状决定 path/重复键/数组，无来源字段按原值交给系统。
+- 只根据本场点击、输入、请求、响应、`visible_control`、截图判断。
+- 换一个页面也走同一套台账 / 切分 / 编排 / 字段形状规则：先摊请求形状，再摊可见控件，对得上可改控件就是调用方；无控件的请求键按身份或原值交给系统。
 - 最终 `result` 必须完整、可编排、可执行：每个点过的独立动作都在，关联和顺序能执行，字段处理逻辑与真实请求一致。
 - 证据不够、台账对不齐、点过的独立动作做不成能力时：写入 `unresolved`，不要猜测成看似可用的残缺能力。导出层只拒绝这种能力缺口。
 - 字段来源写不出时：标系统自动处理，`default_value` 用请求原值。不要猜测来源，也不要因此阻止导出。

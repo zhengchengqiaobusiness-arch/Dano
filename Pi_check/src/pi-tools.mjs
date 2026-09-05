@@ -15,6 +15,32 @@ function toolText(payload) {
   };
 }
 
+async function responseView(evidence, recordingId, response) {
+  const body = response.payload?.body && typeof response.payload.body === "object"
+    ? { ...response.payload.body }
+    : null;
+  const view = {
+    seq: response.seq,
+    status: response.payload?.status,
+    body,
+  };
+  if (body?.stored === "blob" && body.blob_id) {
+    try {
+      const slice = await evidence.readBlob(recordingId, body.blob_id, { offset: 0, length: 8000 });
+      view.body = {
+        ...body,
+        text: Buffer.from(slice.bytes).toString("utf8"),
+        preview_bytes: slice.bytes.byteLength,
+        has_more: slice.hasMore,
+        total_bytes: slice.totalBytes,
+      };
+    } catch {
+      // 文件不在就只回元数据，不编造正文
+    }
+  }
+  return view;
+}
+
 export function createPiToolHost({
   recordingId,
   evidence,
@@ -51,23 +77,72 @@ export function createPiToolHost({
     async read_evidence_item({ seq }) {
       const event = await evidence.readOne(recordingId, seq);
       if (!event) return { found: false, seq };
+      const requestId = event.payload?.request_id;
+      if (event.kind === "network_request" && requestId) {
+        const response = await evidence.findResponseForRequest(recordingId, requestId);
+        if (response) {
+          return {
+            found: true,
+            event,
+            response: await responseView(evidence, recordingId, response),
+          };
+        }
+      }
       return { found: true, event };
     },
     async read_response_blob({ blob_id, offset = 0, length = 65536 }) {
-      const slice = await evidence.readBlob(recordingId, blob_id, {
-        offset: Number(offset) || 0,
-        length: Math.min(1024 * 1024, Math.max(1, Number(length) || 65536)),
-      });
-      return {
-        blob_id: slice.blobId,
-        offset: slice.offset,
-        total_bytes: slice.totalBytes,
-        has_more: slice.hasMore,
-        bytes_base64: Buffer.from(slice.bytes).toString("base64"),
-      };
+      const start = Number(offset) || 0;
+      const maxLen = Math.min(1024 * 1024, Math.max(1, Number(length) || 65536));
+      const stored = await evidence.findStoredBody(recordingId, blob_id);
+      if (stored?.body?.stored === "inline") {
+        const text = String(stored.body.text || "");
+        const slice = text.slice(start, start + maxLen);
+        return {
+          found: true,
+          stored: "inline",
+          blob_id: stored.body.blob_id || "",
+          request_id: stored.event?.payload?.request_id || "",
+          text: slice,
+          offset: start,
+          total_bytes: text.length,
+          has_more: start + slice.length < text.length,
+        };
+      }
+      const fileId = stored?.body?.blob_id || blob_id;
+      try {
+        const slice = await evidence.readBlob(recordingId, fileId, { offset: start, length: maxLen });
+        return {
+          found: true,
+          stored: "blob",
+          blob_id: slice.blobId,
+          offset: slice.offset,
+          total_bytes: slice.totalBytes,
+          has_more: slice.hasMore,
+          bytes_base64: Buffer.from(slice.bytes).toString("base64"),
+        };
+      } catch (error) {
+        if (error?.code === "ENOENT") {
+          return {
+            found: false,
+            blob_id,
+            error: "没有这个正文。请读 network_response 的 payload.body.text，或把 body.blob_id（blob_ 开头）传给本工具。不要把 request_id 当成 blob_id。",
+          };
+        }
+        throw error;
+      }
     },
     async read_screenshot({ blob_id, offset = 0, length = 65536 }) {
-      return this.read_response_blob({ blob_id, offset, length });
+      const result = await this.read_response_blob({ blob_id, offset, length });
+      if (result.found) return result;
+      const index = await evidence.index(recordingId);
+      const shots = index.items.filter((item) => item.kind === "screenshot" && item.blob_id);
+      return {
+        found: false,
+        blob_id,
+        error: shots.length
+          ? `没有这张截图。可用 blob_id：${shots.map((item) => item.blob_id).join(", ")}`
+          : "这场录制没有截图。不要编造 blob_id，用 interaction 和请求正文即可。",
+      };
     },
     async get_recording_freeze_state() {
       const session = evidence.snapshot(recordingId);
@@ -118,7 +193,7 @@ export function describePiTools() {
     {
       name: "list_recording_index",
       label: "证据索引",
-      description: "按序号列出 interaction、xhr/fetch 请求和页面跳转的短摘要。只投影已有字段，不分类、不判断能力、不丢后半场。",
+      description: "按序号列出 interaction、xhr/fetch、network_response、visible_control、截图和页面跳转。visible_control 是当前页看得见的筛选/表单控件事实。只投影已有字段，不分类、不判断能力。",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
     {
@@ -137,7 +212,7 @@ export function describePiTools() {
     {
       name: "read_evidence_item",
       label: "指定证据",
-      description: "读取指定序号的原始证据。",
+      description: "读取指定序号的原始证据。读 network_request 时会附带对应响应的 status 和 body；大正文在 body.text 预览或 body.blob_id。",
       parameters: {
         type: "object",
         properties: { seq: { type: "integer" } },
@@ -148,7 +223,7 @@ export function describePiTools() {
     {
       name: "read_response_blob",
       label: "分段读响应体",
-      description: "按偏移量读取原始响应体或其它二进制证据。",
+      description: "按偏移量读取原始响应体。只接受 body.blob_id（blob_ 开头）。不要把 request_id 当 blob_id；小 JSON 直接读 network_response 或请求附带的 response.body.text。",
       parameters: {
         type: "object",
         properties: {

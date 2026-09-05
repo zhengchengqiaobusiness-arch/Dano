@@ -4,6 +4,8 @@
  * 只把已有证据投影成短摘要。不分类、不判断能力、不补字段。
  */
 
+import { projectVisibleControlSnapshot, summarizeVisibleControls } from "./visible-controls.mjs";
+
 function compactUrl(raw) {
   const text = String(raw || "");
   if (!text) return "";
@@ -48,6 +50,22 @@ export function buildEvidenceIndex(events) {
         method: String(payload.method || ""),
         path: compactUrl(payload.url),
         resource_type: resourceType || String(payload.resource_type || ""),
+        request_id: String(payload.request_id || ""),
+      });
+      continue;
+    }
+    if (kind === "network_response") {
+      const url = compactUrl(payload.url);
+      if (/\.(js|css|png|jpe?g|gif|svg|ico|woff2?|map)(\?|$)/i.test(url)) continue;
+      const body = asRecord(payload.body);
+      items.push({
+        seq,
+        kind,
+        status: Number(payload.status) || 0,
+        path: url,
+        request_id: String(payload.request_id || ""),
+        body_stored: String(body.stored || ""),
+        blob_id: String(body.blob_id || ""),
       });
       continue;
     }
@@ -56,6 +74,28 @@ export function buildEvidenceIndex(events) {
         seq,
         kind,
         url: String(payload.url || payload.frame_url || ""),
+      });
+      continue;
+    }
+    if (kind === "screenshot") {
+      const image = asRecord(payload.image);
+      items.push({
+        seq,
+        kind,
+        reason: String(payload.reason || ""),
+        blob_id: String(image.blob_id || payload.blob_id || ""),
+      });
+      continue;
+    }
+    if (kind === "visible_control") {
+      const snapshot = projectVisibleControlSnapshot(event);
+      items.push({
+        seq,
+        kind,
+        url: snapshot.url,
+        reason: snapshot.reason,
+        count: snapshot.count,
+        labels: summarizeVisibleControls(snapshot.controls),
       });
     }
   }

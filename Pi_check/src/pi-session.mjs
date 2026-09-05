@@ -65,9 +65,11 @@ function sleep(ms) {
 export function buildFinalAnalysisPrompt(latestSeq) {
   return (
     `证据已冻结，最新 seq=${Number(latestSeq) || 0}。现在必须调用 submit_recording_result。\n` +
-    "先调 list_recording_index 建台账，看完全场 interaction 和 xhr/fetch，再抽读正文。不要逐条读 console，也不要只读前半场。\n" +
-    "不要写 capabilities[].fields。request_refs 必须是 {step_id, usage} 对象。steps[].params 必须是含 key/path 的对象数组。\n" +
-    "若你已经写过 submit_recording_draft，把完整 result 立刻提交为 final=true。草稿不会自动变成结果。这是唯一结果来源。"
+    "先调 list_recording_index 建台账，看 interaction、xhr/fetch、network_response 和 visible_control。读关键 execute 请求正文；响应在 network_response 或读请求时附带的 response.body。\n" +
+    "visible_control 是当前页看得见的筛选/表单/表格控件。可改控件一律调用方，即使本场没改、请求没带。禁止把看得见的日期/下拉/附件写成不可见或系统固定。登录身份用 current_user，不要写死本场数字。\n" +
+    "read_response_blob 只接受 body.blob_id（blob_ 开头）。不要把 request_id 当 blob_id，也不要读 screenshot 去找接口正文。\n" +
+    "看完关键请求立刻把完整 result 作为 submit_recording_result 的工具参数提交。不要把 JSON 写在对话里。不要写 capabilities[].fields。request_refs 必须是 {step_id, usage}。steps[].params 必须是含 key/path 的对象数组。\n" +
+    "若已有 submit_recording_draft，立刻 final=true 提交。草稿不会自动变成结果。"
   );
 }
 
@@ -134,24 +136,108 @@ export class LivePiSession {
     return this.#notifyChain;
   }
 
-  async requestFinalAnalysis({ timeoutMs = 600000 } = {}) {
+  async requestFinalAnalysis({ timeoutMs = 600000, idleSubmitMs = 90000, hasResult } = {}) {
     if (!this.alive) {
       throw new PiRequiredError("PI 在录制期间退出");
     }
     this.status = "finalizing";
     const started = Date.now();
     const deadline = started + timeoutMs;
+    const idleMs = Math.max(20, Number(idleSubmitMs) || 90000);
+    const submitNow = (
+      "证据已经够了。立刻调用 submit_recording_result，把完整 result 作为工具参数提交。不要把 JSON 写在对话里，不要再读证据。"
+    );
+    const checkResult = typeof hasResult === "function" ? hasResult : null;
+    let lastToolCount = this.#trace.toolCount;
+    let lastToolAt = Date.now();
+    let steered = false;
+    let settled = false;
+    let resolveDone;
+    let rejectDone;
+    const done = new Promise((resolve, reject) => {
+      resolveDone = resolve;
+      rejectDone = reject;
+    });
+    const settleOk = () => {
+      if (settled) return;
+      settled = true;
+      resolveDone();
+    };
+    const settleErr = (error) => {
+      if (settled) return;
+      settled = true;
+      rejectDone(error);
+    };
+    const resultReady = async () => {
+      if (!checkResult) return false;
+      try {
+        return Boolean(await checkResult());
+      } catch {
+        return false;
+      }
+    };
+    const onPromptSettled = async (error) => {
+      if (settled) return;
+      if (await resultReady()) {
+        settleOk();
+        return;
+      }
+      if (!checkResult) {
+        if (error) settleErr(error);
+        else settleOk();
+        return;
+      }
+      if (Date.now() >= deadline) {
+        settleErr(new Error("PI 最终分析超时"));
+        return;
+      }
+      logPiOnly("[PI分析] 本轮结束但未提交，继续要求 submit_recording_result");
+      startPrompt(submitNow);
+    };
+    const startPrompt = (text, options) => {
+      const task = options ? this.session.prompt(text, options) : this.#promptNow(text);
+      Promise.resolve(task).then(
+        () => onPromptSettled(),
+        (error) => onPromptSettled(error),
+      );
+    };
     logPiOnly(`[PI分析] 开始最终分析 timeout=${timeoutMs}ms seq=${this.#latestSeq}`);
+    startPrompt(buildFinalAnalysisPrompt(this.#latestSeq));
     const heartbeat = setInterval(() => {
-      const elapsed = Math.round((Date.now() - started) / 1000);
-      logPiOnly(`[PI分析] 仍在进行 elapsed=${elapsed}s ${this.#trace.summary()}`);
+      logPiOnly(`[PI分析] 仍在进行 elapsed=${Math.round((Date.now() - started) / 1000)}s ${this.#trace.summary()}`);
     }, 15000);
-    const finalPrompt = this.#promptNow(buildFinalAnalysisPrompt(this.#latestSeq));
-    const timeoutTask = sleep(Math.max(1000, timeoutMs)).then(() => {
+    const resultWatch = checkResult
+      ? setInterval(async () => {
+        if (settled) return;
+        if (await resultReady()) {
+          logPiOnly("[PI分析] 已检测到 submit_recording_result");
+          settleOk();
+        }
+      }, 250)
+      : null;
+    const idleWatch = setInterval(() => {
+      if (settled) return;
+      if (this.#trace.toolCount !== lastToolCount) {
+        lastToolCount = this.#trace.toolCount;
+        lastToolAt = Date.now();
+        steered = false;
+        return;
+      }
+      if (this.#trace.toolCount <= 0) return;
+      const quietFor = Date.now() - Math.max(lastToolAt, this.#trace.lastEventAt || 0);
+      if (quietFor < idleMs) return;
+      if (steered) return;
+      steered = true;
+      logPiOnly(`[PI分析] ${Math.round(quietFor / 1000)}s 没有新工具，催促提交，不中止当前轮`);
+      this.session.prompt(submitNow, { streamingBehavior: "steer" }).catch((error) => {
+        logPiOnly(`[PI分析] 催促提交失败 ${error?.message || error}`);
+      });
+    }, Math.min(1000, Math.max(20, Math.floor(idleMs / 2) || 20)));
+    const timeoutTask = sleep(Math.max(50, timeoutMs)).then(() => {
       throw new Error("PI 最终分析超时");
     });
     try {
-      await Promise.race([finalPrompt, timeoutTask]);
+      await Promise.race([done, timeoutTask]);
     } catch (error) {
       this.lastError = error.message || String(error);
       this.status = "failed";
@@ -167,6 +253,8 @@ export class LivePiSession {
       throw error;
     } finally {
       clearInterval(heartbeat);
+      clearInterval(idleWatch);
+      if (resultWatch) clearInterval(resultWatch);
     }
     if (Date.now() > deadline) {
       throw new Error(`PI 最终分析超时 ${this.#trace.summary()}`);

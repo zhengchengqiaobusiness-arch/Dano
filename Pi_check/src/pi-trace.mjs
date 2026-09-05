@@ -42,9 +42,13 @@ export function summarizeToolResult(name, result) {
   }
   if (name === "read_evidence_item") {
     const event = result.event || {};
-    return result.found === false
-      ? `未找到 seq=${result.seq ?? ""}`
-      : `kind=${event.kind || ""} ${event.payload?.method || ""} ${compactText(event.payload?.url || event.payload?.path || "", 80)}`;
+    if (result.found === false) return `未找到 seq=${result.seq ?? ""}`;
+    const resp = result.response?.status != null ? ` resp=${result.response.status}` : "";
+    return `kind=${event.kind || ""} ${event.payload?.method || ""} ${compactText(event.payload?.url || event.payload?.path || "", 80)}${resp}`;
+  }
+  if (name === "read_response_blob") {
+    if (result.found === false) return `没有正文 ${compactText(result.error, 120)}`;
+    return `stored=${result.stored || ""} bytes=${result.total_bytes ?? ""}`;
   }
   if (name === "read_evidence_delta") return `events=${result.events?.length ?? 0} next_seq=${result.next_seq ?? ""}`;
   if (name === "submit_recording_draft") return `saved=${result.saved} final=${result.final}`;
@@ -77,7 +81,8 @@ export function formatAgentEvent(event) {
     return `本轮结束 toolResults=${tools} ${compactText(messageText(event.message), 200)}`;
   }
   if (type === "message_end") {
-    const role = event.message?.role || "assistant";
+    const role = String(event.message?.role || "assistant");
+    if (/tool/i.test(role)) return "";
     const text = compactText(messageText(event.message), 280);
     if (!text) return "";
     return `模型${role === "assistant" ? "分析" : role}：${text}`;
@@ -98,6 +103,7 @@ export function createPiTrace() {
   const tools = [];
   let turns = 0;
   let lastTool = "";
+  let lastEventAt = Date.now();
   return {
     get toolCount() {
       return tools.length;
@@ -108,15 +114,20 @@ export function createPiTrace() {
     get turns() {
       return turns;
     },
+    get lastEventAt() {
+      return lastEventAt;
+    },
     summary() {
       return `turns=${turns} tools=${tools.length} last=${lastTool || "-"}`;
     },
     recordTool(name, args, resultText, ok = true) {
+      lastEventAt = Date.now();
       lastTool = `${name} ${summarizeToolArgs(name, args)}`.trim();
       tools.push({ name, ok, detail: lastTool, result: resultText });
       logPiOnly(`[PI分析] ${ok ? "工具完成" : "工具失败"} ${lastTool} → ${compactText(resultText, 200)}`);
     },
     handleEvent(event) {
+      if (event) lastEventAt = Date.now();
       if (event?.type === "turn_start") turns += 1;
       if (String(event?.type || "").startsWith("tool_execution")) return;
       const line = formatAgentEvent(event);

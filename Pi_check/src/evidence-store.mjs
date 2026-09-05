@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { buildEvidenceIndex } from "./evidence-index.mjs";
 
 const clone = (value) => structuredClone(value);
+const asRecord = (value) => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
 
 export class EvidenceStore {
   constructor(files, { onEvent = () => {} } = {}) {
@@ -126,6 +127,37 @@ export class EvidenceStore {
     const blobId = `blob_${randomUUID().replaceAll("-", "")}`;
     await this.files.writeBlob(recordingId, blobId, bytes);
     return { blobId, byteLength: bytes.byteLength };
+  }
+
+  async findStoredBody(recordingId, ref) {
+    this.require(recordingId);
+    const key = String(ref || "").trim();
+    if (!key) return null;
+    const events = await this.files.readEvidence(recordingId);
+    let requestFallback = null;
+    for (const event of events) {
+      const payload = asRecord(event?.payload);
+      const bodies = [payload.body, payload.image].filter((item) => item && typeof item === "object");
+      for (const body of bodies) {
+        if (String(body.blob_id || "") === key) return { event, body };
+      }
+      if (String(payload.request_id || "") !== key) continue;
+      const body = payload.body && typeof payload.body === "object" ? payload.body : null;
+      if (!body || body.stored === "omitted") continue;
+      if (event.kind === "network_response") return { event, body };
+      if (event.kind === "network_request" && !requestFallback) requestFallback = { event, body };
+    }
+    return requestFallback;
+  }
+
+  async findResponseForRequest(recordingId, requestId) {
+    this.require(recordingId);
+    const key = String(requestId || "").trim();
+    if (!key) return null;
+    const events = await this.files.readEvidence(recordingId);
+    return events.find((event) => (
+      event.kind === "network_response" && String(event.payload?.request_id || "") === key
+    )) || null;
   }
 
   async readBlob(recordingId, blobId, { offset = 0, length = 65536 } = {}) {

@@ -191,7 +191,10 @@ export class RecordingController {
       publicMessage: "证据已冻结，等待 PI 最终提交",
     });
     try {
-      await slot.pi.requestFinalAnalysis({ timeoutMs: this.finalTimeoutMs });
+      await slot.pi.requestFinalAnalysis({
+        timeoutMs: this.finalTimeoutMs,
+        hasResult: () => this.files.hasPiResult(recordingId),
+      });
     } catch (error) {
       const message = String(error.message || error);
       logPiOnly(`最终分析失败 recording=${recordingId} ${message}`);

@@ -37,7 +37,13 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(skill, /无独立来源，按录制请求原值提交/);
   assert.match(skill, /核对的是\*\*处理逻辑\*\*/);
   assert.match(skill, /不要另编一份/);
+  assert.match(skill, /不要把 `request_id` 当 blob/);
+  assert.match(skill, /visible_control/);
+  assert.match(skill, /陌生页解题步骤/);
+  assert.match(skill, /source_kind=current_user/);
+  assert.match(skill, /禁止把 `visible_control` 里看得见的日期/);
   assert.match(skill, /不绑定任何具体业务页、系统名或字段名/);
+  assert.doesNotMatch(skill, /登录态、Cookie、分页、流程定义 Key、单据类型/);
   assert.doesNotMatch(skill, /workItems|planItems|createTime=/);
   assert.doesNotMatch(skill, /to_flow_spec|compile_capabilities|inferCapability/);
   const loaded = await readRecordingSkill();
