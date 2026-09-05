@@ -317,19 +317,29 @@ def _step_wire_formats(step: FlowStep) -> dict[str, str]:
 
 
 def _executable_identity_source(value: Any) -> bool:
-    """Return whether the existing request runtime can resolve this source.
+    """Return whether the request runtime can resolve this source.
 
     FlowSpec also keeps advisory identity guesses (for example a body field
     named ``user_id`` whose concrete session location was not captured).  An
     advisory body path is useful evidence for Pi, but it is not a runtime
     source and must not be emitted into the executable request.
+    ``current_user:<field>`` is resolved from the current session profile.
     """
     kind, separator, location = str(value or "").partition(":")
     return bool(
         separator
         and location
-        and kind in {"cookie", "localStorage", "requestHeader"}
+        and kind in {"cookie", "localStorage", "requestHeader", "current_user"}
     )
+
+
+def _current_user_identity_source(param: ParamField) -> str:
+    source = dict(param.source or {})
+    raw = str(source.get("path") or "")
+    if _executable_identity_source(raw):
+        return raw
+    key = str(param.key or "").strip() or _strip_body_prefix(param.path)
+    return f"current_user:{key}"
 
 
 def _step_runtime_identity(step: FlowStep) -> list[dict[str, Any]]:
@@ -340,16 +350,22 @@ def _step_runtime_identity(step: FlowStep) -> list[dict[str, Any]]:
         if _executable_identity_source(item.source)
     ]
     for param in step.params:
-        if param.category != "runtime_var":
+        if _param_exposed_to_caller(param):
             continue
         source = dict(param.source or {})
-        if (
+        reason = str(param.reason or "")
+        current_user = (
             param.source_kind == "current_user"
-            and _executable_identity_source(source.get("path"))
-        ):
+            or "登录身份" in reason
+            or "当前登录" in reason
+        )
+        if current_user:
             values.append({
                 "path": _strip_body_prefix(param.path),
-                "source": str(source["path"]),
+                "source": _current_user_identity_source(param),
+                "kind": "current_user",
+                "key": str(param.key or "").strip() or _strip_body_prefix(param.path),
+                "required": param.value not in (None, ""),
                 "value": param.value,
             })
         elif param.source_kind == "request_header" and source.get("header"):
@@ -360,7 +376,11 @@ def _step_runtime_identity(step: FlowStep) -> list[dict[str, Any]]:
             })
     deduped: dict[tuple[str, str], dict[str, Any]] = {}
     for item in values:
-        deduped[(str(item.get("path") or ""), str(item.get("source") or ""))] = item
+        packed = dict(item)
+        packed.setdefault("kind", "current_user" if str(packed.get("source") or "").startswith("current_user:") else "")
+        if packed.get("kind"):
+            packed.setdefault("key", str(packed.get("path") or "").rsplit(".", 1)[-1])
+        deduped[(str(packed.get("path") or ""), str(packed.get("source") or ""))] = packed
     return list(deduped.values())
 
 

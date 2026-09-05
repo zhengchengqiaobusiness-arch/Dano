@@ -325,7 +325,7 @@ def _safe_step(step: dict) -> dict:
         "step_id", "step_name", "method", "url", "url_template", "path",
         "content_type", "body_template", "query_template", "params", "success_rule",
         "field_types", "wire_formats", "runtime_fields",
-        "selects", "system_values", "fact_check",
+        "selects", "system_values", "identity", "fact_check",
     }
     projected = {key: step.get(key) for key in keep if step.get(key) is not None}
     projected["selects"] = [
@@ -433,7 +433,10 @@ def consume_upstream_input_schema(compiled: Any, upstream: Any) -> dict[str, Any
     for name, field in list(properties.items()):
         other = overlay.get(name)
         if isinstance(field, dict) and isinstance(other, dict):
-            properties[name] = _merge_option_metadata(field, other)
+            properties[name] = _prefer_object_array_items(
+                _merge_option_metadata(field, other),
+                other,
+            )
     required: list[str] = []
     for field in required_source.get("required") or []:
         name = str(field)
@@ -945,6 +948,7 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
             compiled_schema,
             _upstream_capability_schema(spec, skill, cap),
         )
+        schema = _hydrate_object_array_schema(schema, spec, cap)
         schema = _attach_capability_param_options(schema, spec, cap)
         schema = _stage8_input_schema(schema, cap, confirmed_derived)
         step_ids = (
@@ -970,6 +974,7 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
                 cap=cap,
                 links=links,
                 step_index=step_index,
+                spec=spec,
             )
             for step_index, step_id in enumerate(step_ids)
         ]
@@ -1487,6 +1492,266 @@ def _path_covers(key: str, paths: set[str]) -> bool:
     return False
 
 
+def _array_items_are_objects(field: dict | None) -> bool:
+    items = (field or {}).get("items") if isinstance(field, dict) else None
+    return isinstance(items, dict) and (
+        items.get("type") == "object" or isinstance(items.get("properties"), dict)
+    )
+
+
+def _prefer_object_array_items(field: dict, other: dict) -> dict:
+    packed = dict(field)
+    if (
+        packed.get("type") == "array"
+        and not _array_items_are_objects(packed)
+        and _array_items_are_objects(other)
+    ):
+        packed["items"] = deepcopy(other["items"])
+        if other.get("minItems") is not None:
+            packed["minItems"] = other["minItems"]
+    return packed
+
+
+def _capability_spec_steps(spec, cap: dict) -> list[Any]:  # noqa: ANN001
+    if spec is None:
+        return []
+    keys = {str(cap.get("capability_id") or ""), str(cap.get("name") or "")} - {""}
+    step_ids: set[str] = set()
+    for item in spec.capabilities or []:
+        if str(item.capability_id or "") not in keys and str(item.name or "") not in keys:
+            continue
+        step_ids.update(str(step_id) for step_id in (item.step_ids or []) if str(step_id))
+        for ref in item.request_refs or []:
+            step_id = getattr(ref, "step_id", None) or (ref.get("step_id") if isinstance(ref, dict) else "")
+            if step_id:
+                step_ids.add(str(step_id))
+    if not step_ids:
+        return list(spec.steps or [])
+    return [step for step in (spec.steps or []) if str(step.step_id) in step_ids]
+
+
+def _object_array_facts(spec, cap: dict, name: str) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:  # noqa: ANN001
+    from dano.execution.page.flow_materialization.field_contracts.dynamic_array import (
+        _caller_keys_for_object_rows,
+        _infer_array_item_system_rules,
+        _recorded_object_rows,
+    )
+
+    rows: list[dict[str, Any]] = []
+    item_params = []
+    for step in _capability_spec_steps(spec, cap):
+        for param in step.params or []:
+            key = str(param.key or "")
+            path = str(param.path or "")
+            if key != name and not path.endswith(f".{name}") and path != name and path != f"body.{name}":
+                continue
+            found = _recorded_object_rows(param.value)
+            if found:
+                rows = found
+                containers = {
+                    name,
+                    path.removeprefix("body."),
+                    str((param.source or {}).get("array_container_path") or ""),
+                } - {""}
+                item_params = [
+                    item
+                    for item in (step.params or [])
+                    if item is not param
+                    and str((item.source or {}).get("array_container_path") or "") in containers
+                ]
+                break
+        if rows:
+            break
+    if not rows:
+        return [], [], []
+    caller_keys = _caller_keys_for_object_rows(rows, item_params)
+    return rows, caller_keys, _infer_array_item_system_rules(rows, caller_keys)
+
+
+def _hydrate_object_array_schema(schema: dict[str, Any], spec, cap: dict) -> dict[str, Any]:  # noqa: ANN001
+    packed = deepcopy(schema) if isinstance(schema, dict) else {"type": "object", "properties": {}}
+    properties = packed.get("properties") if isinstance(packed.get("properties"), dict) else {}
+    for name, field in list(properties.items()):
+        if not isinstance(field, dict) or field.get("type") != "array":
+            continue
+        rows, caller_keys, _rules = _object_array_facts(spec, cap, str(name))
+        if not rows or not caller_keys or _array_items_are_objects(field):
+            continue
+        item_properties: dict[str, Any] = {}
+        required: list[str] = []
+        for key in caller_keys:
+            sample = next((row.get(key) for row in rows if key in row), None)
+            item_type = "number" if isinstance(sample, (int, float)) and not isinstance(sample, bool) else (
+                "boolean" if isinstance(sample, bool) else "string"
+            )
+            item_properties[key] = {"type": item_type, "title": key, "label": key}
+            if any(key in row and row.get(key) not in (None, "") for row in rows):
+                required.append(key)
+        field["items"] = {
+            "type": "object",
+            "properties": item_properties,
+            "required": required,
+        }
+        field["minItems"] = 1
+        properties[name] = field
+    packed["properties"] = properties
+    return packed
+
+
+_LOGIN_IDENTITY_LEAVES = frozenset({
+    "creator", "creatorid", "creatorname", "createby", "createbyname",
+    "ownerid", "ownername", "userid", "username",
+    "deptid", "deptname", "departmentid", "departmentname",
+    "companyid", "companyname", "orgid", "orgname",
+})
+_SYSTEM_TIME_LEAVES = frozenset({
+    "createtime", "updatetime", "createdat", "updatedat",
+})
+
+
+def _export_leaf(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(name or "").casefold())
+
+
+def _matching_spec_step(spec, cap: dict, step: dict):  # noqa: ANN001
+    method = str(step.get("method") or "").upper()
+    path = str(step.get("path") or "")
+    url = str(step.get("url") or "")
+    for item in _capability_spec_steps(spec, cap):
+        item_path = str(item.path or "")
+        item_url = str(item.url or "")
+        if str(item.method or "").upper() != method:
+            continue
+        if item_path and item_path == path:
+            return item
+        if item_url and item_url == url:
+            return item
+        if path and (item_path.endswith(path) or path.endswith(item_path)):
+            return item
+    return None
+
+
+def _inferred_identity_bindings(step: dict, schema: dict, spec_step) -> list[dict[str, Any]]:  # noqa: ANN001
+    caller = {
+        name
+        for _path, name, _field in _iter_schema_fields(schema)
+        if name
+    }
+    bindings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in step.get("identity") or []:
+        if not isinstance(item, dict) or not item.get("path"):
+            continue
+        packed = dict(item)
+        packed.setdefault("kind", "current_user" if str(packed.get("source") or "").startswith("current_user:") else packed.get("kind"))
+        packed.setdefault("key", str(packed.get("path") or "").rsplit(".", 1)[-1])
+        bindings.append(packed)
+        seen.add(str(packed.get("path")))
+    params = list(getattr(spec_step, "params", None) or [])
+    for param in params:
+        if getattr(param, "exposed_to_user", False):
+            continue
+        path = str(param.path or "").removeprefix("body.")
+        leaf = _export_leaf(param.key or path)
+        reason = str(getattr(param, "reason", "") or "")
+        source_kind = str(getattr(param, "source_kind", "") or "")
+        if source_kind == "current_user" or "登录身份" in reason or "当前登录" in reason or leaf in _LOGIN_IDENTITY_LEAVES:
+            if path in seen or path in caller or "[" in path:
+                continue
+            source = str((param.source or {}).get("path") or "")
+            if not source.startswith(("cookie:", "localStorage:", "requestHeader:", "current_user:")):
+                source = f"current_user:{param.key or path}"
+            bindings.append({
+                "path": path,
+                "source": source,
+                "kind": "current_user",
+                "key": str(param.key or path),
+                "required": param.value not in (None, ""),
+            })
+            seen.add(path)
+    body = step.get("body_template")
+    if isinstance(body, dict):
+        for key, value in body.items():
+            leaf = _export_leaf(key)
+            if key in seen or key in caller or leaf not in _LOGIN_IDENTITY_LEAVES:
+                continue
+            if value not in (None, "", 0) and not isinstance(value, (str, int)):
+                continue
+            bindings.append({
+                "path": key,
+                "source": f"current_user:{key}",
+                "kind": "current_user",
+                "key": key,
+                "required": value not in (None, ""),
+            })
+            seen.add(key)
+    return bindings
+
+
+def _inferred_system_values(step: dict, schema: dict, spec_step) -> list[dict[str, Any]]:  # noqa: ANN001
+    caller = {
+        name
+        for _path, name, _field in _iter_schema_fields(schema)
+        if name
+    }
+    values = [
+        dict(item)
+        for item in (step.get("system_values") or [])
+        if isinstance(item, dict) and item.get("path")
+    ]
+    seen = {str(item.get("path")) for item in values}
+    for param in getattr(spec_step, "params", None) or []:
+        path = str(param.path or "").removeprefix("body.")
+        leaf = _export_leaf(param.key or path)
+        if path in seen or path in caller or "[" in path:
+            continue
+        if str(getattr(param, "source_kind", "") or "") == "system_time" or leaf in _SYSTEM_TIME_LEAVES:
+            kind = "now_date" if str(getattr(param, "type", "") or "") == "date" else (
+                "now_iso" if str(getattr(param, "type", "") or "") in {"string", "datetime"} else "now_ms"
+            )
+            values.append({"path": path, "kind": kind})
+            seen.add(path)
+    body = step.get("body_template")
+    if isinstance(body, dict):
+        for key, value in body.items():
+            leaf = _export_leaf(key)
+            if key in seen or key in caller or leaf not in _SYSTEM_TIME_LEAVES:
+                continue
+            kind = "now_iso" if isinstance(value, str) and "T" in value else (
+                "now_date" if isinstance(value, str) else "now_ms"
+            )
+            values.append({"path": key, "kind": kind})
+            seen.add(key)
+    return values
+
+
+def _attach_array_system_fields(step: dict, schema: dict, spec, cap: dict) -> list[dict[str, Any]]:  # noqa: ANN001
+    fields = [
+        dict(item)
+        for item in (step.get("runtime_fields") or [])
+        if isinstance(item, dict)
+    ]
+    body = step.get("body_template")
+    if not isinstance(body, dict):
+        return fields
+    existing = {
+        (str(item.get("kind") or ""), str(item.get("container_field") or item.get("container_path") or ""))
+        for item in fields
+    }
+    for name in body:
+        _rows, _caller, rules = _object_array_facts(spec, cap, str(name))
+        if not rules or ("array_item_system_fields", str(name)) in existing:
+            continue
+        fields.append({
+            "name": f"{name}__system_fields",
+            "kind": "array_item_system_fields",
+            "container_field": name,
+            "container_path": name,
+            "rules": rules,
+        })
+    return fields
+
+
 def _caller_name_for_key(key: str, fields: list[tuple[str, str, dict]]) -> str:
     for path, name, field in fields:
         flow = str(field.get("x-flow-path") or "")
@@ -1509,15 +1774,22 @@ def _sanitize_request_mapping(
     system_paths: set[str],
     formula_paths: set[str],
     runtime_names: set[str] | None = None,
+    identity_paths: set[str] | None = None,
 ) -> Any:
     del kind, params
     if not isinstance(template, dict):
         return template
     runtime_names = set(runtime_names or [])
+    identity_paths = set(identity_paths or [])
     out: dict[str, Any] = {}
     for key, value in template.items():
         name = str(key)
-        if _path_covers(name, linked) or _path_covers(name, system_paths) or _path_covers(name, formula_paths):
+        if (
+            _path_covers(name, linked)
+            or _path_covers(name, system_paths)
+            or _path_covers(name, formula_paths)
+            or _path_covers(name, identity_paths)
+        ):
             continue
         caller = _caller_name_for_key(name, fields)
         if _is_placeholder(value):
@@ -1549,9 +1821,14 @@ def _project_capability_step(
     cap: dict,
     links: list[dict],
     step_index: int,
+    spec=None,  # noqa: ANN001
 ) -> dict:
     projected = dict(step)
     fields = _iter_schema_fields(schema)
+    spec_step = _matching_spec_step(spec, cap, projected)
+    projected["identity"] = _inferred_identity_bindings(projected, schema, spec_step)
+    projected["system_values"] = _inferred_system_values(projected, schema, spec_step)
+    projected["runtime_fields"] = _attach_array_system_fields(projected, schema, spec, cap)
     linked = {
         str(item.get("target_path") or "")
         for item in links
@@ -1560,6 +1837,11 @@ def _project_capability_step(
     system_paths = {
         str(item.get("path") or "")
         for item in (projected.get("system_values") or [])
+        if isinstance(item, dict)
+    }
+    identity_paths = {
+        str(item.get("path") or "")
+        for item in (projected.get("identity") or [])
         if isinstance(item, dict)
     }
     formula_paths = set()
@@ -1586,6 +1868,7 @@ def _project_capability_step(
             system_paths=system_paths,
             formula_paths=formula_paths,
             runtime_names=runtime_names,
+            identity_paths=identity_paths,
         )
     if projected.get("query_template") is not None:
         projected["query_template"] = _sanitize_request_mapping(
@@ -1597,6 +1880,7 @@ def _project_capability_step(
             system_paths=system_paths,
             formula_paths=formula_paths,
             runtime_names=runtime_names,
+            identity_paths=identity_paths,
         )
         for key in ("path", "url", "url_template"):
             if projected.get(key):
@@ -2952,12 +3236,19 @@ def _tenant_key(tenant):
     return str(os.environ.get("DANO_TENANT_KEY") or "").strip()
 
 
-def _cache_headers():
+def _session_state():
     tenant = _runtime_tenant()
     path = Path.home() / ".dano" / "sessions" / f"{tenant}__{CONFIG['subsystem'].replace('/', '_')}.json"
     if not path.is_file():
         return {}
     data = json.loads(path.read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else {}
+
+
+def _cache_headers():
+    data = _session_state()
+    if not data:
+        return {}
     if isinstance(data.get("headers"), dict) and data["headers"]:
         return data["headers"]
     headers = {}
@@ -3208,6 +3499,163 @@ def _apply_selects(step, values, cache):
     return current, projections
 
 
+_CURRENT_USER_PROFILE_KEYS = {
+    "creator": ("id", "userId", "user.id", "user.userId"),
+    "creatorid": ("id", "userId", "user.id", "user.userId"),
+    "createby": ("id", "userId", "user.id", "user.userId"),
+    "ownerid": ("id", "userId", "user.id", "user.userId"),
+    "userid": ("id", "userId", "user.id", "user.userId"),
+    "creatorname": ("nickname", "userName", "name", "user.nickname", "user.userName", "user.name"),
+    "createbyname": ("nickname", "userName", "name", "user.nickname", "user.userName"),
+    "ownername": ("nickname", "userName", "name", "user.nickname"),
+    "username": ("userName", "nickname", "name", "user.userName"),
+    "deptid": ("deptId", "dept.id", "user.deptId"),
+    "departmentid": ("deptId", "dept.id", "user.deptId"),
+    "deptname": ("deptName", "dept.name", "user.deptName"),
+    "companyid": ("companyId", "company.id", "user.companyId"),
+    "companyname": ("companyName", "company.name", "user.companyName"),
+}
+
+
+def _session_identity_profile(state):
+    profile = {}
+
+    def put(key, value):
+        if value in (None, "") or key in profile:
+            return
+        profile[key] = value
+
+    def walk(node, prefix):
+        if isinstance(node, dict):
+            for name, value in node.items():
+                path = f"{prefix}.{name}" if prefix else str(name)
+                put(path, value)
+                put(str(name), value)
+                walk(value, path)
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{prefix}[{index}]")
+
+    for origin in (state or {}).get("origins") or []:
+        for item in origin.get("localStorage") or []:
+            name = str(item.get("name") or "")
+            raw = item.get("value", "")
+            if not name:
+                continue
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                put(name, raw)
+                continue
+            walk(parsed, name)
+            walk(parsed, "")
+    return profile
+
+
+def _resolve_current_user(field, state):
+    profile = _session_identity_profile(state)
+    leaf = re.sub(r"[^a-z0-9]+", "", str(field or "").lower())
+    for candidate in (str(field or ""), *(_CURRENT_USER_PROFILE_KEYS.get(leaf) or ())):
+        if candidate in profile and profile[candidate] not in (None, ""):
+            return profile[candidate]
+    return None
+
+
+def _resolve_identity_value(item, state, headers):
+    source = str(item.get("source") or "")
+    if not source and (item.get("kind") == "current_user" or item.get("key")):
+        source = f"current_user:{item.get('key') or item.get('path') or ''}"
+    kind, _, rest = source.partition(":")
+    if kind == "current_user":
+        return _resolve_current_user(rest, state)
+    if kind == "requestHeader":
+        for key, value in (headers or {}).items():
+            if str(key).lower() == rest.lower():
+                text = str(value or "")
+                return text[7:].strip() if text.lower().startswith("bearer ") else text
+        return None
+    if kind == "cookie":
+        for cookie in (state or {}).get("cookies") or []:
+            if cookie.get("name") == rest:
+                return cookie.get("value")
+        return None
+    if kind == "localStorage":
+        name, _, path = rest.partition(".")
+        for origin in (state or {}).get("origins") or []:
+            for entry in origin.get("localStorage") or []:
+                if entry.get("name") != name:
+                    continue
+                raw = entry.get("value", "")
+                if not path:
+                    return raw
+                try:
+                    return get_path(json.loads(raw), path)
+                except Exception:
+                    return raw
+    return None
+
+
+def _apply_identity(step, body):
+    if not isinstance(body, dict):
+        return body
+    state = _session_state()
+    try:
+        headers = auth_headers()
+    except RuntimeError:
+        headers = _cache_headers()
+    for item in step.get("identity") or []:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "")
+        if not path:
+            continue
+        value = _resolve_identity_value(item, state, headers)
+        if value is not None:
+            body = deep_set(body, path, value)
+            continue
+        if item.get("required") is True:
+            raise RuntimeError(f"current user field {path!r} is missing from the login session")
+        body = deep_set(body, path, None)
+    return body
+
+
+def _apply_array_item_system_fields(step, body):
+    if not isinstance(body, dict):
+        return body
+    for field in step.get("runtime_fields") or []:
+        if not isinstance(field, dict) or str(field.get("kind") or "") != "array_item_system_fields":
+            continue
+        container = str(field.get("container_path") or field.get("container_field") or "")
+        rows = get_path(body, container) if container else None
+        if not isinstance(rows, list):
+            continue
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            for rule in field.get("rules") or []:
+                key = str(rule.get("key") or "")
+                strategy = str(rule.get("strategy") or "")
+                if not key:
+                    continue
+                if strategy == "uuid":
+                    row[key] = str(uuid4())
+                elif strategy == "index":
+                    row[key] = index
+                elif strategy == "constant":
+                    row[key] = copy.deepcopy(rule.get("value"))
+                elif strategy == "caller_presence":
+                    for case in rule.get("cases") or []:
+                        when = case.get("when") or {}
+                        if all(
+                            (row.get(name) not in (None, "") if state == "present" else row.get(name) in (None, ""))
+                            for name, state in when.items()
+                        ):
+                            row[key] = copy.deepcopy(case.get("value"))
+                            break
+        body = deep_set(body, container, rows)
+    return body
+
+
 def _system_values(step, body):
     for item in step.get("system_values") or []:
         kind = str(item.get("kind") or "")
@@ -3446,6 +3894,8 @@ def execute_plan(plan, inputs):
             else:
                 body = deep_set(body or {}, target.removeprefix("body."), value)
         if isinstance(body, (dict, list)):
+            body = _apply_array_item_system_fields(step, body)
+            body = _apply_identity(step, body)
             body = _system_values(step, body)
         result = http_json(
             step.get("method") or "GET", step.get("path") or "", url=url,
@@ -3876,7 +4326,7 @@ def _runtime_step(step: dict) -> dict:
     keys = (
         "method", "url", "url_template", "path", "content_type", "body_template",
         "query_template", "params", "success_rule", "wire_formats", "runtime_fields",
-        "selects", "system_values",
+        "selects", "system_values", "identity",
     )
     packed = {key: deepcopy(step[key]) for key in keys if step.get(key) is not None}
     selects = []
@@ -3907,7 +4357,8 @@ def _runtime_step(step: dict) -> dict:
     runtime_keys = {
         "name", "kind", "strategy", "start_field", "end_field", "output_key",
         "output_format", "left_field", "right_field", "result_field",
-        "container_field", "item_field", "array_container_path", "array_item_key",
+        "container_field", "container_path", "item_field",
+        "array_container_path", "array_item_key", "rules",
     }
     packed["runtime_fields"] = [
         {key: value for key, value in item.items() if key in runtime_keys}

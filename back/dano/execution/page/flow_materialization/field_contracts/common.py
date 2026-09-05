@@ -1237,15 +1237,29 @@ def _param_control_is_readonly(param: ParamField | None) -> bool:
     )
 
 
-def _looks_audit_system_leaf(key: str, path: str) -> bool:
+_AUDIT_TIME_LEAVES = frozenset({
+    "createtime", "updatetime", "createdat", "updatedat",
+})
+_AUDIT_ACTOR_LEAVES = frozenset({
+    "creator", "updater", "modifier", "createby", "updateby",
+    "creatorname", "updatername", "createdby", "updatedby",
+    "creatorid", "createbyid", "ownerid", "ownername",
+})
+
+
+def _looks_audit_time_leaf(key: str, path: str) -> bool:
     leaf = _field_leaf_token(key, path)
-    if leaf in {
-        "createtime", "updatetime", "createdat", "updatedat",
-        "creator", "updater", "modifier", "createby", "updateby",
-        "creatorname", "updatername", "createdby", "updatedby",
-    }:
-        return True
-    return leaf.endswith(("createtime", "updatetime", "createdat", "updatedat"))
+    return leaf in _AUDIT_TIME_LEAVES or leaf.endswith(
+        ("createtime", "updatetime", "createdat", "updatedat")
+    )
+
+
+def _looks_audit_actor_leaf(key: str, path: str) -> bool:
+    return _field_leaf_token(key, path) in _AUDIT_ACTOR_LEAVES
+
+
+def _looks_audit_system_leaf(key: str, path: str) -> bool:
+    return _looks_audit_time_leaf(key, path) or _looks_audit_actor_leaf(key, path)
 
 
 def _field_source_configuration_advice(param: ParamField) -> str | None:

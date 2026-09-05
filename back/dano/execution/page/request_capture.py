@@ -2925,11 +2925,80 @@ def _set_by_path(node, path, value) -> bool:
         return False
 
 
+_CURRENT_USER_PROFILE_KEYS = {
+    "creator": ("id", "userId", "user.id", "user.userId"),
+    "creatorid": ("id", "userId", "user.id", "user.userId"),
+    "createby": ("id", "userId", "user.id", "user.userId"),
+    "ownerid": ("id", "userId", "user.id", "user.userId"),
+    "userid": ("id", "userId", "user.id", "user.userId"),
+    "creatorname": ("nickname", "userName", "name", "user.nickname", "user.userName", "user.name"),
+    "createbyname": ("nickname", "userName", "name", "user.nickname", "user.userName"),
+    "ownername": ("nickname", "userName", "name", "user.nickname"),
+    "username": ("userName", "nickname", "name", "user.userName"),
+    "deptid": ("deptId", "dept.id", "user.deptId"),
+    "departmentid": ("deptId", "dept.id", "user.deptId"),
+    "deptname": ("deptName", "dept.name", "user.deptName"),
+    "companyid": ("companyId", "company.id", "user.companyId"),
+    "companyname": ("companyName", "company.name", "user.companyName"),
+}
+
+
+def _session_identity_profile(storage_state: dict | None) -> dict[str, Any]:
+    """Flatten session JSON so current-user fields can be resolved by name."""
+    profile: dict[str, Any] = {}
+    if not storage_state:
+        return profile
+
+    def put(key: str, value: Any) -> None:
+        if value in (None, "") or key in profile:
+            return
+        profile[key] = value
+
+    def walk(node: Any, prefix: str) -> None:
+        if isinstance(node, dict):
+            for name, value in node.items():
+                path = f"{prefix}.{name}" if prefix else str(name)
+                put(path, value)
+                put(str(name), value)
+                walk(value, path)
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{prefix}[{index}]")
+
+    for origin in storage_state.get("origins") or []:
+        for item in origin.get("localStorage") or []:
+            name = str(item.get("name") or "")
+            raw = item.get("value", "")
+            if not name:
+                continue
+            try:
+                parsed = json.loads(raw)
+            except Exception:  # noqa: BLE001
+                put(name, raw)
+                put(f"localStorage:{name}", raw)
+                continue
+            walk(parsed, name)
+            walk(parsed, "")
+    return profile
+
+
+def _resolve_current_user_profile(field: str, storage_state: dict | None):
+    profile = _session_identity_profile(storage_state)
+    leaf = _re.sub(r"[^a-z0-9]+", "", str(field or "").lower())
+    candidates = (str(field or ""), *( _CURRENT_USER_PROFILE_KEYS.get(leaf) or () ))
+    for candidate in candidates:
+        if candidate in profile and profile[candidate] not in (None, ""):
+            return profile[candidate]
+    return None
+
+
 def resolve_identity_value(source: str, storage_state: dict | None, auth_headers: dict | None = None):
     """从登录态按 source 取"当前用户/会话值"。source 形如 localStorage:userInfo.userId / cookie:JSESSIONID。"""
     if not source:
         return None
     kind, _, rest = source.partition(":")
+    if kind == "current_user":
+        return _resolve_current_user_profile(rest, storage_state)
     if kind == "requestHeader":
         for k, v in (auth_headers or {}).items():
             if str(k).lower() == rest.lower():
@@ -2965,11 +3034,18 @@ def _apply_identity(body, api_request: dict, storage_state: dict | None) -> list
     """
     failed: list[str] = []
     for idn in api_request.get("identity") or []:
-        val = resolve_identity_value(idn.get("source", ""), storage_state, api_request.get("auth_headers"))
+        source = str(idn.get("source") or "")
+        if not source and (idn.get("kind") == "current_user" or idn.get("key")):
+            source = f"current_user:{idn.get('key') or idn.get('path') or ''}"
+        val = resolve_identity_value(source, storage_state, api_request.get("auth_headers"))
+        path = idn.get("tokens") or idn.get("path", "")
         if val is not None:
-            path = idn.get("tokens") or idn.get("path", "")   # tokens 优先(键含点也无歧义)
             if not _set_by_path(body, path, val):
-                failed.append(path)                            # 路径不可达 → 入失败清单
+                failed.append(path)
+        elif idn.get("required") is True:
+            failed.append(path)
+        elif path:
+            _set_by_path(body, path, None)
     return failed
 
 
@@ -3369,7 +3445,7 @@ def _merge_query_into_url(url: str, query: dict | None, *, drop_keys: set[str] |
 
 def _wellformed_identity_source(src: str) -> bool:
     kind, sep, rest = (src or "").partition(":")
-    return bool(sep) and kind in ("cookie", "localStorage", "requestHeader") and bool(rest)
+    return bool(sep) and kind in ("cookie", "localStorage", "requestHeader", "current_user") and bool(rest)
 
 
 def _check_step_links(workflow: dict) -> list[str]:

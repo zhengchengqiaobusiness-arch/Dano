@@ -2,14 +2,216 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 from typing import Any
 
 from dano.execution.page.flow_spec_core.models import FlowSpec, FlowStep, ParamField, SelectBinding
+from dano.execution.page.flow_spec_core.normalization import _infer_type_from_value
 from dano.execution.page.request_capture import _parse_body
 
 
 _ARRAY_OCCURRENCE_RE = re.compile(r"^(?P<container>.+?)\[(?P<index>\d+)\](?:\.|$)")
+_UUID_LIKE_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_ROW_SYSTEM_LEAVES = frozenset({
+    "xrowkey", "x_row_key", "rowkey", "row_key",
+    "sort", "index", "seq", "order",
+    "itemtype", "rowtype", "linetype",
+})
+
+
+def _looks_row_system_leaf(key: str) -> bool:
+    """Row mechanics (type code / order / client row key), not caller-owned cells."""
+    leaf = re.sub(r"[^a-z0-9]+", "", str(key or "").casefold())
+    return leaf in _ROW_SYSTEM_LEAVES or leaf.endswith("rowkey")
+
+
+def _recorded_object_rows(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        return []
+    if any(item is not None and not isinstance(item, dict) for item in value):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _object_array_keys(rows: list[dict[str, Any]]) -> list[str]:
+    keys: list[str] = []
+    for row in rows:
+        for key in row:
+            name = str(key)
+            if name and name not in keys:
+                keys.append(name)
+    return keys
+
+
+def _caller_keys_for_object_rows(
+    rows: list[dict[str, Any]],
+    item_params: list[ParamField] | None = None,
+) -> list[str]:
+    keys = _object_array_keys(rows)
+    public = {
+        str(param.key or "")
+        for param in (item_params or [])
+        if param.exposed_to_user and str(param.key or "")
+    }
+    if public:
+        return [key for key in keys if key in public]
+    return [key for key in keys if not _looks_row_system_leaf(key)]
+
+
+def _presence_signature(row: dict[str, Any], caller_keys: list[str]) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (
+            key,
+            "present" if row.get(key) not in (None, "") else "absent",
+        )
+        for key in caller_keys
+    )
+
+
+def _simplify_presence_cases(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(cases) < 2:
+        return []
+    keys = [str(name) for name in (cases[0].get("when") or {})]
+    distinguishing = [
+        key
+        for key in keys
+        if len({str((case.get("when") or {}).get(key)) for case in cases}) > 1
+    ]
+    if not distinguishing:
+        return []
+    return [
+        {
+            "when": {key: (case.get("when") or {}).get(key) for key in distinguishing},
+            "value": case.get("value"),
+        }
+        for case in cases
+    ]
+
+
+def _presence_cases(
+    rows: list[dict[str, Any]],
+    key: str,
+    caller_keys: list[str],
+) -> list[dict[str, Any]]:
+    if not caller_keys:
+        return []
+    grouped: dict[tuple[tuple[str, str], ...], list[Any]] = {}
+    for row in rows:
+        grouped.setdefault(_presence_signature(row, caller_keys), []).append(row.get(key))
+    cases: list[dict[str, Any]] = []
+    for signature, values in grouped.items():
+        encoded = {json.dumps(value, ensure_ascii=False, sort_keys=True, default=str) for value in values}
+        if len(encoded) != 1:
+            return []
+        cases.append({
+            "when": {name: state for name, state in signature},
+            "value": values[0],
+        })
+    return _simplify_presence_cases(cases)
+
+
+def _infer_array_item_system_rules(
+    rows: list[dict[str, Any]],
+    caller_keys: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Derive per-row system fields from recorded rows. No page-specific codes."""
+    if not rows:
+        return []
+    keys = _object_array_keys(rows)
+    owned = list(caller_keys) if caller_keys is not None else _caller_keys_for_object_rows(rows)
+    rules: list[dict[str, Any]] = []
+    for key in keys:
+        if key in owned:
+            continue
+        values = [row.get(key) for row in rows]
+        if values and all(isinstance(value, str) and _UUID_LIKE_RE.match(value) for value in values):
+            rules.append({"key": key, "strategy": "uuid"})
+            continue
+        if all(value == index or value == str(index) for index, value in enumerate(values)):
+            rules.append({"key": key, "strategy": "index"})
+            continue
+        encoded = {json.dumps(value, ensure_ascii=False, sort_keys=True, default=str) for value in values}
+        if len(encoded) == 1:
+            rules.append({"key": key, "strategy": "constant", "value": values[0]})
+            continue
+        cases = _presence_cases(rows, key, owned)
+        if cases:
+            rules.append({"key": key, "strategy": "caller_presence", "cases": cases})
+    return rules
+
+
+def _promote_recorded_object_array_params(step: FlowStep) -> None:
+    """Turn a lone ``body.items = [{...}, ...]`` param into an array<object> contract."""
+    for param in list(step.params or []):
+        source = dict(param.source or {})
+        rows = _recorded_object_rows(param.value)
+        if not rows:
+            continue
+        container = str(
+            source.get("array_container_path")
+            or str(param.path or "").removeprefix("body.")
+        ).strip()
+        if not container or "[" in container:
+            continue
+        existing_members = [
+            item
+            for item in (step.params or [])
+            if item is not param and _array_container_for_path(item.path) == container
+        ]
+        param.type = "array"
+        param.wire_type = param.wire_type or "array"
+        param.source = {
+            **source,
+            "kind": "dynamic_structure_input",
+            "structure_kind": "array_object",
+            "array_container_path": container,
+        }
+        if param.category != "user_param":
+            param.category = "user_param"
+            param.exposed_to_user = True
+            param.editable = True
+        occupied = {str(item.key or "") for item in existing_members if item.key}
+        caller_keys = _caller_keys_for_object_rows(rows, existing_members)
+        for key in _object_array_keys(rows):
+            if key in occupied:
+                continue
+            sample = next((row.get(key) for row in rows if key in row), None)
+            caller = key in caller_keys
+            member = ParamField(
+                path=f"body.{container}[0].{key}",
+                key=key,
+                label=key,
+                value=copy.deepcopy(sample),
+                type=_infer_type_from_value(sample) or "string",
+                wire_type=_infer_type_from_value(sample) or "string",
+                required=caller and any(key in row and row.get(key) not in (None, "") for row in rows),
+                confidence=float(param.confidence or 0.8),
+                confidence_tier="auto",
+                name_source="structure",
+                category="user_param" if caller else "runtime_var",
+                source_kind="user_input" if caller else "system_generated",
+                source={
+                    "kind": "dynamic_structure_leaf",
+                    "array_container_path": container,
+                    "array_item_path": key,
+                    "array_item_key": key,
+                    "array_item_required": caller,
+                    "array_item_member": True,
+                    "array_item_public": caller,
+                    "schema_identity_path": f"{container}[].{key}",
+                },
+                editable=caller,
+                exposed_to_user=caller,
+                reason=(
+                    "重复行内由调用方填写的单元格"
+                    if caller
+                    else "重复行的系统字段：由录制行结构在运行期补齐，不进入调用方 schema"
+                ),
+            )
+            step.params.append(member)
 
 
 def _value_at_path(value: Any, path: str) -> Any:
@@ -192,6 +394,7 @@ def _normalize_dynamic_array_selects(step: FlowStep) -> None:
 def _materialize_dynamic_array_inputs(spec: FlowSpec) -> None:
     """Collapse exposed ``rows[n].field`` leaves into one executable array input."""
     for step in spec.steps or []:
+        _promote_recorded_object_array_params(step)
         if any(
             str((param.source or {}).get("kind") or "") == "dynamic_structure_input"
             and str((param.source or {}).get("structure_kind") or "") == "array_object"

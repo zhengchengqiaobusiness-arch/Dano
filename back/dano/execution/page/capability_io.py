@@ -30,6 +30,8 @@ from dano.execution.page.flow_materialization.field_contracts.caller_ownership i
     _param_requires_caller_input,
 )
 from dano.execution.page.flow_materialization.field_contracts.dynamic_array import (
+    _caller_keys_for_object_rows,
+    _recorded_object_rows,
     _sync_dynamic_array_memberships,
 )
 from dano.execution.page.flow_materialization.request_steps import (
@@ -344,6 +346,40 @@ def _is_dynamic_array_input(param: ParamField) -> bool:
     )
 
 
+def _object_array_item_schema_from_value(
+    param: ParamField,
+    *,
+    include_required_state: bool,
+) -> dict[str, Any] | None:
+    """Build array<object> items from a recorded object list when member params are absent."""
+    rows = _recorded_object_rows(param.value)
+    if not rows:
+        return None
+    caller_keys = _caller_keys_for_object_rows(rows)
+    if not caller_keys:
+        return None
+    item_params: list[ParamField] = []
+    for key in caller_keys:
+        sample = next((row.get(key) for row in rows if key in row), None)
+        required = any(key in row and row.get(key) not in (None, "") for row in rows)
+        item_params.append(ParamField(
+            path=key,
+            key=key,
+            label=key,
+            value=copy.deepcopy(sample),
+            type=_infer_type_from_value(sample) or "string",
+            required=required,
+            category="user_param",
+            source_kind="user_input",
+            exposed_to_user=True,
+        ))
+    return _capability_input_schema(
+        item_params,
+        None,
+        include_required_state=include_required_state,
+    )
+
+
 def _required_state_for_param(
     param: ParamField,
     capability_step_ids: set[str] | None,
@@ -472,12 +508,26 @@ def _capability_input_schema(
         _apply_param_schema_default(props[key], p)
         if _is_dynamic_array_input(p):
             item_params = _dynamic_array_item_params(params, p, capability_step_ids)
-            props[key]["items"] = _capability_input_schema(
-                item_params,
-                capability_step_ids,
-                include_required_state=include_required_state,
-            )
+            if item_params:
+                props[key]["items"] = _capability_input_schema(
+                    item_params,
+                    capability_step_ids,
+                    include_required_state=include_required_state,
+                )
+            else:
+                recorded_items = _object_array_item_schema_from_value(
+                    p, include_required_state=include_required_state,
+                )
+                if recorded_items is not None:
+                    props[key]["items"] = recorded_items
             props[key]["minItems"] = 1
+        elif (p.type or "").lower() in {"array", "list-enum"}:
+            recorded_items = _object_array_item_schema_from_value(
+                p, include_required_state=include_required_state,
+            )
+            if recorded_items is not None:
+                props[key]["items"] = recorded_items
+                props[key]["minItems"] = 1
         grounded_constraints = next((
             item for item in (p.evidence or [])
             if isinstance(item, dict)

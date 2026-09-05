@@ -1886,7 +1886,11 @@ def test_export_bakes_system_preflight_and_keeps_system_body_fields() -> None:
     assert preview["query_template"] == {"activityId": "StartNode"}
     assert "{{definitionId}}" not in json.dumps(preview.get("query_template") or {})
     assert submit["body_template"]["title"] == "{{title}}"
-    assert submit["body_template"]["ownerId"] == 9
+    assert "ownerId" not in submit["body_template"]
+    assert any(
+        item.get("path") == "ownerId" and str(item.get("source") or "").startswith("current_user:")
+        for item in (submit.get("identity") or [])
+    )
     assert runtime["links"]
     assert runtime["links"][0]["read_path"] == "data.id"
     assert runtime["links"][0]["write_path"] == "query.definitionId"
@@ -2643,3 +2647,192 @@ def test_export_recovers_option_controls_from_compiled_refs_without_flow_spec() 
         {"id": 2, "label": "周报"},
         {"id": 3, "label": "月报"},
     ]
+
+
+def test_capability_io_builds_object_array_from_recorded_rows() -> None:
+    schema = _capability_input_schema([
+        ParamField(
+            path="body.items",
+            key="items",
+            type="array",
+            category="user_param",
+            source_kind="user_input",
+            exposed_to_user=True,
+            value=[
+                {
+                    "content": "已完成",
+                    "progress": 60,
+                    "itemType": 1,
+                    "sort": 0,
+                    "_X_ROW_KEY": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                },
+                {
+                    "content": "计划",
+                    "itemType": 2,
+                    "sort": 0,
+                    "_X_ROW_KEY": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                },
+            ],
+        ),
+    ])
+
+    item_props = schema["properties"]["items"]["items"]["properties"]
+    assert set(item_props) == {"content", "progress"}
+    assert item_props["content"]["type"] == "string"
+    assert item_props["progress"]["type"] == "number"
+
+
+def test_export_projects_object_array_and_current_user_identity() -> None:
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="cap_submit",
+                name="新增并提交",
+                title="新增并提交",
+                kind="command",
+                request_refs=[CapabilityRequestRef(step_id="step_submit", usage="execute")],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "title": "标题"},
+                        "items": {
+                            "type": "array",
+                            "title": "工作项",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["title"],
+                },
+            )
+        ],
+        steps=[
+            FlowStep(
+                step_id="step_submit",
+                method="POST",
+                path="/api/records/submit",
+                params=[
+                    ParamField(
+                        key="title",
+                        path="body.title",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                    ParamField(
+                        key="items",
+                        path="body.items",
+                        type="array",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                        value=[
+                            {
+                                "content": "已完成",
+                                "progress": 60,
+                                "itemType": 1,
+                                "sort": 0,
+                                "_X_ROW_KEY": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                            },
+                            {
+                                "content": "计划",
+                                "itemType": 2,
+                                "sort": 0,
+                                "_X_ROW_KEY": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                            },
+                        ],
+                    ),
+                    ParamField(
+                        key="creator",
+                        path="body.creator",
+                        category="runtime_var",
+                        source_kind="current_user",
+                        exposed_to_user=False,
+                        value="1",
+                    ),
+                    ParamField(
+                        key="deptId",
+                        path="body.deptId",
+                        category="runtime_var",
+                        source_kind="current_user",
+                        exposed_to_user=False,
+                        value=103,
+                    ),
+                    ParamField(
+                        key="createTime",
+                        path="body.createTime",
+                        category="runtime_var",
+                        source_kind="system_time",
+                        exposed_to_user=False,
+                        value="",
+                    ),
+                ],
+            )
+        ],
+    )
+    api_request = {
+        "capabilities": [{
+            "capability_id": "cap_submit",
+            "name": "新增并提交",
+            "title": "新增并提交",
+            "kind": "command",
+            "execution_contract": {
+                "steps": [{
+                    "step_id": "step_submit",
+                    "method": "POST",
+                    "path": "/api/records/submit",
+                    "body_template": {
+                        "title": "{{title}}",
+                        "items": "{{items}}",
+                        "creator": "",
+                        "deptId": "",
+                        "createTime": "",
+                    },
+                }],
+            },
+            "input_schema": spec.capabilities[0].input_schema,
+        }],
+    }
+
+    plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), spec, api_request)
+    public_items = _public_schema(plans[0]["input_schema"])["properties"]["items"]
+    submit = _runtime_plan(plans[0])["steps"][0]
+    rules = next(
+        item for item in (submit.get("runtime_fields") or [])
+        if item.get("kind") == "array_item_system_fields"
+    )
+    strategies = {item["key"]: item["strategy"] for item in rules["rules"]}
+
+    assert public_items["items"]["type"] == "object"
+    assert set(public_items["items"]["properties"]) == {"content", "progress"}
+    assert "itemType" not in public_items["items"]["properties"]
+    assert submit["body_template"]["title"] == "{{title}}"
+    assert "creator" not in submit["body_template"]
+    assert "deptId" not in submit["body_template"]
+    assert "createTime" not in submit["body_template"]
+    assert any(item.get("path") == "creator" for item in submit.get("identity") or [])
+    assert any(item.get("path") == "deptId" for item in submit.get("identity") or [])
+    assert any(item.get("path") == "createTime" for item in submit.get("system_values") or [])
+    assert strategies["itemType"] == "caller_presence"
+    assert strategies["_X_ROW_KEY"] == "uuid"
+    assert strategies["sort"] == "constant"
+    work_case = next(
+        case for case in next(item["cases"] for item in rules["rules"] if item["key"] == "itemType")
+        if case["value"] == 1
+    )
+    assert work_case["when"] == {"progress": "present"}
+
+
+def test_current_user_profile_reads_session_without_recorded_ids() -> None:
+    from dano.execution.page.request_capture import _resolve_current_user_profile
+
+    state = {
+        "origins": [{
+            "localStorage": [{
+                "name": "user",
+                "value": json.dumps({"id": 7, "nickname": "甲", "deptId": 88}),
+            }],
+        }],
+    }
+
+    assert _resolve_current_user_profile("creator", state) == 7
+    assert _resolve_current_user_profile("deptId", state) == 88
+    assert _resolve_current_user_profile("creatorName", state) == "甲"
+    assert _resolve_current_user_profile("companyId", state) is None
