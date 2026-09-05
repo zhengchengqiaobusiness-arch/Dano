@@ -71,6 +71,83 @@ def executable_flow_links(spec: FlowSpec) -> list[FlowLink]:
     return executable
 
 
+def _declared_flow_links(spec: FlowSpec) -> list[FlowLink]:
+    """Links a capability plan may run, including PI-declared previous_response bindings.
+
+    Machine-verified links stay first-class. Unverified but declared bindings are
+    still compiled so preflight/system values are not left as caller placeholders.
+    """
+    seen: set[tuple[str, str, str, str]] = set()
+    out: list[FlowLink] = []
+
+    def add(link: FlowLink) -> None:
+        if (link.meta or {}).get("active", True) is False:
+            return
+        key = (
+            str(link.source_step_id or ""),
+            str(link.target_step_id or ""),
+            str(link.source_path or ""),
+            str(link.target_path or ""),
+        )
+        if "" in key[:2] or key in seen:
+            return
+        seen.add(key)
+        out.append(link)
+
+    for link in executable_flow_links(spec):
+        add(link)
+    by_id = {step.step_id: step for step in spec.steps}
+    for link in spec.links or []:
+        if _link_is_auto_generated(link):
+            target = by_id.get(link.target_step_id)
+            target_param = (
+                _resolve_param_reference(target, link.target_path)
+                if target is not None else None
+            )
+            if target_param is None or target_param.source_kind != "previous_response":
+                continue
+        add(link)
+    return out
+
+
+def capability_plan_links(spec: FlowSpec, step_ids: list[str]) -> list[dict[str, Any]]:
+    """Serialize capability-scoped links for compile/export using declared step order."""
+    positions = {
+        step_id: index
+        for index, step_id in enumerate(step_ids)
+        if str(step_id)
+    }
+    links: list[dict[str, Any]] = []
+    for link in _declared_flow_links(spec):
+        if (
+            link.source_step_id not in positions
+            or link.target_step_id not in positions
+            or positions[link.source_step_id] >= positions[link.target_step_id]
+        ):
+            continue
+        verification_id = str(
+            (link.meta or {}).get("verification_id")
+            or (link.evidence or {}).get("verification_id")
+            or ""
+        )
+        links.append({
+            "link_id": link.link_id,
+            "kind": str(link.kind or "value"),
+            "source_step": positions[link.source_step_id],
+            "source_path": link.source_path,
+            "target_step": positions[link.target_step_id],
+            "target_path": link.target_path,
+            "param_name": link.param_name or "",
+            "verification_id": verification_id,
+            "source_collection_path": link.source_collection_path,
+            "source_key_path": link.source_key_path,
+            "source_label_path": link.source_label_path,
+            "target_container_path": link.target_container_path,
+            "value_binding": dict(link.value_binding or {}),
+        })
+    return links
+
+
 def _capability_confirmation_hash(
     spec: FlowSpec,
     cap: FlowCapability,
@@ -276,7 +353,12 @@ def _capability_to_api_dict(spec: FlowSpec, cap: FlowCapability) -> dict[str, An
     contract = _capability_execution_contract(spec, cap)
     out["execution_contract"] = contract
     out["workflow_nodes"] = contract["nodes"]
-    out["compiled_step_ids"] = [c["step_id"] for c in contract["call_order"]]
+    compiled_step_ids = [c["step_id"] for c in contract["call_order"]]
+    if not compiled_step_ids:
+        from dano.execution.page.capability_refs import _capability_declared_step_ids
+
+        compiled_step_ids = list(_capability_declared_step_ids(cap))
+    out["compiled_step_ids"] = compiled_step_ids
     return out
 
 
@@ -430,7 +512,7 @@ def flow_spec_capability_contracts(
         _prepared=_prepared,
     )
 
-_PENDING_FLOW_SPEC_HELPERS = {'_capability_dependency_summary': 'dano.execution.page.capability_contracts', '_capability_field_summary': 'dano.execution.page.capability_contracts', '_capability_input_schema': 'dano.execution.page.capability_io', '_capability_is_batch': 'dano.execution.page.capability_contracts', '_capability_node_step_ids': 'dano.execution.page.capability_refs', '_capability_step_summary': 'dano.execution.page.capability_refs', '_find_capability_by_ref': 'dano.execution.page.capability_contracts', '_iter_capability_nodes': 'dano.execution.page.capability_nodes', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_resolve_param_reference': 'dano.execution.page.flow_spec_core.controlled_edits', '_schema_emits_required_state': 'dano.execution.page.capability_io', '_select_flow_capability': 'dano.execution.page.capability_nodes', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', '_sync_capability_order': 'dano.execution.page.capability_orchestration', 'sync_capability_scoped_views': 'dano.execution.page.capability_orchestration', 'ensure_recorded_goal': 'dano.execution.page.flow_materialization.builder', 'prepare_flow_spec_for_publish': 'dano.execution.page.flow_release', 'sync_flow_spec_models': 'dano.execution.page.flow_materialization.builder'}
+_PENDING_FLOW_SPEC_HELPERS = {'_capability_dependency_summary': 'dano.execution.page.capability_contracts', '_capability_field_summary': 'dano.execution.page.capability_contracts', '_capability_input_schema': 'dano.execution.page.capability_io', '_capability_is_batch': 'dano.execution.page.capability_contracts', '_capability_declared_step_ids': 'dano.execution.page.capability_refs', '_capability_node_step_ids': 'dano.execution.page.capability_refs', '_capability_step_summary': 'dano.execution.page.capability_refs', '_find_capability_by_ref': 'dano.execution.page.capability_contracts', '_iter_capability_nodes': 'dano.execution.page.capability_nodes', '_normalize_capability_references': 'dano.execution.page.capability_nodes', '_resolve_param_reference': 'dano.execution.page.flow_spec_core.controlled_edits', '_schema_emits_required_state': 'dano.execution.page.capability_io', '_select_flow_capability': 'dano.execution.page.capability_nodes', '_sync_capability_io_schemas': 'dano.execution.page.capability_io', '_sync_capability_order': 'dano.execution.page.capability_orchestration', 'sync_capability_scoped_views': 'dano.execution.page.capability_orchestration', 'ensure_recorded_goal': 'dano.execution.page.flow_materialization.builder', 'prepare_flow_spec_for_publish': 'dano.execution.page.flow_release', 'sync_flow_spec_models': 'dano.execution.page.flow_materialization.builder'}
 
 
 def _bind_flow_spec_helpers() -> None:

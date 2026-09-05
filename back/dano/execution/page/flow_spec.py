@@ -18,6 +18,7 @@ from dano.execution.page.capability_repair import (
     auto_fix_flow_spec,
 )
 from dano.execution.page.capability_views import (
+    capability_plan_links,
     capability_to_flow_spec_view,
     executable_flow_links,
     flow_spec_capability_contracts,
@@ -137,6 +138,7 @@ __all__ = (
     "apply_recording_agent_submission",
     "auto_fix_flow_spec",
     "build_review_items",
+    "capability_plan_links",
     "capability_to_flow_spec_view",
     "classify_network_request",
     "compile_capability_to_api_request",

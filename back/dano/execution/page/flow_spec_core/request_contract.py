@@ -557,6 +557,30 @@ def _link_fallback_input(step: FlowStep, param: ParamField | None) -> dict[str, 
     return {"param": str(param.key or param.path or "")}
 
 
+def _flow_step_query_runtime_field(
+    step: FlowStep,
+    param: ParamField,
+) -> dict[str, Any] | None:
+    runtime_rule = _runtime_rule_for_param(param)
+    if param.source_kind not in {"system_time", "system_generated"} and runtime_rule is None:
+        return None
+    runtime_name = f"__dano_runtime_{hashlib.sha1((step.step_id + ':' + param.path).encode()).hexdigest()[:10]}"
+    if runtime_rule is not None:
+        runtime_field = {"name": runtime_name, **runtime_rule}
+        strategy = str(runtime_field.get("strategy") or runtime_field.get("kind") or "")
+    else:
+        strategy = str((param.source or {}).get("strategy") or "")
+        if not strategy:
+            strategy = (
+                ("now_date" if param.type == "date" else "now_iso")
+                if param.source_kind == "system_time" and param.type in {"string", "date", "datetime"}
+                else "now_ms" if param.source_kind == "system_time" else "uuid"
+            )
+        runtime_field = {"name": runtime_name, "kind": strategy}
+    runtime_field["kind"] = strategy
+    return runtime_field
+
+
 def _flow_step_query_template(
     step: FlowStep,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any], dict[str, str], list[dict[str, Any]]]:
@@ -571,43 +595,29 @@ def _flow_step_query_template(
         query_key = _query_key_from_param(p)
         if not query_key:
             continue
-        if p.category == "user_param":
+        if _param_exposed_to_caller(p):
             name = (p.key or query_key).strip()
             if not name:
                 continue
             query_template[query_key] = "{{" + name + "}}"
             if name not in params:
                 params.append(name)
-            if p.value not in (None, ""):
-                samples[name] = p.value
+            recorded = _param_recorded_value(p)
+            if recorded not in (None, ""):
+                samples[name] = recorded
             field_types[name] = p.type
-        elif p.category == "runtime_var":
-            # 运行期变量不是最终用户参数。GET query 里先保留录制值，若有 FlowLink 指向 query.xxx，
-            # execute_api_workflow 会在运行期用上游响应覆盖；没有可靠来源时由 review_items 提醒人工确认。
-            runtime_rule = _runtime_rule_for_param(p)
-            if p.source_kind in {"system_time", "system_generated"} or runtime_rule is not None:
-                runtime_name = f"__dano_runtime_{hashlib.sha1((step.step_id + ':' + p.path).encode()).hexdigest()[:10]}"
-                if runtime_rule is not None:
-                    runtime_field = {"name": runtime_name, **runtime_rule}
-                    strategy = str(runtime_field.get("strategy") or "")
-                    if not strategy:
-                        strategy = str(runtime_field.get("kind") or "")
-                else:
-                    strategy = str((p.source or {}).get("strategy") or "")
-                    if not strategy:
-                        strategy = (
-                            ("now_date" if p.type == "date" else "now_iso")
-                            if p.source_kind == "system_time" and p.type in {"string", "date", "datetime"}
-                            else "now_ms" if p.source_kind == "system_time" else "uuid"
-                        )
-                    runtime_field = {"name": runtime_name, "kind": strategy}
-                query_template[query_key] = "{{" + runtime_name + "}}"
-                runtime_field["kind"] = strategy
-                runtime_fields.append(runtime_field)
-            else:
-                query_template[query_key] = p.value
-        else:
-            query_template[query_key] = p.value
+            continue
+        runtime_field = _flow_step_query_runtime_field(step, p)
+        if runtime_field is not None:
+            query_template[query_key] = "{{" + str(runtime_field["name"]) + "}}"
+            runtime_fields.append(runtime_field)
+            continue
+        if p.source_kind == "previous_response":
+            recorded = _param_recorded_value(p)
+            if recorded not in (None, ""):
+                query_template[query_key] = recorded
+            continue
+        query_template[query_key] = _param_recorded_value(p)
     return query_template, params, samples, field_types, runtime_fields
 
 
@@ -1245,35 +1255,13 @@ def flow_spec_to_api_request(
 def _compiled_capability_links(
     spec: FlowSpec, positions: dict[str, int],
 ) -> list[dict[str, Any]]:
-    links: list[dict[str, Any]] = []
-    for link in executable_flow_links(spec):
-        if (
-            link.source_step_id not in positions
-            or link.target_step_id not in positions
-            or positions[link.source_step_id] >= positions[link.target_step_id]
-        ):
-            continue
-        verification_id = str(
-            (link.meta or {}).get("verification_id")
-            or (link.evidence or {}).get("verification_id")
-            or ""
-        )
-        links.append({
-            "link_id": link.link_id,
-            "kind": str(link.kind or "value"),
-            "source_step": positions[link.source_step_id],
-            "source_path": link.source_path,
-            "target_step": positions[link.target_step_id],
-            "target_path": link.target_path,
-            "param_name": link.param_name or "",
-            "verification_id": verification_id,
-            "source_collection_path": link.source_collection_path,
-            "source_key_path": link.source_key_path,
-            "source_label_path": link.source_label_path,
-            "target_container_path": link.target_container_path,
-            "value_binding": dict(link.value_binding or {}),
-        })
-    return links
+    from dano.execution.page.capability_views import capability_plan_links
+
+    ordered = [""] * (max(positions.values()) + 1 if positions else 0)
+    for step_id, index in positions.items():
+        if 0 <= index < len(ordered):
+            ordered[index] = step_id
+    return capability_plan_links(spec, [step_id for step_id in ordered if step_id])
 
 
 def _api_params(api_request: dict) -> list[str]:
@@ -1449,7 +1437,7 @@ def dry_run_flow_spec(
         "fact_check": fact,
     }
 
-_PENDING_FLOW_SPEC_HELPERS = {'_ENUM_PARAM_TYPES': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_ENUM_SOURCE_KINDS': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_enum_label_value': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_enum_option_map_from_options': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_param_exposed_to_caller': 'dano.execution.page.flow_materialization.field_contracts.caller_ownership', '_param_field_manually_edited': 'dano.execution.page.flow_materialization.field_contracts.common', '_param_requires_caller_input': 'dano.execution.page.flow_materialization.field_contracts.caller_ownership', '_query_key_from_param': 'dano.execution.page.flow_materialization.request_steps', '_request_path': 'dano.execution.page.recording_facts', '_runtime_param_publish_error': 'dano.execution.page.flow_release', 'flow_spec_to_summary': 'dano.execution.page.flow_client_projection', 'prepare_flow_spec_for_publish': 'dano.execution.page.flow_release', '_active_capability_step_ids': 'dano.execution.page.capability_refs', '_capability_execution_contract': 'dano.execution.page.capability_views', '_capability_to_api_dict': 'dano.execution.page.capability_views', 'executable_flow_links': 'dano.execution.page.capability_views', '_validate_assertion_contract': 'dano.execution.page.replay', 'capability_to_flow_spec_view': 'dano.execution.page.capability_views', 'flow_spec_capability_contracts': 'dano.execution.page.capability_views'}
+_PENDING_FLOW_SPEC_HELPERS = {'_ENUM_PARAM_TYPES': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_ENUM_SOURCE_KINDS': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_enum_label_value': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_enum_option_map_from_options': 'dano.execution.page.flow_materialization.field_contracts.option_projection', '_param_exposed_to_caller': 'dano.execution.page.flow_materialization.field_contracts.caller_ownership', '_param_field_manually_edited': 'dano.execution.page.flow_materialization.field_contracts.common', '_param_requires_caller_input': 'dano.execution.page.flow_materialization.field_contracts.caller_ownership', '_query_key_from_param': 'dano.execution.page.flow_materialization.request_steps', '_request_path': 'dano.execution.page.recording_facts', '_runtime_param_publish_error': 'dano.execution.page.flow_release', 'flow_spec_to_summary': 'dano.execution.page.flow_client_projection', 'prepare_flow_spec_for_publish': 'dano.execution.page.flow_release', '_active_capability_step_ids': 'dano.execution.page.capability_refs', '_capability_execution_contract': 'dano.execution.page.capability_views', '_capability_to_api_dict': 'dano.execution.page.capability_views', 'capability_plan_links': 'dano.execution.page.capability_views', 'executable_flow_links': 'dano.execution.page.capability_views', '_validate_assertion_contract': 'dano.execution.page.replay', 'capability_to_flow_spec_view': 'dano.execution.page.capability_views', 'flow_spec_capability_contracts': 'dano.execution.page.capability_views'}
 
 
 def _bind_flow_spec_helpers() -> None:
