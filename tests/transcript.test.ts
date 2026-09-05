@@ -35,6 +35,19 @@ test("manual page clicks are appended to the session log", () => {
   assert.equal(event.item.phase, "complete");
 });
 
+test("message_end reuses the streamed thinking block instead of duplicating it", () => {
+  const transcript = new PiTranscript(value => value);
+  transcript.handle({ type: "agent_start" });
+  transcript.handle({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "先看页面" } });
+  transcript.handle({ type: "message_update", assistantMessageEvent: { type: "thinking_end" } });
+  transcript.handle({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "已识别。" } });
+  transcript.handle({ type: "message_end", message: { role: "assistant", content: [{ type: "thinking", thinking: "先看页面" }, { type: "text", text: "已识别。" }] } });
+
+  assert.deepEqual(transcript.items.map(item => item.kind), ["thinking", "message"]);
+  assert.equal(transcript.items[0]!.kind === "thinking" && transcript.items[0]!.text, "先看页面");
+  assert.equal(transcript.items[0]!.kind === "thinking" && transcript.items[0]!.complete, true);
+});
+
 test("clearing the transcript empties the workbench session", () => {
   const transcript = new PiTranscript(value => value);
   transcript.addUser("上次录制");

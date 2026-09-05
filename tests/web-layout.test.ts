@@ -74,7 +74,7 @@ test("recording workbench can clear conversation history in one click", async ()
     readFile(path.join(root, "src", "web", "pi-rpc.ts"), "utf8"),
     readFile(path.join(root, "src", "web", "workbench-page.ts"), "utf8")
   ]);
-  const resetWorkbench = page.match(/async reset\(\)[\s\S]*?session_reset/)?.[0] || "";
+  const resetWorkbench = page.match(/async reset\(\)[\s\S]*?\n  \}/)?.[0] || "";
 
   assert.match(html, /id="clear-session"[^>]*>清空历史</);
   assert.match(css, /\.session-toolbar\s*\{/);
@@ -89,7 +89,8 @@ test("recording workbench can clear conversation history in one click", async ()
   assert.match(resetWorkbench, /abortWork\("clear"\)/);
   assert.match(resetWorkbench, /lastRecordingSessionId = undefined/);
   assert.match(resetWorkbench, /this\.pi\.stop\(\)/);
-  assert.doesNotMatch(resetWorkbench, /beginFreshConversation|ensureStarted/);
+  assert.doesNotMatch(resetWorkbench, /beginFreshConversation/);
+  assert.match(resetWorkbench, /ensureStarted\(\)/);
   assert.match(resetWorkbench, /this\.transcript\.clear\(\)/);
   assert.match(bridge, /this\.stopping = true/);
   assert.match(bridge, /async beginFreshConversation\(\)[\s\S]*type: "new_session"/);
@@ -113,7 +114,10 @@ test("starting a recording keeps the workbench conversation", async () => {
   assert.doesNotMatch(browserStart, /reset\(|transcript\.clear|pi\.abort|abortAgent|beginFreshConversation/);
   assert.doesNotMatch(openBrowser, /resetWorkbench/);
   assert.doesNotMatch(openBrowser, /工作台已清空/);
-  assert.match(app, /if \(event\.type === "session_reset"\) \{\s*if \(event\.epoch != null\) state\.sessionEpoch = event\.epoch;\s*resetWorkbench\(\);/s);
+  assert.match(app, /event\.epoch <= state\.sessionEpoch/);
+  assert.match(app, /function reconcileSession\(/);
+  assert.match(app, /function adoptLocalUser\(/);
+  assert.match(app, /local-user-/);
   assert.doesNotMatch(server, /studio\.recorder\.control\(\{\s*action:\s*"goto"/);
   const openRoute = server.match(/pathname === "\/api\/browser\/open"[\s\S]*?return;\s*\}/)?.[0] || "";
   const internalStart = server.match(/pathname === "\/internal\/browser\/start"[\s\S]*?return;\s*\}/)?.[0] || "";
@@ -313,14 +317,20 @@ test("refresh keeps a tab session while a new page starts isolated", async () =>
   assert.doesNotMatch(app, /window\.close\(/);
 });
 
-test("idle workbench tabs start Pi only when the first task is sent", async () => {
+test("idle workbench tabs do not start Pi until the tab is watching or a task is sent", async () => {
   const [app, server] = await Promise.all([
     readFile(path.join(root, "web", "app.js"), "utf8"),
     readFile(path.join(root, "src", "web", "server.ts"), "utf8")
   ]);
   const creation = server.slice(server.indexOf("function getOrCreatePage"), server.indexOf("function pageSessionIdFrom"));
+  const chatRoute = server.match(/pathname === "\/api\/chat"[\s\S]*?return;\s*\}/)?.[0] || "";
+  const eventsRoute = server.match(/pathname === "\/api\/events"[\s\S]*?return;\s*\}/)?.[0] || "";
   assert.doesNotMatch(creation, /ensureStarted\(/);
-  assert.match(server, /pathname === "\/api\/chat"[\s\S]*await page\.ensureStarted\(\)/);
+  assert.match(eventsRoute, /ensureStarted\(/);
+  assert.match(chatRoute, /acceptUserMessage|addUser/);
+  assert.match(chatRoute, /sendJson\(response, 202/);
+  assert.match(chatRoute, /runPrompt/);
+  assert.doesNotMatch(chatRoute, /await page\.pi\.prompt|await page\.ensureStarted/);
   assert.match(app, /elements\.sendPrompt\.disabled = state\.agentAborting/);
   assert.doesNotMatch(app, /pendingPrompt/);
 });

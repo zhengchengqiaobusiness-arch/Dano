@@ -53,6 +53,7 @@ export class WorkbenchPage {
   private manualTakeover?: ManualTakeover;
   private coverageContinuationPending = false;
   private coverageContinuations = 0;
+  private promptGeneration = 0;
 
   constructor(
     id: string,
@@ -261,7 +262,31 @@ export class WorkbenchPage {
     return session;
   }
 
+  acceptUserMessage(text: string) {
+    this.transcriptOpen = true;
+    const userEvent = this.transcript.addUser(text);
+    this.broadcastSession(userEvent);
+    return userEvent;
+  }
+
+  async runPrompt(message: string) {
+    const generation = this.promptGeneration;
+    try {
+      await this.ensureStarted();
+      if (generation !== this.promptGeneration || this.disposing) return;
+      this.transcriptOpen = true;
+      await this.pi.prompt(message);
+    } catch (error) {
+      if (generation !== this.promptGeneration || this.disposing) return;
+      const text = error instanceof Error ? error.message : String(error);
+      this.onLog("ERROR", text);
+      this.broadcast({ type: "agent_error", message: text });
+      this.broadcast({ type: "agent_status", ready: this.pi.status().ready, streaming: false });
+    }
+  }
+
   async abortWork(reason = "abort") {
+    this.promptGeneration += 1;
     this.cancelManualTakeover(reason);
     const pid = this.pi.processId();
     if (this.pi.status().streaming) {
@@ -304,6 +329,11 @@ export class WorkbenchPage {
     this.broadcast({ type: "agent_status", ready: false, streaming: false });
     this.broadcast({ type: "browser_changed" });
     this.broadcast({ type: "session_reset", epoch: this.epoch, pageSession: this.id });
+    if (this.clients.size > 0) {
+      void this.ensureStarted().catch(error => {
+        this.onLog("WARN", `Failed to prestart Pi after clear: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
   }
 
   async dispose(reason = "page-closed") {

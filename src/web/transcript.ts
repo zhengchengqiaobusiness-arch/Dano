@@ -113,7 +113,9 @@ export class PiTranscript {
       const finalText = messageText(event.message);
       const finalThinking = thinkingText(event.message);
       if (finalThinking) {
-        const item = this.item(this.activeThinkingId, "thinking") || this.findLast("thinking", candidate => !candidate.complete);
+        const item = this.item(this.activeThinkingId, "thinking")
+          || this.findLast("thinking", candidate => !candidate.complete)
+          || this.findLast("thinking", () => true);
         if (item) {
           item.text = finalThinking;
           item.complete = true;

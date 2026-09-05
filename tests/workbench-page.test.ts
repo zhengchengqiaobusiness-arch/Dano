@@ -15,6 +15,31 @@ test("page session ids are accepted only in the workbench format", () => {
   assert.equal(isPageSessionId("page_***"), false);
 });
 
+test("acceptUserMessage records the user turn without starting Pi", () => {
+  const events: any[] = [];
+  const page = new WorkbenchPage("page_acceptuser", {
+    rootDir: ".",
+    dataDir: ".business-skill-studio",
+    recordingsDir: ".business-skill-studio/recordings",
+    catalogDir: ".business-skill-studio/catalog",
+    profileDir: ".business-skill-studio/browser-profile",
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  }, "http://127.0.0.1:4310", value => value, () => {});
+  page.broadcast = payload => { events.push(payload); };
+
+  const userEvent = page.acceptUserMessage("打开差旅列表");
+
+  assert.equal(userEvent.item.kind, "message");
+  assert.equal(userEvent.item.role, "user");
+  assert.equal(userEvent.item.text, "打开差旅列表");
+  assert.equal(page.transcript.items.length, 1);
+  assert.equal(page.pi.status().ready, false);
+  assert.equal(page.pi.status().running, false);
+  assert.equal(events.some(event => event.type === "session_item" && event.item?.text === "打开差旅列表"), true);
+});
+
 test("reset forgets the last recording so the next chat is independent", async () => {
   const page = new WorkbenchPage("page_clearsession", {
     rootDir: ".",

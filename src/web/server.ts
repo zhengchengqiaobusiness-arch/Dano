@@ -167,12 +167,17 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     response.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
-      "Connection": "keep-alive"
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no"
     });
+    response.socket?.setNoDelay(true);
     response.write("retry: 1500\n\n");
     page.cancelAbandon();
     page.clients.add(response);
-    sendEvent(response, { type: "connected", pageSession: page.id });
+    sendEvent(response, { type: "connected", pageSession: page.id, epoch: page.epoch });
+    void page.ensureStarted().catch(error => {
+      runtimeLog("WARN", `Failed to prestart Pi for ${page.id}: ${errorMessage(error)}`);
+    });
     request.on("close", () => {
       page.clients.delete(response);
       if (page.clients.size === 0) page.scheduleAbandon("sse-disconnected");
@@ -184,6 +189,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     const page = requirePage(request);
     sendJson(response, 200, {
       pageSession: page.id,
+      epoch: page.epoch,
       agent: page.pi.status(),
       browser: await page.browserState(),
       model: process.env.PI_MODEL || null,
@@ -259,11 +265,9 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     if (request.method === "POST" && action === "invoke") {
       const page = requirePage(request);
       const invocation = await studio.invokeSkill(name, typeof body.goal === "string" ? body.goal : "");
-      page.transcriptOpen = true;
-      const userEvent = page.transcript.addUser(invocation.prompt);
-      page.broadcastSession(userEvent);
-      await page.pi.prompt(invocation.prompt);
-      sendJson(response, 202, { accepted: true, skill: invocation.record.name });
+      const userEvent = page.acceptUserMessage(invocation.prompt);
+      sendJson(response, 202, { accepted: true, skill: invocation.record.name, item: userEvent.item, epoch: page.epoch });
+      void page.runPrompt(invocation.prompt);
       return;
     }
   }
@@ -376,12 +380,9 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     const body = await readJsonBody(request);
     const messageText = typeof body.message === "string" ? body.message.trim() : "";
     if (!messageText) throw new Error("A message is required");
-    await page.ensureStarted();
-    page.transcriptOpen = true;
-    const userEvent = page.transcript.addUser(messageText);
-    page.broadcastSession(userEvent);
-    await page.pi.prompt(messageText);
-    sendJson(response, 202, { accepted: true, item: userEvent.item });
+    const userEvent = page.acceptUserMessage(messageText);
+    sendJson(response, 202, { accepted: true, item: userEvent.item, epoch: page.epoch });
+    void page.runPrompt(messageText);
     return;
   }
 

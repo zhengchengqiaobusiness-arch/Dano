@@ -54,7 +54,8 @@ const state = {
   view: "recording", browserActive: false, browserMode: "automatic", agentReady: false, agentStreaming: false, agentAborting: false,
   currentUiRequest: null, localConfirmation: null, invokeSkill: null, manualTakeover: null, manualTakeoverCompleting: false,
   sessionNodes: new Map(), toastTimer: null, skills: [], skillsPage: 1, skillsPageSize: 8, skillsSort: "desc",
-  sessionFollow: false, sessionLive: true, sessionEpoch: 0,
+  sessionFollow: false, sessionLive: true, sessionEpoch: 0, localUserSeq: 0,
+  reconcileInFlight: false, reconcileAgain: false, eventSource: null,
   manualQueue: Promise.resolve(), manualRefreshTimers: [], recordingAction: null, clearingSession: false,
   pollInFlight: false, frameLoading: false, frameBlobUrl: null, lastFrameAt: 0, frameEpoch: 0,
   lastStatusText: "", viewport: { width: 1440, height: 960 },
@@ -234,8 +235,65 @@ function renderSessionItem(item) {
   return node;
 }
 
+function adoptLocalUser(localId, item) {
+  if (!item?.id) return;
+  if (state.sessionNodes.has(item.id)) {
+    const local = state.sessionNodes.get(localId);
+    if (local) { local.remove(); state.sessionNodes.delete(localId); }
+    return;
+  }
+  const local = state.sessionNodes.get(localId);
+  if (!local) {
+    renderSessionItem(item);
+    return;
+  }
+  state.sessionNodes.delete(localId);
+  state.sessionNodes.set(item.id, local);
+  local.dataset.sessionId = item.id;
+}
+
+function reconcileSessionItems(items = []) {
+  const ids = new Set(items.map(item => item.id));
+  for (const item of items) renderSessionItem(item);
+  for (const [id, node] of [...state.sessionNodes.entries()]) {
+    if (ids.has(id) || String(id).startsWith("local-user-")) continue;
+    node.remove();
+    state.sessionNodes.delete(id);
+  }
+}
+
+async function reconcileSession() {
+  if (state.clearingSession) return;
+  if (state.reconcileInFlight) {
+    state.reconcileAgain = true;
+    return;
+  }
+  state.reconcileInFlight = true;
+  try {
+    do {
+      state.reconcileAgain = false;
+      const status = await api("/api/status");
+      if (status.epoch != null && status.epoch > state.sessionEpoch) {
+        state.sessionEpoch = status.epoch;
+        resetWorkbench();
+      }
+      updateAgentStatus(status.agent?.ready, status.agent?.streaming);
+      reconcileSessionItems(status.sessionItems || []);
+    } while (state.reconcileAgain);
+  } catch (error) {
+    if (!state.clearingSession) showToast(error.message || "Studio 服务已断开，页面保留");
+  } finally {
+    state.reconcileInFlight = false;
+    if (state.reconcileAgain) void reconcileSession();
+  }
+}
+
 function patchSessionItem(event) {
-  const node = state.sessionNodes.get(event.id); if (!node) return;
+  const node = state.sessionNodes.get(event.id);
+  if (!node) {
+    void reconcileSession();
+    return;
+  }
   const text = node.querySelector(".session-text");
   if (text && event.appendText) text.textContent += event.appendText;
   if (event.complete) {
@@ -588,10 +646,21 @@ async function submitPrompt(message) {
   elements.prompt.value = "";
   state.sessionLive = true;
   state.sessionFollow = true;
+  const localId = `local-user-${Date.now()}-${++state.localUserSeq}`;
+  renderSessionItem({ id: localId, kind: "message", role: "user", text, at: new Date().toISOString(), complete: true });
   followSessionIfWanted();
   updateAgentStatus(true, true);
-  try { await api("/api/chat", { method: "POST", body: JSON.stringify({ message: text }) }); }
-  catch (error) { updateAgentStatus(state.agentReady, state.agentStreaming); showToast(error.message); }
+  try {
+    const result = await api("/api/chat", { method: "POST", body: JSON.stringify({ message: text }) });
+    if (result?.epoch != null) state.sessionEpoch = result.epoch;
+    adoptLocalUser(localId, result?.item);
+    followSessionIfWanted();
+  } catch (error) {
+    const local = state.sessionNodes.get(localId);
+    if (local) { local.remove(); state.sessionNodes.delete(localId); }
+    updateAgentStatus(state.agentReady, false);
+    showToast(error.message);
+  }
 }
 
 function notifyPageLeave() {
@@ -811,22 +880,37 @@ async function skillAction(skill, action) {
 }
 
 function connectEvents() {
+  if (state.eventSource) {
+    state.eventSource.onmessage = null;
+    state.eventSource.onerror = null;
+    state.eventSource.close();
+  }
   const stream = new EventSource(`/api/events?pageSession=${encodeURIComponent(pageSessionId())}`);
+  state.eventSource = stream;
   stream.onmessage = message => {
     const event = JSON.parse(message.data);
+    if (event.type === "connected") {
+      if (event.epoch != null && event.epoch > state.sessionEpoch) state.sessionEpoch = event.epoch;
+      void reconcileSession();
+      return;
+    }
     if (event.type === "agent_status") updateAgentStatus(event.ready, event.streaming);
     if (event.type === "session_reset") {
+      if (event.epoch != null && event.epoch <= state.sessionEpoch) return;
       if (event.epoch != null) state.sessionEpoch = event.epoch;
       resetWorkbench();
       void pollBrowser(true);
       return;
     }
     if (event.epoch != null && event.epoch !== state.sessionEpoch) return;
-    const manualItem = event.item && (event.item.role === "user" || String(event.item.toolName || "").startsWith("manual_page"));
-    if ((event.type === "session_item" || event.type === "session_patch" || event.type === "session_replace" || event.type === "ui_request") && !state.sessionLive && !manualItem) return;
-    if (event.type === "session_item") renderSessionItem(event.item);
-    if (event.type === "session_patch") patchSessionItem(event);
-    if (event.type === "session_replace") renderSessionItem(event.item);
+    if (event.type === "session_item" || event.type === "session_replace") {
+      state.sessionLive = true;
+      renderSessionItem(event.item);
+    }
+    if (event.type === "session_patch") {
+      state.sessionLive = true;
+      patchSessionItem(event);
+    }
     if (event.type === "ui_request") showUiRequest(event);
     if (event.type === "browser_changed") void pollBrowser(true).then(() => {
       rememberPaneViewport();
@@ -840,8 +924,8 @@ function connectEvents() {
     if (event.type === "agent_error" && !state.clearingSession) showToast(event.message || "Pi 连接异常");
   };
   stream.onerror = () => {
-    updateAgentStatus(false, false);
-    void fetch("/api/status", { cache: "no-store", headers: pageHeaders() }).catch(() => showToast("Studio 服务已断开，页面保留"));
+    if (state.clearingSession) return;
+    void reconcileSession();
   };
 }
 
@@ -1013,8 +1097,9 @@ elements.browserViewport.addEventListener("keydown", event => {
 async function initialize() {
   try {
     const status = await api("/api/status"); updateAgentStatus(status.agent.ready, status.agent.streaming);
+    if (status.epoch != null) state.sessionEpoch = status.epoch;
     elements.modelStatus.textContent = `${status.model || "由提供商选择模型"} · ${status.thinking}`;
-    for (const item of status.sessionItems || []) renderSessionItem(item);
+    reconcileSessionItems(status.sessionItems || []);
     state.browserMode = status.browser?.mode || state.browserMode; renderBrowserMode(); await pollBrowser();
     rememberPaneViewport();
   } catch (error) { showToast(error.message); }
