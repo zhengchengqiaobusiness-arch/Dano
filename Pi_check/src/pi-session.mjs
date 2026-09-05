@@ -58,10 +58,6 @@ ${skillText}
 
 export const PI_INSTRUCTIONS = buildPiInstructions(await readRecordingSkill());
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export function buildFinalAnalysisPrompt(latestSeq) {
   return (
     `证据已冻结，最新 seq=${Number(latestSeq) || 0}。现在必须调用 submit_recording_result。\n` +
@@ -112,6 +108,7 @@ export class LivePiSession {
   #flushScheduled;
   #notifyDebounceMs;
   #unsub;
+  #analysisSettleErr;
 
   #emitThought(payload) {
     if (!payload) return;
@@ -138,6 +135,9 @@ export class LivePiSession {
   }
 
   async #promptNow(text) {
+    if (!this.alive) {
+      throw new Error("PI 会话已关闭");
+    }
     try {
       await this.session.prompt(text);
     } catch (error) {
@@ -157,7 +157,7 @@ export class LivePiSession {
 
   async requestFinalAnalysis({ timeoutMs = 600000, idleSubmitMs = 90000, hasResult } = {}) {
     if (!this.alive) {
-      throw new PiRequiredError("PI 在录制期间退出");
+      throw new PiRequiredError("PI 会话已关闭");
     }
     this.status = "finalizing";
     const started = Date.now();
@@ -187,6 +187,10 @@ export class LivePiSession {
       settled = true;
       rejectDone(error);
     };
+    this.#analysisSettleErr = settleErr;
+    if (!this.alive) {
+      settleErr(new Error("PI 会话已关闭"));
+    }
     const resultReady = async () => {
       if (!checkResult) return false;
       try {
@@ -197,6 +201,10 @@ export class LivePiSession {
     };
     const onPromptSettled = async (error) => {
       if (settled) return;
+      if (!this.alive) {
+        settleErr(new Error("PI 会话已关闭"));
+        return;
+      }
       if (await resultReady()) {
         settleOk();
         return;
@@ -210,11 +218,16 @@ export class LivePiSession {
         settleErr(new Error("PI 最终分析超时"));
         return;
       }
+      if (!this.alive) {
+        settleErr(new Error("PI 会话已关闭"));
+        return;
+      }
       logPiOnly("[PI分析] 本轮结束但未提交，继续要求 submit_recording_result");
       this.#emitThought({ kind: "text", text: "本轮结束但未提交，继续要求提交完整能力" });
       startPrompt(submitNow);
     };
     const startPrompt = (text, options) => {
+      if (settled || !this.alive) return;
       const task = options ? this.session.prompt(text, options) : this.#promptNow(text);
       Promise.resolve(task).then(
         () => onPromptSettled(),
@@ -225,6 +238,10 @@ export class LivePiSession {
     this.#emitThought({ kind: "text", text: `开始最终分析，最新证据 seq=${this.#latestSeq}` });
     startPrompt(buildFinalAnalysisPrompt(this.#latestSeq));
     const heartbeat = setInterval(() => {
+      if (!this.alive) {
+        settleErr(new Error("PI 会话已关闭"));
+        return;
+      }
       const line = `仍在分析 ${Math.round((Date.now() - started) / 1000)}s ${this.#trace.summary()}`;
       logPiOnly(`[PI分析] ${line}`);
       this.#emitThought({ kind: "text", text: line });
@@ -232,6 +249,10 @@ export class LivePiSession {
     const resultWatch = checkResult
       ? setInterval(async () => {
         if (settled) return;
+        if (!this.alive) {
+          settleErr(new Error("PI 会话已关闭"));
+          return;
+        }
         if (await resultReady()) {
           logPiOnly("[PI分析] 已检测到 submit_recording_result");
           this.#emitThought({ kind: "text", text: "已检测到最终提交" });
@@ -240,7 +261,7 @@ export class LivePiSession {
       }, 250)
       : null;
     const idleWatch = setInterval(() => {
-      if (settled) return;
+      if (settled || !this.alive) return;
       if (this.#trace.toolCount !== lastToolCount) {
         lastToolCount = this.#trace.toolCount;
         lastToolAt = Date.now();
@@ -254,18 +275,21 @@ export class LivePiSession {
       steered = true;
       logPiOnly(`[PI分析] ${Math.round(quietFor / 1000)}s 没有新工具，催促提交，不中止当前轮`);
       this.#emitThought({ kind: "text", text: `${Math.round(quietFor / 1000)}s 没有新工具，催促提交` });
+      if (!this.alive) return;
       this.session.prompt(submitNow, { streamingBehavior: "steer" }).catch((error) => {
         logPiOnly(`[PI分析] 催促提交失败 ${error?.message || error}`);
       });
     }, Math.min(1000, Math.max(20, Math.floor(idleMs / 2) || 20)));
-    const timeoutTask = sleep(Math.max(50, timeoutMs)).then(() => {
-      throw new Error("PI 最终分析超时");
+    let timeoutHandle;
+    const timeoutTask = new Promise((_, reject) => {
+      timeoutHandle = setTimeout(() => reject(new Error("PI 最终分析超时")), Math.max(50, timeoutMs));
     });
     try {
       await Promise.race([done, timeoutTask]);
     } catch (error) {
       this.lastError = error.message || String(error);
-      this.status = "failed";
+      const closed = !this.alive || String(this.lastError).includes("会话已关闭");
+      this.status = closed ? "closed" : "failed";
       logPiOnly(`[PI分析] 失败 ${this.lastError} elapsed=${Math.round((Date.now() - started) / 1000)}s ${this.#trace.summary()}`);
       this.#emitThought({ kind: "text", text: `分析失败：${this.lastError}` });
       try {
@@ -273,11 +297,16 @@ export class LivePiSession {
       } catch {
         // ignore
       }
+      if (closed) {
+        throw new Error("PI 会话已关闭");
+      }
       if (String(this.lastError).includes("超时")) {
         throw new Error(`PI 最终分析超时 ${this.#trace.summary()}`);
       }
       throw error;
     } finally {
+      this.#analysisSettleErr = null;
+      clearTimeout(timeoutHandle);
       clearInterval(heartbeat);
       clearInterval(idleWatch);
       if (resultWatch) clearInterval(resultWatch);
@@ -291,7 +320,11 @@ export class LivePiSession {
   }
 
   async close() {
-    if (!this.alive) {
+    const wasAlive = this.alive;
+    this.alive = false;
+    this.status = "closed";
+    this.#analysisSettleErr?.(new Error("PI 会话已关闭"));
+    if (!wasAlive) {
       try {
         this.#dispose?.();
       } catch {
@@ -299,8 +332,6 @@ export class LivePiSession {
       }
       return;
     }
-    this.alive = false;
-    this.status = "closed";
     try {
       this.#unsub?.();
     } catch {

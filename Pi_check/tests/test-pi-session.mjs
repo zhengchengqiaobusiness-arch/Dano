@@ -52,12 +52,19 @@ test("录制中不打断 PI，冻结后只发一次最终提示，忙时改用 f
 
 test("分析停住时催促提交，但不中止当前轮", async () => {
   const prompts = [];
+  let rejectPending;
+  const pending = new Promise((_, reject) => {
+    rejectPending = reject;
+  });
   const session = {
     prompts,
     async prompt(text, options = {}) {
       prompts.push({ text, options });
       if (options.streamingBehavior === "steer") return;
-      await new Promise(() => {});
+      await pending;
+    },
+    async abort() {
+      rejectPending?.(new Error("aborted"));
     },
   };
   const { createPiTrace } = await import("../src/pi-trace.mjs");
@@ -76,6 +83,47 @@ test("分析停住时催促提交，但不中止当前轮", async () => {
   const steers = prompts.filter((item) => item.options.streamingBehavior === "steer" && /submit_recording_result/.test(item.text));
   assert.equal(steers.length, 1);
   assert.equal(prompts.filter((item) => !item.options.streamingBehavior && /证据已经够了/.test(item.text)).length, 0);
+});
+
+test("关闭会话后立即停止最终分析，不再继续 prompt", async () => {
+  const prompts = [];
+  let rejectPending;
+  const pending = new Promise((_, reject) => {
+    rejectPending = reject;
+  });
+  const session = {
+    prompts,
+    aborted: 0,
+    async prompt(text, options = {}) {
+      prompts.push({ text, options });
+      await pending;
+    },
+    async abort() {
+      this.aborted += 1;
+      rejectPending?.(new Error("aborted"));
+    },
+    dispose() {},
+  };
+  const pi = new LivePiSession({
+    session,
+    sessionId: "pi_close",
+    dispose: () => {},
+  });
+  const analysis = pi.requestFinalAnalysis({
+    timeoutMs: 60000,
+    idleSubmitMs: 90000,
+    hasResult: async () => false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const countBeforeClose = session.prompts.length;
+  assert.ok(countBeforeClose >= 1);
+  await pi.close();
+  await assert.rejects(() => analysis, /会话已关闭/);
+  assert.equal(pi.status, "closed");
+  assert.equal(pi.alive, false);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(session.prompts.length, countBeforeClose);
+  assert.ok(session.aborted >= 1);
 });
 
 test("本轮结束但未提交时继续催促，直到有结果", async () => {
