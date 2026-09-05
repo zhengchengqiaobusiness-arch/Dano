@@ -193,7 +193,7 @@ export function describePiTools() {
     {
       name: "list_recording_index",
       label: "证据索引",
-      description: "按序号列出 interaction、xhr/fetch、network_response、visible_control、截图和页面跳转。visible_control 是当前页看得见的筛选/表单控件事实。只投影已有字段，不分类、不判断能力。",
+      description: "按序号列出 interaction、xhr/fetch、network_response、visible_control、截图和页面跳转。visible_control 是当前页看得见的筛选/表单/表格控件事实，含日期、下拉、上传。只投影已有字段，不分类、不判断能力。",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
     {
@@ -296,7 +296,8 @@ export function wrapPiToolsForSdk(host, defineTool, Type, trace = null) {
     execute: async (_id, params) => {
       const args = params || {};
       const started = Date.now();
-      logPiOnly(`[PI分析] 调用 ${spec.name} ${summarizeToolArgs(spec.name, args)}`);
+      if (trace?.recordToolStart) trace.recordToolStart(spec.name, args);
+      else logPiOnly(`[PI分析] 调用 ${spec.name} ${summarizeToolArgs(spec.name, args)}`);
       try {
         const result = await host[spec.name](args);
         const summary = summarizeToolResult(spec.name, result);

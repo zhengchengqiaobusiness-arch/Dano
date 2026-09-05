@@ -28,7 +28,7 @@ export class EvidenceStore {
       id,
       targetUrl,
       goal,
-      title: title || goal,
+      title: String(title || "").trim(),
       action,
       status: "starting_pi",
       piStatus: "starting",

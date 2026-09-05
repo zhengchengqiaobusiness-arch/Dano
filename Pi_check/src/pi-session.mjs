@@ -66,7 +66,7 @@ export function buildFinalAnalysisPrompt(latestSeq) {
   return (
     `证据已冻结，最新 seq=${Number(latestSeq) || 0}。现在必须调用 submit_recording_result。\n` +
     "先调 list_recording_index 建台账，看 interaction、xhr/fetch、network_response 和 visible_control。读关键 execute 请求正文；响应在 network_response 或读请求时附带的 response.body。\n" +
-    "visible_control 是当前页看得见的筛选/表单/表格控件。可改控件一律调用方，即使本场没改、请求没带。禁止把看得见的日期/下拉/附件写成不可见或系统固定。登录身份用 current_user，不要写死本场数字。\n" +
+    "先读各页 visible_control，再对 execute 每个键。可改控件一律调用方，即使本场没改、请求没带。禁止把看得见的日期/下拉/附件写成不可见或系统固定。空数组若有上传/选人控件仍是调用方。确认弹层说明没进 execute 就不要写。schema（含数组 items）不得包含系统字段或 execute 里没有的键。跳转带入但本页可改的筛选仍是调用方。登录身份用 current_user，不要写死本场数字。\n" +
     "read_response_blob 只接受 body.blob_id（blob_ 开头）。不要把 request_id 当 blob_id，也不要读 screenshot 去找接口正文。\n" +
     "看完关键请求立刻把完整 result 作为 submit_recording_result 的工具参数提交。不要把 JSON 写在对话里。不要写 capabilities[].fields。request_refs 必须是 {step_id, usage}。steps[].params 必须是含 key/path 的对象数组。\n" +
     "若已有 submit_recording_draft，立刻 final=true 提交。草稿不会自动变成结果。"
@@ -74,7 +74,15 @@ export function buildFinalAnalysisPrompt(latestSeq) {
 }
 
 export class LivePiSession {
-  constructor({ session, sessionId, dispose, notifyDebounceMs = 8000, instructions = PI_INSTRUCTIONS, trace = createPiTrace() }) {
+  constructor({
+    session,
+    sessionId,
+    dispose,
+    notifyDebounceMs = 8000,
+    instructions = PI_INSTRUCTIONS,
+    onThought = null,
+    trace,
+  }) {
     this.session = session;
     this.sessionId = sessionId;
     this.alive = true;
@@ -82,7 +90,8 @@ export class LivePiSession {
     this.lastError = "";
     this.#instructions = instructions;
     this.#dispose = dispose;
-    this.#trace = trace;
+    this.#onThought = typeof onThought === "function" ? onThought : null;
+    this.#trace = trace || createPiTrace({ onThought: (payload) => this.#emitThought(payload) });
     this.#exitListeners = new Set();
     this.#notifyChain = Promise.resolve();
     this.#latestSeq = 0;
@@ -95,6 +104,7 @@ export class LivePiSession {
 
   #instructions;
   #dispose;
+  #onThought;
   #trace;
   #exitListeners;
   #notifyChain;
@@ -102,6 +112,15 @@ export class LivePiSession {
   #flushScheduled;
   #notifyDebounceMs;
   #unsub;
+
+  #emitThought(payload) {
+    if (!payload) return;
+    try {
+      this.#onThought?.(payload);
+    } catch {
+      // 助手输出失败不得影响分析
+    }
+  }
 
   onExit(listener) {
     this.#exitListeners.add(listener);
@@ -192,6 +211,7 @@ export class LivePiSession {
         return;
       }
       logPiOnly("[PI分析] 本轮结束但未提交，继续要求 submit_recording_result");
+      this.#emitThought({ kind: "text", text: "本轮结束但未提交，继续要求提交完整能力" });
       startPrompt(submitNow);
     };
     const startPrompt = (text, options) => {
@@ -202,15 +222,19 @@ export class LivePiSession {
       );
     };
     logPiOnly(`[PI分析] 开始最终分析 timeout=${timeoutMs}ms seq=${this.#latestSeq}`);
+    this.#emitThought({ kind: "text", text: `开始最终分析，最新证据 seq=${this.#latestSeq}` });
     startPrompt(buildFinalAnalysisPrompt(this.#latestSeq));
     const heartbeat = setInterval(() => {
-      logPiOnly(`[PI分析] 仍在进行 elapsed=${Math.round((Date.now() - started) / 1000)}s ${this.#trace.summary()}`);
+      const line = `仍在分析 ${Math.round((Date.now() - started) / 1000)}s ${this.#trace.summary()}`;
+      logPiOnly(`[PI分析] ${line}`);
+      this.#emitThought({ kind: "text", text: line });
     }, 15000);
     const resultWatch = checkResult
       ? setInterval(async () => {
         if (settled) return;
         if (await resultReady()) {
           logPiOnly("[PI分析] 已检测到 submit_recording_result");
+          this.#emitThought({ kind: "text", text: "已检测到最终提交" });
           settleOk();
         }
       }, 250)
@@ -229,6 +253,7 @@ export class LivePiSession {
       if (steered) return;
       steered = true;
       logPiOnly(`[PI分析] ${Math.round(quietFor / 1000)}s 没有新工具，催促提交，不中止当前轮`);
+      this.#emitThought({ kind: "text", text: `${Math.round(quietFor / 1000)}s 没有新工具，催促提交` });
       this.session.prompt(submitNow, { streamingBehavior: "steer" }).catch((error) => {
         logPiOnly(`[PI分析] 催促提交失败 ${error?.message || error}`);
       });
@@ -242,6 +267,7 @@ export class LivePiSession {
       this.lastError = error.message || String(error);
       this.status = "failed";
       logPiOnly(`[PI分析] 失败 ${this.lastError} elapsed=${Math.round((Date.now() - started) / 1000)}s ${this.#trace.summary()}`);
+      this.#emitThought({ kind: "text", text: `分析失败：${this.lastError}` });
       try {
         await this.session.abort?.();
       } catch {
@@ -260,6 +286,7 @@ export class LivePiSession {
       throw new Error(`PI 最终分析超时 ${this.#trace.summary()}`);
     }
     logPiOnly(`[PI分析] prompt 结束 elapsed=${Math.round((Date.now() - started) / 1000)}s ${this.#trace.summary()}`);
+    this.#emitThought({ kind: "text", text: `分析结束 ${this.#trace.summary()}` });
     this.status = "submitted";
   }
 
@@ -297,7 +324,7 @@ export class LivePiSession {
   }
 }
 
-export async function createLivePiSession({ recording, tools }) {
+export async function createLivePiSession({ recording, tools, onThought = null }) {
   assertNeverStartLegacy();
   const agentDir = path.join(ROOT, "runtime", "pi-agent");
   const cwd = path.join(ROOT, "runtime", "pi-cwd", recording.id);
@@ -337,7 +364,7 @@ export async function createLivePiSession({ recording, tools }) {
   });
 
   const instructions = buildPiInstructions(await readRecordingSkill());
-  const trace = createPiTrace();
+  const trace = createPiTrace({ onThought });
   const customTools = wrapPiToolsForSdk(tools, defineTool, Type, trace);
   const resourceLoader = new DefaultResourceLoader({
     cwd,
@@ -384,6 +411,7 @@ export async function createLivePiSession({ recording, tools }) {
     sessionId,
     dispose: () => created.session?.dispose?.(),
     instructions,
+    onThought,
     trace,
   });
 }

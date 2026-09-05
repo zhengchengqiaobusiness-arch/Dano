@@ -5,6 +5,7 @@
  */
 
 import { capabilityCountFromPiResult } from "./capability-presence.mjs";
+import { displayTitleFromResult, requestCountFromResult } from "./result-summary.mjs";
 
 export class ResultsCatalog {
   constructor(files) {
@@ -17,10 +18,10 @@ export class ResultsCatalog {
     const row = {
       id: recordingId,
       action: action || recordingId,
-      title: title || result.title || goal || "",
+      title: displayTitleFromResult({ userTitle: title, goal, result }),
       goal_summary: String(result.business_understanding?.summary || goal || ""),
       capability_count: capabilityCount,
-      request_count: evidenceCount || 0,
+      request_count: requestCountFromResult(result),
       created_at: new Date().toISOString(),
       published: false,
       subsystem: subsystem || "",

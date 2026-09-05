@@ -99,11 +99,64 @@ export function formatAgentEvent(event) {
   return "";
 }
 
-export function createPiTrace() {
+export function thoughtFromAgentEvent(event) {
+  if (!event || typeof event !== "object") return null;
+  const type = String(event.type || event.event || "");
+  const deltaType = String(event.delta_type || event.deltaType || "");
+  const delta = String(event.delta || "");
+  if (deltaType === "thinking_delta" || type === "thinking_delta") {
+    return delta ? { kind: "thinking", text: delta } : null;
+  }
+  if (deltaType === "text_delta" || type === "text_delta") {
+    return delta ? { kind: "text", text: delta } : null;
+  }
+  if (String(type).startsWith("tool_execution") || type === "tool_start" || type === "tool_end") {
+    return null;
+  }
+  const line = formatAgentEvent(event);
+  return line ? { kind: "text", text: line } : null;
+}
+
+export function thoughtFromEvidence(kind, payload = {}) {
+  const body = payload && typeof payload === "object" ? payload : {};
+  if (kind === "page_navigated") {
+    const url = compactText(body.url || body.frame_id || "", 160);
+    return url ? { kind: "text", text: `打开页面 ${url}` } : null;
+  }
+  if (kind === "interaction") {
+    const action = String(body.kind || "click");
+    if (/pointer|mousemove|mouseover|mouseenter/i.test(action)) return null;
+    const label = compactText(body.label || body.text || body.placeholder || body.name || body.tag || "", 80);
+    return { kind: "text", text: label ? `操作 ${action} ${label}` : `操作 ${action}` };
+  }
+  if (kind === "network_request") {
+    const type = String(body.resource_type || "");
+    if (type && type !== "xhr" && type !== "fetch") return null;
+    const path = compactText(body.path || body.url || "", 160);
+    if (!path) return null;
+    return { kind: "text", text: `请求 ${String(body.method || "").toUpperCase()} ${path}`.trim() };
+  }
+  if (kind === "visible_control") {
+    const count = Number(body.count || body.controls?.length || 0);
+    return { kind: "text", text: `采集可见控件 ${count} 个` };
+  }
+  return null;
+}
+
+export function createPiTrace({ onThought } = {}) {
   const tools = [];
   let turns = 0;
   let lastTool = "";
   let lastEventAt = Date.now();
+  const emit = (payload) => {
+    if (!payload || typeof onThought !== "function") return;
+    if (!payload.text && payload.kind !== "tool") return;
+    try {
+      onThought(payload);
+    } catch {
+      // 助手输出失败不得影响分析
+    }
+  };
   return {
     get toolCount() {
       return tools.length;
@@ -120,18 +173,46 @@ export function createPiTrace() {
     summary() {
       return `turns=${turns} tools=${tools.length} last=${lastTool || "-"}`;
     },
+    emitThought(payload) {
+      emit(payload);
+    },
+    recordToolStart(name, args) {
+      lastEventAt = Date.now();
+      lastTool = `${name} ${summarizeToolArgs(name, args)}`.trim();
+      logPiOnly(`[PI分析] 调用 ${lastTool}`);
+      emit({
+        kind: "tool",
+        phase: "start",
+        tool: name,
+        text: `调用 ${name}`,
+        args: summarizeToolArgs(name, args),
+      });
+    },
     recordTool(name, args, resultText, ok = true) {
       lastEventAt = Date.now();
       lastTool = `${name} ${summarizeToolArgs(name, args)}`.trim();
       tools.push({ name, ok, detail: lastTool, result: resultText });
       logPiOnly(`[PI分析] ${ok ? "工具完成" : "工具失败"} ${lastTool} → ${compactText(resultText, 200)}`);
+      emit({
+        kind: "tool",
+        phase: "end",
+        tool: name,
+        ok,
+        text: `${name} 调用${ok ? "成功" : "失败"}`,
+        args: summarizeToolArgs(name, args),
+        result: compactText(resultText, 360),
+      });
     },
     handleEvent(event) {
       if (event) lastEventAt = Date.now();
       if (event?.type === "turn_start") turns += 1;
-      if (String(event?.type || "").startsWith("tool_execution")) return;
-      const line = formatAgentEvent(event);
-      if (line) logPiOnly(`[PI分析] ${line}`);
+      const thought = thoughtFromAgentEvent(event);
+      if (thought) {
+        emit(thought);
+        if (thought.kind === "text" || thought.kind === "thinking") {
+          logPiOnly(`[PI分析] ${thought.text}`);
+        }
+      }
     },
   };
 }

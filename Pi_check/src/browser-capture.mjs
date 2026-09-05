@@ -194,8 +194,45 @@ async function waitForPageReady(page) {
   await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
 }
 
+const routeSnapshotTimers = new WeakMap();
+
+async function revealCollapsedFilters(page) {
+  try {
+    await page.evaluate(() => {
+      const expandRe = /^(展开|展开筛选|高级搜索|高级|更多筛选|Expand|Advanced)$/i;
+      const roots = document.querySelectorAll(
+        ".search-form, .ant-pro-table-search, .el-form--inline, .filter-container, .table-search, .vxe-grid--form-wrapper, [class*='search-form'], [class*='table-search'], [class*='filter-bar'], [class*='search-bar'], [class*='filter-form'], [class*='query-form']",
+      );
+      for (const root of roots) {
+        for (const btn of root.querySelectorAll("button, a, .el-button, .ant-btn, span, [role='button']")) {
+          const text = String(btn.innerText || btn.textContent || "").replace(/\s+/g, "");
+          if (!expandRe.test(text) && !/展开筛选|高级搜索/.test(text)) continue;
+          try {
+            btn.click();
+          } catch {
+            // ignore
+          }
+        }
+      }
+    });
+  } catch {
+    // ignore
+  }
+}
+
+function scheduleRoutedSnapshot(page, handle, append) {
+  if (!page || page.isClosed?.() || handle.closed) return;
+  const previous = routeSnapshotTimers.get(page);
+  if (previous) clearTimeout(previous);
+  routeSnapshotTimers.set(page, setTimeout(() => {
+    snapshotVisibleControls(page, handle, append, "routed").catch(() => {});
+  }, 700));
+}
+
 async function snapshotVisibleControls(page, handle, append, reason) {
   if (!page || page.isClosed?.() || handle.closed) return;
+  await revealCollapsedFilters(page);
+  await page.waitForTimeout(250).catch(() => {});
   let controls = [];
   try {
     controls = await page.evaluate(collectVisibleControlsInPage);
@@ -532,6 +569,10 @@ async function recordingWriteBlob(appendEvidence, bytes) {
 
 async function installContextHooks(context, handle, append) {
   await context.exposeBinding("__piCheckRecord", async (source, payload) => {
+    if (String(payload?.kind || "") === "route_changed") {
+      scheduleRoutedSnapshot(source.page, handle, append);
+      return;
+    }
     const pageId = handle.pageIds.get(source.page) || "";
     await append("interaction", {
       page_id: pageId,
@@ -596,6 +637,16 @@ async function installContextHooks(context, handle, append) {
         method: target?.method || "",
       });
     }, true);
+    const notifyRoute = () => send("route_changed", { url: location.href });
+    window.addEventListener("hashchange", notifyRoute);
+    window.addEventListener("popstate", notifyRoute);
+    const wrapHistory = (method) => function wrappedHistory(...args) {
+      const result = method.apply(this, args);
+      notifyRoute();
+      return result;
+    };
+    history.pushState = wrapHistory(history.pushState);
+    history.replaceState = wrapHistory(history.replaceState);
   });
 }
 

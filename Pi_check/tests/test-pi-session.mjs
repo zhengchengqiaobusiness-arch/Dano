@@ -44,6 +44,8 @@ test("录制中不打断 PI，冻结后只发一次最终提示，忙时改用 f
   assert.match(session.prompts[1].text, /不要把 request_id 当 blob_id/);
   assert.match(session.prompts[1].text, /visible_control/);
   assert.match(session.prompts[1].text, /current_user/);
+  assert.match(session.prompts[1].text, /确认弹层说明没进 execute/);
+  assert.match(session.prompts[1].text, /schema（含数组 items）不得包含系统字段/);
   assert.equal(session.prompts[1].options.streamingBehavior, "followUp");
 });
 

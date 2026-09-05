@@ -79,7 +79,7 @@ def test_pi_result_storage_keeps_submitted_capabilities() -> None:
     )
     assert body["flow_spec"] is draft
     assert body["capability_count"] == 1
-    assert body["request_count"] == 4
+    assert body["request_count"] == 1
     assert body["recording_backend"] == "pi_check"
     assert body["skill_export_description"] == ""
 

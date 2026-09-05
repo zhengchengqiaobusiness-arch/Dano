@@ -16,6 +16,7 @@ import {
 import { createPiToolHost } from "./pi-tools.mjs";
 import { attachBlobSaver } from "./browser-capture.mjs";
 import { capabilityCountFromPiResult } from "./capability-presence.mjs";
+import { thoughtFromEvidence } from "./pi-trace.mjs";
 
 export class RecordingController {
   constructor({
@@ -82,7 +83,7 @@ export class RecordingController {
     return this.#lastCapabilityCount.get(recordingId) ?? 0;
   }
 
-  async start({ targetUrl, goal, storageState = null, title = "", action = "", viewport = null }) {
+  async start({ targetUrl, goal, storageState = null, title = "", action = "", viewport = null, onThought = null }) {
     assertNeverStartLegacy();
     if (!String(targetUrl || "").trim()) throw new Error("必须提供目标页面地址");
     if (!String(goal || "").trim()) throw new Error("必须提供录制目标");
@@ -90,7 +91,7 @@ export class RecordingController {
     const session = await this.evidence.create({
       targetUrl: String(targetUrl).trim(),
       goal: String(goal).trim(),
-      title: String(title || goal).trim(),
+      title: String(title || "").trim(),
       action: String(action || "").trim(),
     });
     const slot = {
@@ -99,6 +100,7 @@ export class RecordingController {
       browser: null,
       failed: false,
       browserStartAttempted: false,
+      onThought: typeof onThought === "function" ? onThought : null,
     };
     this.#active.set(session.id, slot);
 
@@ -117,7 +119,7 @@ export class RecordingController {
         gate: this.gate,
         getPiSessionId: () => this.evidence.snapshot(session.id).piSessionId,
       });
-      const pi = await this.createPi({ recording: session, tools });
+      const pi = await this.createPi({ recording: session, tools, onThought: slot.onThought });
       if (!pi || !pi.alive) {
         throw new PiRequiredError("PI 无法启动");
       }
@@ -268,6 +270,14 @@ export class RecordingController {
       return null;
     }
     const event = await this.evidence.append(recordingId, kind, payload);
+    const thought = thoughtFromEvidence(kind, payload);
+    if (thought) {
+      try {
+        slot.onThought?.(thought);
+      } catch {
+        // 助手输出失败不得中断采集
+      }
+    }
     if (shouldNotifyPi(kind, payload)) {
       Promise.resolve(slot.pi.notifyEvidence({ seq: event.seq }))
         .catch(async (error) => {

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>visible controls fixture</title>
+</head>
+<body>
+  <form class="search-form el-form--inline">
+    <div class="el-form-item">
+      <label class="el-form-item__label">编号</label>
+      <input name="code" placeholder="请输入编号" />
+    </div>
+    <div id="extra-filters" style="display:none">
+      <div class="el-form-item">
+        <label class="el-form-item__label">创建时间</label>
+        <div class="el-date-editor">
+          <input readonly placeholder="开始日期" />
+        </div>
+      </div>
+    </div>
+    <button type="button" id="expand">展开</button>
+  </form>
+  <table class="el-table"><thead><tr><th>名称</th></tr></thead><tbody></tbody></table>
+  <form class="el-form">
+    <div class="el-form-item is-required">
+      <label class="el-form-item__label">* 类型</label>
+      <div class="el-select">
+        <input readonly placeholder="请选择" />
+      </div>
+    </div>
+    <div class="el-form-item">
+      <label class="el-form-item__label">开始日期</label>
+      <div class="el-date-editor">
+        <input readonly />
+      </div>
+    </div>
+    <div>
+      <button type="button" class="el-button">上传附件</button>
+      <div class="el-upload"><input type="file" /></div>
+    </div>
+  </form>
+  <div class="standalone">
+    <span class="label">截止日期</span>
+    <div class="ant-picker">
+      <input placeholder="请选择日期" />
+    </div>
+  </div>
+  <script>
+    document.getElementById("expand").addEventListener("click", () => {
+      document.getElementById("extra-filters").style.display = "block";
+    });
+  </script>
+</body>
+</html>

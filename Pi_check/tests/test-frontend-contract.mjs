@@ -29,6 +29,8 @@ test("现有录制页拿到的 draft 就是 PI 提交的能力合同", async () 
       evidenceCount: 3,
     });
     assert.equal(summary.capability_count, 1);
+    assert.equal(summary.request_count, 1);
+    assert.equal(summary.title, "演示");
     const detail = catalog.detail(started.id);
     assert.deepEqual(detail.draft, stopped.result);
     assert.equal(detail.draft.capabilities.length, 1);

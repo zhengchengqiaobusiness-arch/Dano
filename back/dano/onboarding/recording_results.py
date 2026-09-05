@@ -16,6 +16,19 @@ RECORDING_RESULT_KIND = "stage_six_recording_result"
 _PLACEHOLDER_TITLES = frozenset({
     "", "(未命名)", "(未捕获到业务请求)", "未命名录制", "录制业务", "录制业务流程",
 })
+_INSTRUCTION_PREFIXES = (
+    "请将我接下来",
+    "请把我接下来",
+    "请根据我接下来",
+    "请将接下来",
+    "请把接下来",
+)
+_INSTRUCTION_MARKERS = (
+    "生成一个可调用能力",
+    "分别生成一个",
+    "每项业务操作",
+    "接下来在页面中实际完成",
+)
 _LEGACY_GENERATED_DESCRIPTIONS = frozenset({
     "先查找再办理。只要查看时不要写入。没有已确认绑定就先查再问人。",
 })
@@ -23,31 +36,135 @@ _CREATE_HINTS = ("新增", "新建", "创建", "录入", "添加")
 _LOOKUP_HINTS = ("查询", "搜索", "筛选", "检索", "列表")
 
 
-def recording_display_title(*, user_title: str = "", draft: dict[str, Any] | None = None) -> str:
-    """Prefer the operator title; otherwise use the recorded business name."""
+def looks_like_recording_goal(text: str, *, goal: str = "") -> bool:
+    """True when the string is a recording instruction, not a Skill name."""
+    value = str(text or "").strip()
+    if not value or value in _PLACEHOLDER_TITLES:
+        return True
+    other = str(goal or "").strip()
+    if other and value == other:
+        return True
+    if any(value.startswith(prefix) for prefix in _INSTRUCTION_PREFIXES):
+        return True
+    return any(marker in value for marker in _INSTRUCTION_MARKERS)
+
+
+def _capability_label(item: Any) -> str:
+    if isinstance(item, dict):
+        return str(item.get("title") or item.get("name") or "").strip()
+    return str(getattr(item, "title", "") or getattr(item, "name", "") or "").strip()
+
+
+def capability_display_titles(draft: dict[str, Any] | None) -> list[str]:
+    body = draft if isinstance(draft, dict) else {}
+    titles: list[str] = []
+    seen: set[str] = set()
+    for item in body.get("capabilities") or []:
+        label = _capability_label(item)
+        if not label or looks_like_recording_goal(label) or label in seen:
+            continue
+        seen.add(label)
+        titles.append(label)
+    return titles
+
+
+def compose_skill_title(titles: list[str]) -> str:
+    labels = [str(item or "").strip() for item in titles if str(item or "").strip()]
+    if not labels:
+        return ""
+    if len(labels) == 1:
+        return labels[0]
+    if len(labels) <= 3:
+        return "、".join(labels)
+    return "、".join(labels[:3]) + "等"
+
+
+def skill_request_count(draft: dict[str, Any] | None) -> int:
+    """Count requests in the produced contract, not every captured evidence event."""
+    body = draft if isinstance(draft, dict) else {}
+    seen: set[str] = set()
+
+    def add(key: str) -> None:
+        value = str(key or "").strip()
+        if value:
+            seen.add(value)
+
+    steps = body.get("steps")
+    if isinstance(steps, list):
+        for index, step in enumerate(steps):
+            if not isinstance(step, dict):
+                add(str(index))
+                continue
+            add(
+                str(step.get("step_id") or "")
+                or "|".join(
+                    (
+                        str(step.get("method") or ""),
+                        str(step.get("path") or step.get("url") or ""),
+                    )
+                )
+                or str(index)
+            )
+        if seen:
+            return len(seen)
+
+    for item in body.get("capabilities") or []:
+        refs = item.get("request_refs") if isinstance(item, dict) else getattr(item, "request_refs", None)
+        if isinstance(refs, list):
+            for ref in refs:
+                if isinstance(ref, dict):
+                    add(str(ref.get("step_id") or ref.get("request_id") or ""))
+                else:
+                    add(str(ref or ""))
+        ids = item.get("step_ids") if isinstance(item, dict) else getattr(item, "step_ids", None)
+        if isinstance(ids, list):
+            for step_id in ids:
+                add(str(step_id or ""))
+    if seen:
+        return len(seen)
+
+    facts = body.get("request_facts") if isinstance(body.get("request_facts"), dict) else {}
+    requests = facts.get("requests")
+    if isinstance(requests, list):
+        return len(requests)
+    return 0
+
+
+def recording_display_title(
+    *,
+    user_title: str = "",
+    draft: dict[str, Any] | None = None,
+    goal: str = "",
+) -> str:
+    """Prefer a real operator name; otherwise compose from recorded capabilities."""
     chosen = str(user_title or "").strip()
-    if chosen and chosen not in _PLACEHOLDER_TITLES:
+    if chosen and not looks_like_recording_goal(chosen, goal=goal):
         return chosen
     body = draft if isinstance(draft, dict) else {}
+    composed = compose_skill_title(capability_display_titles(body))
+    if composed:
+        return composed
     spec_title = str(body.get("title") or "").strip()
-    if spec_title and spec_title not in _PLACEHOLDER_TITLES:
+    if spec_title and not looks_like_recording_goal(spec_title, goal=goal):
         return spec_title
     meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
     page_context = meta.get("page_context") if isinstance(meta.get("page_context"), dict) else {}
-    page_title = str(
-        page_context.get("document_title") or ""
-    ).strip()
-    if page_title and page_title not in _PLACEHOLDER_TITLES:
+    page_title = str(page_context.get("document_title") or "").strip()
+    if page_title and not looks_like_recording_goal(page_title, goal=goal):
         return page_title
     plan = ((meta.get("capability_model") or {}) if isinstance(meta.get("capability_model"), dict) else {}).get("semantic_plan")
     understanding = plan.get("business_understanding") if isinstance(plan, dict) else {}
+    if not isinstance(understanding, dict):
+        understanding = body.get("business_understanding") if isinstance(body.get("business_understanding"), dict) else {}
+    if not isinstance(understanding, dict):
+        understanding = body.get("business") if isinstance(body.get("business"), dict) else {}
     if isinstance(understanding, dict):
         business_name = str(
             understanding.get("business_name") or understanding.get("object") or ""
         ).strip()
-        if business_name and business_name not in _PLACEHOLDER_TITLES:
+        if business_name and not looks_like_recording_goal(business_name, goal=goal):
             return business_name
-    return spec_title or chosen or page_title or "未命名录制"
+    return "未命名录制"
 
 
 def generate_business_description(draft: dict[str, Any] | None) -> str:
@@ -246,22 +363,19 @@ def stage_six_result_body(
         goal_payload = dict(goal)
     else:
         goal_payload = {"text": str(goal or "")}
-    requests = []
-    facts = draft.get("request_facts")
-    if isinstance(facts, dict):
-        requests = list(facts.get("requests") or [])
     capabilities = list(draft.get("capabilities") or [])
     fingerprint = _draft_fingerprint(draft)
+    goal_text = str(goal_payload.get("intent") or goal_payload.get("text") or "")
     return {
         "kind": RECORDING_RESULT_KIND,
         "action": action,
-        "title": recording_display_title(user_title=title, draft=draft),
+        "title": recording_display_title(user_title=title, draft=draft, goal=goal_text),
         "goal": goal_payload,
         "tenant": tenant,
         "subsystem": subsystem,
         "flow_spec": draft,
         "capability_count": len(capabilities),
-        "request_count": len(requests),
+        "request_count": skill_request_count(draft),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "published": published,
         "machine_verification_ran": machine_verification_ran,
@@ -315,16 +429,21 @@ def recording_result_summary(draft: AssetDraft) -> dict[str, Any]:
     goal_text = str(goal.get("intent") or goal.get("text") or "")
     created = draft.created_at.isoformat() if draft.created_at else str(body.get("created_at") or "")
     checkpoint = body.get("stage_seven") if isinstance(body.get("stage_seven"), dict) else {}
+    spec = body.get("flow_spec") if isinstance(body.get("flow_spec"), dict) else body
     return {
         "id": str(draft.asset_draft_id),
         "action": str(body.get("action") or draft.asset_key.removeprefix(RECORDING_RESULT_KEY_PREFIX)),
         "title": recording_display_title(
             user_title=str(body.get("title") or ""),
-            draft=body.get("flow_spec") if isinstance(body.get("flow_spec"), dict) else body,
+            draft=spec,
+            goal=goal_text,
         ),
         "goal_summary": goal_text[:80],
-        "capability_count": int(body.get("capability_count") or 0),
-        "request_count": int(body.get("request_count") or 0),
+        "capability_count": (
+            len(list((spec or {}).get("capabilities") or []))
+            or int(body.get("capability_count") or 0)
+        ),
+        "request_count": skill_request_count(spec),
         "created_at": created,
         "published": bool(body.get("published")),
         "machine_verification_ran": bool(body.get("machine_verification_ran")),
@@ -451,10 +570,13 @@ def apply_recording_result_edits(
     next_body["flow_spec"] = dumped
     next_body["fingerprint"] = _draft_fingerprint(dumped)
     next_body["capability_count"] = len(list(dumped.get("capabilities") or []))
+    goal = next_body.get("goal") if isinstance(next_body.get("goal"), dict) else {}
     next_body["title"] = recording_display_title(
         user_title=str(next_body.get("title") or ""),
         draft=dumped,
+        goal=str(goal.get("intent") or goal.get("text") or ""),
     )
+    next_body["request_count"] = skill_request_count(dumped)
     next_body = _refresh_business_description(next_body, dumped)
     checkpoint = next_body.get("stage_seven") if isinstance(next_body.get("stage_seven"), dict) else None
     if checkpoint is not None:

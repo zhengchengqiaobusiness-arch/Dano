@@ -6,7 +6,7 @@
   "description": "Standalone browser recorder whose complete recording result is authored exclusively by Pi.",
   "scripts": {
     "start": "node src/server.mjs",
-    "test": "node --test tests/test-policy.mjs tests/test-result-gate.mjs tests/test-controller.mjs tests/test-pi-model.mjs tests/test-import-scan.mjs tests/test-source-scan.mjs tests/test-frontend-contract.mjs tests/test-session-store.mjs tests/test-skill-contract.mjs tests/test-pi-session.mjs tests/test-evidence-index.mjs tests/test-e2e-browser.mjs tests/test-e2e-pi-submit.mjs tests/test-e2e-pi-kill.mjs",
+    "test": "node --test tests/test-policy.mjs tests/test-result-gate.mjs tests/test-controller.mjs tests/test-pi-model.mjs tests/test-import-scan.mjs tests/test-source-scan.mjs tests/test-frontend-contract.mjs tests/test-session-store.mjs tests/test-skill-contract.mjs tests/test-pi-session.mjs tests/test-evidence-index.mjs tests/test-visible-controls.mjs tests/test-result-summary.mjs tests/test-pi-thoughts.mjs tests/test-e2e-browser.mjs tests/test-e2e-pi-submit.mjs tests/test-e2e-pi-kill.mjs",
     "check": "node --check src/server.mjs && npm test"
   },
   "dependencies": {

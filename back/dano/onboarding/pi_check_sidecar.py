@@ -187,21 +187,26 @@ def pi_result_storage_body(
     draft: dict[str, Any],
     request_count: int = 0,
 ) -> dict[str, Any]:
-    from dano.onboarding.recording_results import RECORDING_RESULT_KIND, recording_display_title
+    from dano.onboarding.recording_results import (
+        RECORDING_RESULT_KIND,
+        recording_display_title,
+        skill_request_count,
+    )
     from dano.onboarding.recording_workflow import _draft_fingerprint
 
     goal_payload = dict(goal) if isinstance(goal, dict) else {"text": str(goal or "")}
     capabilities = list(draft.get("capabilities") or []) if isinstance(draft, dict) else []
+    goal_text = str(goal_payload.get("intent") or goal_payload.get("text") or "")
     return {
         "kind": RECORDING_RESULT_KIND,
         "action": action,
-        "title": recording_display_title(user_title=title, draft=draft),
+        "title": recording_display_title(user_title=title, draft=draft, goal=goal_text),
         "goal": goal_payload,
         "tenant": tenant,
         "subsystem": subsystem,
         "flow_spec": draft,
         "capability_count": len(capabilities),
-        "request_count": int(request_count or 0),
+        "request_count": skill_request_count(draft) or int(request_count or 0),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "published": False,
         "machine_verification_ran": False,
