@@ -10,6 +10,10 @@ function compact(value) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, 80);
 }
 
+function displayLabel(value) {
+  return compact(String(value || "").replace(/^[＊*\s]+/, "").replace(/[＊*]\s*$/g, ""));
+}
+
 export function projectVisibleControlSnapshot(event) {
   const payload = event?.payload && typeof event.payload === "object" ? event.payload : {};
   const controls = Array.isArray(payload.controls) ? payload.controls : [];
@@ -27,7 +31,7 @@ export function projectVisibleControlSnapshot(event) {
       return {
         region: String(row.region || ""),
         name: String(row.name || ""),
-        label: String(row.label || ""),
+        label: displayLabel(row.label),
         placeholder: String(row.placeholder || ""),
         section: String(row.section || ""),
         control_kind: String(row.control_kind || ""),
@@ -195,11 +199,19 @@ export function collectVisibleControlsInPage() {
 
   const seen = new Set();
   const out = [];
+  const cleanLabel = (value) => compactText(String(value || "").replace(/^[＊*\s]+/, "").replace(/[＊*]\s*$/g, ""));
   const push = (row) => {
     const options = Array.isArray(row.options) ? row.options.map((item) => compactText(item)).filter(Boolean).slice(0, 24) : [];
-    const label = compactText(row.label) || (options.length ? options.slice(0, 4).join(" / ") : "");
+    const rawLabel = compactText(row.label) || (options.length ? options.slice(0, 4).join(" / ") : "");
+    const label = cleanLabel(rawLabel);
     if (!label && !row.name && !row.placeholder) return;
-    const next = { ...row, label, options, section: compactText(row.section) };
+    const next = {
+      ...row,
+      label,
+      options,
+      section: compactText(row.section),
+      required_mark: Boolean(row.required_mark || /[＊*]/.test(rawLabel)),
+    };
     const key = [next.region, next.name, next.label, next.placeholder, next.section, next.control_kind, next.range ? "range" : ""].join("|");
     if (seen.has(key)) return;
     seen.add(key);
@@ -277,8 +289,9 @@ export function collectVisibleControlsInPage() {
     push({
       region: regionOf(btn),
       name: "",
-      label: nearbyLabel(wrap) || label,
+      label: nearbyLabel(wrap) || nearbyHeading(wrap) || label,
       placeholder: "",
+      section: nearbyHeading(wrap) || nearbyHeading(btn),
       control_kind: "upload",
       required_mark: markRequired(wrap, nearbyLabel(wrap) || label),
       readonly: widgetLocked(wrap, firstInput(wrap), "upload"),
@@ -320,6 +333,32 @@ export function collectVisibleControlsInPage() {
     });
   }
 
+  for (const cell of document.querySelectorAll(".el-table td, .ant-table td, table td, .vxe-table td")) {
+    if (!visible(cell)) continue;
+    if (cell.querySelector("input, textarea, select")) continue;
+    const widget = cell.querySelector("[role='slider'], .el-slider, .ant-slider, .el-progress, .ant-progress, [class*='progress']");
+    if (!widget || !visible(widget)) continue;
+    const row = cell.parentElement;
+    const index = row ? [...row.children].indexOf(cell) : -1;
+    const table = cell.closest("table, .el-table, .ant-table, .vxe-table");
+    const head = index >= 0
+      ? table?.querySelector?.(`thead th:nth-child(${index + 1}), thead td:nth-child(${index + 1})`)
+      : null;
+    push({
+      region: dialogRoot(cell) ? "dialog" : "table",
+      name: "",
+      label: textOf(head) || nearbyLabel(cell),
+      placeholder: "",
+      section: nearbyHeading(table) || nearbyHeading(cell),
+      control_kind: "input",
+      required_mark: false,
+      readonly: false,
+      disabled: false,
+      range: false,
+      options: [],
+    });
+  }
+
   for (const node of document.querySelectorAll(
     'dialog input, dialog textarea, [role="dialog"] input, [role="dialog"] textarea, [role="alertdialog"] input, [role="alertdialog"] textarea, .el-dialog input, .el-dialog textarea, .ant-modal input, .ant-modal textarea, .van-dialog input, .van-dialog textarea',
   )) {
@@ -357,7 +396,39 @@ export function collectVisibleControlsInPage() {
     });
   }
 
-  return out.slice(0, 120);
+  const rank = { button: 0, readonly: 1, input: 2, textarea: 3, upload: 4, date: 5, select: 6 };
+  const merged = [];
+  const groups = new Map();
+  for (const row of out) {
+    if (row.control_kind === "button") {
+      merged.push(row);
+      continue;
+    }
+    const key = [row.region, row.section, row.label || row.placeholder || row.name, row.range ? "range" : "field"].join("|");
+    const prev = groups.get(key);
+    if (!prev) {
+      groups.set(key, { ...row });
+      continue;
+    }
+    const keep = (rank[row.control_kind] || 0) >= (rank[prev.control_kind] || 0) ? { ...row } : { ...prev };
+    keep.readonly = Boolean(prev.readonly || row.readonly);
+    keep.disabled = Boolean(prev.disabled || row.disabled);
+    if (keep.readonly || keep.disabled) keep.readonly = true;
+    keep.required_mark = Boolean(prev.required_mark || row.required_mark);
+    const richer = (row.options || []).length > (prev.options || []).length ? row : prev;
+    keep.options = richer.options || keep.options;
+    keep.placeholder = keep.placeholder || row.placeholder || prev.placeholder;
+    keep.name = keep.name || row.name || prev.name;
+    groups.set(key, keep);
+  }
+  merged.push(...groups.values());
+  const named = new Set(merged.filter((row) => row.label && row.name).map((row) => `${row.region}|${row.name}|${row.control_kind}`));
+  const compactRows = merged.filter((row) => {
+    if (row.label || row.control_kind === "button") return true;
+    if (!row.name) return Boolean(row.placeholder);
+    return !named.has(`${row.region}|${row.name}|${row.control_kind}`);
+  });
+  return compactRows.slice(0, 120);
 }
 
 export function summarizeVisibleControls(controls) {

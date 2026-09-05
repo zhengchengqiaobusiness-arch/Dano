@@ -66,6 +66,11 @@ export function assertPageDisplayContract(result) {
     }
   }
   const steps = Array.isArray(result?.steps) ? result.steps : [];
+  const stepsById = new Map(
+    steps
+      .filter((step) => isPlainObject(step) && String(step.step_id || "").trim())
+      .map((step) => [String(step.step_id).trim(), step]),
+  );
   for (const step of steps) {
     if (!isPlainObject(step)) {
       throw new SubmitRejectedError("DISPLAY_CONTRACT", "每个 step 必须是对象");
@@ -82,6 +87,41 @@ export function assertPageDisplayContract(result) {
         throw new SubmitRejectedError(
           "DISPLAY_CONTRACT",
           "steps[].params 的每一项必须是对象，且同时包含 key 和 path",
+        );
+      }
+    }
+  }
+  for (const capability of capabilities) {
+    const properties = capability?.input_schema?.properties;
+    if (!isPlainObject(properties)) continue;
+    const callerKeys = new Set();
+    const stepIds = [];
+    if (Array.isArray(capability.request_refs)) {
+      for (const ref of capability.request_refs) {
+        const stepId = String(ref?.step_id || "").trim();
+        if (stepId) stepIds.push(stepId);
+      }
+    }
+    if (Array.isArray(capability.step_ids)) {
+      for (const stepId of capability.step_ids) {
+        const id = String(stepId || "").trim();
+        if (id) stepIds.push(id);
+      }
+    }
+    for (const stepId of stepIds) {
+      const step = stepsById.get(stepId);
+      for (const param of Array.isArray(step?.params) ? step.params : []) {
+        if (param?.exposed_to_user === true && String(param.key || "").trim()) {
+          callerKeys.add(String(param.key).trim());
+        }
+      }
+    }
+    if (!callerKeys.size) continue;
+    for (const key of Object.keys(properties)) {
+      if (!callerKeys.has(key)) {
+        throw new SubmitRejectedError(
+          "DISPLAY_CONTRACT",
+          `input_schema.properties.${key} 必须对应某个 exposed_to_user=true 的 param.key，不能编造 execute 请求里没有的键`,
         );
       }
     }

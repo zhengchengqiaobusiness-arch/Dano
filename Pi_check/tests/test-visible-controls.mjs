@@ -88,7 +88,13 @@ test("采集日期、下拉、上传和折叠筛选，日期只读输入不当�
   assert.equal(find("编号")?.control_kind, "input");
   assert.equal(find("创建时间", "date")?.region, "filter");
   assert.equal(find("创建时间", "date")?.readonly, false);
-  assert.equal(find("* 类型", "select")?.readonly, false);
+  assert.equal(find("类型", "select")?.readonly, false);
+  const reportType = find("汇报类型", "select");
+  assert.ok(reportType, "disabled select should still be collected");
+  assert.equal(reportType.readonly, true);
+  assert.equal(reportType.disabled, true);
+  assert.ok(!controls.some((item) => item.label === "汇报类型" && item.control_kind === "input" && !item.readonly && !item.disabled));
+  assert.ok(!controls.some((item) => String(item.label || "").startsWith("*")));
   assert.equal(find("开始日期", "date")?.readonly, false);
   assert.ok(controls.some((item) => item.control_kind === "upload"));
   assert.ok(controls.some((item) => item.control_kind === "date" && (item.placeholder === "请选择日期" || item.label === "截止日期")));
@@ -107,9 +113,15 @@ test("采集日期、下拉、上传和折叠筛选，日期只读输入不当�
   assert.equal(contents.length, 1);
   assert.equal(progresses.length, 1);
   assert.equal(contents[0].section, "已完成工作");
-  const addRow = controls.find((item) => item.control_kind === "button" && item.label === "添加行");
+  const addRow = controls.find((item) => item.control_kind === "button" && item.label === "添加工作项");
   assert.ok(addRow, "add-row button should be collected as a fact");
   assert.equal(addRow.region, "table");
+  const planContents = controls.filter((item) => item.region === "table" && item.label === "计划内容");
+  assert.equal(planContents.length, 1);
+  assert.equal(planContents[0].section, "工作计划");
+  const attach = controls.find((item) => item.control_kind === "upload");
+  assert.ok(attach);
+  assert.ok(attach.section === "附件信息" || attach.label === "上传附件" || attach.label === "附件信息");
   const note = controls.find((item) => item.label === "补充说明");
   assert.ok(note, "form textarea should stay a separate fact from table rows");
   assert.equal(note.region, "form");
@@ -156,4 +168,48 @@ test("SPA 路由变化后补采当前页控件，不判断能力", async (t) => 
   assert.ok(snapshots.some((event) => (event.payload?.controls || []).some((item) => item.name === "first" || item.label === "甲")));
   assert.ok(snapshots.some((event) => (event.payload?.controls || []).some((item) => item.name === "second" || item.label === "乙")));
   assert.ok(!JSON.stringify(snapshots).includes("capability"));
+});
+
+test("加行或打开确认弹层后补采当前页控件", async (t) => {
+  const html = `<!doctype html><html><body>
+    <h3>已完成工作</h3>
+    <button type="button" id="add" class="el-button">添加工作项</button>
+    <table class="el-table">
+      <thead><tr><th>工作内容</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <script>
+      document.getElementById("add").addEventListener("click", () => {
+        const row = document.createElement("tr");
+        row.innerHTML = '<td><input placeholder="请输入工作内容" /></td>';
+        document.getElementById("rows").appendChild(row);
+      });
+    </script>
+  </body></html>`;
+  const fixture = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  const port = await listen(fixture);
+  const events = [];
+  const appendEvidence = async (kind, payload) => {
+    events.push({ kind, payload });
+    return { seq: events.length };
+  };
+  appendEvidence.saveBlob = async (bytes) => ({ blobId: "blob_test", byteLength: bytes.byteLength });
+  const handle = await createPlaywrightBrowser({
+    recording: { id: "rec_add_row_controls", targetUrl: `http://127.0.0.1:${port}/` },
+    appendEvidence,
+  });
+  t.after(async () => {
+    await handle.close().catch(() => {});
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+  await handle.page.click("#add");
+  await handle.page.waitForTimeout(900);
+  const snapshots = events.filter((event) => event.kind === "visible_control");
+  assert.ok(snapshots.some((event) => (
+    event.payload?.reason === "interaction"
+    && (event.payload?.controls || []).some((item) => item.label === "工作内容" && item.region === "table")
+  )), "clicking add-row should recapture the new table input");
 });

@@ -44,7 +44,9 @@ test("录制中不打断 PI，冻结后只发一次最终提示，忙时改用 f
   assert.match(session.prompts[1].text, /不要把 request_id 当 blob_id/);
   assert.match(session.prompts[1].text, /visible_control/);
   assert.match(session.prompts[1].text, /current_user/);
-  assert.match(session.prompts[1].text, /确认弹层可填意见必须完整处理/);
+  assert.match(session.prompts[1].text, /确认弹层可填意见/);
+  assert.match(session.prompts[1].text, /readonly\/disabled/);
+  assert.match(session.prompts[1].text, /表头原文/);
   assert.match(session.prompts[1].text, /每个 exposed_to_user=true 的 param 都必须出现在 schema/);
   assert.match(session.prompts[1].text, /树\/页签\/分段器\/单选组\/日期区间/);
   assert.match(session.prompts[1].text, /不要读 screenshot/);

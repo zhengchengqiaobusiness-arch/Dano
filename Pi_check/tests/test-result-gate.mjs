@@ -164,6 +164,72 @@ test("拒收页面读不到的私有字段袋、字符串 request_refs 和键值
   assert.doesNotThrow(() => assertCapabilityIdentityContract(sampleResult()));
 });
 
+test("拒收 input_schema 里编造的、params 没有的调用方键", () => {
+  assert.throws(
+    () => assertPageDisplayContract({
+      capabilities: [{
+        capability_id: "cap_create",
+        request_refs: [{ step_id: "step_submit", usage: "execute" }],
+        input_schema: {
+          type: "object",
+          properties: {
+            title: { type: "string", title: "标题" },
+            extraRows: { type: "array", title: "另编的行" },
+          },
+        },
+      }],
+      steps: [{
+        step_id: "step_submit",
+        params: [
+          {
+            key: "title",
+            path: "body.title",
+            label: "标题",
+            exposed_to_user: true,
+          },
+          {
+            key: "items",
+            path: "body.items",
+            label: "已完成工作 / 工作计划",
+            exposed_to_user: true,
+          },
+        ],
+      }],
+    }),
+    (error) => error instanceof SubmitRejectedError && /不能编造/.test(error.message),
+  );
+  assert.doesNotThrow(() => assertPageDisplayContract({
+    capabilities: [{
+      capability_id: "cap_create",
+      request_refs: [{ step_id: "step_submit", usage: "execute" }],
+      input_schema: {
+        type: "object",
+        properties: {
+          title: { type: "string", title: "标题" },
+          items: {
+            type: "array",
+            title: "已完成工作 / 工作计划",
+            items: {
+              type: "object",
+              properties: {
+                content: { type: "string", title: "工作内容" },
+                progress: { type: "number", title: "完成进度" },
+              },
+            },
+          },
+        },
+      },
+    }],
+    steps: [{
+      step_id: "step_submit",
+      params: [
+        { key: "title", path: "body.title", exposed_to_user: true },
+        { key: "items", path: "body.items", exposed_to_user: true },
+      ],
+    }],
+  }));
+});
+
 test("拒收重复 capability_id 和共用 execute", () => {
   assert.throws(
     () => assertCapabilityIdentityContract({

@@ -273,13 +273,22 @@ async function revealCollapsedFilters(page) {
   }
 }
 
-function scheduleRoutedSnapshot(page, handle, append) {
+function scheduleVisibleSnapshot(page, handle, append, reason = "routed", delayMs = 700) {
   if (!page || page.isClosed?.() || handle.closed) return;
   const previous = routeSnapshotTimers.get(page);
   if (previous) clearTimeout(previous);
   routeSnapshotTimers.set(page, setTimeout(() => {
-    snapshotVisibleControls(page, handle, append, "routed").catch(() => {});
-  }, 700));
+    snapshotVisibleControls(page, handle, append, reason).catch(() => {});
+  }, delayMs));
+}
+
+function scheduleRoutedSnapshot(page, handle, append) {
+  scheduleVisibleSnapshot(page, handle, append, "routed", 700);
+}
+
+function shouldResnapshotAfterClick(payload) {
+  const text = `${payload?.text || ""} ${payload?.label || ""} ${payload?.placeholder || ""}`.replace(/\s+/g, "");
+  return /添加|新增|增加|提交|确认|上传|Upload|Attach/.test(text);
 }
 
 async function snapshotVisibleControls(page, handle, append, reason) {
@@ -662,6 +671,9 @@ async function installContextHooks(context, handle, append) {
       page_id: pageId,
       ...payload,
     });
+    if (String(payload?.kind || "") === "click" && shouldResnapshotAfterClick(payload)) {
+      scheduleVisibleSnapshot(source.page, handle, append, "interaction", 500);
+    }
   });
   await context.addInitScript(() => {
     const send = (kind, detail) => {
@@ -676,10 +688,26 @@ async function installContextHooks(context, handle, append) {
       const control = node?.closest?.("input, textarea, select, .el-select, .el-input, .ant-select, .ant-picker") || node;
       const item = control?.closest?.(".el-form-item, .ant-form-item, .el-form-item__content, label") || control;
       const labelNode = item?.querySelector?.(".el-form-item__label, .ant-form-item-label, label");
+      let label = String(labelNode?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 80);
+      const cell = node?.closest?.("td, th");
+      if (!label && cell) {
+        const row = cell.parentElement;
+        const index = row ? [...row.children].indexOf(cell) : -1;
+        const table = cell.closest?.("table, .el-table, .ant-table, .vxe-table");
+        const head = index >= 0
+          ? table?.querySelector?.(`thead th:nth-child(${index + 1}), thead td:nth-child(${index + 1})`)
+          : null;
+        label = String(head?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 80);
+      }
+      if (!label) {
+        const dialog = node?.closest?.('dialog, [role="dialog"], [role="alertdialog"], .el-dialog, .ant-modal, .van-dialog');
+        const header = dialog?.querySelector?.(".el-dialog__header, .ant-modal-title, .el-dialog__title, [class*='dialog__title'], header");
+        label = String(header?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 80);
+      }
       return {
         placeholder: String(control?.getAttribute?.("placeholder") || target?.placeholder || ""),
         aria_label: String(control?.getAttribute?.("aria-label") || ""),
-        label: String(labelNode?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 80),
+        label: label.replace(/^[＊*\s]+/, "").replace(/[＊*]\s*$/g, "").trim(),
       };
     };
     document.addEventListener("click", (event) => {
