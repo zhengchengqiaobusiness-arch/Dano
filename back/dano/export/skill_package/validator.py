@@ -1,6 +1,7 @@
 """Machine validator for self-contained skill packages."""
 from __future__ import annotations
 
+from typing import Any
 import json
 import os
 from pathlib import Path
@@ -636,6 +637,78 @@ def _capability_caller_fields(item: dict) -> set[str]:
     }
 
 
+_SCRIPT_PLAN_RE = re.compile(
+    r"PLAN\s*=\s*json\.loads\(\s*(?P<quote>['\"])(?P<body>.*?)(?P=quote)\s*\)",
+    re.S,
+)
+_TEMPLATE_PLACEHOLDER_RE = re.compile(r"\{\{([^{}]+)\}\}")
+
+
+def _script_plan(source: str) -> dict | None:
+    match = _SCRIPT_PLAN_RE.search(source or "")
+    if match is None:
+        return None
+    raw = match.group("body")
+    try:
+        loaded = json.loads(raw)
+    except json.JSONDecodeError:
+        try:
+            loaded = json.loads(raw.encode("utf-8").decode("unicode_escape"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _template_placeholder_names(node: Any) -> set[str]:
+    names: set[str] = set()
+    if isinstance(node, dict):
+        for value in node.values():
+            names.update(_template_placeholder_names(value))
+    elif isinstance(node, list):
+        for item in node:
+            names.update(_template_placeholder_names(item))
+    elif isinstance(node, str):
+        names.update(item.strip() for item in _TEMPLATE_PLACEHOLDER_RE.findall(node) if item.strip())
+    return names
+
+
+def _check_script_plan_placeholders(
+    script_path: Path,
+    source: str,
+    schema_fields: set[str],
+    issues: list[dict],
+) -> None:
+    plan = _script_plan(source)
+    if not isinstance(plan, dict):
+        return
+    runtime_names = {
+        str(field.get("name") or "").strip()
+        for step in (plan.get("steps") or [])
+        if isinstance(step, dict)
+        for field in (step.get("runtime_fields") or [])
+        if isinstance(field, dict) and field.get("name")
+    }
+    leaked: list[str] = []
+    for step in plan.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        for key in ("query_template", "body_template", "url_template", "url", "path"):
+            for name in _template_placeholder_names(step.get(key)):
+                if (
+                    name not in schema_fields
+                    and name not in runtime_names
+                    and not name.startswith(("__dano_runtime", "computed_"))
+                    and name not in leaked
+                ):
+                    leaked.append(name)
+    if leaked:
+        issues.append(_issue(
+            "script_system_param_as_caller",
+            f"{script_path.name} PLAN asks the caller for system fields: {', '.join(leaked)}",
+            script_path,
+        ))
+
+
 def _check_input_fact_alignment(root: Path, contract: dict, issues: list[dict]) -> None:
     caps: dict[str, dict] = {}
     for item in contract.get("capabilities") or []:
@@ -679,9 +752,9 @@ def _check_input_fact_alignment(root: Path, contract: dict, issues: list[dict]) 
             ))
         script = Path(str(item.get("script") or ""))
         script_path = root / script if str(script) else None
-        if script_path and script_path.is_file() and schema_fields:
+        if script_path and script_path.is_file():
             source = script_path.read_text(encoding="utf-8")
-            if "PLAN = json.loads" in source or "PLAN=json.loads" in source:
+            if schema_fields and ("PLAN = json.loads" in source or "PLAN=json.loads" in source):
                 missing = [
                     field
                     for field in sorted(schema_fields)
@@ -693,6 +766,7 @@ def _check_input_fact_alignment(root: Path, contract: dict, issues: list[dict]) 
                         f"{script_path.name} PLAN is missing capability fields: {', '.join(missing)}",
                         script_path,
                     ))
+            _check_script_plan_placeholders(script_path, source, schema_fields, issues)
     for route in contract.get("routes") or []:
         if not isinstance(route, dict):
             continue
