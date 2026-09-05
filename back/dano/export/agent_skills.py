@@ -1043,12 +1043,9 @@ def _multi_capability_sop(m: SkillManifest) -> str:
         "2. 读取 `references/CAPABILITIES.md` 中所选能力小节和该 capability 的完整 `input_schema`；"
         "对动态选择项先运行 "
         "`bash scripts/submit.sh --capability <能力名> --list-options <字段名>` 获取实时候选。",
-        "   查询能力不得为可选筛选字段主动提问。查询 input 只能包含用户本轮明确指定的业务筛选条件；"
-        "录制推荐值不得作为查询筛选条件自动提交。"
-        "没有筛选条件时传空 input，由脚本仅应用 `x-dano-apply-default: true` 的分页等安全默认值。",
-        "3. **一次性收集本次所需字段。** 写能力必须收集全部必填表单项；查询能力只收集必填字段和"
-        "用户明确要求的可选筛选条件，不得为其他可选筛选字段主动提问。原生调用 `ask_user_question` "
-        "且本轮只调用一次，使用顶层 `title` 与 `questions[]`（`questions` 数组），把所需字段放在同一个分组表单；"
+        "3. **一次性展示能力契约里的全部调用方字段。** 查询和写能力都按 `input_schema.properties` 原样发出 `questions[]`，"
+        "禁止因为可选、用户没点名或原页控件更少就少问。原生调用 `ask_user_question` "
+        "且本轮只调用一次，使用顶层 `title` 与 `questions[]`（`questions` 数组），把能力字段放在同一个分组表单；"
         "多个表单也必须先一次性汇总，不得在普通文本中提问，"
         "不得按表单、字段或分区拆成多轮追问。",
         "   每个问题必须使用所选能力参考小节给出的参数名作为 `id`、业务标签作为 `question`，并设置对应的 "
@@ -1324,14 +1321,9 @@ def _question_request_template(name: str, contract: dict) -> dict:
     """Render a schema-valid grouped form request for the selected capability."""
     schema = contract.get("parameters") or {}
     required = set(schema.get("required") or [])
-    query = contract.get("kind") in _READ_CAPABILITY_KINDS
     questions: list[dict] = []
     for field, prop in (schema.get("properties") or {}).items():
-        if (
-            not isinstance(prop, dict)
-            or prop.get("x-dano-derived-from-query") is True
-            or (query and field not in required)
-        ):
+        if not isinstance(prop, dict) or prop.get("x-dano-derived-from-query") is True:
             continue
         control = _question_control(prop, field)
         question = {
@@ -1402,11 +1394,7 @@ def _question_collection_block(name: str, contract: dict) -> list[str]:
     """Render the exact parameter-to-question mapping for one capability."""
     schema = contract.get("parameters") or {}
     rows = _question_rows(schema)
-    suffix = (
-        "可用查询字段（可选筛选条件仅在用户明确指定时加入问题）"
-        if contract.get("kind") in _READ_CAPABILITY_KINDS else
-        "字段配置"
-    )
+    suffix = "字段配置"
     lines = [f"   `{name}`（{contract.get('title') or name}）{suffix}："]
     if not rows:
         lines.append("   - 无需收集业务字段。")
@@ -1447,8 +1435,7 @@ def _question_request_block(name: str, contract: dict, heading: str) -> list[str
     lines = ["", heading, ""]
     if not request["questions"]:
         lines += [
-            "该查询没有必填筛选项：用户未明确给筛选条件时不要调用表单，直接提交空 `input`；"
-            "用户明确给出可选筛选条件时，只从上表选取这些字段并按同一 `title + questions[]` 结构组装。",
+            "该能力没有调用方字段，不调用表单。",
         ]
         return lines
     lines += [
@@ -1609,10 +1596,7 @@ def _sop_section(m: SkillManifest, flags: str, cflag: str) -> str:
         f"`bash scripts/submit.sh --capability {name} --list-options <字段名>` 获取实时候选，"
         "不得猜测选项名称或内部 ID。",
         (
-            "3. **只收集本次所需查询字段。** 必填字段必须收集；可选筛选条件仅在用户明确指定时收集，"
-            "不得主动补入、提问或提交其他录制筛选值。原生调用 `ask_user_question` 且本轮只调用一次，"
-            if contract.get("kind") in _READ_CAPABILITY_KINDS else
-            "3. **一次性收集全部表单项。** 原生调用 `ask_user_question` 且本轮只调用一次，"
+            "3. **一次性展示能力契约里的全部调用方字段。** 原生调用 `ask_user_question` 且本轮只调用一次，"
         ) + (
             "使用顶层 `title` 与 `questions[]`（`questions` 数组），把所有字段放进同一个分组表单；"
             "多个表单也必须先一次性汇总，不得在普通文本中提问，"
@@ -1630,12 +1614,6 @@ def _sop_section(m: SkillManifest, flags: str, cflag: str) -> str:
         "才可使用顶层 `question`。运行时推荐默认值只用于 `ask_user_question` 展示，"
         "不得把生成规则占位符原样传给工具或业务接口。",
     ]
-    if contract.get("kind") in _READ_CAPABILITY_KINDS:
-        L += [
-            "   查询能力不得为可选筛选字段主动提问。查询 input 只能包含用户本轮明确指定的业务筛选条件；"
-            "录制推荐值不得作为查询筛选条件自动提交。"
-            "没有筛选条件时传空 input，由脚本仅应用 `x-dano-apply-default: true` 的分页等安全默认值。",
-        ]
     L += [
         "4. `ask_user_question` 返回 `status=answered` 后，保存 `formId`，按 `answer` 对象的 `id` "
         "映射为能力参数；name-ref 选择项按稳定 id 找回同一候选的 label 后提交，日期按 `dateFormat` "

@@ -14,11 +14,13 @@ from dano.execution.page.flow_spec_core.models import (
     FlowStep,
     ParamField,
 )
+from dano.export.agent_skills import _question_request_template
 from dano.export.skill_package.renderer import (
     _capabilities_md,
     _capability_plans,
     _consumer_contract,
     consume_upstream_input_schema,
+    _execution_protocol,
     _field_label,
     _format_list_py,
     _handbook_text,
@@ -466,6 +468,63 @@ def test_skill_enum_options_match_capability_exactly() -> None:
     assert "不要改 `questions[]` 的 id 或 options" in forms
     assert "禁止增加、删除、改写 options" in forms
     assert "禁止把契约外的值传给脚本" in forms
+
+
+def test_export_form_keeps_every_capability_field() -> None:
+    properties = {
+        "items": {"type": "array", "title": "工作项与计划项", "items": {"type": "object"}},
+        "title": {"type": "string", "title": "标题"},
+        "remark": {"type": "string", "title": "备注"},
+        "endDate": {"type": "date", "title": "结束日期"},
+        "startDate": {"type": "date", "title": "开始日期"},
+        "attachments": {"type": "array", "title": "上传附件", "items": {"type": "object"}},
+        "planContent": {"type": "string", "title": "工作计划"},
+        "issueContent": {"type": "string", "title": "问题/协调事项"},
+        "todayContent": {"type": "string", "title": "工作总结"},
+    }
+    plan = {
+        "name": "新增并提交工作日报",
+        "title": "新增并提交工作日报",
+        "input_schema": {
+            "type": "object",
+            "properties": properties,
+            "required": ["startDate", "endDate"],
+        },
+    }
+    forms = _input_forms_md([plan])
+    start = forms.index("```json") + len("```json")
+    request = json.loads(forms[start:forms.index("```", start)])
+    protocol = "\n".join(_execution_protocol())
+
+    assert [item["id"] for item in request["questions"]] == list(properties)
+    assert "第一次提问必须把该能力 `questions[]` 原样发出" in forms
+    assert "条数与 `input_schema.properties` 一致" in forms
+    assert "禁止因为可选、用户没提到、或原页控件更少就少问" in forms
+    assert "字段、options 和条数必须与能力 `input_schema` 完全一致" in protocol
+    assert "禁止少问能力里已有的字段" in protocol
+    assert "表单已覆盖该能力全部调用方字段" in protocol
+    assert "必填已齐" not in protocol
+
+
+def test_query_export_form_keeps_optional_capability_fields() -> None:
+    request = _question_request_template("查询统计", {
+        "title": "查询工作汇报统计",
+        "kind": "query",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "deptId": {"type": "number", "title": "部门"},
+                "startDate": {"type": "date", "title": "开始日期"},
+                "endDate": {"type": "date", "title": "结束日期"},
+                "reportType": {"type": "string", "title": "汇报类型"},
+            },
+            "required": ["startDate", "endDate"],
+        },
+    })
+
+    assert [item["id"] for item in request["questions"]] == [
+        "deptId", "startDate", "endDate", "reportType",
+    ]
 
 
 def test_package_semantics_rejects_unconfirmed_writes_and_missing_combo(tmp_path: Path) -> None:
@@ -1252,7 +1311,7 @@ def test_rendered_package_is_executable_and_contains_no_generation_vocabulary(tm
     handbook = (folder / "SKILL.md").read_text(encoding="utf-8")
     assert "## 展示与确认" in handbook
     assert "用户眼前始终是页面字段，不是请求 JSON" in handbook
-    assert "字段和 options 必须与能力 `input_schema` 完全一致" in handbook
+    assert "字段、options 和条数必须与能力 `input_schema` 完全一致" in handbook
     assert "禁止增加、删除、改写 options" in handbook
     assert "也不要从原页补契约没有的项" in handbook
     assert "references/routes/查询工作记录-然后-新增工作记录.md" in handbook
@@ -1292,7 +1351,7 @@ def test_business_labels_and_complete_dynamic_data_source_are_rendered() -> None
 
     assert '"params": {}' in forms
     assert '"resultPath": "data"' in forms
-    assert "删除已由当前对话提供且通过校验的字段" in forms
+    assert "第一次提问必须把该能力 `questions[]` 原样发出" in forms
     assert "没有可确认的 formId" in forms
     assert "历史样本" not in forms
 
@@ -1619,7 +1678,7 @@ def test_array_form_question_uses_page_label_not_json_jargon() -> None:
     assert '"question": "明细"' in forms
     assert "提供符合 schema 的 JSON" not in forms
     assert "对象数组用 `items.properties` 的 title 画成表格" in forms
-    assert "删除已由当前对话提供且通过校验的字段" in forms
+    assert "第一次提问必须把该能力 `questions[]` 原样发出" in forms
     assert "禁止增加、删除、改写 options" in forms
 
 
