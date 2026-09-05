@@ -388,36 +388,9 @@ def _skill_frontmatter_name(skill, plans: list[dict]) -> str:  # noqa: ANN001
 def _verified_links(spec, step_ids: list[str]) -> list[dict]:  # noqa: ANN001
     if spec is None:
         return []
-    from dano.execution.page.flow_spec import executable_flow_links
+    from dano.execution.page.flow_spec import capability_plan_links
 
-    allowed = set(step_ids)
-    positions = {step_id: index for index, step_id in enumerate(step_ids)}
-    links: list[dict] = []
-    for link in executable_flow_links(spec):
-        verification_id = str((link.meta or {}).get("verification_id") or "")
-        if (
-            link.source_step_id not in allowed
-            or link.target_step_id not in allowed
-            or positions[link.source_step_id] >= positions[link.target_step_id]
-        ):
-            continue
-        link_kind = str(link.kind or "value")
-        links.append({
-            "link_id": link.link_id,
-            "kind": link_kind,
-            "source_step": positions[link.source_step_id],
-            "source_path": link.source_path,
-            "target_step": positions[link.target_step_id],
-            "target_path": link.target_path,
-            "param_name": link.param_name or "",
-            "verification_id": verification_id,
-            "source_collection_path": link.source_collection_path,
-            "source_key_path": link.source_key_path,
-            "source_label_path": link.source_label_path,
-            "target_container_path": link.target_container_path,
-            "value_binding": dict(link.value_binding or {}),
-        })
-    return links
+    return capability_plan_links(spec, step_ids)
 
 
 def consume_upstream_input_schema(compiled: Any, upstream: Any) -> dict[str, Any]:
@@ -687,8 +660,10 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
         links = (
             [dict(item) for item in (execution.get("links") or []) if isinstance(item, dict)]
             if capability_owned
-            else _verified_links(spec, step_ids)
+            else []
         )
+        if not links:
+            links = _verified_links(spec, step_ids)
         cap_steps = [
             _project_capability_step(
                 _safe_step(by_id[step_id]),
@@ -967,12 +942,32 @@ def _is_caller_field(field: dict) -> bool:
 
 
 _PLACEHOLDER_RE = re.compile(r"^\{\{.+\}\}$")
+_PLACEHOLDER_NAME_RE = re.compile(r"^\{\{([^{}]+)\}\}$")
 _ARRAY_FIELD_PATH_RE = re.compile(r"^([^.\[]+)\[(?:\d+|\*|)?\]\.(.+)$")
 _EXECUTE_REF_USAGES = frozenset({"preflight", "execute"})
 
 
 def _is_placeholder(value: Any) -> bool:
     return isinstance(value, str) and bool(_PLACEHOLDER_RE.match(value.strip()))
+
+
+def _placeholder_name(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    match = _PLACEHOLDER_NAME_RE.match(value.strip())
+    return match.group(1).strip() if match else ""
+
+
+def _is_runtime_placeholder(name: str, runtime_names: set[str]) -> bool:
+    token = str(name or "").strip()
+    return bool(
+        token
+        and (
+            token in runtime_names
+            or token.startswith("__dano_runtime")
+            or token.startswith("computed_")
+        )
+    )
 
 
 def _iter_schema_fields(schema: dict | None, prefix: str = "") -> list[tuple[str, str, dict]]:
@@ -1184,27 +1179,31 @@ def _sanitize_request_mapping(
     linked: set[str],
     system_paths: set[str],
     formula_paths: set[str],
+    runtime_names: set[str] | None = None,
 ) -> Any:
+    del kind, params
     if not isinstance(template, dict):
         return template
-    params_set = {str(item) for item in params if str(item)}
+    runtime_names = set(runtime_names or [])
     out: dict[str, Any] = {}
     for key, value in template.items():
         name = str(key)
-        if _is_placeholder(value):
-            out[name] = value
+        if _path_covers(name, linked) or _path_covers(name, system_paths) or _path_covers(name, formula_paths):
             continue
         caller = _caller_name_for_key(name, fields)
+        if _is_placeholder(value):
+            inner = _placeholder_name(value)
+            if (
+                caller
+                or _caller_name_for_key(inner, fields)
+                or _is_runtime_placeholder(inner, runtime_names)
+            ):
+                out[name] = "{{" + (caller or _caller_name_for_key(inner, fields) or inner) + "}}"
+            continue
         if caller:
             out[name] = "{{" + caller + "}}"
             continue
-        if name in params_set:
-            out[name] = "{{" + name + "}}"
-            continue
-        if _path_covers(name, linked) or _path_covers(name, system_paths) or _path_covers(name, formula_paths):
-            continue
-        if kind == "query":
-            out[name] = value
+        out[name] = value
     return out
 
 
@@ -1242,6 +1241,12 @@ def _project_capability_step(
             if item.get(key):
                 formula_paths.add(str(item.get(key)))
     params = list(projected.get("params") or [])
+    runtime_names = {
+        str(item.get("name") or "")
+        for item in (projected.get("runtime_fields") or [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    caller_names = {name for _path, name, _field in fields if name}
     if projected.get("body_template") is not None:
         projected["body_template"] = _sanitize_request_mapping(
             projected.get("body_template"),
@@ -1251,6 +1256,7 @@ def _project_capability_step(
             linked=linked,
             system_paths=system_paths,
             formula_paths=formula_paths,
+            runtime_names=runtime_names,
         )
     if projected.get("query_template") is not None:
         projected["query_template"] = _sanitize_request_mapping(
@@ -1261,6 +1267,7 @@ def _project_capability_step(
             linked=linked,
             system_paths=system_paths,
             formula_paths=formula_paths,
+            runtime_names=runtime_names,
         )
         for key in ("path", "url", "url_template"):
             if projected.get(key):
@@ -1275,6 +1282,7 @@ def _project_capability_step(
         if _step_uses_option(projected, str(item.get("param") or ""), str(item.get("path") or item.get("id_path") or ""))
         or (execute_step and not item.get("param") and item.get("source_url"))
     ]
+    projected["params"] = [name for name in params if str(name) in caller_names]
     return projected
 
 
