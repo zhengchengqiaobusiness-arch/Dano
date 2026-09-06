@@ -674,6 +674,59 @@ test("exported executor queries dynamic options before sending a display name", 
   }
 });
 
+test("exported executor converts a dynamic option inside a detail collection", async () => {
+  const requests: Array<{ url: string; body?: unknown }> = [];
+  const server = http.createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", chunk => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8");
+      requests.push({ url: request.url || "", ...(raw ? { body: JSON.parse(raw) } : {}) });
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(request.url === "/types"
+        ? { data: [{ dictValue: "0", dictLabel: "车船票" }] }
+        : { code: 200 }));
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const origin = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+  const source = verifiedCapability("bill-types");
+  source.role = "lookup";
+  source.transport = { method: "GET", origin, pathTemplate: "/types", urlTemplate: `${origin}/types` };
+  source.outputSchema = {
+    type: "object",
+    properties: { data: { type: "array", items: { type: "object", properties: { dictValue: { type: "string" }, dictLabel: { type: "string" } } } } }
+  };
+  const target = verifiedCapability("create-expense", "create");
+  target.role = "primary";
+  target.transport = { method: "POST", origin, pathTemplate: "/expense", urlTemplate: `${origin}/expense` };
+  target.inputSchema = { type: "object", properties: { items: { type: "array" } } };
+  target.inputForm = [{
+    path: "$.items", name: "items", label: "明细", valueType: "array", source: "system",
+    required: false, requiredBasis: "not-observed", systemHandled: true, sourceDetail: "成功请求模板", widget: "json",
+    defaultRule: 'literal:[{"billType":"0"}]'
+  }, {
+    path: "$.items[*].billType", name: "billType", label: "票据类型", valueType: "string", source: "caller",
+    required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面动态枚举", widget: "select",
+    candidates: { type: "capability", capabilityId: source.id, valuePath: "$.data[*].dictValue", labelPath: "$.data[*].dictLabel" }
+  }];
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-skill-detail-candidate-"));
+  try {
+    const exported = await exportSkill(temporary, "报销申请", [target, source]);
+    await execFileAsync("python", [
+      path.join(exported.dir, "scripts", "execute.py"),
+      "--capability", target.id,
+      "--input", JSON.stringify({ "items.billType": "车船票" }),
+      "--confirm-write"
+    ]);
+    assert.deepEqual(requests, [{ url: "/types" }, { url: "/expense", body: { items: [{ billType: "0" }] } }]);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("exported executor turns an object-picker display name into the recorded request object", async () => {
   const requests: Array<{ url: string; body?: unknown }> = [];
   const rows = [{

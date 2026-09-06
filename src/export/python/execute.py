@@ -707,10 +707,22 @@ def resolve_dynamic_candidates(
             continue
         field_path = field.get("path") or ""
         field_name = field.get("name") or ""
-        value = get_by_path(prepared, field_path)
-        supplied_by_name = value is None and field_name in prepared
-        if supplied_by_name:
-            value = prepared[field_name]
+        collection = parse_collection_leaf_path(field_path)
+        collection_rows = get_by_path(prepared, collection["prefix"]) if collection else None
+        collection_targets = [
+            row for row in collection_rows
+            if isinstance(row, dict) and collection["key"] in row
+        ] if isinstance(collection_rows, list) else []
+        supplied_key = None
+        if collection_targets:
+            value = [row[collection["key"]] for row in collection_targets]
+        else:
+            value = get_by_path(prepared, field_path)
+            for key in collection_field_input_keys(field, capability.get("inputForm", [])) if collection else [field_name]:
+                if value is None and key in prepared:
+                    supplied_key = key
+                    value = prepared[key]
+                    break
         if value is None:
             continue
         source_id = rule.get("capabilityId")
@@ -759,8 +771,11 @@ def resolve_dynamic_candidates(
             return converted[0]
 
         converted = [convert(item) for item in value] if isinstance(value, list) else convert(value)
-        if supplied_by_name:
-            prepared[field_name] = converted
+        if collection_targets:
+            for row, item in zip(collection_targets, converted):
+                row[collection["key"]] = item
+        elif supplied_key is not None:
+            prepared[supplied_key] = converted
         else:
             set_by_path(prepared, field_path, converted)
     return prepared
