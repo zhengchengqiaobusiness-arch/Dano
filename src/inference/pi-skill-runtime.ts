@@ -668,6 +668,7 @@ export function applyExactChooserJoin(catalog: CapabilityContract[], events: Evi
     const related = relatedEvents(capability, events);
     const sample = richestRequestSample(related);
     const observations = chooserObservations(capability, catalog, events, sources);
+    const localObservations = collectUiObservations(joinUiEvents(capability, events));
     return {
       ...capability,
       inputForm: capability.inputForm.map(field => {
@@ -682,7 +683,7 @@ export function applyExactChooserJoin(catalog: CapabilityContract[], events: Evi
         if (!isSkillDistinctive(ids[0])) {
           matchedSources = matchedSources.filter(sourceIsClosedEnum);
         }
-        const hits = observations.filter(observation =>
+        const hits = (isSkillDistinctive(ids[0]) ? observations : localObservations).filter(observation =>
           matchedSources.some(source =>
             source.rows.filter(row =>
               sameValue(rowIdentity(row), ids[0]) && observationMatchesRow(observation, row)

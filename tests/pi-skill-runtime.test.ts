@@ -265,6 +265,14 @@ test("standard RuoYi dictValue and dictLabel rows resolve an unnamed select", ()
       resourceType: "xhr", headers: {}, query: { status: "0" }
     },
     response: { status: 200, headers: {}, body: { code: 200, rows: [] } }
+  }, {
+    id: "tenant-bootstrap", kind: "network", sessionId: "seal", at: "2026-09-06T07:04:00.000Z",
+    pageUrl: "http://boot.test/login",
+    request: {
+      method: "GET", url: "http://boot.test/prod-api/queryCompanyTenant?status=0",
+      resourceType: "xhr", headers: {}, query: { status: "0" }
+    },
+    response: { status: 200, headers: {}, body: { code: 200, data: [{ id: 1, companyName: "示例企业" }] } }
   }];
 
   const catalog = applyDeterministicCatalogJudgment(buildCapabilityCandidates(events), events);
@@ -281,6 +289,11 @@ test("standard RuoYi dictValue and dictLabel rows resolve an unnamed select", ()
       { value: "3", label: "被驳回" }
     ]
   });
+  const bootstrapStatus = catalog
+    .find(item => item.transport.pathTemplate.endsWith("/queryCompanyTenant"))
+    ?.inputForm.find(item => item.name === "status");
+  assert.equal(bootstrapStatus?.source, "system");
+  assert.equal(bootstrapStatus?.candidates, undefined);
 });
 
 test("fallback role keeps a write primary and marks companion queries as lookup", () => {
