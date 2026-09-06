@@ -13,7 +13,7 @@ import { persistOriginCredentials } from "../credentials/credential-store.js";
 import { buildCapabilityCandidates } from "../inference/build-candidates.js";
 import { summarizeCatalog } from "../inference/export-scope.js";
 import { finalizeCapabilities } from "../inference/finalize-capabilities.js";
-import { authenticationFailureReason, businessFailureReason, inferUiOperationIntent, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
+import { authenticationFailureReason, businessFailureReason, hasSuccessfulOperationEvidence, inferUiOperationIntent, isSuccessfulNetworkEvidence, isTriggeredOperationEvidence } from "../inference/heuristics.js";
 import { loadSessionCookies, saveSessionCookies } from "./login-profile.js";
 import { reviewCatalog } from "../review/catalog-review.js";
 
@@ -66,10 +66,12 @@ export function recordingStopReadiness(
   const byId = new Map(events.map(event => [event.id, event]));
   const candidates = finalizeCapabilities(buildCapabilityCandidates(events), events);
   const primary = summarizeCatalog(candidates).primary;
-  const successfulOperations = new Set(primary.filter(capability => capability.evidence.some(ref => {
-    const event = byId.get(ref.eventId);
-    return event?.kind === "network" && isSuccessfulNetworkEvidence(event);
-  })).map(capability => capability.operation));
+  const successfulOperations = new Set(primary.filter(capability => {
+    const network = capability.evidence
+      .map(ref => byId.get(ref.eventId))
+      .filter((event): event is NetworkEvidence => event?.kind === "network");
+    return hasSuccessfulOperationEvidence(network, capability.operation, byId, true);
+  }).map(capability => capability.operation));
   const expected = [...new Set(expectedOperations)].filter(operation => EXPECTABLE_OPERATIONS.has(operation));
   const missingOperations = expected.filter(operation => !successfulOperations.has(operation));
   const missingPages = pageCoverage?.unvisited || [];
@@ -88,13 +90,15 @@ export function recordingStopReadiness(
   for (const capability of primary) {
     for (const ref of capability.evidence) {
       const network = byId.get(ref.eventId);
-      if (network?.kind !== "network" || !isSuccessfulNetworkEvidence(network)) continue;
+      if (network?.kind !== "network"
+        || !isSuccessfulNetworkEvidence(network)
+        || !isTriggeredOperationEvidence(network, capability.operation, byId)) continue;
       credit(network.pageUrl, capability.operation);
       const before = eventIndex.get(network.id) ?? events.length;
       for (let index = before - 1; index >= 0; index -= 1) {
         const event = events[index];
         if (event?.kind !== "ui" || event.sessionId !== network.sessionId) continue;
-        const intent = inferUiOperationIntent(`${event.text || ""} ${event.label || ""}`, event.pageUrl);
+        const intent = inferUiOperationIntent(event.text || event.label || "", event.pageUrl);
         if (intent !== capability.operation) continue;
         const key = normalizeNavigationUrl(event.pageUrl);
         if (!requirementByUrl.has(key)) continue;

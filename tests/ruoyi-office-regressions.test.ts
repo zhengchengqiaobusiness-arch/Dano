@@ -117,6 +117,49 @@ test("record stop keeps the live session open until every expected operation has
   assert.equal(ready.contractReview.primaryCount, 1);
 });
 
+test("record stop does not use an initial list load to hide a failed clicked query", () => {
+  const pageUrl = "https://ruoyioffice.com/web/#/oa/duty/duty-leave";
+  const requestUrl = "https://ruoyioffice.com/prod-api/oa/dutyApply/list?pageNum=1&pageSize=20";
+  const queryNetwork = (
+    id: string,
+    second: number,
+    responseBody: Record<string, unknown>,
+    correlatedUiEvidenceId?: string
+  ): NetworkEvidence => ({
+    id,
+    kind: "network",
+    sessionId: "ruoyi",
+    at: at(second),
+    pageUrl,
+    correlatedUiEvidenceId,
+    request: {
+      method: "GET",
+      url: requestUrl,
+      resourceType: "xhr",
+      headers: {},
+      query: { pageNum: "1", pageSize: "20" }
+    },
+    response: { status: 200, headers: {}, body: responseBody }
+  });
+  const initial = queryNetwork("initial-list", 1, { code: 200, rows: [] });
+  const failed = queryNetwork(
+    "clicked-query",
+    3,
+    { code: 500, msg: "Failed to convert value of type 'String' to required type 'BigDecimal' for property 'days'" },
+    "ui-search"
+  );
+  const evidence: EvidenceEvent[] = [initial, ui("ui-search", 2, "搜索", pageUrl), failed];
+
+  const blocked = recordingStopReadiness(evidence, ["query"]);
+  assert.equal(blocked.ready, false, JSON.stringify(blocked));
+  assert.deepEqual(blocked.missingOperations, ["query"]);
+  assert.match(blocked.message, /BigDecimal/);
+
+  failed.response = { status: 200, headers: {}, body: { code: 200, rows: [] } };
+  const ready = recordingStopReadiness(evidence, ["query"]);
+  assert.equal(ready.ready, true, JSON.stringify(ready));
+});
+
 test("a generic save or submit inherits the active create or update form intent", () => {
   const list = "https://ruoyioffice.com/web/#/oa/seal/seal-apply-list";
   const form = "https://ruoyioffice.com/web/#/oa/seal/seal-apply-info?t=1";
@@ -931,6 +974,7 @@ test("exercise-form fills spinbutton and labeled sort fields with numbers not �
         <label>*车牌号<input placeholder="请输入车牌号" name="carNo"></label>
         <label>车座<input role="spinbutton" placeholder="请输入车座" name="seatNum"></label>
         <div class="el-input-number"><label>显示顺序<input placeholder="请输入显示顺序" name="sort"></label></div>
+        <label>天数<input placeholder="请输入天数" name="days"></label>
         <button type="button" id="save">确认</button>
       </div>
       <script>
@@ -941,7 +985,8 @@ test("exercise-form fills spinbutton and labeled sort fields with numbers not �
             body: JSON.stringify({
               carNo: document.querySelector("[name=carNo]").value,
               seatNum: document.querySelector("[name=seatNum]").value,
-              sort: document.querySelector("[name=sort]").value
+              sort: document.querySelector("[name=sort]").value,
+              days: document.querySelector("[name=days]").value
             })
           });
         });
@@ -969,6 +1014,7 @@ test("exercise-form fills spinbutton and labeled sort fields with numbers not �
     assert.match(String(byLabel("*车牌号")?.value || ""), /样例/, JSON.stringify(exercised.formFields));
     assert.equal(String(byLabel("车座")?.value || ""), "1", JSON.stringify(exercised.formFields));
     assert.equal(String(byLabel("显示顺序")?.value || ""), "1", JSON.stringify(exercised.formFields));
+    assert.equal(String(byLabel("天数")?.value || ""), "1", JSON.stringify(exercised.formFields));
   } finally {
     if (recorder.isActive()) await recorder.stop().catch(() => {});
     await new Promise<void>(resolve => server.close(() => resolve()));

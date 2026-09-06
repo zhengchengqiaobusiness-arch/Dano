@@ -3,7 +3,7 @@
  * 本文件只保留 HTTP 成功/登录失败、URL 模板，以及精确按钮文案 / 分页问数字段等取证原语。
  * 旧正则引擎全文见 `heuristics.ts.bak`。
  */
-import type { NetworkEvidence, OperationKind, UiEvidence } from "../domain.js";
+import type { EvidenceEvent, NetworkEvidence, OperationKind, UiEvidence } from "../domain.js";
 
 const REVIEW = /approve|approval|audit|review|reject|pass|审核|审批|通过|驳回|拒绝|复核/i;
 const DELETE = /delete|remove|destroy|删除|移除|作废|注销/i;
@@ -101,6 +101,31 @@ export function businessFailureReason(event: NetworkEvidence): string | undefine
 
 export function isSuccessfulNetworkEvidence(event: NetworkEvidence) {
   return businessFailureReason(event) === undefined;
+}
+
+export function isTriggeredOperationEvidence(
+  event: NetworkEvidence,
+  operation: OperationKind,
+  evidenceById: Map<string, EvidenceEvent>
+) {
+  if (!event.correlatedUiEvidenceId) return false;
+  const ui = evidenceById.get(event.correlatedUiEvidenceId);
+  if (ui?.kind !== "ui") return false;
+  const explicitIntent = inferUiOperationIntent(ui.text || ui.label || "", ui.pageUrl);
+  if (explicitIntent) return explicitIntent === operation;
+  if (["create", "update", "review", "action"].includes(operation) && isFormCommit(ui)) return true;
+  return inferOperation(event, ui) === operation;
+}
+
+export function hasSuccessfulOperationEvidence(
+  events: NetworkEvidence[],
+  operation: OperationKind,
+  evidenceById: Map<string, EvidenceEvent>,
+  requireTriggered = false
+) {
+  const triggered = events.filter(event => isTriggeredOperationEvidence(event, operation, evidenceById));
+  if (requireTriggered || triggered.length) return triggered.some(isSuccessfulNetworkEvidence);
+  return events.some(isSuccessfulNetworkEvidence);
 }
 
 function isFormCommit(ui?: UiEvidence) {

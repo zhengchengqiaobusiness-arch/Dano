@@ -3,7 +3,7 @@ import { getByPath } from "../utils.js";
 import { collectionRowHasUiEvidence, fieldHasUiEvidence, flattenRequestValues, requestValueAt, sameValue, staticCandidatesHaveUiEvidence } from "../inference/field-resolver.js";
 import { evidenceSample, isExecutableRule } from "../inference/field-derivation.js";
 import { pickerFieldsMissingQuery, uncoveredWriteLeaves, unresolvedWriteFields, unsoundFormulaFields } from "../review/catalog-review.js";
-import { businessFailureReason, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
+import { businessFailureReason, hasSuccessfulOperationEvidence, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
 
 function schemaHasPath(schema: CapabilityContract["inputSchema"], jsonPath: string) {
   const parts = jsonPath.replace(/^\$\.?/, "").split(".").filter(Boolean);
@@ -37,7 +37,7 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
     detail: hasNetwork ? `${networkRefs.length} recorded network event(s)` : "No recorded network evidence"
   });
 
-  const successful = networkRefs.some(isSuccessfulNetworkEvidence);
+  const successful = hasSuccessfulOperationEvidence(networkRefs, cap.operation, byId);
   const failureReasons = networkRefs.map(businessFailureReason).filter((item): item is string => Boolean(item));
   checks.push({
     name: "successful-response",
