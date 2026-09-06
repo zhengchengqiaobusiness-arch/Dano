@@ -269,6 +269,36 @@ test("an unresolved from-rule falls back to the recorded successful request valu
   assert.equal(request.body?.deptId, 103);
 });
 
+test("a dynamic candidate label is converted with the verified lookup result", () => {
+  const create: CapabilityContract = {
+    id: "create-seal-apply",
+    kind: "atomic",
+    title: "新增用印申请",
+    description: "新增用印申请",
+    operation: "create",
+    confidence: 1,
+    transport: { method: "POST", urlTemplate: "https://example.test/oa/sealApply", origin: "https://example.test", pathTemplate: "/oa/sealApply" },
+    inputSchema: { type: "object", properties: { sealId: { type: "string" } }, required: ["sealId"] },
+    outputSchema: { type: "object", properties: {} },
+    inputForm: [{
+      path: "$.sealId", name: "sealId", label: "选择公章", valueType: "string", source: "caller",
+      required: true, requiredBasis: "ui-required", systemHandled: false, sourceDetail: "来自已验证的公章查询",
+      widget: "select",
+      candidates: { type: "capability", capabilityId: "query-seals", valuePath: "$.data[*].id", labelPath: "$.data[*].name" }
+    }],
+    evidence: [],
+    sideEffect: true,
+    confirmation: { required: true },
+    completion: { acceptedHttpStatuses: [200] },
+    bindings: [],
+    validation: { version: 2, status: "verified", checks: [] },
+    generated: { source: "heuristic", generatedAt: "2026-09-06T00:00:00.000Z" }
+  };
+  const options = { lookupBodies: { "query-seals": { data: [{ id: "seal-1", name: "合同章" }] } } };
+  assert.equal(materializeHttpRequest(create, { sealId: "合同章" }, options).body?.sealId, "seal-1");
+  assert.throws(() => materializeHttpRequest(create, { sealId: "不存在" }, options), /候选值不存在或不唯一/);
+});
+
 test("a business summary query is a primary page result, not a leftover lookup", () => {
   const events = fidelityEvents();
   const catalog = finalizeCapabilities(buildCapabilityCandidates(events), events);

@@ -8,24 +8,7 @@ import json
 import sys
 from typing import Any
 
-from execute import execute_capability, load_contract, parse_json_argument
-
-
-def extract_many(root: Any, json_path: str) -> list[Any]:
-    tokens = [token for token in json_path.removeprefix("$.").split(".") if token]
-    values = [root]
-    for token in tokens:
-        wildcard = token.endswith("[*]")
-        key = token[:-3] if wildcard else token
-        next_values: list[Any] = []
-        for value in values:
-            child = value.get(key) if key and isinstance(value, dict) else value
-            if wildcard and isinstance(child, list):
-                next_values.extend(child)
-            elif not wildcard and child is not None:
-                next_values.append(child)
-        values = next_values
-    return values
+from execute import execute_capability, extract_many, load_contract, parse_json_argument
 
 
 def main() -> int:

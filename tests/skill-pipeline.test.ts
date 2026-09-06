@@ -326,3 +326,36 @@ test("exported executor preserves a recorded date-only string", async () => {
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+test("exported executor resolves a dynamic candidate label before a write", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-skill-dynamic-candidate-"));
+  const lookup = verifiedCapability("query-seals");
+  lookup.role = "lookup";
+  lookup.outputSchema = { type: "object", properties: { data: { type: "array", items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" } } } } } };
+  const create = verifiedCapability("create-seal", "create");
+  create.role = "primary";
+  create.inputSchema = { type: "object", properties: { sealId: { type: "string" } }, required: ["sealId"] };
+  create.inputForm = [{
+    path: "$.sealId", name: "sealId", label: "选择公章", valueType: "string", source: "caller",
+    required: true, requiredBasis: "ui-required", systemHandled: false, sourceDetail: "来自已验证查询",
+    widget: "select", candidates: { type: "capability", capabilityId: lookup.id, valuePath: "$.data[*].id", labelPath: "$.data[*].name" }
+  }];
+  try {
+    const exported = await exportSkill(temporary, "用印申请", [lookup, create]);
+    const script = path.join(exported.dir, "scripts", "execute.py");
+    const probe = [
+      "import importlib.util,json,sys",
+      "spec=importlib.util.spec_from_file_location('skill_execute',sys.argv[1])",
+      "mod=importlib.util.module_from_spec(spec)",
+      "spec.loader.exec_module(mod)",
+      "mod.execute_capability=lambda *_args,**_kwargs:{'ok':True,'body':{'data':[{'id':'seal-1','name':'合同章'}]}}",
+      "contract=mod.load_contract()",
+      "target=next(x for x in contract['capabilities'] if x['id']=='create-seal')",
+      "print(json.dumps(mod.prepare_input(target,{'sealId':'合同章'},contract),ensure_ascii=False))"
+    ].join(";");
+    const { stdout } = await execFileAsync("python", ["-c", probe, script]);
+    assert.equal(JSON.parse(stdout).sealId, "seal-1");
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});

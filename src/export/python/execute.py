@@ -226,6 +226,71 @@ def apply_candidate(field: dict[str, Any], value: Any) -> Any:
     return value
 
 
+def extract_many(root: Any, json_path: str) -> list[Any]:
+    tokens = [token for token in json_path.removeprefix("$.").split(".") if token]
+    values = [root]
+    for token in tokens:
+        wildcard = token.endswith("[*]")
+        key = token[:-3] if wildcard else token
+        next_values: list[Any] = []
+        for value in values:
+            child = value.get(key) if key and isinstance(value, dict) else value
+            if wildcard and isinstance(child, list):
+                next_values.extend(child)
+            elif not wildcard and child is not None:
+                next_values.append(child)
+        values = next_values
+    return values
+
+
+def apply_capability_candidates(
+    capability: dict[str, Any],
+    prepared: dict[str, Any],
+    contract: dict[str, Any] | None,
+    resolve_lookups: bool,
+) -> None:
+    if not resolve_lookups or not contract:
+        return
+    for field in capability.get("inputForm", []):
+        rule = field.get("candidates") or {}
+        if rule.get("type") != "capability":
+            continue
+        path = field.get("path") or ""
+        leaf = parse_collection_leaf_path(path)
+        rows = get_by_path(prepared, leaf["prefix"]) if leaf else None
+        present = any(isinstance(row, dict) and row.get(leaf["key"]) is not None for row in rows or []) if leaf else get_by_path(prepared, path) is not None
+        if not present:
+            continue
+        source = next((item for item in contract.get("capabilities", []) if item.get("id") == rule.get("capabilityId")), None)
+        if not source or source.get("operation") != "query" or source.get("validation", {}).get("status") != "verified":
+            raise ValueError(f"字段 {field.get('label')} 的候选查询不存在或未验证")
+        source_input: dict[str, Any] = {}
+        for dependency in rule.get("dependsOn") or []:
+            target = next((item for item in capability.get("inputForm", []) if item.get("path") == dependency or item.get("name") == dependency), None)
+            value = get_by_path(prepared, target.get("path")) if target else get_by_path(prepared, dependency)
+            if value is not None:
+                source_input[(target or {}).get("name") or dependency.removeprefix("$.").split(".")[-1]] = value
+        response = execute_capability(source, source_input, False)
+        if not response.get("ok"):
+            raise ValueError(f"字段 {field.get('label')} 的候选查询失败")
+        values = extract_many(response.get("body"), rule["valuePath"])
+        labels = extract_many(response.get("body"), rule["labelPath"])
+        choices = [{"value": item, "label": str(labels[index] if index < len(labels) else item)} for index, item in enumerate(values)]
+
+        def resolve(value: Any) -> Any:
+            matches = [item for item in choices if same_join(item["value"], value) or item["label"] == str(value)]
+            if len(matches) != 1:
+                raise ValueError(f"字段 {field.get('label')} 的候选值不存在或不唯一：{value}")
+            return matches[0]["value"]
+
+        if leaf:
+            for row in rows or []:
+                if isinstance(row, dict) and row.get(leaf["key"]) is not None:
+                    row[leaf["key"]] = resolve(row[leaf["key"]])
+        else:
+            set_by_path(prepared, path, resolve(get_by_path(prepared, path)))
+
+
 def delete_by_path(target: dict[str, Any], json_path: str) -> None:
     key = literal_key(json_path)
     if key is not None:
@@ -494,6 +559,7 @@ def prepare_input(
 ) -> dict[str, Any]:
     prepared = hoist_named_fields(capability, nest_line_items(capability, supplied))
     apply_collection_templates(capability, prepared)
+    apply_capability_candidates(capability, prepared, contract, resolve_lookups)
     coerce_present_fields(capability, prepared, False)
     changed = True
     while changed:
