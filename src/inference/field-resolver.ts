@@ -110,7 +110,7 @@ export function flattenRequestValues(value: unknown, prefix = "$"): Array<{ path
   );
 }
 
-export function richTextPlain(value: unknown) {
+function richTextPlain(value: unknown) {
   if (typeof value !== "string" || !/<\/?[a-z][^>]*>/i.test(value)) return undefined;
   return value
     .replace(/<br\s*\/?>/gi, "\n")
@@ -863,7 +863,6 @@ function widgetFromObservation(field: InputFormField, matched?: UiObservation): 
   if (matched?.options?.length && !looksTextObservation(matched) && !looksDateControl(matched || field)) return "select";
   if (/number/.test(type)) return "number";
   if (/checkbox|switch|boolean/.test(type)) return "boolean";
-  if (matched && /^(text|input|search|email|tel|url|password)$/.test(type)) return "text";
   return field.widget;
 }
 

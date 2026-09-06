@@ -111,7 +111,6 @@ export interface InputFormField {
   defaultRule?: string;
   dateClock?: string;
   dateClocks?: string[];
-  richText?: boolean;
   candidates?: CandidateRule;
 }
 

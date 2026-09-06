@@ -577,7 +577,7 @@ function callerFieldTable(capability: CapabilityContract, capabilities: Capabili
 |---|---|---|---|---|---|
 ${fields.map(field => {
     const dataSource = publishedDataSource(field, capabilities);
-    let candidate = field.richText ? "富文本：传纯文本，系统按页面请求格式转换为 HTML" : "自由输入";
+    let candidate = "自由输入";
     if (field.candidates?.type === "static") {
       candidate = field.candidates.values.map(item => `${item.label}=${String(item.value)}`).join("；");
     } else if (dataSource) {

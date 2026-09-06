@@ -24,7 +24,6 @@ import {
   pickerEntity,
   relatedUiEvents,
   requestValueAt,
-  richTextPlain,
   sameFormShape,
   sameSynonymGroup,
   sameValue,
@@ -268,9 +267,6 @@ function widgetFromObservation(field: InputFormField, observation?: UiObservatio
   if (type === "select" || type === "select-one" || type === "combobox" || type === "picker") {
     return field.valueType === "array" ? "multiselect" : "select";
   }
-  if (observation && (type === "text" || type === "input" || type === "search" || type === "email" || type === "tel" || type === "url" || type === "password")) {
-    return "text";
-  }
   return field.widget;
 }
 
@@ -386,8 +382,6 @@ function asExactCaller(field: InputFormField, observation: UiObservation | undef
   const options = !picker ? optionsWithRecordedValue(observation, value) : undefined;
   const widget = widgetFromObservation(field, observation);
   const clock = recordedClock(value);
-  const plainRichText = richTextPlain(value);
-  const richText = plainRichText !== undefined && sameValue(plainRichText, observation?.value);
   return {
     ...field,
     label: displayLabel(observation?.label, field.label) || field.label,
@@ -399,10 +393,7 @@ function asExactCaller(field: InputFormField, observation: UiObservation | undef
     defaultRule: keptJudgedRule(field) ? field.defaultRule : undefined,
     candidates: options?.length ? { type: "static", values: options } : field.candidates,
     dateClock: widget === "date" && clock ? clock : field.dateClock,
-    richText: richText || field.richText,
-    sourceDetail: richText
-      ? "页面富文本由调用方提供纯文本，系统按真实请求格式转换为 HTML"
-      : options?.length
+    sourceDetail: options?.length
       ? "页面同名控件有固定选项，由调用方选择"
       : picker
         ? "页面同名选择控件，由调用方提供"
