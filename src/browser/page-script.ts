@@ -5,13 +5,23 @@
 export const PAGE_HELPERS = String.raw`
   const clean = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 12000);
   const generatedName = (value) => /^(el-id-\d+|el-[a-z]+-\d+|reka-v-[a-z0-9-]+|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i.test(String(value || ""));
+  const intersectsViewport = (rect) => {
+    const width = document.documentElement.clientWidth || window.innerWidth || 0;
+    const height = document.documentElement.clientHeight || window.innerHeight || 0;
+    return rect.right > 0 && rect.bottom > 0 && rect.left < width && rect.top < height;
+  };
   const isVisible = (el) => {
     if (!(el instanceof Element)) return false;
     if (el.hidden || el.getAttribute("aria-hidden") === "true") return false;
     if (el.closest("[hidden]")) return false;
     const style = getComputedStyle(el);
     const rect = el.getBoundingClientRect();
-    return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    if (style.display === "none" || style.visibility === "hidden" || rect.width <= 0 || rect.height <= 0) return false;
+    // Closed drawers and dialogs can keep a positive box while translated
+    // completely off-canvas. Their controls are not part of the active
+    // business form and must not compete with its fields or submit button.
+    const layer = el.closest('[role="dialog"], [role="alertdialog"], .el-dialog, .el-drawer, .el-overlay-dialog, .ant-modal, .ant-drawer, .arco-modal, .arco-drawer');
+    return !layer || intersectsViewport(layer.getBoundingClientRect());
   };
   const shadowRootsOf = () => {
     if (window.__bssShadowScan) return window.__bssShadowRoots || [];

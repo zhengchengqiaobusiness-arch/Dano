@@ -2214,6 +2214,60 @@ test("a locked Chromium debug log cannot crash session disposal", async () => {
   );
 });
 
+test("off-canvas settings drawers do not become the active business form", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-offscreen-drawer-"));
+  let searched = false;
+  const server = http.createServer((request, response) => {
+    if (request.url?.startsWith("/search")) {
+      searched = true;
+      response.setHeader("content-type", "application/json");
+      response.end('{"code":200,"rows":[]}');
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body>
+      <form>
+        <div class="el-form-item"><label class="el-form-item__label">名称</label><input name="name" placeholder="请输入名称"></div>
+        <button type="button" id="search">搜索</button>
+      </form>
+      <aside class="el-drawer" style="position:fixed;left:calc(100vw + 40px);top:0;width:320px;height:400px">
+        <div class="el-form-item"><label class="el-form-item__label">开启 TopNav</label><input type="checkbox" name="topnav"></div>
+        <button type="button">保存配置</button>
+      </aside>
+      <script>document.getElementById('search').onclick=()=>fetch('/search?name='+encodeURIComponent(document.querySelector('[name=name]').value));</script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "offscreen-drawer");
+    const snapshot: any = await recorder.control({ action: "snapshot" });
+    assert.deepEqual(snapshot.formFields.map((field: any) => field.label), ["名称"]);
+    assert.doesNotMatch(snapshot.text, /开启 TopNav|保存配置/);
+    const filled: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(filled.ok, true, JSON.stringify(filled));
+    const submitted: any = await recorder.control({ action: "submit-form" });
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    assert.equal(submitted.submitted, "搜索");
+    assert.equal(searched, true);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("snapshot and exercise-form cover component radios backed by hidden native inputs", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-component-radio-"));
   const server = http.createServer((_request, response) => {
