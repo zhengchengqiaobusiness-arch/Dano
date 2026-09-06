@@ -412,11 +412,18 @@ test("complete coverage does not demand a chooser that opened with no options", 
     evidence: [{ eventId: "net-search", sessionId: "s", kind: "network", at: "2026-09-05T08:00:01.000Z", status: 200 }]
   });
   const events: EvidenceEvent[] = [{
+    id: "ui-open-empty", kind: "ui", sessionId: "s", at: "2026-09-05T07:59:59.000Z",
+    pageUrl: "https://x/web/#/oa/doc", eventType: "click", text: "申请部门", label: "申请部门",
+    form: [
+      { name: "billCode", label: "单据编号", type: "text", value: "A1" },
+      { name: "deptId", label: "申请部门", type: "select", value: "无数据" }
+    ]
+  }, {
     id: "ui-search", kind: "ui", sessionId: "s", at: "2026-09-05T08:00:00.000Z",
     pageUrl: "https://x/web/#/oa/doc", eventType: "click", text: "搜索", label: "搜索",
     form: [
       { name: "billCode", label: "单据编号", type: "text", value: "A1" },
-      { name: "deptId", label: "申请部门", type: "select", value: "", visibleOptions: ["暂无数据"] }
+      { name: "deptId", label: "申请部门", type: "select", value: "" }
     ]
   }, {
     id: "net-search", kind: "network", sessionId: "s", at: "2026-09-05T08:00:01.000Z",

@@ -3,7 +3,7 @@ import { getByPath } from "../utils.js";
 import { collectionRowHasUiEvidence, fieldHasUiEvidence, flattenRequestValues, requestValueAt, sameValue, staticCandidatesHaveUiEvidence } from "../inference/field-resolver.js";
 import { evidenceSample, isExecutableRule } from "../inference/field-derivation.js";
 import { pickerFieldsMissingQuery, uncoveredWriteLeaves, unresolvedWriteFields, unsoundFormulaFields } from "../review/catalog-review.js";
-import { businessFailureReason, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
+import { businessFailureReason, inferUiOperationIntent, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
 
 function schemaHasPath(schema: CapabilityContract["inputSchema"], jsonPath: string) {
   const parts = jsonPath.replace(/^\$\.?/, "").split(".").filter(Boolean);
@@ -16,6 +16,53 @@ function schemaHasPath(schema: CapabilityContract["inputSchema"], jsonPath: stri
     if (wildcard) current = current.items;
   }
   return parts.length > 0 && Boolean(current);
+}
+
+function emptyUiValue(value: unknown) {
+  if (value === undefined || value === null) return true;
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value !== "string") return false;
+  const text = value.replace(/<[^>]+>/g, "").replace(/&nbsp;|&#160;/gi, " ").trim();
+  return !text || /^(请选择|请输入|请填写|please (select|enter|choose))/i.test(text);
+}
+
+function uncoveredSuccessfulUiFields(
+  cap: CapabilityContract,
+  networkRefs: NetworkEvidence[],
+  byId: Map<string, EvidenceEvent>
+) {
+  const successful = networkRefs.filter(isSuccessfulNetworkEvidence).sort((left, right) => right.at.localeCompare(left.at));
+  const latestSession = successful[0]?.sessionId;
+  const submissions = successful
+    .filter(event => !latestSession || event.sessionId === latestSession)
+    .map(network => ({ network, submission: network.correlatedUiEvidenceId ? byId.get(network.correlatedUiEvidenceId) : undefined }))
+    .filter((item): item is { network: NetworkEvidence; submission: UiEvidence } => {
+      const event = item.submission;
+      if (event?.kind !== "ui" || !event.form?.length) return false;
+      if (cap.operation !== "query") return true;
+      return inferUiOperationIntent(event.text || event.label || "", event.pageUrl) === "query";
+    });
+  const missing = new Set<string>();
+  for (const { network, submission } of submissions) {
+    const input = network.request.body && typeof network.request.body === "object" && !Array.isArray(network.request.body)
+      ? { ...network.request.query, ...(network.request.body as Record<string, unknown>) }
+      : network.request.query;
+    const requestLeaves = flattenRequestValues(input);
+    for (const field of submission.form || []) {
+      const label = String(field.label || field.name || "").trim();
+      const type = String(field.type || "");
+      if (!label || emptyUiValue(field.value) || field.disabled || /upload|file|readonly|hidden/i.test(type) || /附件|上传/.test(label)) continue;
+      if (!requestLeaves.some(item => sameValue(item.value, field.value))) continue;
+      const single: UiEvidence = { ...submission, form: [field] };
+      const covered = cap.inputForm.some(contract =>
+        contract.source === "caller"
+        && (fieldHasUiEvidence(contract, [single])
+          || contract.candidates?.type === "static" && staticCandidatesHaveUiEvidence(contract, [single]))
+      );
+      if (!covered) missing.add(label);
+    }
+  }
+  return [...missing];
 }
 
 export function validateCapability(cap: CapabilityContract, events: EvidenceEvent[], catalog: CapabilityContract[] = []): CapabilityContract {
@@ -122,6 +169,15 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
     detail: ownershipConsistent
       ? "调用方字段与系统处理字段已明确区分"
       : "字段来源与处理方标记冲突"
+  });
+
+  const uncoveredUi = uncoveredSuccessfulUiFields(cap, networkRefs, byId);
+  checks.push({
+    name: "editable-ui-fields-covered",
+    ok: uncoveredUi.length === 0,
+    detail: uncoveredUi.length === 0
+      ? "成功提交时已填写的页面控件均有调用方字段"
+      : `成功提交时已填写的页面控件没有对应调用参数：${uncoveredUi.join("、")}`
   });
 
   const systemFieldsResolvable = cap.inputForm.every(field => {

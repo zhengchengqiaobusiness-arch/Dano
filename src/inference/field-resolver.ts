@@ -262,6 +262,13 @@ export function sameSynonymGroup(field: { name?: string; label?: string }, item:
 }
 
 const SEMANTIC_CONCEPTS = [
+  ["start", /\b(?:start|begin)\b|开始|起始/i],
+  ["end", /\b(?:end|finish)\b|结束|截止|目的地/i],
+  ["destination", /\b(?:destination|end\s*city)\b|目的地/i],
+  ["stay", /\bstay\b|住宿/i],
+  ["duration", /\bdays?\b|天数/i],
+  ["bill", /\bbill\b|单据|票据/i],
+  ["item", /\bitem\b|款项/i],
   ["supplier", /\b(?:supplier|vendor)\b|供应商|供货商/i],
   ["account", /\baccount\b|账户|账号/i],
   ["product", /\b(?:product|goods)\b|商品|产品/i],
@@ -269,10 +276,10 @@ const SEMANTIC_CONCEPTS = [
   ["deposit", /\bdeposit\b|订金|定金/i],
   ["tax", /\btax\b|税/i],
   ["percent", /\b(?:percent|percentage|rate)\b|百分比|率/i],
-  ["total", /\btotal\b|合计|总计|总额|优惠后/i],
+  ["total", /\btotal\b|合计|总计|总额|总数|优惠后/i],
   ["unit-price", /\b(?:unit|product)\s+price\b|单价/i],
-  ["money", /\b(?:price|amount)\b|金额|税额|单价|价格|价款|货款|付款|订金|定金/i],
-  ["count", /\b(?:count|qty|quantity)\b|数量/i],
+  ["money", /\b(?:price|amount|amt)\b|金额|税额|单价|价格|价款|货款|付款|订金|定金/i],
+  ["count", /\b(?:count|qty|quantity)\b|数量|总数|张数|份数/i],
   ["stock", /\b(?:stock|inventory)\b|库存/i],
   ["unit", /\bunit\b|单位/i],
   ["barcode", /\bbar\s*code\b|条码/i],
@@ -1886,6 +1893,7 @@ export function owningFormEvent(
       best = item;
     }
   }
+  if (correlated?.form?.length && (!best?.form?.length || correlated.form.length >= best.form.length)) return correlated;
   return best || (correlated?.form?.length ? correlated : undefined);
 }
 
