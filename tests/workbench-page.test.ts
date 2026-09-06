@@ -133,6 +133,46 @@ test("a settled agent is resumed to stop and export after the live recording aud
   assert.match(prompts[0]!, /business_skill_export/);
 });
 
+test("live audit never resumes a missing write operation without a new user confirmation", async () => {
+  const logs: Array<{ level: string; message: string }> = [];
+  const page = new WorkbenchPage("page_waitwrite", {
+    rootDir: ".",
+    dataDir: ".business-skill-studio",
+    recordingsDir: ".business-skill-studio/recordings",
+    catalogDir: ".business-skill-studio/catalog",
+    profileDir: ".business-skill-studio/browser-profile",
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  }, "http://127.0.0.1:4310", value => value, (level, message) => {
+    logs.push({ level, message: String(message) });
+  });
+  const prompts: string[] = [];
+  (page.recorder as any).activeSession = () => ({
+    id: "rec_waitwrite",
+    completeFieldCoverage: true,
+    completePageCoverage: false,
+    expectedOperations: ["query", "create"]
+  });
+  (page.recorder as any).stopReadiness = async () => ({
+    ready: false,
+    pageCoverage: undefined,
+    missingPageOperations: [],
+    missingOperations: ["create"],
+    missingFields: [],
+    contractReview: { findings: [] },
+    nextAction: { action: "perform-operation", operations: ["create"] }
+  });
+  (page.pi as any).status = () => ({ streaming: false });
+  (page.pi as any).prompt = async (prompt: string) => { prompts.push(prompt); };
+
+  (page as any).scheduleCoverageContinuation();
+  await new Promise(resolve => setTimeout(resolve, 260));
+
+  assert.deepEqual(prompts, []);
+  assert.equal(logs.some(item => item.level === "WAIT" && /明确确认/.test(item.message)), true);
+});
+
 test("a queued audit continuation does not send another prompt after the recording stops", async () => {
   const page = new WorkbenchPage("page_stoprace", {
     rootDir: ".",

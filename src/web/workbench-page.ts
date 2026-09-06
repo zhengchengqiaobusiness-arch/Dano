@@ -23,6 +23,7 @@ interface ManualTakeover {
 }
 
 const PAGE_SESSION_PATTERN = /^page_[A-Za-z0-9_-]{8,80}$/;
+const WRITE_EVIDENCE_OPERATIONS = new Set<OperationKind>(["create", "update", "review", "delete", "upload", "action"]);
 
 function requiresCompleteFieldCoverage(text: string) {
   const request = text.replace(/\s+/g, "");
@@ -246,6 +247,12 @@ export class WorkbenchPage {
           const missingPageOperations = readiness.missingPageOperations || [];
           const missingOperations = readiness.missingOperations || [];
           const missingFields = readiness.missingFields || [];
+          const pendingWrite = [...missingOperations, ...missingPageOperations.flatMap(item => item.operations || [])]
+            .find(operation => WRITE_EVIDENCE_OPERATIONS.has(operation));
+          if (pendingWrite) {
+            this.onLog("WAIT", `实时审核仍缺少写操作 ${pendingWrite}；等待用户对当前表单和目标做本次明确确认，不自动续跑写请求。`);
+            return;
+          }
           const continuationLimit = Math.max(24, (readiness.pageCoverage?.discovered || 0) * 2);
           if (this.coverageContinuations >= continuationLimit) {
             this.onLog("ERROR", `Live recording audit did not finish after ${continuationLimit} automatic continuations.`);
