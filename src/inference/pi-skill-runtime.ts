@@ -865,12 +865,16 @@ export function applySameResourceCandidates(catalog: CapabilityContract[]): Capa
   return catalog.map(capability => ({
     ...capability,
     inputForm: capability.inputForm.map(field => {
-      if (field.candidates) return field;
+      if (field.source !== "caller" || field.candidates) return field;
       const matches = catalog.flatMap(source => {
         if (source.id === capability.id
           || source.transport.origin !== capability.transport.origin
           || !sameResource(source.transport.pathTemplate, capability.transport.pathTemplate)) return [];
-        return source.inputForm.filter(item => item.name === field.name && Boolean(item.candidates));
+        return source.inputForm.filter(item =>
+          item.source === "caller"
+          && item.path === field.path
+          && Boolean(item.candidates)
+        );
       });
       const unique = [...new Map(matches.map(item => [JSON.stringify(item.candidates), item])).values()];
       if (unique.length !== 1) return field;

@@ -5,6 +5,7 @@ import { buildCapabilityCandidates } from "../src/inference/build-candidates.js"
 import {
   applyDeterministicCatalogJudgment,
   applyExactEvidenceJoin,
+  applySameResourceCandidates,
   fallbackRole
 } from "../src/inference/pi-skill-runtime.js";
 import { relatedLookupCapabilities } from "../src/inference/export-scope.js";
@@ -365,6 +366,43 @@ test("same-named header and detail fields bind to their exact visible controls",
   assert.deepEqual([detailType?.source, detailType?.label, detailType?.widget], ["caller", "票据类型", "select"]);
   assert.equal(detailType?.candidates?.type, "capability");
   assert.match(detailType?.candidates?.type === "capability" ? detailType.candidates.capabilityId : "", /reimburse-bill-type/);
+});
+
+test("same-resource candidates never leak from a detail caller field to a system field", () => {
+  const transport = {
+    method: "GET",
+    urlTemplate: "https://x/oa/reimburseApply/list",
+    origin: "https://x",
+    pathTemplate: "/oa/reimburseApply/list"
+  };
+  const dynamic = {
+    type: "capability" as const,
+    capabilityId: "query-bill-types",
+    valuePath: "$.data[*].value",
+    labelPath: "$.data[*].label"
+  };
+  const query = cap({
+    id: "query-reimburse", operation: "query", transport,
+    inputForm: [
+      field({ name: "billType", source: "system", defaultRule: 'literal:"reimburse"' }),
+      field({ name: "status", source: "caller", systemHandled: false })
+    ]
+  });
+  const create = cap({
+    id: "create-reimburse", operation: "create",
+    transport: { ...transport, method: "POST", pathTemplate: "/oa/reimburseApply", urlTemplate: "https://x/oa/reimburseApply" },
+    inputForm: [
+      field({
+        name: "billType", path: "$.items[*].billType", source: "caller", systemHandled: false,
+        label: "票据类型", widget: "select", candidates: dynamic
+      }),
+      field({ name: "status", source: "caller", systemHandled: false, widget: "select", candidates: dynamic })
+    ]
+  });
+
+  const [resolved] = applySameResourceCandidates([query, create]);
+  assert.equal(resolved?.inputForm.find(item => item.path === "$.billType")?.candidates, undefined);
+  assert.deepEqual(resolved?.inputForm.find(item => item.path === "$.status")?.candidates, dynamic);
 });
 
 test("recorded dictionary and directory APIs supply work-report select candidates", () => {
