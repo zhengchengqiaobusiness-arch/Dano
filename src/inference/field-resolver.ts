@@ -539,7 +539,7 @@ function mergeObservations(items: UiObservation[]) {
   const textHasEvidence = texts.some(hasValue);
   const choiceHasEvidence = choices.some(item => hasValue(item) || Boolean(item.options?.length));
   const pool = texts.length && choices.length
-    ? (textHasEvidence || !choiceHasEvidence ? texts : choices)
+    ? (choiceHasEvidence ? choices : textHasEvidence ? texts : choices)
     : items;
   const named = pool.find(item => item.name);
   return pool.reduce((best, item) => ({

@@ -114,6 +114,13 @@ test("hotel room fields bind by compound semantics when every recorded value is 
       { label: "入住人数", type: "text", value: "1", required: false }
     ]
   }, {
+    id: "ui-hotel-dropdown-click", kind: "ui", sessionId: "hotel", at: "2026-09-06T00:00:00.500Z",
+    pageUrl: "https://x/oa/hotelApply", eventType: "click", label: "房间类型", inputType: "text", value: "标准间大床房",
+    form: [
+      { label: "房间类型", type: "select", value: "标准间", required: false },
+      { label: "房间等级", type: "select", value: "标准", required: false }
+    ]
+  }, {
     id: "net-hotel-list", kind: "network", sessionId: "hotel", at: "2026-09-06T00:00:01.000Z",
     pageUrl: "https://x/oa/hotelApply", correlatedUiEvidenceId: "ui-hotel-search",
     request: {
