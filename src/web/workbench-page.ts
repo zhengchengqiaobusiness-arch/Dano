@@ -60,6 +60,7 @@ export class WorkbenchPage {
   private disposing?: Promise<void>;
   private manualTakeover?: ManualTakeover;
   private coverageContinuationPending = false;
+  private coverageContinuationTimer?: ReturnType<typeof setTimeout>;
   private coverageContinuations = 0;
   private promptGeneration = 0;
   private completeFieldCoverageRequested = false;
@@ -202,8 +203,8 @@ export class WorkbenchPage {
     completeFieldCoverage = false,
     completePageCoverage = false
   ) {
+    this.cancelCoverageContinuation();
     this.coverageContinuations = 0;
-    this.coverageContinuationPending = false;
     this.cancelManualTakeover("new-recording");
     if (this.recorder.isActive()) {
       const oldPid = this.recorder.browserProcessId();
@@ -222,16 +223,25 @@ export class WorkbenchPage {
     return session;
   }
 
+  private cancelCoverageContinuation() {
+    if (this.coverageContinuationTimer) clearTimeout(this.coverageContinuationTimer);
+    this.coverageContinuationTimer = undefined;
+    this.coverageContinuationPending = false;
+  }
+
   private scheduleCoverageContinuation() {
-    if (this.coverageContinuationPending || this.manualTakeover || this.mode !== "automatic") return;
+    if (!this.transcriptOpen || this.coverageContinuationPending || this.manualTakeover || this.mode !== "automatic") return;
     const session = this.recorder.activeSession();
     if (!session || (!session.completePageCoverage && !session.completeFieldCoverage && !(session.expectedOperations || []).length)) return;
+    const generation = this.promptGeneration;
     this.coverageContinuationPending = true;
-    setTimeout(() => {
+    this.coverageContinuationTimer = setTimeout(() => {
+      this.coverageContinuationTimer = undefined;
       void (async () => {
         try {
-          if (this.pi.status().streaming || this.manualTakeover || !this.recorder.activeSession()) return;
+          if (!this.transcriptOpen || generation !== this.promptGeneration || this.pi.status().streaming || this.manualTakeover || !this.recorder.activeSession()) return;
           const readiness = await this.recorder.stopReadiness();
+          if (!this.transcriptOpen || generation !== this.promptGeneration) return;
           const remaining = readiness.pageCoverage?.remaining || 0;
           const missingPageOperations = readiness.missingPageOperations || [];
           const missingOperations = readiness.missingOperations || [];
@@ -257,7 +267,7 @@ export class WorkbenchPage {
         } catch (error) {
           this.onLog("WARN", `Automatic full-page continuation failed: ${error instanceof Error ? error.message : String(error)}`);
         } finally {
-          this.coverageContinuationPending = false;
+          if (generation === this.promptGeneration) this.coverageContinuationPending = false;
         }
       })();
     }, 200);
@@ -281,6 +291,7 @@ export class WorkbenchPage {
   }
 
   acceptUserMessage(text: string) {
+    this.promptGeneration += 1;
     this.transcriptOpen = true;
     this.completeFieldCoverageRequested = requiresCompleteFieldCoverage(text);
     const userEvent = this.transcript.addUser(text);
@@ -306,23 +317,15 @@ export class WorkbenchPage {
 
   async abortWork(reason = "abort") {
     this.promptGeneration += 1;
+    this.transcriptOpen = false;
+    this.cancelCoverageContinuation();
     this.cancelManualTakeover(reason);
     const pid = this.pi.processId();
-    if (this.pi.status().streaming) {
-      try {
-        await this.pi.abort();
-        if (this.pi.status().streaming) await new Promise(resolve => setTimeout(resolve, 200));
-        if (this.pi.status().streaming) throw new Error("abort did not stop streaming");
-        this.onLog("PROCESS", formatProcessLog("CLOSE", "pi-rpc-task", { pid, page: this.id, reason }));
-      } catch {
-        if (pid) {
-          await this.pi.stop();
-          this.onLog("PROCESS", formatProcessLog("CLOSE", "pi-rpc", { pid, page: this.id, reason: `${reason}-force` }));
-        }
-        await this.ensureStarted();
-      }
+    if (this.pi.status().running) {
+      await this.pi.stop();
+      this.onLog("PROCESS", formatProcessLog("CLOSE", "pi-rpc", { pid, page: this.id, reason }));
     }
-    this.broadcast({ type: "agent_status", ready: this.pi.status().ready, streaming: false });
+    this.broadcast({ type: "agent_status", ready: false, streaming: false });
   }
 
   async reset() {
@@ -331,7 +334,6 @@ export class WorkbenchPage {
     this.lastRecordingSessionId = undefined;
     this.completeFieldCoverageRequested = false;
     this.coverageContinuations = 0;
-    this.coverageContinuationPending = false;
     await this.abortWork("clear");
     if (this.recorder.isActive() || this.recorder.browserProcessId()) {
       const pid = this.recorder.browserProcessId();
@@ -342,7 +344,7 @@ export class WorkbenchPage {
     }
     const pid = this.pi.processId();
     if (pid || this.pi.status().ready || this.pi.status().running) {
-      this.pi.stop();
+      await this.pi.stop();
       if (pid) this.onLog("PROCESS", formatProcessLog("CLOSE", "pi-rpc", { pid, page: this.id, reason: "clear" }));
     }
     this.transcript.clear();

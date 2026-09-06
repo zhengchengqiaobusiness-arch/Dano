@@ -17,7 +17,6 @@ export class PiRpcBridge {
   private readonly listeners = new Set<EventListener>();
   private readonly pendingUiRequests = new Set<string>();
   private suppressEvents = false;
-  private stopping = false;
 
   constructor(
     private readonly cwd: string,
@@ -43,7 +42,6 @@ export class PiRpcBridge {
   }
 
   async start() {
-    this.stopping = false;
     this.suppressEvents = false;
     if (this.child && this.child.exitCode === null) return;
     const rpcEntry = path.join(
@@ -97,7 +95,7 @@ export class PiRpcBridge {
       ].join(" ")
     );
 
-    this.child = spawn(process.execPath, args, {
+    const child = spawn(process.execPath, args, {
       cwd: this.cwd,
       env: {
         ...process.env,
@@ -107,23 +105,24 @@ export class PiRpcBridge {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true
     });
-    this.attachJsonl(this.child.stdout);
-    this.child.stderr.on("data", chunk => {
+    this.child = child;
+    this.attachJsonl(child.stdout, child);
+    child.stderr.on("data", chunk => {
+      if (this.child !== child) return;
       const message = String(chunk).trim();
       if (message) this.emit({ type: "agent_diagnostic", message });
     });
-    this.child.on("exit", code => {
+    child.on("exit", code => {
+      if (this.child !== child) return;
+      this.child = undefined;
       this.ready = false;
       this.streaming = false;
-      const expected = this.stopping;
-      this.stopping = false;
       const error = new Error(`Pi process exited with code ${code ?? "unknown"}`);
       for (const request of this.pending.values()) {
         clearTimeout(request.timer);
         request.reject(error);
       }
       this.pending.clear();
-      if (expected) return;
       this.emit({ type: "agent_process_exit", code, message: `Pi process stopped with code ${code ?? "unknown"}` });
     });
 
@@ -186,11 +185,10 @@ export class PiRpcBridge {
     this.write({ type: "extension_ui_response", ...input });
   }
 
-  stop() {
+  async stop() {
     this.ready = false;
     this.streaming = false;
     this.suppressEvents = true;
-    this.stopping = true;
     this.cancelPendingUi();
     const error = new Error("Pi process stopped");
     for (const request of this.pending.values()) {
@@ -200,15 +198,24 @@ export class PiRpcBridge {
     this.pending.clear();
     const child = this.child;
     this.child = undefined;
-    if (!child?.pid) {
-      this.stopping = false;
-      return;
-    }
-    if (process.platform === "win32") {
-      spawn("taskkill", ["/F", "/T", "/PID", String(child.pid)], { stdio: "ignore", windowsHide: true });
-      return;
-    }
-    child.kill("SIGKILL");
+    if (!child?.pid || child.exitCode !== null) return;
+    await new Promise<void>(resolve => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout>;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      timer = setTimeout(finish, 2_000);
+      child.once("exit", finish);
+      if (process.platform === "win32") {
+        spawn("taskkill", ["/F", "/T", "/PID", String(child.pid)], { stdio: "ignore", windowsHide: true }).once("error", finish);
+      } else if (!child.kill("SIGKILL")) {
+        finish();
+      }
+    });
   }
 
   private request(command: Record<string, unknown>, timeout = 15_000): Promise<any> {
@@ -228,10 +235,11 @@ export class PiRpcBridge {
     this.child.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
-  private attachJsonl(stream: NodeJS.ReadableStream) {
+  private attachJsonl(stream: NodeJS.ReadableStream, child: ChildProcessWithoutNullStreams) {
     const decoder = new StringDecoder("utf8");
     let buffer = "";
     stream.on("data", chunk => {
+      if (this.child !== child) return;
       buffer += decoder.write(chunk as Buffer);
       while (true) {
         const newline = buffer.indexOf("\n");

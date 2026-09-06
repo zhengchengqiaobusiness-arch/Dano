@@ -92,7 +92,7 @@ test("recording workbench can clear conversation history in one click", async ()
   assert.doesNotMatch(resetWorkbench, /beginFreshConversation/);
   assert.match(resetWorkbench, /ensureStarted\(\)/);
   assert.match(resetWorkbench, /this\.transcript\.clear\(\)/);
-  assert.match(bridge, /this\.stopping = true/);
+  assert.match(bridge, /if \(this\.child !== child\) return/);
   assert.match(bridge, /async beginFreshConversation\(\)[\s\S]*type: "new_session"/);
   assert.match(bridge, /this\.suppressEvents = true/);
   assert.match(bridge, /async newSession\(\)[\s\S]*type: "new_session"/);

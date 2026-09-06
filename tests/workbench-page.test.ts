@@ -133,6 +133,87 @@ test("a settled agent is resumed to stop and export after the live recording aud
   assert.match(prompts[0]!, /business_skill_export/);
 });
 
+test("aborting a task cancels its queued recording-audit continuation", async () => {
+  const page = new WorkbenchPage("page_abortaudit", {
+    rootDir: ".",
+    dataDir: ".business-skill-studio",
+    recordingsDir: ".business-skill-studio/recordings",
+    catalogDir: ".business-skill-studio/catalog",
+    profileDir: ".business-skill-studio/browser-profile",
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  }, "http://127.0.0.1:4310", value => value, () => {});
+  let streaming = true;
+  let aborted = 0;
+  let stopped = 0;
+  const prompts: string[] = [];
+  (page.recorder as any).activeSession = () => ({
+    id: "rec_abortaudit",
+    completeFieldCoverage: true,
+    completePageCoverage: false,
+    expectedOperations: ["query"]
+  });
+  (page.recorder as any).stopReadiness = async () => ({
+    ready: true,
+    missingPageOperations: [],
+    missingOperations: [],
+    missingFields: [],
+    nextAction: { action: "record-stop" }
+  });
+  (page.pi as any).status = () => ({ ready: true, running: true, streaming });
+  (page.pi as any).abort = async () => { aborted += 1; streaming = false; };
+  (page.pi as any).stop = async () => { stopped += 1; streaming = false; };
+  (page.pi as any).prompt = async (prompt: string) => { prompts.push(prompt); };
+
+  (page as any).scheduleCoverageContinuation();
+  await page.abortWork();
+  await new Promise(resolve => setTimeout(resolve, 260));
+
+  assert.deepEqual(prompts, []);
+  assert.equal(aborted, 0);
+  assert.equal(stopped, 1);
+  assert.equal(page.transcriptOpen, false);
+});
+
+test("reset prevents an old recording-audit continuation from entering the next conversation", async () => {
+  const page = new WorkbenchPage("page_resetaudit", {
+    rootDir: ".",
+    dataDir: ".business-skill-studio",
+    recordingsDir: ".business-skill-studio/recordings",
+    catalogDir: ".business-skill-studio/catalog",
+    profileDir: ".business-skill-studio/browser-profile",
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  }, "http://127.0.0.1:4310", value => value, () => {});
+  const prompts: string[] = [];
+  (page.recorder as any).activeSession = () => ({
+    id: "rec_resetaudit",
+    completeFieldCoverage: true,
+    completePageCoverage: false,
+    expectedOperations: ["query"]
+  });
+  (page.recorder as any).stopReadiness = async () => ({
+    ready: true,
+    missingPageOperations: [],
+    missingOperations: [],
+    missingFields: [],
+    nextAction: { action: "record-stop" }
+  });
+  (page.recorder as any).isActive = () => false;
+  (page.recorder as any).browserProcessId = () => undefined;
+  (page.pi as any).status = () => ({ ready: false, running: false, streaming: false });
+  (page.pi as any).stop = () => {};
+  (page.pi as any).prompt = async (prompt: string) => { prompts.push(prompt); };
+
+  (page as any).scheduleCoverageContinuation();
+  await page.reset();
+  await new Promise(resolve => setTimeout(resolve, 260));
+
+  assert.deepEqual(prompts, []);
+});
+
 test("manual takeover waits for the person and then restores automatic execution", async () => {
   const events: any[] = [];
   const page = new WorkbenchPage("page_takeover123", {
