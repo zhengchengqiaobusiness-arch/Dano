@@ -726,7 +726,9 @@ export function findObservation(
       }
       return !item.name || uiNameMatches(item.name, field.name);
     });
-    const direct = mergeObservations(related.length ? related : byName);
+    const candidates = related.length ? related : byName;
+    const exact = candidates.filter(item => sameValue(item.value, requestValue));
+    const direct = mergeObservations(exact.length ? exact : candidates);
     if (direct) return expandObservation(direct, observations);
   }
 
@@ -740,7 +742,8 @@ export function findObservation(
     const scoped = field.name && names.size > 1
       ? related.filter(item => !item.name || uiNameMatches(item.name, field.name))
       : related;
-    const direct = mergeObservations(scoped);
+    const exact = scoped.filter(item => sameValue(item.value, requestValue));
+    const direct = mergeObservations(exact.length ? exact : scoped);
     if (direct) return expandObservation(direct, observations);
   }
 

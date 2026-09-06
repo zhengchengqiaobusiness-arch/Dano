@@ -77,7 +77,11 @@ function requestInput(event: NetworkEvidence) {
 
 function relatedEvents(capability: CapabilityContract, events: EvidenceEvent[]) {
   const ids = new Set(capability.evidence.map(ref => ref.eventId));
-  return events.filter(event => ids.has(event.id));
+  const related = events.filter(event => ids.has(event.id));
+  const activeSessionId = related[0]?.sessionId;
+  return activeSessionId
+    ? related.filter(event => event.sessionId === activeSessionId)
+    : related;
 }
 
 function richestNetwork(related: EvidenceEvent[]) {

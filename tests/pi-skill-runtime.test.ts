@@ -405,6 +405,50 @@ test("same-resource candidates never leak from a detail caller field to a system
   assert.deepEqual(resolved?.inputForm.find(item => item.path === "$.status")?.candidates, dynamic);
 });
 
+test("current session request precision wins over richer evidence from an older session", () => {
+  const current: EvidenceEvent[] = [{
+    id: "current-ui", kind: "ui", sessionId: "current", at: "2026-09-06T00:00:00.000Z",
+    pageUrl: "https://x/oa/reimburseApply", eventType: "click", text: "搜索", label: "搜索",
+    form: [{ label: "月度", type: "date", value: "2026-09" }]
+  }, {
+    id: "current-net", kind: "network", sessionId: "current", at: "2026-09-06T00:00:00.100Z",
+    pageUrl: "https://x/oa/reimburseApply", correlatedUiEvidenceId: "current-ui",
+    request: {
+      method: "GET", url: "https://x/oa/reimburseApply/list?month=2026-09",
+      resourceType: "xhr", headers: {}, query: { month: "2026-09" }
+    },
+    response: { status: 200, headers: {}, body: { code: 200, rows: [] } }
+  }];
+  const old: EvidenceEvent[] = [{
+    id: "old-ui", kind: "ui", sessionId: "old", at: "2026-09-05T00:00:00.000Z",
+    pageUrl: "https://x/oa/reimburseApply", eventType: "click", text: "搜索", label: "搜索",
+    form: [{ label: "月度", type: "date", value: "2026-09-06" }]
+  }, {
+    id: "old-net", kind: "network", sessionId: "old", at: "2026-09-05T00:00:00.100Z",
+    pageUrl: "https://x/oa/reimburseApply", correlatedUiEvidenceId: "old-ui",
+    request: {
+      method: "GET", url: "https://x/oa/reimburseApply/list?month=2026-09-06&status=0",
+      resourceType: "xhr", headers: {}, query: { month: "2026-09-06", status: "0" }
+    },
+    response: { status: 200, headers: {}, body: { code: 200, rows: [] } }
+  }];
+  const query = buildCapabilityCandidates(current)
+    .find(item => item.transport.pathTemplate.endsWith("/oa/reimburseApply/list"))!;
+  query.evidence = [...query.evidence, ...old.map(event => ({
+    eventId: event.id,
+    sessionId: event.sessionId,
+    kind: event.kind,
+    at: event.at,
+    status: event.kind === "network" ? event.response?.status : undefined
+  }))];
+
+  const joined = applyExactEvidenceJoin(query, [...current, ...old]);
+  const month = joined.inputForm.find(item => item.path === "$.month");
+  assert.deepEqual([month?.source, month?.label, month?.widget, month?.dateFormat], ["caller", "月度", "date", "YYYY-MM"]);
+  const joinedAgain = applyExactEvidenceJoin(joined, [...current, ...old]);
+  assert.equal(joinedAgain.inputForm.find(item => item.path === "$.month")?.dateFormat, "YYYY-MM");
+});
+
 test("recorded dictionary and directory APIs supply work-report select candidates", () => {
   const events: EvidenceEvent[] = [{
     id: "dicts-unauthorized", kind: "network", sessionId: "s", at: "2026-09-05T23:59:59.000Z",
