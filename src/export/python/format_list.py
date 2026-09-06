@@ -136,6 +136,7 @@ def main() -> int:
             return 0
         enums: dict[str, dict[str, str]] = {}
         columns = json.loads(args.columns) if args.columns else None
+        auto_columns = columns is None and capability is not None and inferred is not None
         if columns is None and capability and inferred:
             columns, enums = capability_columns(contract, capability, inferred[1])
         if columns is None:
@@ -146,6 +147,12 @@ def main() -> int:
                 columns = {key: f"$.{key}" for key in list(first)[:8]}
         if not isinstance(columns, dict) or not columns:
             raise ValueError("--columns 必须是非空 JSON 对象")
+        if auto_columns:
+            visible = {
+                label: path for label, path in columns.items()
+                if any((value := get_by_path(item, path)) is not None and value != "" and value != [] and value != {} for item in items)
+            }
+            columns = visible or columns
         headers = list(columns)
         print("| " + " | ".join(cell(header) for header in headers) + " |")
         print("|" + "|".join("---" for _ in headers) + "|")

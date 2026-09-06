@@ -338,7 +338,7 @@ test("exported list fast path executes once and formats contract fields and enum
     requests.push(request.url || "");
     response.setHeader("content-type", "application/json");
     response.end(JSON.stringify({
-      rows: [{ searchValue: "", billType: "duty_leave", billCode: "Q-1", leaveType: "busy", status: 0, startTime: "2026-09-07 09:00:00", reason: "测试" }],
+      rows: [{ searchValue: "", billType: "duty_leave", billCode: "Q-1", leaveType: "busy", status: 0, startTime: "2026-09-07 09:00:00", reason: "测试", applyTitle: "" }],
       total: 1
     }));
   });
@@ -362,7 +362,8 @@ test("exported list fast path executes once and formats contract fields and enum
             leaveType: { type: "string" },
             status: { type: "integer" },
             startTime: { type: "string" },
-            reason: { type: "string" }
+            reason: { type: "string" },
+            applyTitle: { type: "string" }
           }
         }
       },
@@ -416,6 +417,7 @@ test("exported list fast path executes once and formats contract fields and enum
     assert.doesNotMatch(stdout, /billType|业务类型/);
     assert.match(stdout, /开始时间/);
     assert.match(stdout, /事由/);
+    assert.doesNotMatch(stdout, /applyTitle/);
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(temporary, { recursive: true, force: true });
