@@ -339,7 +339,9 @@ def _safe_step(step: dict) -> dict:
             key: item.get(key)
             for key in (
                 "param", "path", "option_map", "multi", "element_template",
-                "field_projections", "source_url", "source_method", "source_body",
+                "label_subkey", "field_projections", "source_url", "source_method", "source_params", "source_body",
+                "result_path", "total_path", "search_param", "page_param", "page_size_param", "page_size",
+                "extra_fields",
                 "source_content_type", "value_key", "label_key", "category_key",
                 "category_value", "id_path",
             )
@@ -1221,6 +1223,20 @@ def _option_source(field: dict) -> dict | None:
     children = source.get("childrenField") or source.get("children_key")
     if children:
         data_source["childrenField"] = children
+    aliases = {
+        "searchParam": ("searchParam", "search_param"),
+        "pageParam": ("pageParam", "page_param"),
+        "pageSizeParam": ("pageSizeParam", "page_size_param"),
+        "pageSize": ("pageSize", "page_size"),
+        "totalPath": ("totalPath", "total_path"),
+    }
+    for public_key, candidates in aliases.items():
+        value = next((source.get(key) for key in candidates if source.get(key) not in (None, "")), None)
+        if value is not None:
+            data_source[public_key] = value
+    extra_fields = source.get("extraFields") or source.get("extra_fields")
+    if isinstance(extra_fields, list) and extra_fields:
+        data_source["extraFields"] = [str(item) for item in extra_fields if str(item)]
     return data_source
 
 
@@ -1373,8 +1389,28 @@ def _option_binding(path: str, name: str, field: dict) -> dict | None:
         binding["option_map"] = option_map
     if source.get("source_body") is not None:
         binding["source_body"] = source.get("source_body")
+    source_params = source.get("source_params") or source.get("params")
+    if isinstance(source_params, dict) and source_params:
+        binding["source_params"] = dict(source_params)
     if source.get("source_content_type"):
         binding["source_content_type"] = source.get("source_content_type")
+    result_path = source.get("result_path") or source.get("resultPath")
+    if result_path:
+        binding["result_path"] = result_path
+    extra_fields = source.get("extra_fields") or source.get("extraFields")
+    if isinstance(extra_fields, list) and extra_fields:
+        binding["extra_fields"] = [str(item) for item in extra_fields if str(item)]
+    source_metadata = {
+        "total_path": ("total_path", "totalPath"),
+        "search_param": ("search_param", "searchParam"),
+        "page_param": ("page_param", "pageParam"),
+        "page_size_param": ("page_size_param", "pageSizeParam"),
+        "page_size": ("page_size", "pageSize"),
+    }
+    for target_key, candidates in source_metadata.items():
+        value = next((source.get(key) for key in candidates if source.get(key) not in (None, "")), None)
+        if value is not None:
+            binding[target_key] = value
     if source.get("category_key"):
         binding["category_key"] = source.get("category_key")
         if source.get("category_value") is not None:
@@ -1383,8 +1419,13 @@ def _option_binding(path: str, name: str, field: dict) -> dict | None:
 
 
 def _select_key(item: dict) -> tuple[str, str]:
+    path = str(item.get("path") or item.get("id_path") or item.get("param") or "")
+    for prefix in ("body.", "query.", "path."):
+        if path.startswith(prefix):
+            path = path[len(prefix):]
+            break
     return (
-        str(item.get("path") or item.get("id_path") or item.get("param") or ""),
+        path,
         str(item.get("source_url") or ""),
     )
 
@@ -1417,6 +1458,18 @@ def _merge_schema_selects(existing: list[dict], schema: dict | None, cap: dict |
         key = _select_key(binding)
         alt = (str(name), str(binding.get("source_url") or ""))
         if key in seen or alt in seen:
+            existing_item = next((
+                item
+                for item in merged
+                if _select_key(item) in {key, alt}
+            ), None)
+            if existing_item is not None:
+                for metadata_key in (
+                    "source_params", "result_path", "total_path", "search_param",
+                    "page_param", "page_size_param", "page_size", "extra_fields",
+                ):
+                    if existing_item.get(metadata_key) in (None, "", [], {}) and binding.get(metadata_key) is not None:
+                        existing_item[metadata_key] = deepcopy(binding[metadata_key])
             continue
         seen.add(key)
         if binding.get("source_url"):
@@ -2221,6 +2274,16 @@ def _capability_form_section(plan: dict) -> list[str]:
         lines.extend(["该能力没有可收集字段，不调用 `ask_user_question`。", ""])
         return lines
     request = {"title": title, "questions": questions}
+    dynamic_fields = [str(item.get("id")) for item in questions if item.get("dataSource")]
+    if dynamic_fields:
+        command = f"python scripts/{plan.get('script') or plan.get('name')}.py --list-options <字段名>"
+        lines.extend([
+            "动态候选调用规则：",
+            "",
+            f"- 在调用 `ask_user_question` 前，对字段 {', '.join(f'`{item}`' for item in dynamic_fields)} 分别运行 `{command}`。",
+            "- 把脚本返回的 `options` 原样放进对应 question，并从本次工具参数中移除该 question 的 `dataSource`；保留原 `multiple`。这样候选通过 Skill 的运行期鉴权加载，不能让表单前端直接匿名请求业务接口。",
+            "",
+        ])
     lines.extend([
         "原生分组表单请求：",
         "",
@@ -2607,7 +2670,7 @@ def _on_demand_resources(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
         "## 按需读取资源",
         "",
         "- 当前操作缺少输入时，读取 `references/INPUT_FORMS.md` 中对应能力的章节，按其中完整 `questions[]` 提问，不得少问。",
-        "- 字段需要动态候选，或候选为空/多条时，读取 `references/OPTIONS.md`。",
+        "- 字段需要动态候选时，读取 `references/OPTIONS.md`，并按输入表单中的命令先实时拉取 `options`；不得让表单前端匿名请求业务接口。",
         "- 原子路线需要调用命令，或需要判断能力输入输出边界时，读取 `references/CAPABILITIES.md` 对应行。",
         "- 不要在开始前读取 references 下的全部文件。",
         "- 组合路线只在工作流表「详情」列指向该文件时读取；不要为单次原子操作加载组合文件。",
@@ -3606,23 +3669,102 @@ def _live_option_rows(binding, values, cache):
         return []
     method = str(binding.get("method") or "GET").upper()
     body = render(binding.get("body_template"), values) if binding.get("body_template") is not None else None
+    query_template = binding.get("params") or binding.get("source_params") or binding.get("query_template")
+    query = render(query_template, values) if query_template is not None else None
+    search_param = str(binding.get("search_param") or binding.get("searchParam") or "")
+    if search_param and values.get(search_param) not in (None, ""):
+        query = dict(query or {})
+        query[search_param] = values[search_param]
+    page_param = str(binding.get("page_param") or binding.get("pageParam") or "")
+    page_size_param = str(binding.get("page_size_param") or binding.get("pageSizeParam") or "")
+    page_size = int(binding.get("page_size") or binding.get("pageSize") or (query or {}).get(page_size_param) or 20)
     cache_key = json.dumps(
-        [method, endpoint, body], ensure_ascii=False, sort_keys=True, default=str,
+        [method, endpoint, query, body, page_param, page_size_param, page_size],
+        ensure_ascii=False, sort_keys=True, default=str,
     )
     if cache_key not in cache:
-        result = http_json(
-            method, url=endpoint, body=body,
-            content_type=binding.get("content_type") or "application/json",
-        )
-        if not result.get("ok"):
-            raise RuntimeError(f"option source request failed: {method} {endpoint}")
-        cache[cache_key] = list_items(result.get("data"))
+        collected = []
+        current_query = dict(query or {})
+        current_page = int(current_query.get(page_param) or 1) if page_param else 1
+        total_path = str(binding.get("total_path") or binding.get("totalPath") or "")
+        for _page_count in range(100):
+            if page_param and page_size_param and method == "GET":
+                current_query[page_param] = current_page
+                current_query[page_size_param] = page_size
+            result = http_json(
+                method, url=endpoint, query=current_query or None, body=body,
+                content_type=binding.get("content_type") or "application/json",
+            )
+            if not result.get("ok"):
+                raise RuntimeError(f"option source request failed: {method} {endpoint}")
+            response_data = result.get("data")
+            payload = response_data
+            result_path = str(binding.get("result_path") or binding.get("resultPath") or "")
+            if result_path:
+                selected = get_path(payload, result_path)
+                if selected is not None:
+                    payload = selected
+            page_rows = list_items(payload)
+            collected.extend(page_rows)
+            paged = bool(page_param and page_size_param and method == "GET")
+            if not paged:
+                break
+            total = get_path(response_data, total_path) if total_path else None
+            if isinstance(total, (int, float)) and len(collected) >= int(total):
+                break
+            if len(page_rows) < page_size:
+                break
+            current_page += 1
+        else:
+            raise RuntimeError(f"option source pagination exceeded 100 pages: {method} {endpoint}")
+        cache[cache_key] = collected
     rows = [item for item in cache[cache_key] if isinstance(item, dict)]
     category_key = str(binding.get("category_key") or "")
     if category_key:
         expected = str(binding.get("category_value") or "")
         rows = [item for item in rows if str(get_path(item, category_key) or "") == expected]
     return rows
+
+
+def option_choices(plan, field, values=None):
+    field = str(field or "").strip()
+    if not field:
+        raise ValueError("--list-options requires a field name")
+    matches = []
+    for step in plan.get("steps") or []:
+        for binding in step.get("selects") or []:
+            param = str(binding.get("param") or "")
+            path = str(binding.get("path") or binding.get("id_path") or "")
+            top_level = path.removeprefix("body.").removeprefix("query.").split("[", 1)[0].split(".", 1)[0]
+            if field in {param, top_level}:
+                matches.append(binding)
+    if len(matches) != 1:
+        raise ValueError(f"dynamic option field {field!r} does not resolve to exactly one source")
+    binding = matches[0]
+    rows = _live_option_rows(binding, dict(values or {}), {})
+    value_key = str(binding.get("value_key") or "")
+    label_key = str(binding.get("label_key") or "")
+    if not value_key or not label_key:
+        raise ValueError(f"dynamic option field {field!r} is missing value_key/label_key")
+    options = []
+    seen = set()
+    for row in rows:
+        option_id = get_path(row, value_key)
+        label = get_path(row, label_key)
+        if option_id in (None, "") or label in (None, "") or str(option_id) in seen:
+            continue
+        stable_id = str(option_id)
+        seen.add(stable_id)
+        option = {"id": stable_id, "label": str(label)}
+        extra = {
+            str(path): value
+            for path in (binding.get("extra_fields") or binding.get("extraFields") or [])
+            if (value := get_path(row, str(path))) not in (None, "")
+        }
+        if extra:
+            option["extra"] = extra
+        options.append(option)
+    return options
 
 
 def _selected_option(binding, raw, rows):
@@ -3648,6 +3790,70 @@ def _nested_array_field(path: str) -> tuple[str, str] | None:
     if not match:
         return None
     return match.group(1), match.group(2)
+
+
+def _selected_element(binding, selected_row, label):
+    element = {}
+    label_subkey = str(binding.get("label_subkey") or "")
+    for key, mapping in (binding.get("element_template") or {}).items():
+        if isinstance(mapping, dict) and "const" in mapping:
+            value = mapping["const"]
+        elif selected_row is not None and isinstance(mapping, dict) and mapping.get("item_key"):
+            value = get_path(selected_row, str(mapping["item_key"]))
+            if value is None:
+                value = label if str(key) == label_subkey else ""
+        else:
+            value = label if str(key) == label_subkey else ""
+        deep_set(element, str(key), value)
+    return element
+
+
+def _apply_multi_select(binding, raw, rows):
+    existing_rows = raw if isinstance(raw, list) and all(isinstance(item, dict) for item in raw) else None
+    label_subkey = str(binding.get("label_subkey") or "")
+    if isinstance(raw, str):
+        labels = [item.strip() for item in raw.split(",") if item.strip()]
+    elif existing_rows is not None:
+        if not label_subkey or any(get_path(item, label_subkey) in (None, "") for item in existing_rows):
+            raise RuntimeError(
+                f"multi-select {binding.get('param')} requires row field {label_subkey or 'label_subkey'}"
+            )
+        labels = [str(get_path(item, label_subkey)) for item in existing_rows]
+    elif isinstance(raw, list):
+        labels = list(raw)
+    else:
+        return raw
+    if binding.get("endpoint") and not rows:
+        raise RuntimeError(
+            f"live option source returned no rows for {binding.get('param') or binding.get('path')}"
+        )
+    selected = [_selected_option(binding, label, rows) for label in labels]
+    template = binding.get("element_template") or {}
+    if not template:
+        return [value for value, _row in selected]
+    container = str(binding.get("param") or "")
+    result = []
+    for index, (label, (_value, selected_row)) in enumerate(zip(labels, selected)):
+        built = _selected_element(binding, selected_row, str(label))
+        if existing_rows is None:
+            row = built
+        else:
+            row = dict(existing_rows[index])
+            for key, value in built.items():
+                if str(key) == label_subkey or get_path(row, str(key)) in (None, ""):
+                    deep_set(row, str(key), value)
+        for target_path, response_path in (binding.get("field_projections") or {}).items():
+            target = _nested_array_field(str(target_path))
+            if selected_row is None or target is None or target[0] != container:
+                continue
+            projected = get_path(selected_row, response_path)
+            if projected is None:
+                raise RuntimeError(
+                    f"live option field {response_path!r} is missing for {container}"
+                )
+            deep_set(row, target[1], projected)
+        result.append(row)
+    return result
 
 
 def _apply_selects(step, values, cache):
@@ -3689,6 +3895,9 @@ def _apply_selects(step, values, cache):
             continue
         rows = _live_option_rows(binding, current, cache)
         raw = current[param]
+        if binding.get("multi"):
+            current[param] = _apply_multi_select(binding, raw, rows)
+            continue
         if isinstance(raw, list):
             selected = [_selected_option(binding, value, rows) for value in raw]
             current[param] = [value for value, _row in selected]
@@ -4289,7 +4498,7 @@ import json
 import re
 import sys
 
-from client import emit, execute_plan
+from client import emit, execute_plan, option_choices
 
 PLAN = json.loads(__PLAN__)
 
@@ -4392,6 +4601,7 @@ def parser():
     command = argparse.ArgumentParser(description=PLAN.get("title") or PLAN["name"])
     command.add_argument("--input-json", default="{}", help="JSON object merged before named arguments")
     command.add_argument("--confirm", action="store_true", help="confirm an explicitly reviewed write")
+    command.add_argument("--list-options", metavar="FIELD", help="load one dynamic field through authenticated runtime")
     for name, schema in (PLAN.get("input_schema", {}).get("properties") or {}).items():
         schema = schema if isinstance(schema, dict) else {{}}
         command.add_argument(f"--{name}", dest=name, help=str(schema.get("description") or schema.get("title") or name))
@@ -4420,6 +4630,26 @@ def inputs_from_args(args, command):
 def main():
     command = parser()
     args = command.parse_args()
+    if args.list_options:
+        try:
+            context = json.loads(args.input_json)
+            if not isinstance(context, dict):
+                raise ValueError("--input-json must be an object")
+            emit({
+                "capability": PLAN["name"],
+                "status": "options",
+                "field": args.list_options,
+                "options": option_choices(PLAN, args.list_options, context),
+            })
+            return 0
+        except (TypeError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
+            emit({
+                "capability": PLAN["name"],
+                "status": "failed",
+                "field": args.list_options,
+                "reason": str(exc),
+            })
+            return 1
     inputs = inputs_from_args(args, command)
     if PLAN.get("requires_confirmation") and not args.confirm:
         emit({

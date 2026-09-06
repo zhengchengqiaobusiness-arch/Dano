@@ -7,7 +7,12 @@ from pathlib import Path
 from uuid import UUID
 
 from dano.execution.page.flow_spec import FlowSpec
-from dano.export.skill_package.renderer import _CLIENT_TEMPLATE, package_slug, render_skill_package
+from dano.export.skill_package.renderer import (
+    _CAPABILITY_TEMPLATE,
+    _CLIENT_TEMPLATE,
+    package_slug,
+    render_skill_package,
+)
 from dano.onboarding.skill_generation.models import SkillGenerationRequest
 from dano.onboarding.skill_generation.planner import propose_deterministic_plan
 from dano.orchestrator.types import SkillSpec
@@ -96,6 +101,149 @@ def test_client_template_reads_tenant_map_and_live_token_before_cache() -> None:
     assert live_fn < auth_fn
     body = source[auth_fn:]
     assert body.index("_live_headers()") < body.index("_cache_headers()")
+
+
+def test_exported_operation_exposes_authenticated_list_options_command() -> None:
+    assert 'command.add_argument("--list-options"' in _CAPABILITY_TEMPLATE
+    assert "option_choices(PLAN, args.list_options, context)" in _CAPABILITY_TEMPLATE
+
+
+def test_exported_client_lists_people_with_safe_display_extras(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = _load_client(_render_client(tmp_path))
+    seen: list[dict[str, object]] = []
+
+    def fake_http_json(method, *, url, **kwargs):  # noqa: ANN001
+        query = dict(kwargs.get("query") or {})
+        seen.append({"method": method, "url": url, "query": query})
+        page = int(query.get("pageNum") or 1)
+        person = {
+            "userId": 127 + page,
+            "nickName": "张段誉" if page == 1 else "王语嫣",
+            "dept": {"deptName": "项目管理部"},
+            "phonenumber": "must-not-leak",
+        }
+        return {
+            "ok": True,
+            "data": {
+                "payload": {
+                    "members": [person],
+                    "total": 2,
+                },
+            },
+        }
+
+    monkeypatch.setattr(client, "http_json", fake_http_json)
+    options = client.option_choices(
+        {
+            "steps": [{
+                "selects": [{
+                    "param": "ccedList",
+                    "path": "body.ccedList",
+                    "endpoint": "/prod-api/system/user/list",
+                    "method": "GET",
+                    "source_params": {"pageNum": 1, "pageSize": 1, "status": "0"},
+                    "result_path": "payload.members",
+                    "total_path": "payload.total",
+                    "search_param": "userName",
+                    "page_param": "pageNum",
+                    "page_size_param": "pageSize",
+                    "page_size": 1,
+                    "value_key": "userId",
+                    "label_key": "nickName",
+                    "extra_fields": ["dept.deptName"],
+                }],
+            }],
+        },
+        "ccedList",
+        {"userName": "张"},
+    )
+
+    assert seen == [
+        {
+            "method": "GET",
+            "url": "/prod-api/system/user/list",
+            "query": {"pageNum": 1, "pageSize": 1, "status": "0", "userName": "张"},
+        },
+        {
+            "method": "GET",
+            "url": "/prod-api/system/user/list",
+            "query": {"pageNum": 2, "pageSize": 1, "status": "0", "userName": "张"},
+        },
+    ]
+    assert options == [
+        {
+            "id": "128",
+            "label": "张段誉",
+            "extra": {"dept.deptName": "项目管理部"},
+        },
+        {
+            "id": "129",
+            "label": "王语嫣",
+            "extra": {"dept.deptName": "项目管理部"},
+        },
+    ]
+
+
+def test_exported_client_builds_selected_people_as_recorded_object_rows(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = _load_client(_render_client(tmp_path))
+    calls: list[tuple[str, str, object]] = []
+
+    def fake_http_json(method, *, url, **_kwargs):  # noqa: ANN001
+        calls.append((method, url, _kwargs.get("query")))
+        return {
+            "ok": True,
+            "data": {
+                "rows": [{
+                    "userId": 128,
+                    "nickName": "张段誉",
+                    "dept": {"deptName": "项目管理部"},
+                }],
+            },
+        }
+
+    monkeypatch.setattr(client, "http_json", fake_http_json)
+    values, projections = client._apply_selects(
+        {
+            "selects": [{
+                "param": "ccedList",
+                "path": "body.ccedList",
+                "endpoint": "/prod-api/system/user/list",
+                "method": "GET",
+                "params": {"pageNum": 1, "pageSize": 20, "status": "0"},
+                "value_key": "userId",
+                "label_key": "nickName",
+                "multi": True,
+                "label_subkey": "toNickName",
+                "element_template": {
+                    "billType": {"const": "duty_leave"},
+                    "toUserId": {"from": "item", "item_key": "userId"},
+                    "toNickName": {"from": "item", "item_key": "nickName"},
+                    "toDeptName": {"from": "item", "item_key": "dept.deptName"},
+                },
+            }],
+        },
+        {"ccedList": ["张段誉"]},
+        {},
+    )
+
+    assert calls == [(
+        "GET",
+        "/prod-api/system/user/list",
+        {"pageNum": 1, "pageSize": 20, "status": "0"},
+    )]
+    assert projections == {}
+    assert values["ccedList"] == [{
+        "billType": "duty_leave",
+        "toUserId": 128,
+        "toNickName": "张段誉",
+        "toDeptName": "项目管理部",
+    }]
 
 
 def test_exported_client_uses_mapped_key_and_ignores_stale_cache(tmp_path: Path, monkeypatch) -> None:

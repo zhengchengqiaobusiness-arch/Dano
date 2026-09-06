@@ -27,11 +27,13 @@ from dano.export.skill_package.renderer import (
     _format_list_py,
     _handbook_text,
     _input_forms_md,
+    _merge_schema_selects,
     _options_md,
     _public_schema,
     _runtime_plan,
     _script_invocation,
     _script_slug,
+    _safe_step,
     _skill_description,
     _skill_frontmatter_name,
     _workflow_table,
@@ -2912,6 +2914,131 @@ def test_capability_io_builds_object_array_from_recorded_rows() -> None:
     assert set(item_props) == {"content", "progress"}
     assert item_props["content"]["type"] == "string"
     assert item_props["progress"]["type"] == "number"
+
+
+def test_schema_select_does_not_duplicate_prefixed_runtime_multi_binding() -> None:
+    existing = [{
+        "param": "ccedList",
+        "path": "body.ccedList",
+        "source_url": "/prod-api/system/user/list",
+        "value_key": "userId",
+        "label_key": "nickName",
+        "multi": True,
+        "label_subkey": "toNickName",
+        "element_template": {"toUserId": {"item_key": "userId"}},
+    }]
+    schema = {
+        "type": "object",
+        "properties": {
+            "ccedList": {
+                "type": "array",
+                "items": {"type": "string"},
+                "dataSource": {
+                    "type": "api",
+                    "endpoint": "/prod-api/system/user/list",
+                    "method": "GET",
+                    "params": {"pageNum": 1, "pageSize": 20, "status": "0"},
+                    "resultPath": "rows",
+                    "idField": "userId",
+                    "labelField": "nickName",
+                    "searchParam": "userName",
+                    "pageParam": "pageNum",
+                    "pageSizeParam": "pageSize",
+                    "pageSize": 20,
+                    "totalPath": "total",
+                    "extraFields": ["dept.deptName"],
+                },
+            },
+        },
+    }
+
+    merged = _merge_schema_selects(existing, schema)
+
+    assert merged == existing
+    assert len(merged) == 1
+    assert merged[0]["source_params"] == {"pageNum": 1, "pageSize": 20, "status": "0"}
+    assert merged[0]["result_path"] == "rows"
+    assert merged[0]["total_path"] == "total"
+    assert merged[0]["search_param"] == "userName"
+    assert merged[0]["page_param"] == "pageNum"
+    assert merged[0]["page_size_param"] == "pageSize"
+    assert merged[0]["page_size"] == 20
+    assert merged[0]["extra_fields"] == ["dept.deptName"]
+    assert merged[0]["element_template"] == {"toUserId": {"item_key": "userId"}}
+
+
+def test_dynamic_form_requires_authenticated_option_prefetch() -> None:
+    text = _input_forms_md([{
+        "name": "create_record",
+        "script": "create_record",
+        "title": "新增申请",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "recipients": {
+                    "type": "array",
+                    "items": {"type": "string", "format": "name-ref"},
+                    "title": "抄送列表",
+                    "dataSource": {
+                        "type": "api",
+                        "endpoint": "/api/users",
+                        "method": "GET",
+                        "params": {"status": "0"},
+                        "resultPath": "rows",
+                        "idField": "id",
+                        "labelField": "name",
+                        "searchParam": "userName",
+                        "pageParam": "pageNum",
+                        "pageSizeParam": "pageSize",
+                        "pageSize": 20,
+                        "totalPath": "total",
+                        "extraFields": ["dept.name"],
+                    },
+                },
+            },
+            "required": [],
+        },
+    }])
+
+    question = _form_questions(text)[0]
+    assert question["inputType"] == "select"
+    assert question["multiple"] is True
+    assert question["dataSource"]["extraFields"] == ["dept.name"]
+    assert "python scripts/create_record.py --list-options <字段名>" in text
+    assert "移除该 question 的 `dataSource`" in text
+
+
+def test_export_keeps_multi_picker_template_and_source_params() -> None:
+    step = _safe_step({
+        "method": "POST",
+        "path": "/api/create",
+        "selects": [{
+            "param": "recipients",
+            "path": "body.recipients",
+            "source_url": "/api/users",
+            "source_method": "GET",
+            "source_params": {"pageNum": 1, "status": "0"},
+            "result_path": "rows",
+            "total_path": "total",
+            "search_param": "keyword",
+            "page_param": "pageNum",
+            "page_size_param": "pageSize",
+            "page_size": 20,
+            "value_key": "id",
+            "label_key": "name",
+            "multi": True,
+            "label_subkey": "recipientName",
+            "element_template": {
+                "recipientId": {"item_key": "id"},
+                "recipientName": {"item_key": "name"},
+            },
+        }],
+    })
+
+    assert step["selects"][0]["source_params"] == {"pageNum": 1, "status": "0"}
+    assert step["selects"][0]["label_subkey"] == "recipientName"
+    assert step["selects"][0]["result_path"] == "rows"
+    assert step["selects"][0]["page_param"] == "pageNum"
 
 
 def test_export_projects_object_array_and_current_user_identity() -> None:

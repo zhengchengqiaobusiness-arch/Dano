@@ -64,6 +64,14 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(skill, /去掉星号|不要把星号写进/);
   assert.match(skill, /表头原文/);
   assert.match(skill, /x-dano-section-titles/);
+  assert.match(skill, /弹层选人\/选记录的对象数组/);
+  assert.match(skill, /label_subkey/);
+  assert.match(skill, /element_template/);
+  assert.match(skill, /item_key.*嵌套路径/);
+  assert.match(skill, /多选选择器.*不是.*textarea/);
+  assert.match(skill, /禁止复制本场已选中的对象行/);
+  assert.match(skill, /禁止新增大小写不同、拼写相近或别名容器/);
+  assert.match(skill, /option_source.*execute/);
   assert.match(skill, /禁止把一个数组拆成多个调用方数组/);
   assert.match(skill, /写请求里不存在的.*键|不要编造写请求里没有的键/);
   assert.doesNotMatch(skill, /登录态、Cookie、分页、流程定义 Key、单据类型/);

@@ -220,6 +220,59 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 14. **树 / 页签 / 分段器 / 单选组**：按可改选择控件处理。选项用当场看到的文案做 `page_enum`，或用树/下拉接口做 `api_option`。不要因为快照以前漏过就标系统。
 15. **可增行按钮**：`control_kind=button` 且文案像「添加×× / 新增行」只证明行数可变，不是调用方字段。不要把它或它产生的行类型码写进 `input_schema`。
 
+### 弹层选人/选记录的对象数组
+
+选择器弹层里用树、搜索、表格勾选和「确认」选一个或多个人/组织/业务记录，而 execute 在一个数组字段中提交所选行的多个属性时，这是**一个调用方多选字段 + 系统按选项响应组装对象行**，不是可增行明细，也不是让调用方粘贴 JSON。
+
+1. 只保留 execute 里的真实数组容器键和 path。`steps[].params` 为该容器建立一个 `type=list-enum`、`wire_type=array`、`source_kind=api_option`、`exposed_to_user=true` 的字段；必填性只看父表单的星号/校验。禁止新增大小写不同、拼写相近或别名容器，也禁止把同一个选择拆成 `xxxIds`、`xxxList` 等第二条调用方路径。
+2. `input_schema.properties.<容器>` 写成 `type=array`，`items={"type":"string","format":"name-ref"}`，并声明 `x-dano-business-type=api_option`、`multiple=true` 和完整 `x-dano-option-source`：`source_method`、`source_url`、请求的 `params`/查询参数、`result_path`、`value_key`、`label_key`；弹层需要展示部门、编号等辅助列时写 `extra_fields`。导出结果必须是多选选择器，不是 `textarea`，也不是逐列可编辑表格。
+3. 在 execute step 的 `selects` 中为同一容器写一个绑定：`param` 是容器 key，`path` 是真实 body/query path，`multi=true`，并复用同一个选项来源。`label_subkey` 指向对象行中承载显示名的字段；`element_template` 必须覆盖 execute 对象行的每个键：固定业务判别值写 `{ "const": 录制请求原值 }`，来自所选接口行的值写 `{ "item_key": "响应字段路径" }`。响应字段可以是 `dept.name` 这样的嵌套路径，不能因为它嵌套就冻结成录制样本。
+4. `element_template` 的目标键必须逐字等于本场 execute 数组对象的键；`item_key` 必须能在 option_source 响应中读到。禁止复制本场已选中的对象行、人员 ID、姓名或部门作为下次执行的固定数组；固定的只能是每次同样提交的行内判别值。
+5. 该选择器的请求挂为当前能力的 `option_source`，顺序在 execute 前；弹层内部的姓名/部门搜索框和分页是选项接口内部参数，不提升为父表单字段。其它能力只有自己的表单也存在这个选择器时才关联该 option_source。
+
+通用形状示例（字段名仅说明结构，不绑定具体页面）：
+
+```json
+{
+  "input_schema": {
+    "properties": {
+      "recipients": {
+        "type": "array",
+        "items": { "type": "string", "format": "name-ref" },
+        "title": "页面上的选择字段名",
+        "multiple": true,
+        "x-dano-business-type": "api_option",
+        "x-dano-option-source": {
+          "source_method": "GET",
+          "source_url": "/api/options",
+          "params": { "status": "active" },
+          "result_path": "rows",
+          "value_key": "id",
+          "label_key": "name",
+          "extra_fields": ["department.name"]
+        }
+      }
+    }
+  },
+  "selects": [{
+    "param": "recipients",
+    "path": "body.recipients",
+    "source_method": "GET",
+    "source_url": "/api/options",
+    "value_key": "id",
+    "label_key": "name",
+    "multi": true,
+    "label_subkey": "recipientName",
+    "element_template": {
+      "businessType": { "const": "recorded_constant" },
+      "recipientId": { "item_key": "id" },
+      "recipientName": { "item_key": "name" },
+      "departmentName": { "item_key": "department.name" }
+    }
+  }]
+}
+```
+
 ## 编排
 
 - `request_refs[].step_id` 必须等于 `steps[].step_id`，不要填 `request_id`。
@@ -362,12 +415,13 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 28. `readonly=true` / `disabled=true` 的控件没有进 `input_schema`。
 29. 可增行 `items.properties` 的 title 是表头原文，覆盖各分区可见表头（序号、操作除外）；数组 title 是分区标题原文。同一线格式键在不同分区表头不同时写了 `x-dano-section-titles`。没有把可增行收成 string，也没有用分区标题去命名同请求里的 form textarea。
 30. 确认弹层可填意见：有请求键则建成调用方，没有则写入 `unresolved`，没有编造写请求里没有的键。
+31. 弹层选人/选记录若对应对象数组：调用方 schema 是带实时候选的多选；execute step 有同容器的 `multi + label_subkey + element_template`；每个对象键来自常量或选项响应（含嵌套路径）；没有复制本场人员对象，也没有新增别名容器。
 
 ## 泛化
 
 - 本 Skill 不绑定任何具体业务页、系统名或字段名。上面的例子只说明形状，不是某页的补丁。
 - 只根据本场点击、输入、请求、响应、`visible_control`、截图判断。
-- 换一个页面也走同一套台账 / 切分 / 编排 / 字段形状规则：先摊请求形状，再摊可见控件，对得上可改控件就是调用方且必须进 schema；`readonly`/`disabled` 灰框是系统；树/页签/区间日期同样是调用方；可增行按行填写再组装成一个对象数组 path，列名用各分区表头原文，同一键不同表头写 `x-dano-section-titles`，不要把同名 textarea 当成行，也不要把一个数组拆成多个调用方数组或收成一段字符串；空容器有上传/选人/可增行控件仍是调用方；确认弹层可填意见完整处理，没有请求键就 unresolved，不要编造写请求里没有的键；无控件的 query/body 键按身份或原值交给系统，并写进系统栏。名字与页面原文一致，去掉星号。
+- 换一个页面也走同一套台账 / 切分 / 编排 / 字段形状规则：先摊请求形状，再摊可见控件，对得上可改控件就是调用方且必须进 schema；`readonly`/`disabled` 灰框是系统；树/页签/区间日期同样是调用方；弹层选人/选记录若提交对象数组，就保留一个多选字段并用 `element_template` 从实时选项行组装对象；可增行按行填写再组装成一个对象数组 path，列名用各分区表头原文，同一键不同表头写 `x-dano-section-titles`，不要把同名 textarea 当成行，也不要把一个数组拆成多个调用方数组或收成一段字符串；空容器有上传/选人/可增行控件仍是调用方；确认弹层可填意见完整处理，没有请求键就 unresolved，不要编造写请求里没有的键；无控件的 query/body 键按身份或原值交给系统，并写进系统栏。名字与页面原文一致，去掉星号。
 - 最终 `result` 必须完整、可编排、可执行：每个点过的独立动作都在，关联和顺序能执行，字段处理逻辑与真实请求一致。
 - 证据不够、台账对不齐、点过的独立动作做不成能力时：写入 `unresolved`，不要猜测成看似可用的残缺能力。导出层只拒绝这种能力缺口。
 - 字段来源写不出时：标系统自动处理，`default_value` 用请求原值。不要猜测来源，也不要因此阻止导出。
@@ -375,6 +429,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 以后再碰到识别缺口，先回到本文件补**通用形状规则**，不要给某一页打补丁：
 
 - 点加行才出现的输入框 → 调用方按行提供，系统再组装成一个数组。
+- 弹层勾选记录、execute 提交对象数组 → 调用方选择显示项，系统按实时响应组装原数组对象，不能写死本场所选行。
 - 同名大段 textarea ≠ 这些行。
 - 确认弹层可填意见必须完整处理。
 - 请求有、控件无、也看不出公式 → 系统栏 + 原值传递。
