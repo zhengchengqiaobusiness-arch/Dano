@@ -38,24 +38,6 @@ function extractJoined(body: unknown, jsonPath: string, viaValue?: unknown) {
   return getByPath(body, jsonPath);
 }
 
-function extractMany(root: unknown, jsonPath: string) {
-  let values: unknown[] = [root];
-  for (const token of jsonPath.replace(/^\$\.?/, "").split(".").filter(Boolean)) {
-    const wildcard = token.endsWith("[*]");
-    const key = wildcard ? token.slice(0, -3) : token;
-    const next: unknown[] = [];
-    for (const value of values) {
-      const child = key && value && typeof value === "object" && !Array.isArray(value)
-        ? (value as Record<string, unknown>)[key]
-        : value;
-      if (wildcard && Array.isArray(child)) next.push(...child);
-      else if (!wildcard && child !== undefined && child !== null) next.push(child);
-    }
-    values = next;
-  }
-  return values;
-}
-
 function resolveFrom(
   rule: string,
   prepared: Record<string, unknown>,
@@ -185,27 +167,18 @@ function literalKey(jsonPath: string) {
   return literal && !literal.includes(".") ? literal : undefined;
 }
 
-function applyCandidate(field: InputFormField, value: unknown, options?: MaterializeOptions) {
+function applyCandidate(field: InputFormField, value: unknown) {
   const rule = field.candidates;
-  if (!rule || value === undefined || value === null) return value;
-  const choices = rule.type === "static"
-    ? rule.values
-    : (() => {
-      const body = options?.lookupBodies?.[rule.capabilityId];
-      if (body === undefined) return undefined;
-      const values = extractMany(body, rule.valuePath);
-      const labels = extractMany(body, rule.labelPath);
-      return values.map((item, index) => ({ value: item, label: String(labels[index] ?? item) }));
-    })();
-  if (!choices) return value;
-  const matches = choices.filter(option => sameJoin(option.value, value) || String(option.label) === String(value));
-  if (matches.length !== 1) throw new Error(`字段 ${field.label} 的候选值不存在或不唯一：${String(value)}`);
-  return matches[0]!.value;
+  if (!rule || rule.type !== "static" || value === undefined || value === null) return value;
+  for (const option of rule.values) {
+    if (option.value === value || String(option.label) === String(value)) return option.value;
+  }
+  return value;
 }
 
-function coerceFieldValue(value: unknown, field: InputFormField, options?: MaterializeOptions) {
+function coerceFieldValue(value: unknown, field: InputFormField) {
   if (value === undefined || value === null) return value;
-  let next = applyCandidate(field, value, options);
+  let next = applyCandidate(field, value);
   if (field.valueType === "array" && Array.isArray(next) && field.dateClocks?.length === next.length) {
     return next.map((item, index) =>
       typeof item === "string" && isDateInput(item.trim())
@@ -340,7 +313,7 @@ function nestLineItems(cap: CapabilityContract, supplied: Record<string, unknown
   return prepared;
 }
 
-function coercePresentFields(cap: CapabilityContract, prepared: Record<string, unknown>, requireMissing: boolean, options?: MaterializeOptions) {
+function coercePresentFields(cap: CapabilityContract, prepared: Record<string, unknown>, requireMissing: boolean) {
   for (const field of cap.inputForm) {
     if (field.path.includes("[*]")) {
       const [prefix, suffix] = field.path.split("[*].");
@@ -365,7 +338,7 @@ function coercePresentFields(cap: CapabilityContract, prepared: Record<string, u
           }
           continue;
         }
-        current[name] = coerceFieldValue(value, field, options);
+        current[name] = coerceFieldValue(value, field);
       }
       continue;
     }
@@ -378,14 +351,14 @@ function coercePresentFields(cap: CapabilityContract, prepared: Record<string, u
       }
       continue;
     }
-    setByPath(prepared, field.path, coerceFieldValue(value, field, options));
+    setByPath(prepared, field.path, coerceFieldValue(value, field));
   }
 }
 
 function prepareInput(cap: CapabilityContract, input: Record<string, unknown>, options?: MaterializeOptions) {
   const prepared = hoistNamedFields(cap, nestLineItems(cap, input));
   applyCollectionTemplates(cap, prepared);
-  coercePresentFields(cap, prepared, false, options);
+  coercePresentFields(cap, prepared, false);
   let changed = true;
   while (changed) {
     changed = false;
@@ -405,7 +378,7 @@ function prepareInput(cap: CapabilityContract, input: Record<string, unknown>, o
           try {
             const value = resolveFieldRule(field, prepared, current, options);
             if (value !== undefined) {
-              current[name] = coerceFieldValue(value, field, options);
+              current[name] = coerceFieldValue(value, field);
               changed = true;
             }
           } catch {
@@ -418,7 +391,7 @@ function prepareInput(cap: CapabilityContract, input: Record<string, unknown>, o
       try {
         const value = resolveFieldRule(field, prepared, undefined, options);
         if (value !== undefined) {
-          setByPath(prepared, field.path, coerceFieldValue(value, field, options));
+          setByPath(prepared, field.path, coerceFieldValue(value, field));
           changed = true;
         }
       } catch {
@@ -426,7 +399,7 @@ function prepareInput(cap: CapabilityContract, input: Record<string, unknown>, o
       }
     }
   }
-  coercePresentFields(cap, prepared, true, options);
+  coercePresentFields(cap, prepared, true);
   return prepared;
 }
 
@@ -491,30 +464,6 @@ async function lookupBodiesFor(
     const viaInput = parsed.via && input[parsed.via] !== undefined ? { [parsed.via]: input[parsed.via] } : {};
     const result = await executeCapability(source, viaInput, false, catalog, visiting);
     bodies[parsed.capabilityId] = result.body;
-  }
-  for (const field of cap.inputForm) {
-    const rule = field.candidates;
-    if (rule?.type !== "capability" || bodies[rule.capabilityId] !== undefined) continue;
-    const leaf = parseCollectionLeafPath(field.path);
-    const collection = leaf ? getByPath(input, leaf.prefix) : undefined;
-    const supplied = leaf
-      ? Array.isArray(collection) && collection.some(item =>
-        item && typeof item === "object" && !Array.isArray(item) && (item as Record<string, unknown>)[leaf.key] !== undefined
-      )
-      : getByPath(input, field.path) !== undefined || input[field.name] !== undefined;
-    if (!supplied) continue;
-    const source = catalog.find(item => item.id === rule.capabilityId);
-    if (!source || source.operation !== "query") throw new Error(`字段 ${field.label} 的候选查询不存在`);
-    const sourceInput: Record<string, unknown> = {};
-    for (const dependency of rule.dependsOn || []) {
-      const target = cap.inputForm.find(item => item.path === dependency || item.name === dependency);
-      const value = target ? getByPath(input, target.path) ?? input[target.name] : getByPath(input, dependency) ?? input[dependency];
-      const name = target?.name || dependency.replace(/^\$\./, "").split(".").pop();
-      if (value !== undefined && name) sourceInput[name] = value;
-    }
-    const result = await executeCapability(source, sourceInput, false, catalog, visiting);
-    if (!result.ok) throw new Error(`字段 ${field.label} 的候选查询失败`);
-    bodies[rule.capabilityId] = result.body;
   }
   return bodies;
 }
