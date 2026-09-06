@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { mkdtemp, mkdir, readFile, writeFile, stat, utimes } from "node:fs/promises";
 import { seedPageProfile, syncLoginState, hasLoginState } from "../src/browser/login-profile.js";
+import { WorkbenchPage } from "../src/web/workbench-page.js";
 
 async function exists(target: string) {
   try {
@@ -92,4 +94,73 @@ test("sync writes page login back to the shared profile", async () => {
   assert.equal(await hasLoginState(shared), true);
   assert.equal(await readFile(path.join(shared, "Default", "Cookies"), "utf8"), "fresh-cookie");
   assert.equal(await exists(path.join(shared, "Default", "Local Storage", "000003.log")), true);
+});
+
+test("a second workbench page reuses the login completed in the first recording", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "bss-login-reuse-"));
+  const server = createServer((request, response) => {
+    if (request.url === "/login" && request.method === "POST") {
+      response.setHeader("set-cookie", "session=logged-in; Path=/; HttpOnly");
+      response.end("ok");
+      return;
+    }
+    if (request.headers.cookie?.includes("session=logged-in")) {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end("<title>印章申请</title><h1>印章申请</h1>");
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<title>登录</title><form action="/login"><input name="username"><input type="password"><button id="login" type="button" onclick="fetch('/login',{method:'POST'}).then(()=>location.reload())">登录</button></form>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("server did not bind");
+  const config = {
+    rootDir: root,
+    dataDir: path.join(root, "data"),
+    recordingsDir: path.join(root, "data", "recordings"),
+    catalogDir: path.join(root, "data", "catalog"),
+    profileDir: path.join(root, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  };
+  const url = `http://127.0.0.1:${address.port}/oa/seal/sealApply?billType=seal_apply`;
+  const first = new WorkbenchPage("page_loginfirst", config, "http://127.0.0.1:4310", value => value, () => {});
+  const second = new WorkbenchPage("page_loginsecond", config, "http://127.0.0.1:4310", value => value, () => {});
+  let secondStarting: Promise<unknown> | undefined;
+
+  try {
+    const firstStarting = first.startRecording(url, "first");
+    for (let attempt = 0; attempt < 100 && !first.manualTakeoverState(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.ok(first.manualTakeoverState(), "first recording should pause for login");
+    const firstBrowserPage = (first.recorder as any).currentPage();
+    await firstBrowserPage.locator("#login").click();
+    await firstBrowserPage.waitForFunction(() => document.title === "印章申请");
+    assert.equal((await first.recorder.loginPageState()).detected, false);
+    first.completeManualTakeover(first.manualTakeoverState()!.id);
+    await firstStarting;
+    await first.stopRecording();
+
+    let secondStarted = false;
+    secondStarting = second.startRecording(url, "second").then(session => {
+      secondStarted = true;
+      return session;
+    });
+    for (let attempt = 0; attempt < 100 && !secondStarted && !second.manualTakeoverState(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(second.manualTakeoverState(), undefined, second.manualTakeoverState()?.reason || "second recording unexpectedly paused for login");
+    await secondStarting;
+    assert.equal((await second.recorder.loginPageState()).detected, false);
+    assert.equal(await (second.recorder as any).currentPage().title(), "印章申请");
+  } finally {
+    if (second.manualTakeoverState()) second.completeManualTakeover(second.manualTakeoverState()!.id);
+    await secondStarting?.catch(() => {});
+    if (first.recorder.isActive()) await first.stopRecording().catch(() => {});
+    if (second.recorder.isActive()) await second.stopRecording().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 });

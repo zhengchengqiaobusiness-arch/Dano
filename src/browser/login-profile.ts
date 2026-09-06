@@ -1,5 +1,8 @@
-import { cp, mkdir, readdir, stat } from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { Cookie } from "playwright";
+
+const SESSION_COOKIES_FILE = "session-cookies.json";
 
 const LOGIN_RELATIVE = [
   "Default/Network/Cookies",
@@ -11,7 +14,8 @@ const LOGIN_RELATIVE = [
   "Default/Login Data",
   "Default/Login Data-journal",
   "Default/Preferences",
-  "Local State"
+  "Local State",
+  SESSION_COOKIES_FILE
 ];
 
 const LOGIN_MARKERS = [
@@ -99,4 +103,31 @@ export async function syncLoginState(fromDir: string, sharedDir: string) {
   if (path.resolve(fromDir) === path.resolve(sharedDir)) return;
   if (!await hasLoginState(fromDir)) return;
   await copyLoginState(fromDir, sharedDir);
+}
+
+export async function loadSessionCookies(profileDir: string): Promise<Cookie[]> {
+  try {
+    const saved = JSON.parse(await readFile(path.join(profileDir, SESSION_COOKIES_FILE), "utf8"));
+    if (saved?.version !== 1 || !Array.isArray(saved.cookies)) return [];
+    const now = Date.now() / 1_000;
+    return saved.cookies.filter((cookie: Cookie) =>
+      cookie && typeof cookie.name === "string" && typeof cookie.value === "string"
+      && typeof cookie.domain === "string" && typeof cookie.path === "string"
+      && (cookie.expires === -1 || cookie.expires > now)
+    );
+  } catch {
+    return [];
+  }
+}
+
+export async function saveSessionCookies(profileDir: string, cookies: Cookie[]) {
+  const file = path.join(profileDir, SESSION_COOKIES_FILE);
+  if (!cookies.length) {
+    await unlink(file).catch(() => {});
+    return;
+  }
+  await mkdir(profileDir, { recursive: true, mode: 0o700 });
+  await chmod(profileDir, 0o700).catch(() => {});
+  await writeFile(file, JSON.stringify({ version: 1, cookies }) + "\n", { encoding: "utf8", mode: 0o600 });
+  await chmod(file, 0o600).catch(() => {});
 }

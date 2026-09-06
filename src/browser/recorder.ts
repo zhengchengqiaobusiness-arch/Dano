@@ -13,6 +13,7 @@ import { persistOriginCredentials } from "../credentials/credential-store.js";
 import { buildCapabilityCandidates } from "../inference/build-candidates.js";
 import { summarizeCatalog } from "../inference/export-scope.js";
 import { authenticationFailureReason, businessFailureReason, inferUiOperationIntent, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
+import { loadSessionCookies, saveSessionCookies } from "./login-profile.js";
 
 const FORM_ACTION_BUDGET = 3;
 const EXPECTABLE_OPERATIONS = new Set<OperationKind>(["query", "create", "update", "review", "delete", "upload", "download", "action"]);
@@ -575,6 +576,8 @@ export class BrowserRecorder {
       if (!/Executable doesn't exist/i.test(String(error))) throw error;
       return chromium.launchPersistentContext(this.config.profileDir, { ...launchOptions, channel: "chrome" });
     });
+    const sessionCookies = await loadSessionCookies(this.config.profileDir);
+    if (sessionCookies.length) await context.addCookies(sessionCookies);
 
     const eventsFile = path.join(dir, "events.jsonl");
     const session: RecordingSession = {
@@ -1803,10 +1806,13 @@ export class BrowserRecorder {
     this.manualPointer = undefined;
     clearTimeout(this.inventoryTimer);
     if (!active) return Promise.resolve();
-    return Promise.all([
-      active.context.close().catch(() => {}),
-      active.browser?.close().catch(() => {})
-    ]).then(() => undefined);
+    return (async () => {
+      await saveSessionCookies(this.config.profileDir, await active.context.cookies()).catch(() => {});
+      await Promise.all([
+        active.context.close().catch(() => {}),
+        active.browser?.close().catch(() => {})
+      ]);
+    })();
   }
 
   async disposeAndKill(_reason = "dispose") {
@@ -1841,6 +1847,7 @@ export class BrowserRecorder {
       const dir = path.dirname(active.eventsFile);
       await writeJson(path.join(dir, "session.json"), active.session);
       if (!active.externalBrowser) {
+        await saveSessionCookies(this.config.profileDir, await active.context.cookies()).catch(() => {});
         await Promise.race([
           Promise.all([
             active.context.close().catch(() => {}),
