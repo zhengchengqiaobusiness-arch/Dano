@@ -10,6 +10,13 @@ export const PAGE_HELPERS = String.raw`
     const height = document.documentElement.clientHeight || window.innerHeight || 0;
     return rect.right > 0 && rect.bottom > 0 && rect.left < width && rect.top < height;
   };
+  const insideOffscreenFixedLayer = (el) => {
+    for (let node = el; node && node !== document.documentElement; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (style.position === "fixed" && !intersectsViewport(node.getBoundingClientRect())) return true;
+    }
+    return false;
+  };
   const isVisible = (el) => {
     if (!(el instanceof Element)) return false;
     if (el.hidden || el.getAttribute("aria-hidden") === "true") return false;
@@ -17,6 +24,7 @@ export const PAGE_HELPERS = String.raw`
     const style = getComputedStyle(el);
     const rect = el.getBoundingClientRect();
     if (style.display === "none" || style.visibility === "hidden" || rect.width <= 0 || rect.height <= 0) return false;
+    if (insideOffscreenFixedLayer(el)) return false;
     // Closed drawers and dialogs can keep a positive box while translated
     // completely off-canvas. Their controls are not part of the active
     // business form and must not compete with its fields or submit button.

@@ -2230,7 +2230,7 @@ test("off-canvas settings drawers do not become the active business form", async
         <div class="el-form-item"><label class="el-form-item__label">名称</label><input name="name" placeholder="请输入名称"></div>
         <button type="button" id="search">搜索</button>
       </form>
-      <aside class="el-drawer" style="position:fixed;left:calc(100vw + 40px);top:0;width:320px;height:400px">
+      <aside class="layout-settings" style="position:fixed;left:calc(100vw + 40px);top:0;width:320px;height:400px">
         <div class="el-form-item"><label class="el-form-item__label">开启 TopNav</label><input type="checkbox" name="topnav"></div>
         <button type="button">保存配置</button>
       </aside>
