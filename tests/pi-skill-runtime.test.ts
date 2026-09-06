@@ -278,6 +278,37 @@ test("exact list id joins a directory lookup and ignores a sibling business page
   assert.doesNotMatch(candidateId, /doc/);
 });
 
+test("a shared amount value never becomes an unrelated chooser id", () => {
+  const events: EvidenceEvent[] = [{
+    id: "companies", kind: "network", sessionId: "expense", at: "2026-09-06T00:00:00.000Z",
+    pageUrl: "https://x/expense",
+    request: { method: "GET", url: "https://x/queryCompanyTenant", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { code: 200, data: [
+      { id: 1, name: "示例公司" }, { id: 2, name: "另一公司" }
+    ] } }
+  }, {
+    id: "expense-save", kind: "ui", sessionId: "expense", at: "2026-09-06T00:00:01.000Z",
+    pageUrl: "https://x/oa/reimburseApply/form/add", eventType: "click", text: "保存", label: "保存",
+    form: [{ label: "所属公司", type: "select", value: "示例公司" }]
+  }, {
+    id: "expense-create", kind: "network", sessionId: "expense", at: "2026-09-06T00:00:01.100Z",
+    pageUrl: "https://x/oa/reimburseApply/form/add", correlatedUiEvidenceId: "expense-save",
+    request: {
+      method: "POST", url: "https://x/oa/reimburseApply", resourceType: "xhr", headers: {}, query: {},
+      body: { totalAmt: "1.00", billAmt: 1 }
+    },
+    response: { status: 200, headers: {}, body: { code: 200 } }
+  }];
+
+  const catalog = applyDeterministicCatalogJudgment(buildCapabilityCandidates(events), events);
+  const create = catalog.find(item => item.operation === "create")!;
+  for (const name of ["totalAmt", "billAmt"]) {
+    const input = create.inputForm.find(item => item.name === name);
+    assert.notEqual(input?.label, "所属公司", JSON.stringify(create.inputForm));
+    assert.notEqual(input?.candidates?.type, "capability", JSON.stringify(create.inputForm));
+  }
+});
+
 test("recorded dictionary and directory APIs supply work-report select candidates", () => {
   const events: EvidenceEvent[] = [{
     id: "dicts-unauthorized", kind: "network", sessionId: "s", at: "2026-09-05T23:59:59.000Z",

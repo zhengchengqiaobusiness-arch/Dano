@@ -773,6 +773,12 @@ export function applyExactChooserJoin(catalog: CapabilityContract[], events: Evi
         if (field.source === "caller" && field.label !== field.name) return field;
         const ids = identityValues(requestValueAt(sample, field.path));
         if (ids.length !== 1) return field;
+        const shared = flattenRequestValues(sample).some(item =>
+          item.path !== field.path
+          && !PAGE_NAME.test(item.name)
+          && sameValue(item.value, ids[0])
+        );
+        if (shared) return field;
         let matchedSources = sources.filter(source =>
           source.capabilityId !== capability.id
           && source.rows.filter(row => sameValue(rowIdentity(row), ids[0])).length === 1
