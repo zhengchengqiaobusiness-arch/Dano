@@ -523,3 +523,81 @@ test("model judgment cannot invent that an optional recorded field is required",
 
   assert.equal(judged!.inputForm[0]?.required, false);
 });
+
+test("a post-save list refresh cannot make an optional query filter required", async () => {
+  const query = cap({
+    id: "query-duty-list",
+    operation: "query",
+    role: "primary",
+    transport: {
+      method: "GET",
+      urlTemplate: "https://x/oa/dutyApply/list?leaveType={leaveType}",
+      origin: "https://x",
+      pathTemplate: "/oa/dutyApply/list"
+    },
+    inputSchema: { type: "object", properties: { leaveType: { type: "string" } } },
+    inputForm: [field({ name: "leaveType", defaultRule: 'literal:"marry"' })],
+    evidence: [
+      { eventId: "net-query", sessionId: "s", kind: "network", at: "2026-09-06T00:00:02.000Z", status: 200 },
+      { eventId: "ui-query", sessionId: "s", kind: "ui", at: "2026-09-06T00:00:01.000Z" },
+      { eventId: "net-refresh", sessionId: "s", kind: "network", at: "2026-09-06T00:01:02.000Z", status: 200 },
+      { eventId: "ui-create", sessionId: "s", kind: "ui", at: "2026-09-06T00:01:01.000Z" }
+    ]
+  });
+  const dictionary = cap({
+    id: "query-leave-types",
+    operation: "query",
+    role: "lookup",
+    transport: {
+      method: "GET",
+      urlTemplate: "https://x/dict/type/duty_leave_type",
+      origin: "https://x",
+      pathTemplate: "/dict/type/duty_leave_type"
+    },
+    evidence: [{ eventId: "net-dict", sessionId: "s", kind: "network", at: "2026-09-06T00:00:00.000Z", status: 200 }]
+  });
+  const events: EvidenceEvent[] = [
+    network("GET", "https://x/dict/type/duty_leave_type", {
+      id: "net-dict",
+      sessionId: "s",
+      at: "2026-09-06T00:00:00.000Z",
+      response: { status: 200, headers: {}, body: { data: [
+        { dictType: "duty_leave_type", dictValue: "marry", dictLabel: "婚假" },
+        { dictType: "duty_leave_type", dictValue: "sick", dictLabel: "病假" }
+      ] } }
+    }),
+    {
+      id: "ui-query", kind: "ui", sessionId: "s", at: "2026-09-06T00:00:01.000Z",
+      pageUrl: "https://x/oa/duty/list", eventType: "click",
+      form: [{ label: "请假类型", type: "select-one", value: "婚假", required: false }]
+    },
+    network("GET", "https://x/oa/dutyApply/list", {
+      id: "net-query", sessionId: "s", at: "2026-09-06T00:00:02.000Z",
+      pageUrl: "https://x/oa/duty/list", correlatedUiEvidenceId: "ui-query",
+      request: {
+        method: "GET", url: "https://x/oa/dutyApply/list?leaveType=marry",
+        resourceType: "xhr", headers: {}, query: { leaveType: "marry" }
+      }
+    }),
+    {
+      id: "ui-create", kind: "ui", sessionId: "s", at: "2026-09-06T00:01:01.000Z",
+      pageUrl: "https://x/oa/duty/create", eventType: "click",
+      form: [{ label: "请假类型", type: "select-one", value: "婚假", required: true }]
+    },
+    network("GET", "https://x/oa/dutyApply/list", {
+      id: "net-refresh", sessionId: "s", at: "2026-09-06T00:01:02.000Z",
+      pageUrl: "https://x/oa/duty/create", correlatedUiEvidenceId: "ui-create",
+      request: {
+        method: "GET", url: "https://x/oa/dutyApply/list",
+        resourceType: "xhr", headers: {}, query: {}
+      }
+    })
+  ];
+
+  const judged = await applyPiCatalogJudgment([query, dictionary], events, { available: () => false } as any, process.cwd(), false);
+  const leaveType = judged.find(item => item.id === query.id)?.inputForm.find(item => item.name === "leaveType");
+
+  assert.equal(leaveType?.source, "caller");
+  assert.equal(leaveType?.required, false);
+  assert.equal(leaveType?.requiredBasis, "not-observed");
+});

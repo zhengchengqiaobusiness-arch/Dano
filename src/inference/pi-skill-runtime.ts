@@ -719,10 +719,7 @@ function chooserObservations(
     const sourceCap = catalog.find(item => item.evidence.some(ref => ref.eventId === event.id));
     if (sourceCap && sourceIds.has(sourceCap.id)) extraIds.add(event.correlatedUiEvidenceId);
   }
-  const local = mergeUi([
-    ...joinUiEvents(capability, events),
-    ...related.filter((event): event is UiEvidence => event.kind === "ui")
-  ]);
+  const local = joinUiEvents(capability, events);
   const localObs = collectUiObservations(local);
   const claimed = new Set(localObs.flatMap(item => rowKeysForObservation(item, sources)));
   const at = richest ? Date.parse(richest.at) : Number.POSITIVE_INFINITY;
