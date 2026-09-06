@@ -24,6 +24,14 @@ interface ManualTakeover {
 
 const PAGE_SESSION_PATTERN = /^page_[A-Za-z0-9_-]{8,80}$/;
 
+function requiresCompleteFieldCoverage(text: string) {
+  const request = text.replace(/\s+/g, "");
+  const allFields = /(?:全部|所有|每个|每一)(?:可操作的?)?(?:查询)?(?:条件|字段|筛选项|表单项)/.test(request)
+    || /(?:条件|字段|筛选项|表单项)(?:都|全部|全都|每个|每一)/.test(request)
+    || /(?:all|every)(?:operable)?(?:field|filter|condition)/i.test(request);
+  return allFields && /点击|填写|填充|选择|操作|遍历|click|fill|select|exercise/i.test(request);
+}
+
 export function isPageSessionId(value: string) {
   return PAGE_SESSION_PATTERN.test(value);
 }
@@ -54,6 +62,7 @@ export class WorkbenchPage {
   private coverageContinuationPending = false;
   private coverageContinuations = 0;
   private promptGeneration = 0;
+  private completeFieldCoverageRequested = false;
 
   constructor(
     id: string,
@@ -205,7 +214,7 @@ export class WorkbenchPage {
     await seedPageProfile(this.sharedProfileDir, this.pageProfileDir);
     const size = viewport || this.preferredViewport;
     if (size) this.preferredViewport = normalizePreviewViewport(size);
-    const session = await this.recorder.start(url, name || "web-session", this.preferredViewport, expectedOperations, completeFieldCoverage, completePageCoverage);
+    const session = await this.recorder.start(url, name || "web-session", this.preferredViewport, expectedOperations, completeFieldCoverage || this.completeFieldCoverageRequested, completePageCoverage);
     this.lastRecordingSessionId = session.id;
     this.onLog("PROCESS", formatProcessLog("OPEN", "playwright-browser", { pid: this.recorder.browserProcessId(), page: this.id }));
     const login = await this.recorder.loginPageState();
@@ -272,6 +281,7 @@ export class WorkbenchPage {
 
   acceptUserMessage(text: string) {
     this.transcriptOpen = true;
+    this.completeFieldCoverageRequested = requiresCompleteFieldCoverage(text);
     const userEvent = this.transcript.addUser(text);
     this.broadcastSession(userEvent);
     return userEvent;
@@ -318,6 +328,7 @@ export class WorkbenchPage {
     this.epoch += 1;
     this.transcriptOpen = false;
     this.lastRecordingSessionId = undefined;
+    this.completeFieldCoverageRequested = false;
     this.coverageContinuations = 0;
     this.coverageContinuationPending = false;
     await this.abortWork("clear");

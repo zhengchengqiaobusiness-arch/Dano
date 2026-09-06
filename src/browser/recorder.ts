@@ -1415,13 +1415,14 @@ export class BrowserRecorder {
       field.selector === selector || field.label === normalized || field.name === normalized
     );
     if (!target || target.skip || target.disabled) return undefined;
+    const fields = (snapshot.formFields || []).filter(field => !field.skip && !field.disabled);
     return {
       ok: false,
       requiresWholeForm: true,
       recommendedAction: "exercise-form",
       reason: "当前录制要求完整字段覆盖；首次填写必须调用一次 exercise-form，不能从单字段操作开始。",
-      todoFields: snapshot.todoFields || [],
-      todoCount: snapshot.todoCount ?? (snapshot.todoFields || []).length,
+      todoFields: fields,
+      todoCount: fields.length,
       formFields: snapshot.formFields || [],
       followManualSteps: false
     };
@@ -1458,11 +1459,14 @@ export class BrowserRecorder {
       ? { ...this.navigationCoverage(), operationRequirements: this.pageOperationCoverage() }
       : undefined;
     const base = recordingStopReadiness(events, active.session.expectedOperations || [], pageCoverage);
+    if (active.session.completeFieldCoverage) await this.ensureFormScope();
     const snapshot = active.session.completeFieldCoverage
       ? knownSnapshot || await this.actions.captureSnapshot()
       : knownSnapshot;
+    const eligibleFields = (snapshot?.formFields || []).filter(field => !field.skip && !field.disabled);
+    const needsWholeFormPass = active.session.completeFieldCoverage && eligibleFields.length > 0 && !active.guard.wholeFormExercised;
     const missingFields = active.session.completeFieldCoverage
-      ? (snapshot?.todoFields || []).filter(field => !field.skip && !field.disabled)
+      ? needsWholeFormPass ? eligibleFields : (snapshot?.todoFields || []).filter(field => !field.skip && !field.disabled)
       : [];
     const currentPageKey = this.navigationKey(String(snapshot?.url || this.currentPage().url()), this.currentPage().url());
     const currentPageOperations = base.missingPageOperations.find(item => this.navigationKey(item.url) === currentPageKey)?.operations || [];
@@ -1634,8 +1638,12 @@ export class BrowserRecorder {
           const currentSnapshot = await this.actions.captureSnapshot();
           const currentKey = this.navigationKey(String(currentSnapshot.url || page.url()), page.url());
           const currentRequirement = this.active?.pageOperationRequirements.get(currentKey);
-          if (this.active?.session.completeFieldCoverage && currentRequirement?.operations.size) {
-            const todoFields = (currentSnapshot.todoFields || []).filter(field => !field.skip && !field.disabled);
+          if (this.active?.session.completeFieldCoverage) {
+            await this.ensureFormScope();
+            const eligibleFields = (currentSnapshot.formFields || []).filter(field => !field.skip && !field.disabled);
+            const todoFields = this.active.guard.wholeFormExercised
+              ? (currentSnapshot.todoFields || []).filter(field => !field.skip && !field.disabled)
+              : eligibleFields;
             if (todoFields.length) {
               return {
                 ok: false,
@@ -1682,6 +1690,13 @@ export class BrowserRecorder {
         }
         case "click": {
           if (!command.selector) throw new Error("click requires selector");
+          {
+            const required = await this.requireWholeFormBeforeDirectFieldAction(command.selector);
+            if (required) {
+              watch?.stop();
+              return required;
+            }
+          }
           try {
             return await this.guardedPageAction("click", command.selector, async () => {
               const clicked = await this.actions.click(command.selector!);
@@ -1758,8 +1773,9 @@ export class BrowserRecorder {
         case "snapshot":
           return this.actions.captureSnapshot();
         case "exercise-form": {
-          await this.markWholeFormExercised();
-          return this.guardedFormAction("exercise-form", () => this.actions.exerciseForm());
+          const exercised = await this.guardedFormAction("exercise-form", () => this.actions.exerciseForm(Boolean(this.active?.session.completeFieldCoverage)));
+          if (exercised.ok) await this.markWholeFormExercised();
+          return exercised;
         }
         case "submit-form": {
           return this.guardedFormAction("submit-form", () => this.actions.submitForm());

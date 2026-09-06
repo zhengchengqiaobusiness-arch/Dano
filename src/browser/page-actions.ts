@@ -1440,11 +1440,11 @@ export class PageActions {
     }
   }
 
-  private async fillOneField(field: FormField, startUrl: string, dateOffset = 0) {
+  private async fillOneField(field: FormField, startUrl: string, dateOffset = 0, force = false) {
     const selector = field.selector || `label=${field.label}`;
     if (this.page().url() !== startUrl) throw new Error("Page navigated; stopping so filled fields are not overwritten");
     if (field.kind === "upload" || field.skip) return { label: field.label, selector, kind: field.kind, skipped: true };
-    if (field.filled && (field.kind === "select" || field.kind === "picker") && !field.invalid) {
+    if (!force && field.filled && (field.kind === "select" || field.kind === "picker") && !field.invalid) {
       return { label: field.label, selector, kind: field.kind, value: field.value, skipped: true };
     }
     const attempts = this.strategiesFor(field, dateOffset);
@@ -1670,7 +1670,7 @@ export class PageActions {
     return false;
   }
 
-  async exerciseForm() {
+  async exerciseForm(allFields = false) {
     await this.dismissTransientOverlays();
     await this.completeChooserDialog();
     const filled: Array<Record<string, unknown>> = [];
@@ -1679,21 +1679,27 @@ export class PageActions {
     const startUrl = this.page().url();
     let dateOffset = 0;
     const fieldKey = (field: FormField) => `${field.scope || ""}|${field.label}|${field.selector || ""}|${field.groupIndex ?? field.rangeIndex ?? 0}`;
-    const run = async (fields: FormField[]) => {
+    const run = async (fields: FormField[], force = false) => {
       for (const field of fields) {
         const key = fieldKey(field);
         if (failedKeys.has(key)) continue;
         const offset = field.kind === "date" ? dateOffset++ : 0;
         try {
-          const result = await this.fillOneField(field, startUrl, offset);
+          const result = await this.fillOneField(field, startUrl, offset, force);
           if (!result.skipped) filled.push(result);
         } catch (error: any) {
           failedKeys.add(key);
-          failed.push({ label: field.label, selector: field.selector || `label=${field.label}`, kind: field.kind, error: String(error?.message || error) });
+          failed.push({ label: field.label, selector: field.selector || `label=${field.label}`, kind: field.kind, requiredInteraction: force, error: String(error?.message || error) });
         }
       }
     };
     let after = await this.captureSnapshot();
+    let fullPassPending = allFields;
+    const recent = this.host.recentUserActions() as Array<{ eventType?: string; label?: string; name?: string; selector?: string }>;
+    const alreadyOperated = (field: FormField) => recent.some(action =>
+      (action.eventType === "input" || action.eventType === "change")
+      && ((field.selector && action.selector === field.selector) || (field.name && action.name === field.name) || (field.label && action.label === field.label))
+    );
     const attemptedRepeatables = new Set<string>();
     const expansionFailures: Array<Record<string, unknown>> = [];
     const maxPasses = Math.max(6, Math.min(32, (after.controls || []).length + 6));
@@ -1703,7 +1709,10 @@ export class PageActions {
         if (!expansion.expanded) expansionFailures.push({ label: expansion.name || "业务明细", error: "点击添加控件后没有出现可填写字段" });
         after = await this.captureFields();
       }
-      const leftover = (after.todoFields || []).filter(field => !field.skip && !field.disabled && !failedKeys.has(fieldKey(field)));
+      const force = fullPassPending;
+      const candidates = force ? (after.formFields || []).filter(field => !alreadyOperated(field)) : (after.todoFields || []);
+      fullPassPending = false;
+      const leftover = candidates.filter(field => !field.skip && !field.disabled && !failedKeys.has(fieldKey(field)));
       if (!leftover.length) {
         if (expansion.attempted) continue;
         if (await this.revealHiddenSections()) {
@@ -1712,12 +1721,12 @@ export class PageActions {
         }
         break;
       }
-      await run(leftover.filter(field => field.kind === "select"));
+      await run(leftover.filter(field => field.kind === "select"), force);
       await this.waitForPageQuiet(800);
-      await run(leftover.filter(field => field.kind === "date"));
+      await run(leftover.filter(field => field.kind === "date"), force);
       await this.closeDatePanel();
-      await run(leftover.filter(field => field.kind !== "select" && field.kind !== "date" && field.kind !== "picker"));
-      await run(leftover.filter(field => field.kind === "picker"));
+      await run(leftover.filter(field => field.kind !== "select" && field.kind !== "date" && field.kind !== "picker"), force);
+      await run(leftover.filter(field => field.kind === "picker"), force);
       await this.completeChooserDialog();
       await this.dismissTransientOverlays();
       after = await this.captureFields();
@@ -1731,7 +1740,7 @@ export class PageActions {
     }
     await this.repairFormValues(startUrl);
     after = await this.captureSnapshot();
-    const leftoverFailed = failed.filter(item =>
+    const leftoverFailed = failed.filter(item => item.requiredInteraction ||
       (after.formFields || []).some(field => field.label === item.label && !field.filled && !field.skip && !field.disabled)
     );
     const ok = this.formReady(after, startUrl) && leftoverFailed.length === 0 && expansionFailures.length === 0;

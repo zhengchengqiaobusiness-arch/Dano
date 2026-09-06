@@ -476,6 +476,51 @@ test("complete field coverage cannot be bypassed with direct single-field action
   }
 });
 
+test("complete field coverage requires one whole-form pass and touches prefilled conditions", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "whole-form-prefilled-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body>
+      <form class="el-form">
+        <div class="el-form-item"><label class="el-form-item__label">关键字</label><input name="keyword" value="默认关键字" placeholder="请输入关键字"></div>
+        <div class="el-form-item"><label class="el-form-item__label">申请人</label><input name="applicant" value="默认申请人" placeholder="请输入申请人"></div>
+        <button type="button">搜索</button>
+      </form>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "whole-form-prefilled", undefined, [], true);
+    const before: any = await recorder.stopReadiness();
+    assert.equal(before.ready, false, JSON.stringify(before));
+    assert.equal(before.nextAction.action, "exercise-form", JSON.stringify(before));
+
+    const directClick: any = await recorder.control({ action: "click", selector: "placeholder=请输入关键字" });
+    assert.equal(directClick.requiresWholeForm, true, JSON.stringify(directClick));
+
+    const exercised: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(exercised.ok, true, JSON.stringify(exercised));
+    assert.deepEqual(new Set((exercised.filled || []).map((field: any) => field.label)), new Set(["关键字", "申请人"]));
+    assert.equal(exercised.recordingAudit.ready, true, JSON.stringify(exercised));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("menu controls use their own accessible name instead of the preceding menu item label", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "menu-selector-regression-"));
   const server = http.createServer((_request, response) => {

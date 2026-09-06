@@ -40,6 +40,34 @@ test("acceptUserMessage records the user turn without starting Pi", () => {
   assert.equal(events.some(event => event.type === "session_item" && event.item?.text === "打开差旅列表"), true);
 });
 
+test("an explicit all-conditions request forces complete field coverage when the agent omits the flag", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bss-all-fields-"));
+  const page = new WorkbenchPage("page_allfields", {
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  }, "http://127.0.0.1:4310", value => value, () => {});
+  let completeFieldCoverage: boolean | undefined;
+  (page.recorder as any).start = async (_url: string, _name: string, _viewport: unknown, _operations: unknown, complete: boolean) => {
+    completeFieldCoverage = complete;
+    return { id: "rec_allfields", expectedOperations: [], completeFieldCoverage: complete };
+  };
+  (page.recorder as any).loginPageState = async () => ({ detected: false });
+
+  try {
+    page.acceptUserMessage("识别当前页面，执行查询，全部条件都要点击，上传除外");
+    await page.startRecording("https://example.test/list", "all-fields", undefined, ["query"], false);
+    assert.equal(completeFieldCoverage, true);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("reset forgets the last recording so the next chat is independent", async () => {
   const page = new WorkbenchPage("page_clearsession", {
     rootDir: ".",
