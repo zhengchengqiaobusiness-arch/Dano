@@ -26,9 +26,9 @@ This host is Windows. The bash tool is disabled. Page recording uses `business_s
    - When the user says 手动录制完毕, stop this session and analyze it. Do not start a new recording just because Chinese labels do not match request keys. Field ownership is judged by `infer-field-contract` from exact names and distinctive values; do not invent keys.
    - If this session already has a successful write request and lookup queries (product/simple-list, get-count, dict, same-resource scalar fetches, and similar), do not `record_start` again when review reports a backend interpretation problem. Review automatically rebuilds the affected session from raw UI/network evidence without another paid model call and stops when the finding set is stable. Re-record only for a major evidence gap: a required primary operation is missing, or that operation has no successful response. Empty pickers, grafted caller fields, and unverified leftover lookups are not major gaps. If disambiguating evidence is genuinely absent, use browser automation to collect a targeted second sample; manual takeover is only for a page that cannot be operated, never for editing generated fields, bindings, endpoints, or contracts. A second recording that only clicks a picker must not replace or drop the recorded write capability.
    - Capture actual UI events, field choices, requests, responses, and statuses. `submit-form` 会继续处理嵌套确认框，同时检查 HTTP 状态和响应体业务码；后端明确指出某个候选字段缺失时，自动重新选择并重试，累计三次真实失败后才人工接管。
-   - Call `business_skill_record_stop`. 该工具会先核对所有 `expectedOperations` 是否已有业务成功响应；不完整时保持当前浏览器和录制会话，不允许提前关闭后再生成残缺 Skill。
+   - Call `business_skill_record_stop`. 该工具会先核对所有 `expectedOperations` 是否已有业务成功响应；不完整时保持当前浏览器和录制会话，不允许提前关闭后再生成残缺 Skill。用户要求产出 Skill 时，停止录制后直接调用 `business_skill_export`；不要要求调用方手工串联分析、审核和导出。
 
-2. **Analyze**
+2. **Analyze（内部阶段/可选诊断）**
    - Call `business_skill_analyze` with the `sessionId` returned by `business_skill_record_stop`. Do not analyze the entire recording history.
    - Field ownership, lookup rules, and primary/lookup/noise roles are judged by Pi using `infer-field-contract` and `judge-primary-capability`. TypeScript only clusters method+path and keeps every recorded request key. Do not invent endpoints or fields.
    - You may also call `business_skill_infer_fields` or `business_skill_judge_primary` explicitly; analyze already runs both.
@@ -36,14 +36,14 @@ This host is Windows. The bash tool is disabled. Page recording uses `business_s
    - Report 主能力 (`role=primary`) and 字段候选 (`role=lookup`) separately. IM, login, and captcha are `noise`. Do not start a new recording because a Chinese label does not match a request key.
    - For each write field, first use real form evidence to decide whether the caller supplies it. For a non-caller field, use a lookup, formula, copy, session, or generated rule only when causal evidence uniquely proves that rule; equal values in one sample are not causal evidence. If no such source exists, classify the field as system-handled and preserve the exact value from the successful recorded request, including empty objects, empty arrays, zeroes, row keys, and nested fields. Never ask the user to invent a source for an internal field.
 
-3. **Review**
-   - Call `business_skill_validate` with the same `sessionId`. This is the gate. Inference is not assumed correct. If the process restarted, the last analyzed session is remembered; still pass `sessionId` when you have it.
+3. **Review（内部阶段/可选诊断）**
+   - `business_skill_validate` 只用于查看审核和自动修复结果，不是让调用方操作的门禁。产出流程由 `business_skill_export` 使用同一 `sessionId` 统一驱动。
    - **Pass** only when the tool returns `审核通过`: every operation listed in the recording's `expectedOperations` exists; every 主能力 is `verified`; every write non-caller field has an executable rule (a causally proven derivation or the exact successful-request system value); computed formulas do not use IDs, enums, or timestamps as operands; picker/user-select fields expose a recorded query instead of a frozen page enum; every key in the successful write request has a field or an assemble rule; and every lookup used by `from:` / candidates is usable. Then export is allowed.
-   - **Fail** when it returns `审核未通过`. Do not export. Do not treat “some checks passed” as passed. A write Skill that freezes a user picker as a static enum, uses `computed:day - type`, or drops `startUserSelectAssignees` is not passed.
+   - **Fail** when it returns `审核未通过`. 导出入口不得写出残缺 Skill，但也不得把生成文件或可自动修复的问题交给用户。A write Skill that freezes a user picker as a static enum, uses `computed:day - type`, or drops `startUserSelectAssignees` is not passed.
    - Read the **entire** findings list first. Group by stage. Do not bounce back after the first failure.
-     - Open a new recording only when the review next step is `回到页面补录` and a required primary operation or its successful response is missing. If the next step is 重新分析 / 不要重新录制, do not `record_start`, do not analyze again, and stop.
+     - Only when the review next step is `回到页面补录` and a required primary operation or its successful response is genuinely missing, automatically return to the same page and record that one gap. If the next step is 重新分析, the export path repairs from existing evidence without asking the user.
      - If the successful write and its lookups are already recorded, do not collect field-ownership or leftover-lookup findings as 补录 and do not ask the person to repair generated content. Review already rebuilds field ownership, candidates, bindings, completion criteria, and transport from the evidence.
-     - Review performs its bounded evidence-only repair loop internally; do not trigger repeated paid analysis. If the same findings come back or the tool says 审核结果与上次相同, stop and report them; do not start another analyze/validate/recording loop.
+     - Review performs its bounded evidence-only repair loop internally: deterministic rebuild first, one paid repair pass only if necessary, then re-review. Never ask the user to repair generated content. A stable unresolved finding is a platform defect; keep the catalog blocked instead of inventing evidence or directing the user to edit files.
      - If a required primary operation was never successfully recorded, return to the browser and record only that operation. The three-failure human takeover remains limited to operating the page.
    - Preserve manually edited titles/descriptions, but do not ask a person to edit `.business-skill-studio/catalog/capabilities.json` to fix analyzer output. Explicit `business_skill_approve_binding` remains only for a user-authored cross-capability composition decision, not as a repair for field recognition.
 
@@ -55,8 +55,8 @@ This host is Windows. The bash tool is disabled. Page recording uses `business_s
    - Execute planned operations immediately. Do not ask the user to confirm page actions or writes.
 
 5. **Export**
-   - Export only after Review returned `审核通过`. If it did not, go back; do not export a blocked catalog.
-   - Call `business_skill_export` with the page's Chinese business name, such as `采购订单`, and the same `sessionId`. Do not export a newer unrelated recording.
+   - **Export owns Analyze → Review → Repair → Re-review → Export.** Call `business_skill_export` with the page's Chinese business name, such as `采购订单`, and the same `sessionId`; it accepts raw recorded evidence and owns every internal stage. Do not export a newer unrelated recording.
+   - It writes files only after Review returns `审核通过`. If evidence is genuinely missing, automatically collect only that gap and invoke the same export entry again; do not ask the caller to interpret findings or repair generated files.
    - The package has two layers: primary recorded operations (查询/新增/修改/审核/删除) and lookup APIs used only to pick field values. Report them separately. Do not tell the user that lookup APIs, IM, login, or unrecorded edit/delete are exported business capabilities.
    - The exported package is a handbook, not a business spec: `SKILL.md` (router + composition rules) + `references/CAPABILITIES.md` + `references/INPUT_FORMS.md` + `references/OPTIONS.md` + `references/PLAYBOOK.md` + `references/CONTRACT.json` + `scripts/execute.py`. Do not invent endpoints.
    - Report 主能力 and 字段候选接口 separately. Lookup APIs are for field values only.
@@ -65,4 +65,4 @@ This host is Windows. The bash tool is disabled. Page recording uses `business_s
 
 ## Completion rule
 
-A workflow is complete only when Review returned `审核通过` and every planned step satisfies its contract completion criteria. Do not infer success from prose alone. If Review is blocked, collect every finding, then follow `下一步` in one pass before export. If the user asked for 新增/修改 and the catalog has no verified create/update, go back to the page once, follow recorded manual steps or ask the user to record manually, and record a successful submit; do not click-loop. Do not hand that gap back as a finished Skill.
+A workflow is complete only when the unified export entry has internally reached `审核通过`, written the Skill, and every planned step satisfies its contract completion criteria. Do not infer success from prose alone. If evidence is missing, automatically return to the page once and record only the named gap; manual takeover remains limited to login, three failed page operations, genuine ambiguity, or required write/composition confirmation. Never hand analyzer or generated-file repair work to the user.

@@ -175,7 +175,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       return {
         content: [{
           type: "text",
-          text: `本次会话识别主能力 ${summary.primary.length} 项：${primaryTitles}。字段候选接口 ${summary.lookups.length} 个，后台轮询 ${summary.noise.length} 项不会进入 Skill。主能力只统计本次会话页面的查询/新建/修改/审核/删除，不要把其它页已有能力当成这次的补录对象。用户分页、产品下拉、库存带出不是主能力。分析后必须验证，验证未通过不能导出。`
+          text: `本次会话识别主能力 ${summary.primary.length} 项：${primaryTitles}。字段候选接口 ${summary.lookups.length} 个，后台轮询 ${summary.noise.length} 项不会进入 Skill。主能力只统计本次会话页面的查询/新建/修改/审核/删除，不要把其它页已有能力当成这次的补录对象。用户分页、产品下拉、库存带出不是主能力。该工具用于查看中间结果；完整闭环由 business_skill_export 负责。`
         }],
         details: caps
       };
@@ -218,17 +218,17 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_validate",
     label: "Validate business capabilities",
-    description: "Review inferred capabilities against evidence. Returns 审核通过 or 审核未通过. Export is allowed only when the review passes. This tool already rebuilds interpretation problems from recorded evidence. If it returns 不要重新录制 / 根据已有成功证据重新分析 / 审核结果与上次相同, stop and report; do not call business_skill_analyze, business_skill_validate, or business_skill_record_start again.",
+    description: "Inspect the evidence review and its automatic repair result. This is a diagnostic view, not a caller-operated gate: the complete analyze-review-repair-re-review-export workflow is owned by business_skill_export. Never hand generated-file repairs to the user.",
     parameters: parameters({
       sessionId: { type: "string" }
     }),
     async execute(_id, params: any) {
       const { capabilities, review } = await studio.review(requireConversationSession(params));
       const gate = review.next === "re-record"
-        ? "允许补录：仅补缺失的主操作或其成功响应。"
+        ? "自动处理：仅返回页面补齐缺失的主操作或其成功响应，然后继续导出闭环。"
         : review.status === "passed"
-          ? "可以导出。"
-          : "禁止开新录制。不要再 business_skill_analyze / validate / record_start。停止并报告未通过原因。";
+          ? "审核通过；完整闭环可继续导出。"
+          : "现有证据的自动修复仍未通过；这是平台解析问题，不要求用户补录或修改生成文件。";
       return {
         content: [{
           type: "text",
@@ -337,7 +337,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_export",
     label: "Export business skill",
-    description: "Export verified capabilities as a self-contained Agent Skill package with manual, contracts, routing, forms, candidates, and executable scripts.",
+    description: "Single completion entry for a recorded session: analyze raw evidence, review, automatically repair and re-review, then export a verified Agent Skill package. It never exports a blocked catalog.",
     parameters: parameters({
       name: { type: "string" },
       sessionId: { type: "string" }
