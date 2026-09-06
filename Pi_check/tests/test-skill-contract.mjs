@@ -63,6 +63,7 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(skill, /readonly=true|disabled=true/);
   assert.match(skill, /去掉星号|不要把星号写进/);
   assert.match(skill, /表头原文/);
+  assert.match(skill, /x-dano-section-titles/);
   assert.match(skill, /禁止把一个数组拆成多个调用方数组/);
   assert.match(skill, /写请求里不存在的.*键|不要编造写请求里没有的键/);
   assert.doesNotMatch(skill, /登录态、Cookie、分页、流程定义 Key、单据类型/);
@@ -76,6 +77,7 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   const prompt = buildFinalAnalysisPrompt(3);
   assert.match(prompt, /readonly\/disabled|readonly=true/);
   assert.match(prompt, /表头原文/);
+  assert.match(prompt, /x-dano-section-titles/);
   assert.match(prompt, /不要编新键|不要编造写请求里没有的键/);
   assert.match(prompt, /x-dano-option-source/);
   assert.match(prompt, /藏在 description|type=number/);

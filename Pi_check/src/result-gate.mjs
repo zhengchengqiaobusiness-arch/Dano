@@ -33,6 +33,11 @@ function isPlainObject(value) {
 }
 
 const SELECTABLE_HINT_RE = /部门树|树选择|树选|下拉|选择器|选择节点|选项接口|实时候选|tree\s*select|treeselect/i;
+const ROW_ARRAY_HINT_RE = /可增行|添加.{0,12}(行|项|明细)|点[「"]添加|组装成.{0,12}数组/;
+const SYSTEM_ROW_KEYS = new Set([
+  "itemtype", "sort", "index", "seq", "order",
+  "xrowkey", "x_row_key", "rowkey", "row_key",
+]);
 
 function optionEndpoint(node) {
   const source = isPlainObject(node)
@@ -60,6 +65,30 @@ function hasWrittenOptionContract(node, param) {
   if (isPlainObject(param.enum_value_map) && Object.keys(param.enum_value_map).length) return true;
   const source = isPlainObject(param.source) ? param.source : {};
   return Boolean(optionEndpoint(source) || optionEndpoint(source.option_source));
+}
+
+function objectArrayProperties(node) {
+  const items = isPlainObject(node?.items) ? node.items : {};
+  return isPlainObject(items.properties) ? items.properties : null;
+}
+
+function looksCollapsedRowArray(node, param) {
+  const type = String(node?.type || param?.type || "").toLowerCase();
+  if (type === "array" && objectArrayProperties(node)) return false;
+  const text = [
+    node?.description,
+    node?.title,
+    node?.label,
+    param?.reason,
+    param?.description,
+    param?.label,
+  ].map((item) => String(item || "")).join(" ");
+  return ROW_ARRAY_HINT_RE.test(text);
+}
+
+function isSystemRowKey(key) {
+  const leaf = String(key || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return SYSTEM_ROW_KEYS.has(leaf) || leaf.endsWith("rowkey");
 }
 
 function fieldLooksSelectable(node, param) {
@@ -202,6 +231,32 @@ export function assertPageDisplayContract(result) {
           "DISPLAY_CONTRACT",
           `input_schema.properties.${key} 是树/下拉选择字段，必须把选项合同写进 schema，不能只写 type=number 再把接口藏在说明里`,
         );
+      }
+      if (looksCollapsedRowArray(node, param)) {
+        throw new SubmitRejectedError(
+          "DISPLAY_CONTRACT",
+          `input_schema.properties.${key} 是可增行，必须写成对象数组并给出 items.properties，不能收成一段字符串`,
+        );
+      }
+      const itemProperties = objectArrayProperties(node);
+      if (String(node.type || "").toLowerCase() === "array" && itemProperties) {
+        const missingTitle = Object.entries(itemProperties).find(([itemKey, itemNode]) => {
+          if (!isPlainObject(itemNode)) return true;
+          return !String(itemNode.title || itemNode.label || "").trim();
+        });
+        if (missingTitle) {
+          throw new SubmitRejectedError(
+            "DISPLAY_CONTRACT",
+            `input_schema.properties.${key}.items.properties.${missingTitle[0]} 必须有表头原文 title，不能只写键名`,
+          );
+        }
+        const systemKey = Object.keys(itemProperties).find((itemKey) => isSystemRowKey(itemKey));
+        if (systemKey) {
+          throw new SubmitRejectedError(
+            "DISPLAY_CONTRACT",
+            `input_schema.properties.${key}.items.properties 不能包含行类型码/序号/行键 ${systemKey}，这些只留在系统 params`,
+          );
+        }
       }
     }
   }

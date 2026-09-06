@@ -405,6 +405,32 @@ function schemaItemLabels(schema: Record<string, unknown>) {
   }).filter(Boolean);
 }
 
+function schemaArrayTables(schema: Record<string, unknown>) {
+  const columns = Object.entries(asRecord(asRecord(schema.items).properties)).map(([key, raw]) => {
+    const row = asRecord(raw);
+    return {
+      id: key,
+      label: safeString(row.title || row.label) || key,
+      sectionTitles: asRecord(row["x-dano-section-titles"]),
+    };
+  }).filter((column) => column.label);
+  const title = safeString(schema.title || schema.label);
+  const sections = title.split(/\s*[/；;]\s*/).map((item) => item.trim()).filter(Boolean);
+  if (sections.length > 1) {
+    return sections.map((section) => ({
+      title: section,
+      labels: columns
+        .map((column) => (
+          Object.keys(column.sectionTitles).length
+            ? safeString(column.sectionTitles[section])
+            : column.label
+        ))
+        .filter(Boolean),
+    })).filter((item) => item.labels.length);
+  }
+  return columns.length ? [{ title, labels: columns.map((column) => column.label) }] : [];
+}
+
 function coveredByShownPath(param: { key?: string; path?: string }, shown: Set<string>) {
   const keys = callerFieldKeys(param);
   if (keys.some((key) => shown.has(key))) return true;
@@ -2910,6 +2936,7 @@ export default function PageRecorder({
       const enumValues = schemaChoiceOptions(schema);
       let type = safeString(schema.type) || "string";
       const itemLabels = schemaItemLabels(schema);
+      const itemTables = schemaArrayTables(schema);
       if (businessType === "single_enum") type = "enum";
       else if (businessType === "multi_enum") type = "list-enum";
       else if (format === "date") type = "date";
@@ -2964,7 +2991,9 @@ export default function PageRecorder({
               ? matched.param.type
               : type || matched.param.type,
             source_kind: sourceKind,
-            source: itemLabels.length ? { ...matchedSource, item_labels: itemLabels } : matchedSource,
+            source: itemLabels.length || itemTables.length
+              ? { ...matchedSource, item_labels: itemLabels, item_tables: itemTables }
+              : matchedSource,
             required: typeof matched.param.required === "boolean" ? matched.param.required : required,
             exposed_to_user: true,
             enum_options: matchedOptions,
@@ -2979,7 +3008,9 @@ export default function PageRecorder({
           label: safeString(schema.label || schema.title) || key,
           type,
           source_kind: schemaSourceKind || "user_input",
-          source: itemLabels.length ? { ...optionSource, item_labels: itemLabels } : optionSource,
+          source: itemLabels.length || itemTables.length
+            ? { ...optionSource, item_labels: itemLabels, item_tables: itemTables }
+            : optionSource,
           exposed_to_user: true,
           required,
           reason: safeString(schema.description),
@@ -3049,7 +3080,16 @@ export default function PageRecorder({
                     {param.source_kind === "constant" && fixedValue !== undefined ? (
                       <div><Text type="secondary">{constantValueCaption(param)}：{safeString(fixedValue)}</Text></div>
                     ) : null}
-                    {param.type === "array" && Array.isArray(asRecord(param.source).item_labels) && (asRecord(param.source).item_labels as unknown[]).length ? (
+                    {param.type === "array" && Array.isArray(asRecord(param.source).item_tables) && (asRecord(param.source).item_tables as unknown[]).length ? (
+                      (asRecord(param.source).item_tables as Array<Record<string, unknown>>).map((table, index) => (
+                        <div key={`${safeString(table.title) || "rows"}-${index}`}>
+                          <Text type="secondary">
+                            {safeString(table.title) ? `${safeString(table.title)}：` : "行内调用方："}
+                            {(Array.isArray(table.labels) ? table.labels : []).map((item) => String(item)).join("、")}
+                          </Text>
+                        </div>
+                      ))
+                    ) : param.type === "array" && Array.isArray(asRecord(param.source).item_labels) && (asRecord(param.source).item_labels as unknown[]).length ? (
                       <div>
                         <Text type="secondary">
                           行内调用方：{(asRecord(param.source).item_labels as unknown[]).map((item) => String(item)).join("、")}

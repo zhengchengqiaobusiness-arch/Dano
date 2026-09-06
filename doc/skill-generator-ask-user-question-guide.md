@@ -109,6 +109,29 @@
       },
       "required": ["type", "endpoint"]
     },
+    "tableColumn": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1 }
+      },
+      "required": ["id", "label"]
+    },
+    "tableSection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/tableColumn" }
+        }
+      },
+      "required": ["title", "columns"]
+    },
     "controlShape": {
       "anyOf": [
         {
@@ -121,7 +144,9 @@
               { "required": ["options"] },
               { "required": ["dateFormat"] },
               { "required": ["dataSource"] },
-              { "required": ["multiple"] }
+              { "required": ["multiple"] },
+              { "required": ["columns"] },
+              { "required": ["sections"] }
             ]
           }
         },
@@ -224,6 +249,32 @@
               { "required": ["dateFormat"] }
             ]
           }
+        },
+        {
+          "properties": {
+            "inputType": { "const": "table" },
+            "default": { "type": "string", "minLength": 1 },
+            "columns": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/tableColumn" }
+            },
+            "sections": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/tableSection" }
+            }
+          },
+          "required": ["inputType", "columns"],
+          "not": {
+            "anyOf": [
+              { "required": ["options"] },
+              { "required": ["dateFormat"] },
+              { "required": ["dataSource"] },
+              { "required": ["multiple"] },
+              { "required": ["fieldAssist"] }
+            ]
+          }
         }
       ]
     },
@@ -239,12 +290,22 @@
           "items": { "$ref": "#/$defs/option" }
         },
         "inputType": {
-          "enum": ["text", "textarea", "date", "radio", "checkbox", "select", "treeSelect"]
+          "enum": ["text", "textarea", "date", "radio", "checkbox", "select", "treeSelect", "table"]
         },
         "fieldAssist": { "type": "boolean" },
         "dateFormat": { "type": "string", "minLength": 1 },
         "dataSource": { "$ref": "#/$defs/dataSource" },
         "multiple": { "type": "boolean" },
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/tableColumn" }
+        },
+        "sections": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/tableSection" }
+        },
         "required": { "type": "boolean" },
         "default": { "$ref": "#/$defs/defaultValue" }
       },
@@ -262,12 +323,22 @@
           "items": { "$ref": "#/$defs/option" }
         },
         "inputType": {
-          "enum": ["text", "textarea", "date", "radio", "checkbox", "select", "treeSelect"]
+          "enum": ["text", "textarea", "date", "radio", "checkbox", "select", "treeSelect", "table"]
         },
         "fieldAssist": { "type": "boolean" },
         "dateFormat": { "type": "string", "minLength": 1 },
         "dataSource": { "$ref": "#/$defs/dataSource" },
         "multiple": { "type": "boolean" },
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/tableColumn" }
+        },
+        "sections": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/tableSection" }
+        },
         "required": { "type": "boolean" },
         "default": { "$ref": "#/$defs/defaultValue" }
       },
@@ -1676,6 +1747,7 @@ E09 和 E10 均在同一 Assistant Turn 中已提交。
 | `choice.checkbox` | checkbox 多选 | [E06](#e06-多选中的一个自定义回答) | `kind:multiple` |
 | `choice.select` | select | [E07](#e07-get-远程-select), [E10](#e10-第二份待确认表单) | `kind:select` |
 | `choice.tree-select` | treeSelect | [E08](#e08-post-远程多选-treeselect) | multiple tree Card Request |
+| `table.object-array` | table | 对象数组按 columns/sections 画表 | `inputType:table` |
 | `choice.stable-option` | 稳定 id/label option | [E04](#e04-普通业务确认使用-radio) | canonical options |
 | `choice.default-id` | default 使用 option ID | [E04](#e04-普通业务确认使用-radio) | `default:save_draft` |
 | `custom.single` | 单个自定义“其他”回答 | [E05](#e05-单选中的自定义其他) | custom scalar result |

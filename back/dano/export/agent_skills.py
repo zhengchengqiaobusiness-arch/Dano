@@ -40,6 +40,10 @@ from dano.catalog.manifest import (
     build_manifests,
     tool_name_of,
 )
+from dano.export.skill_package.renderer import (
+    _attach_table_question_fields,
+    _is_caller_object_array,
+)
 from dano.config import get_settings
 from dano.orchestrator.skills import SkillRegistry
 from dano.shared.enums import Subsystem
@@ -1173,6 +1177,8 @@ def _question_control(schema: dict, field: str = "") -> str:
             or (live.get("children_key") if isinstance(live, dict) else None)
         )
         return "treeSelect" if children else "select"
+    if _is_caller_object_array(schema):
+        return "table"
     if business_type in {"textarea", "rich_text", "array", "object"}:
         return "textarea"
     semantic_text = " ".join(str(value or "") for value in (
@@ -1325,8 +1331,13 @@ def _question_default_text(schema: dict, *, query: bool, control: str) -> str:
         rule = f"按当前用户语义从实时候选中选择“{label}”的稳定 id"
     elif control == "date":
         rule = f"根据当前用户意图和当前时间生成“{label}”，并符合 dateFormat"
+    elif control == "table" or _is_caller_object_array(schema):
+        rule = (
+            f"按页面上的“{label}”收集行，用 columns 画表，"
+            "多个 sections 各画一张表，空表写「暂无数据」"
+        )
     elif schema.get("type") in {"array", "object"}:
-        rule = f"根据当前用户意图生成满足 schema 的 JSON {schema.get('type')}"
+        rule = f"根据当前用户意图生成满足 schema 的 {schema.get('type')}"
     elif schema.get("type") in {"number", "integer"}:
         rule = f"从当前用户语义提取“{label}”数值，不得任意使用 0"
     else:
@@ -1385,6 +1396,8 @@ def _question_request_template(name: str, contract: dict) -> dict:
                 prop.get("dateFormat")
                 or ("yyyy-MM-dd HH:mm" if prop.get("format") == "date-time" else "yyyy-MM-dd")
             )
+        if control == "table":
+            _attach_table_question_fields(question, prop)
         questions.append(question)
     return {"title": str(contract.get("title") or name), "questions": questions}
 
@@ -1518,7 +1531,7 @@ def _capability_reference_md(m: SkillManifest) -> str:
                 "",
                 "### 批量/嵌套字段结构",
                 "",
-                "这些路径用于解释 textarea 中 JSON 的结构，不应拆成多次提问。",
+                "这些路径是对象数组表格的列，不应拆成多次提问。",
                 "",
                 "| 路径 | 类型 | 必填 | 推荐默认值 |",
                 "|---|---|---|---|",
@@ -1565,7 +1578,7 @@ def _business_capability_reference_md(manifests: list[SkillManifest]) -> str:
                     "",
                     "#### 批量/嵌套字段结构",
                     "",
-                    "以下路径属于同一个 textarea JSON，不拆成多次提问：",
+                    "以下路径属于同一张或同一组表格，不拆成多次提问：",
                 ]
                 for field, prop, required in nested_rows:
                     lines.append(

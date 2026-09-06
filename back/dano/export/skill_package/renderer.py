@@ -1518,6 +1518,75 @@ def _array_items_are_objects(field: dict | None) -> bool:
     )
 
 
+_SECTION_TITLE_SPLIT_RE = re.compile(r"\s*(?:/|；|;)\s*")
+
+
+def _object_array_item_properties(field: dict | None) -> dict[str, Any]:
+    items = (field or {}).get("items") if isinstance(field, dict) else None
+    props = items.get("properties") if isinstance(items, dict) else None
+    return props if isinstance(props, dict) else {}
+
+
+def _is_caller_object_array(field: dict | None) -> bool:
+    return bool(_object_array_item_properties(field))
+
+
+def _object_array_columns(field: dict | None) -> list[dict[str, str]]:
+    columns: list[dict[str, str]] = []
+    for key, node in _object_array_item_properties(field).items():
+        if not isinstance(node, dict):
+            continue
+        label = str(node.get("title") or node.get("label") or key).strip() or str(key)
+        columns.append({
+            "id": str(key),
+            "label": label,
+            "type": str(node.get("type") or "string"),
+        })
+    return columns
+
+
+def _object_array_section_names(field: dict | None) -> list[str]:
+    title = str((field or {}).get("title") or (field or {}).get("label") or "").strip()
+    parts = [part for part in _SECTION_TITLE_SPLIT_RE.split(title) if part]
+    return parts if len(parts) > 1 else []
+
+
+def _object_array_section_tables(field: dict | None) -> list[dict[str, Any]]:
+    columns = _object_array_columns(field)
+    sections = _object_array_section_names(field)
+    if not columns or not sections:
+        return []
+    props = _object_array_item_properties(field)
+    tables: list[dict[str, Any]] = []
+    for section in sections:
+        section_columns: list[dict[str, str]] = []
+        for column in columns:
+            node = props.get(column["id"])
+            node = node if isinstance(node, dict) else {}
+            titles = node.get("x-dano-section-titles")
+            titles = titles if isinstance(titles, dict) else {}
+            if titles:
+                header = titles.get(section)
+                if header in (None, ""):
+                    continue
+                section_columns.append({**column, "label": str(header)})
+            else:
+                section_columns.append(column)
+        if section_columns:
+            tables.append({"title": section, "columns": section_columns})
+    return tables
+
+
+def _attach_table_question_fields(question: dict[str, Any], field: dict | None) -> dict[str, Any]:
+    columns = _object_array_columns(field)
+    if columns:
+        question["columns"] = columns
+    sections = _object_array_section_tables(field)
+    if sections:
+        question["sections"] = sections
+    return question
+
+
 def _prefer_object_array_items(field: dict, other: dict) -> dict:
     packed = dict(field)
     if (
@@ -2031,12 +2100,16 @@ def _field_control(name: str, field: dict) -> str:
             field.get("x-dano-tree")
             or (data_source or {}).get("childrenField")
         ) else "select"
-    if configured in {"text", "textarea", "date", "radio", "checkbox", "select", "treeSelect"}:
+    if configured in {"text", "textarea", "date", "radio", "checkbox", "select", "treeSelect", "table"}:
+        if configured == "table" or _is_caller_object_array(field):
+            return "table"
         return configured
     if field.get("type") in {"date", "datetime"} or field.get("format") in {"date", "date-time"}:
         return "date"
     if field.get("type") == "boolean":
         return "radio"
+    if _is_caller_object_array(field):
+        return "table"
     if field.get("type") in {"array", "object"}:
         return "textarea"
     semantic = " ".join((name, _field_label(name, field), _safe_text(field.get("description"))))
@@ -2051,10 +2124,16 @@ def _runtime_default(name: str, field: dict, control: str) -> str:
         guidance = f"按当前用户语义从候选项选择“{label}”的稳定 id"
     elif control == "date":
         guidance = f"根据当前业务意图生成“{label}”，并符合 dateFormat"
+    elif control == "table" or _is_caller_object_array(field):
+        guidance = (
+            f"按页面上的“{label}”收集行；"
+            "用 columns 的 label 画表，多个 sections 各画一张表；"
+            "空表写「暂无数据」，不要展示 JSON 原文"
+        )
     elif field.get("type") in {"array", "object"}:
         guidance = (
             f"按页面上的“{label}”收集；"
-            "对象数组用其属性 title 做成表格给用户看，不要展示 JSON 原文"
+            "不要展示 JSON 原文"
         )
     elif field.get("type") in {"number", "integer"}:
         guidance = f"从当前用户语义提取“{label}”数值，不得任意使用 0"
@@ -2094,6 +2173,8 @@ def _question_spec(name: str, field: dict, *, required: bool) -> dict:
                 else "yyyy-MM-dd"
             )
         )
+    if control == "table":
+        _attach_table_question_fields(question, field)
     return question
 
 
@@ -2157,6 +2238,8 @@ def _capability_form_section(plan: dict) -> list[str]:
         options = _field_options(field)
         if source or options:
             source_text = "见 `references/OPTIONS.md` 对应行"
+        elif control == "table":
+            source_text = "按行填写，空表暂无数据"
         else:
             source_text = "自由输入"
         label_text = _field_label(str(name), field).replace("|", "\\|")
@@ -2185,7 +2268,7 @@ def _input_forms_bundle(plans: list[dict]) -> tuple[str, dict[str, str]]:
         "",
         "- 同一能力的相关字段尽量合并在一次 `questions[]` 中；每个 `id` 与 `input_schema.properties` 的键逐字一致。",
         "- `question` 只用页面标签。禁止附加「JSON 数组」「JSON 对象」或类型名。",
-        "- 展示与能力契约完全一致：`questions[]` 的 id、options 必须与 `input_schema` 逐字一致。枚举只显示契约 options 的 label。对象数组用 `items.properties` 的 title 画成表格。空表写「暂无数据」。不要把请求 JSON 给用户看。",
+        "- 展示与能力契约完全一致：`questions[]` 的 id、options 必须与 `input_schema` 逐字一致。枚举只显示契约 options 的 label。对象数组的 `inputType` 是 `table`，按 `columns` 的 label 画表；数组 title 含多个分区时按 `sections` 各画一张表。空表写「暂无数据」。不要把请求 JSON 给用户看。",
         "- 第一次提问必须把该能力 `questions[]` 原样发出，条数与 `input_schema.properties` 一致。只有本轮已给出且通过校验的字段才能从副本中删除。禁止因为可选、用户没提到、或原页控件更少就少问。不要改 `questions[]` 的 id 或 options，也不要另编字段或候选项。",
         "- 下列 `default` 是运行时占位符，调用前必须替换为结合当前用户意图、当前时间和实时候选得到的非空推荐值；不得把占位符本身传给工具。",
         "- 用户回答后，先按 schema 的 `type`、`format`、`enum`、`pattern` 和边界转换为接口线格式。可无歧义转换时自动转换（例如数字文本转 number、日期语义转声明格式、候选 label 转稳定 id）。",
@@ -2466,7 +2549,7 @@ def _caller_display_rules() -> list[str]:
         "",
         "- 标签只用 `input_schema` 的 title/label，以及对象数组 `items.properties` 的 title。禁止在问句、确认框或表头里附加「JSON 数组」「JSON 对象」或类型名。",
         "- 表单以 `references/INPUT_FORMS.md` 里该能力的 `questions[]` 为准。字段、options 和条数必须与能力 `input_schema` 完全一致；枚举只显示契约 options 的 label，纠错仍用同一组 options。禁止增加、删除、改写 options，禁止少问能力里已有的字段。可选字段展示后未选则不传该字段。",
-        "- 对象数组按 `items.properties` 的 title 画成 Markdown 表。空表写「暂无数据」。",
+        "- 对象数组按 `questions[]` 的 `columns`/`sections` 画成 Markdown 表。列名用各分区表头原文。空表写「暂无数据」。",
         "- 线格式只在调用脚本前组装；用户眼前始终是页面字段，不是请求 JSON。",
         "",
     ]

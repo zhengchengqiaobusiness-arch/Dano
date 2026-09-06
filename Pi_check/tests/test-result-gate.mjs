@@ -341,6 +341,68 @@ test("拒收重复 capability_id 和共用 execute", () => {
   );
 });
 
+test("拒收把可增行收成字符串", () => {
+  assert.throws(
+    () => assertPageDisplayContract({
+      capabilities: [{
+        capability_id: "cap_create",
+        request_refs: [{ step_id: "step_submit", usage: "execute" }],
+        input_schema: {
+          type: "object",
+          properties: {
+            items: {
+              type: "string",
+              title: "已完成工作 / 工作计划",
+              description: "调用方按行填写添加行后出现的输入框，系统再组装成该数组",
+            },
+          },
+        },
+      }],
+      steps: [{
+        step_id: "step_submit",
+        params: [
+          { key: "items", path: "body.items", exposed_to_user: true, reason: "可增行，点添加后按行填写" },
+        ],
+      }],
+    }),
+    (error) => error instanceof SubmitRejectedError && /不能收成一段字符串/.test(error.message),
+  );
+});
+
+test("拒收可增行把行类型码写进 items.properties", () => {
+  assert.throws(
+    () => assertPageDisplayContract({
+      capabilities: [{
+        capability_id: "cap_create",
+        request_refs: [{ step_id: "step_submit", usage: "execute" }],
+        input_schema: {
+          type: "object",
+          properties: {
+            items: {
+              type: "array",
+              title: "已完成工作 / 工作计划",
+              items: {
+                type: "object",
+                properties: {
+                  content: { type: "string", title: "工作内容" },
+                  itemType: { type: "number", title: "类型" },
+                },
+              },
+            },
+          },
+        },
+      }],
+      steps: [{
+        step_id: "step_submit",
+        params: [
+          { key: "items", path: "body.items", exposed_to_user: true },
+        ],
+      }],
+    }),
+    (error) => error instanceof SubmitRejectedError && /不能包含行类型码/.test(error.message),
+  );
+});
+
 test("错误信封不得落盘", async () => {
   const harness = await createHarness();
   try {

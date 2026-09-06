@@ -476,6 +476,13 @@ def _ask_user_question_interaction_protocol() -> dict:
                 "dateFormat_required": True,
                 "examples": ["yyyy-MM-dd", "yyyy-MM-dd HH:mm"],
             },
+            "object_array": {
+                "inputType": "table",
+                "columns_from": "items.properties.title",
+                "sections_from": "array title split by / or ；",
+                "empty_text": "暂无数据",
+                "json_textarea_forbidden": True,
+            },
             "choices": {
                 "static": "options",
                 "remote": "dataSource",

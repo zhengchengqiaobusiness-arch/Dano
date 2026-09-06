@@ -1756,10 +1756,98 @@ def test_array_form_question_uses_page_label_not_json_jargon() -> None:
 
     assert "# 输入表单" in forms
     assert '"question": "明细"' in forms
+    assert '"inputType": "table"' in forms
+    assert '"id": "content"' in forms
+    assert '"label": "工作内容"' in forms
     assert "提供符合 schema 的 JSON" not in forms
-    assert "对象数组用 `items.properties` 的 title 画成表格" in forms
+    assert "对象数组的 `inputType` 是 `table`" in forms
     assert "第一次提问必须把该能力 `questions[]` 原样发出" in forms
     assert "禁止增加、删除、改写 options" in forms
+
+
+def test_object_array_form_uses_table_sections_and_column_titles() -> None:
+    forms = _input_forms_md([{
+        "name": "create_record",
+        "title": "新增记录",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "title": "已完成工作 / 工作计划",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "title": "工作内容",
+                                "x-dano-section-titles": {
+                                    "已完成工作": "工作内容",
+                                    "工作计划": "计划内容",
+                                },
+                            },
+                            "progress": {
+                                "type": "number",
+                                "title": "完成进度",
+                                "x-dano-section-titles": {
+                                    "已完成工作": "完成进度",
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            "required": ["items"],
+        },
+    }])
+    questions = {item["id"]: item for item in _form_questions(forms)}
+
+    assert questions["items"]["inputType"] == "table"
+    assert questions["items"]["question"] == "已完成工作 / 工作计划"
+    assert questions["items"]["columns"] == [
+        {"id": "content", "label": "工作内容", "type": "string"},
+        {"id": "progress", "label": "完成进度", "type": "number"},
+    ]
+    assert questions["items"]["sections"] == [
+        {
+            "title": "已完成工作",
+            "columns": [
+                {"id": "content", "label": "工作内容", "type": "string"},
+                {"id": "progress", "label": "完成进度", "type": "number"},
+            ],
+        },
+        {
+            "title": "工作计划",
+            "columns": [
+                {"id": "content", "label": "计划内容", "type": "string"},
+            ],
+        },
+    ]
+    assert "暂无数据" in questions["items"]["default"]
+    assert "JSON" not in questions["items"]["question"]
+
+    template = _question_request_template("create_record", {
+        "title": "新增记录",
+        "parameters": {
+            "type": "object",
+            "required": ["items"],
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "title": "已完成工作 / 工作计划",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string", "title": "工作内容"},
+                            "progress": {"type": "number", "title": "完成进度"},
+                        },
+                    },
+                },
+            },
+        },
+    })
+    assert template["questions"][0]["inputType"] == "table"
+    assert template["questions"][0]["columns"][0]["label"] == "工作内容"
 
 
 def test_result_then_playbook_renders_combination_route_and_readable_scripts(tmp_path: Path) -> None:
