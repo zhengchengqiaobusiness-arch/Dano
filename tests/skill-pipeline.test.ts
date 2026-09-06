@@ -192,9 +192,10 @@ test("exports a progressively disclosed Python Skill package", async () => {
     assert.notEqual(result.dir, again.dir);
     for (const relative of [
       "SKILL.md", "references/CONTRACT.json", "references/CAPABILITIES.md", "references/INPUT_FORMS.md",
-      "references/OPTIONS.md", "references/PLAYBOOK.md", "references/routes/route-review-order.md",
+      "references/OPTIONS.md", "references/routes/route-review-order.md",
       "scripts/execute.py", "scripts/candidates.py", "scripts/format_list.py"
     ]) await stat(path.join(result.dir, relative));
+    await assert.rejects(stat(path.join(result.dir, "references", "PLAYBOOK.md")));
     await assert.rejects(stat(path.join(result.dir, "references", "EVIDENCE.md")));
     await assert.rejects(stat(path.join(result.dir, "references", "reference.md")));
     await execFileAsync("python", ["-m", "py_compile",
@@ -206,39 +207,30 @@ test("exports a progressively disclosed Python Skill package", async () => {
     const skill = await readFile(path.join(result.dir, "SKILL.md"), "utf8");
     const capabilities = await readFile(path.join(result.dir, "references", "CAPABILITIES.md"), "utf8");
     const forms = await readFile(path.join(result.dir, "references", "INPUT_FORMS.md"), "utf8");
-    const playbook = await readFile(path.join(result.dir, "references", "PLAYBOOK.md"), "utf8");
     const route = await readFile(path.join(result.dir, "references", "routes", "route-review-order.md"), "utf8");
-    assert.match(skill, /Prefer HTTP/);
     assert.match(skill, /ask_user_question/);
     assert.match(skill, /approved: true/);
-    assert.match(skill, /前置/);
     assert.match(skill, /SKILL_AUTH_HEADERS/);
     assert.match(skill, /Use when/);
-    assert.match(skill, /何时使用/);
-    assert.match(skill, /何时不要使用/);
-    assert.match(skill, /## 路由/);
-    assert.match(skill, /能力怎么组合/);
-    assert.match(skill, /何时走哪条原子操作/);
-    assert.match(skill, /何时可以按已确认绑定串联/);
-    assert.match(skill, /何时必须停下来问人/);
-    assert.match(skill, /失败处理/);
+    assert.match(skill, /## Workflow/);
+    assert.match(skill, /## Atomic capabilities/);
+    assert.match(skill, /## Composed workflows/);
+    assert.match(skill, /## Output and failures/);
+    assert.match(skill, /## Boundaries/);
     assert.match(skill, /401\/403/);
-    assert.match(skill, /按需读取/);
+    assert.match(skill, /## Progressive references/);
     assert.match(skill, /INPUT_FORMS\.md/);
-    assert.match(skill, /PLAYBOOK\.md/);
-    assert.match(skill, /用户：「/);
-    assert.ok(skill.split(/\r?\n/).length < 500);
+    assert.doesNotMatch(skill, /PLAYBOOK\.md/);
+    assert.equal((skill.match(/python scripts\/execute\.py --capability/g) || []).length, 1);
+    assert.ok(skill.split(/\r?\n/).length < 100);
     assert.doesNotMatch(skill, /生成器实现|TypeScript|execute\.mjs|src\/export|录制样本当成默认查询条件|执行器/);
     assert.doesNotMatch(skill, /### 查询销售订单[\s\S]*参数名/);
     assert.match(capabilities, /查询销售订单/);
     assert.match(capabilities, /审核销售订单/);
+    assert.doesNotMatch(capabilities, /scripts\/execute\.py|ask_user_question/);
     assert.match(forms, /ask_user_question/);
     assert.match(forms, /comment/);
     assert.doesNotMatch(forms, /执行器/);
-    assert.match(playbook, /规划例子/);
-    assert.match(playbook, /无数据/);
-    assert.match(playbook, /format_list/);
-    assert.match(playbook, /<br>/);
     assert.match(route, /自然语言组合/);
     assert.match(route, /可执行约定/);
     assert.match(route, /find-orders/);

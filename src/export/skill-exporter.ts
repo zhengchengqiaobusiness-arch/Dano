@@ -11,7 +11,6 @@ import {
   buildCapabilities,
   buildInputForms,
   buildOptions,
-  buildPlaybook,
   buildRoute,
   buildSkillMd,
   classifyExported,
@@ -205,11 +204,6 @@ export async function exportSkill(
   await writeFile(path.join(referencesDir, "CAPABILITIES.md"), buildCapabilities(capabilities, routes), "utf8");
   await writeFile(path.join(referencesDir, "INPUT_FORMS.md"), buildInputForms(capabilities), "utf8");
   await writeFile(path.join(referencesDir, "OPTIONS.md"), buildOptions(capabilities), "utf8");
-  const playbook = buildPlaybook(displayName, capabilities, routes);
-  const routeIssueNotes = routeIssues.length
-    ? `\n## 未生成的组合路线\n\n${routeIssues.map(item => `- \`${item.targetCapabilityId}\`：${item.reason}`).join("\n")}\n`
-    : "";
-  await writeFile(path.join(referencesDir, "PLAYBOOK.md"), playbook + routeIssueNotes, "utf8");
   for (const route of routes) {
     await writeFile(path.join(routesDir, `${route.id}.md`), buildRoute(route, capabilities), "utf8");
   }

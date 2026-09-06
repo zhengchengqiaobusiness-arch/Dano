@@ -114,18 +114,6 @@ function schemaHas(schema: JsonSchema | undefined, dotted: string) {
   return true;
 }
 
-function hasArrayType(schema: JsonSchema | undefined) {
-  if (!schema?.type) return false;
-  return schema.type === "array" || (Array.isArray(schema.type) && schema.type.includes("array"));
-}
-
-function itemsPathOf(schema?: JsonSchema) {
-  if (schemaHas(schema, "data.list")) return "$.data.list";
-  if (hasArrayType(schema?.properties?.data)) return "$.data";
-  if (schemaHas(schema, "list")) return "$.list";
-  return undefined;
-}
-
 function lookupQueryHints(source: CapabilityContract | undefined) {
   if (!source) return {};
   const hints: {
@@ -233,59 +221,6 @@ export function skillDescriptionLines(displayName: string, capabilities: Capabil
   ];
 }
 
-function compositionNarrative(displayName: string, primary: CapabilityContract[], lookups: CapabilityContract[], routes: CapabilityRoute[]) {
-  const names = primary.map(capability => `「${capability.title}」`).join("、");
-  const lookupNames = lookups.map(capability => capability.title.replace(/^查询/, "")).filter(Boolean).join("、");
-  return [
-    `${displayName}先按用户目标选择一条主能力：${names || "当前已验证动作"}。查询和写操作不要混用。`,
-    lookupNames
-      ? `${lookupNames}只在填表时作为候选来源，不是独立业务动作，也不要单独向用户交差。`
-      : "没有独立的目录查询业务；不要把未列入的接口当成能力。",
-    routes.length
-      ? "只有用户目标明确落在已确认路线时，才按路线串联，并且只使用 `approved: true` 的绑定传值。"
-      : "当前没有已确认组合路线。规划结束后只能执行单一原子操作，不要自行把查询结果填进新建或其他写操作。",
-    "规划阶段用自然语言说明要走哪几步；规划结束后，只按下面的可执行约定执行，不要再混合推理。"
-  ].join("\n");
-}
-
-function planningExamples(primary: CapabilityContract[], routes: CapabilityRoute[]) {
-  const queries = primary.filter(capability => capability.operation === "query");
-  const query = queries.find(capability => pageRoleLabel(capability.transport.pathTemplate) !== "统计") || queries[0];
-  const summary = queries.find(capability => pageRoleLabel(capability.transport.pathTemplate) === "统计");
-  const write = primary.find(capability => capability.confirmation.required);
-  const blocks: string[] = [];
-  if (query) {
-    blocks.push(`用户：「${query.title.replace(/^查询/, "查一下")}」
-规划：单一原子操作「${query.title}」。只收集用户点名的筛选。
-执行：读 [INPUT_FORMS.md](references/INPUT_FORMS.md#${query.id}) → 原生 \`ask_user_question\` → \`python scripts/execute.py --capability ${query.id} --input '...'\` → \`python scripts/format_list.py\`。
-停止：多个主能力都像，或显示名对不上候选。`);
-  }
-  if (summary) {
-    blocks.push(`用户：「${summary.title.replace(/^查询/, "看一下")}」
-规划：单一原子操作「${summary.title}」。只收集用户点名的筛选。
-执行：读 [INPUT_FORMS.md](references/INPUT_FORMS.md#${summary.id}) → 原生 \`ask_user_question\` → \`python scripts/execute.py --capability ${summary.id} --input '...'\`。
-停止：多个主能力都像，或显示名对不上候选。`);
-  }
-  if (write) {
-    blocks.push(`用户：「${write.title}」
-规划：单一原子操作「${write.title}」。这是写操作，先齐字段再确认。
-执行：读 [INPUT_FORMS.md](references/INPUT_FORMS.md#${write.id}) 与 [OPTIONS.md](references/OPTIONS.md#${write.id}) → 原生问人 → \`{"confirm":true,"formIds":["<answered.formId>"]}\` → \`python scripts/execute.py --capability ${write.id} --input '...' --confirm-write\`。
-停止：缺必填、候选对不上、用户未确认或 \`cancelled\`。`);
-  }
-  if (query && write && !routes.length) {
-    blocks.push(`用户：「用刚才查到的那条接着${write.title}」
-规划：当前没有 \`approved: true\` 路线，不能把查询结果自行填进写操作。
-执行：停下来问人。请用户明确是继续只查，还是按写操作表单重新收集字段。`);
-  }
-  for (const route of routes) {
-    blocks.push(`用户目标落在「${route.title}」
-规划：走已确认路线，按步骤串联，只传合同绑定。
-执行：读 [routes/${route.id}.md](references/routes/${route.id}.md)，每步独立执行。
-停止：上一步结果为空或不能唯一确定。`);
-  }
-  return blocks.join("\n\n");
-}
-
 function routingRows(primary: CapabilityContract[]) {
   return primary.map(capability => {
     const intent = intentForCapability(capability);
@@ -298,48 +233,6 @@ function routeIndex(routes: CapabilityRoute[]) {
   return routes.map(route =>
     `- [${safeCell(route.title)}](references/routes/${route.id}.md)：仅当用户目标就是这条最终操作时使用。`
   ).join("\n");
-}
-
-function routeByIntent(primary: CapabilityContract[], lookups: CapabilityContract[]) {
-  const query = primary.filter(capability => capability.operation === "query");
-  const listQueries = query.filter(capability => pageRoleLabel(capability.transport.pathTemplate) !== "统计");
-  const summaryQueries = query.filter(capability => pageRoleLabel(capability.transport.pathTemplate) === "统计");
-  const writes = primary.filter(capability => capability.confirmation.required);
-  const others = primary.filter(capability => !query.includes(capability) && !writes.includes(capability));
-  const lookupNames = lookups.map(capability => capability.title.replace(/^查询/, "")).filter(Boolean).join("、");
-  const sections: string[] = [];
-  if (listQueries.length) {
-    sections.push(`### 查、筛、列单据
-
-当用户只要看已有单据时走这里。选定后先读 [CAPABILITIES.md](references/CAPABILITIES.md)，再读该能力在 [INPUT_FORMS.md](references/INPUT_FORMS.md) 的小节。
-
-${listQueries.map(capability => `- ${capability.title}：\`${capability.id}\``).join("\n")}`);
-  }
-  if (summaryQueries.length) {
-    sections.push(`### 统计与汇总
-
-当用户只要看统计、汇总或分析时走这里。选定后先读 [CAPABILITIES.md](references/CAPABILITIES.md)，再读该能力在 [INPUT_FORMS.md](references/INPUT_FORMS.md) 的小节。
-
-${summaryQueries.map(capability => `- ${capability.title}：\`${capability.id}\``).join("\n")}`);
-  }
-  if (writes.length) {
-    sections.push(`### 写单据
-
-当用户要新建、修改、审核或删除时走这里。选定后读表单和候选；执行前必须确认。
-
-${writes.map(capability => `- ${capability.title}：\`${capability.id}\``).join("\n")}`);
-  }
-  if (others.length) {
-    sections.push(`### 其他已验证动作
-
-${others.map(capability => `- ${capability.title}：\`${capability.id}\``).join("\n")}`);
-  }
-  if (lookups.length) {
-    sections.push(`### 只是选一个名称
-
-当用户只要选${lookupNames || "目录值"}时，不要走主能力。读 [OPTIONS.md](references/OPTIONS.md) 取候选。`);
-  }
-  return sections.join("\n\n");
 }
 
 export function buildSkillMd(
@@ -361,193 +254,91 @@ description: >
 
 # ${safeCell(title)}
 
-把本页当作路由手册。先判断用户目标，再按需读取一份 reference；不要一开始读完 \`references/\`。这不是业务说明书，也不解释代码怎么实现。
+把用户目标路由到最小的已验证能力或组合路线，并通过本目录脚本执行。\`references/CONTRACT.json\` 是接口、字段、枚举、绑定和完成条件的唯一事实来源。
 
-## 前置
+## Workflow
 
-- 工作目录必须是本 \`SKILL.md\` 所在目录。
-- 认证默认读取 Skill 外部同名运行时凭据文件；\`SKILL_AUTH_HEADERS\` 或 \`SKILL_AUTH_FILE\` 可显式覆盖。凭据不写入 Skill、合同或对话。
-- Prefer HTTP：用本目录 \`scripts/\` 执行。不要绕过脚本直接拼请求。
+1. 从下表选择唯一原子能力。目标不唯一时，只读 [CAPABILITIES.md](references/CAPABILITIES.md) 的相关行；仍不唯一再问用户。
+2. 调用方已给出合同字段且类型明确时直接执行。需要把业务名称映射为字段、补字段或生成写操作确认表单时，只读 [INPUT_FORMS.md](references/INPUT_FORMS.md) 的对应能力小节。
+3. 仅当当前字段需要枚举或接口候选时，运行 \`python scripts/candidates.py --capability <能力编号> --field <字段路径> --input '<JSON>'\`；处理规则见 [OPTIONS.md](references/OPTIONS.md)。显示名由脚本转换为真实接口值。
+4. 查询只传用户明确提供的筛选条件。写操作把本阶段调用方字段合并为一次原生 \`ask_user_question\`，再调用 \`{"confirm":true,"formIds":["<answered.formId>"]}\`；只有 \`confirmed\` 才执行。
+5. 从 Skill 根目录运行下述命令。认证由外部同名运行时凭据提供；也可显式使用 \`SKILL_AUTH_HEADERS\` 或 \`SKILL_AUTH_FILE\`。凭据不得进入 Skill、合同或对话。
+6. HTTP 状态与合同全部完成断言同时满足才算完成；写操作结果不明时不重试。
 
-## 何时使用
-
-用户要「${actions || "已验证业务动作"}」时使用，即使没说出 Skill 名或接口名。
-
-## 何时不要使用
-
-- 未列入本手册的编辑、删除、审批、导入导出。
-- ${lookupNames ? `把${lookupNames}当成独立业务去查询或交差。` : "把目录、字典或候选列表当成独立业务。"}
-- 发明合同里没有的接口、字段、枚举或绑定。
-
-## 路由
-
-先判断用户要哪一类事，再打开对应文件。不要同时打开全部 reference。
-
-${routeByIntent(primary, lookups)}
-
-## 能力怎么组合
-
-${compositionNarrative(title, primary, lookups, routes)}
-
-具体规划例子见 [PLAYBOOK.md](references/PLAYBOOK.md)。
-
-${planningExamples(primary, routes)}
-
-## 可执行约定
-
-规划结束后按下述约定执行，不要再混合推理。
-
-### 何时走哪条原子操作
+## Atomic capabilities
 
 | 用户意图 | 原子操作 | 能力编号 |
 | --- | --- | --- |
 ${routingRows(primary)}
-${lookups.length ? `| 只要选${lookupNames || "目录值"} | 不走主能力，读 [OPTIONS.md](references/OPTIONS.md) 取候选 | 字段候选，不是业务动作 |` : ""}
+${lookups.length ? `| 只为字段选择${lookupNames || "目录值"} | 运行候选脚本，不作为最终业务动作 | 字段候选 |` : ""}
 
-查询和写操作不要混用。实体目录不等于业务单据。
+原子命令：
 
-### 何时可以按已确认绑定串联
+\`python scripts/execute.py --capability <能力编号> --input '<JSON>'\`
+
+写操作在确认后追加 \`--confirm-write\`。
+
+## Composed workflows
 
 ${routeIndex(routes)}
 
-- 传值只使用合同声明的 \`fromPath → toPath\`。
-- 上游结果为空或不能唯一确定时停止，展示候选让用户选择。
-- 不得用字段名相似代替合同绑定。
+组合只允许使用路线文档和合同中 \`approved: true\` 的绑定。没有路线时只能执行单一原子能力；不得凭字段名相似自行串联。上游结果为空或不能唯一确定时停止并让用户选择。
 
-### 何时必须停下来问人
+## Output and failures
 
-- 多个主能力都可能匹配。
-- 缺少调用方必填字段，或显示名对不上候选。
-- 写操作还没有 \`confirm: true\`，或用户返回 \`cancelled\`。
-- 目标超出本手册，或 Prefer HTTP 与 Fallback 都无法完成。
+- 列表结果交给 \`python scripts/format_list.py\`；无数据输出「无数据」，单元格换行使用 \`<br>\`。
+- 非列表只展示合同完成条件中的业务字段，不把内部 ID 或裸 \`data\` 猜成业务编号。
+- 401/403：停止并提示更新外部运行时凭据。网络或合同断言失败：报告真实错误；只读操作由用户决定是否重试，写操作不自动重试。
+- 字段类型或候选不能唯一转换时，只对错误字段重新调用 \`ask_user_question\`。\`cancelled\` 后立即停止。
 
-## 收集输入
+## Boundaries
 
-需要补字段时原生调用 \`ask_user_question\`。控件、默认策略和 \`dataSource\` 以当前能力在 [INPUT_FORMS.md](references/INPUT_FORMS.md) 的小节为准。
+- 仅支持：${actions || "合同列出的已验证业务动作"}。
+- 不支持未列出的编辑、删除、审批、导入导出；${lookupNames ? `${lookupNames}只作为字段候选。` : "目录、字典和候选列表不是最终业务动作。"}
+- 只通过本目录脚本执行，不直接拼接口，不发明字段、枚举、绑定或成功结果。
 
-## 执行与输出
+## Progressive references
 
-- Prefer：\`python scripts/execute.py --capability <能力编号> --input '<JSON>'\`。写操作在确认后追加 \`--confirm-write\`。
-- 写操作先调用 \`{"confirm": true, "formIds": ["<answered.formId>"]}\`，只有 \`confirmed\` 才执行。
-- 列表先 \`python scripts/format_list.py\`：无数据输出「无数据」；表头、分隔行、数据行之间不插空行；单元格换行使用 \`<br>\`。
-- 非列表只展示合同完成条件里的业务字段，不要把内部 ID 或裸 data 猜成业务编号。
-- Prefer 失败时整段改走 Fallback（内置浏览器按已验证合同补录），并写明走了哪条路径。
-- 结果样例和列表列选择见 [PLAYBOOK.md](references/PLAYBOOK.md)。
-
-## 质量与完成
-
-- HTTP 状态和合同完成断言都满足才算成功。
-- 写操作结果不明确时不要重试。
-- 未列入的能力不要假装支持。
-
-## 失败处理
-
-| 情况 | 处理 |
-| --- | --- |
-| 缺鉴权或 401/403 | 停止。检查外部运行时凭据是否仍有效；必要时重新登录并录制一次请求，或显式提供 \`SKILL_AUTH_HEADERS\`。 |
-| 超时或网络失败 | Prefer 整段改走 Fallback，并写明路径。不要重试写操作。 |
-| HTTP 已返回但断言不满足 | 按合同失败处理；展示关键错误字段，不要编造成功。 |
-| \`ask_user_question\` 为 \`cancelled\` | 立即停止当前流程。 |
-| 字段类型或候选不唯一 | 只重问错误字段。 |
-
-细则见 [PLAYBOOK.md](references/PLAYBOOK.md)。
-
-## 安全边界
-
-- 不发明接口、字段、枚举或绑定。
-- 不把凭证、Cookie 或 secret-bearing headers 写入 Skill 或对话记录。
-- 不绕过脚本直接访问业务系统。
-- 不确定时停下来问人，不要把不确定内容说成确定事实。
-
-## 按需读取
-
-- [CAPABILITIES.md](references/CAPABILITIES.md)：选定主能力
-- [INPUT_FORMS.md](references/INPUT_FORMS.md)：填写当前能力
-- [OPTIONS.md](references/OPTIONS.md)：取字段候选
-- [PLAYBOOK.md](references/PLAYBOOK.md)：规划例子、输出样例、失败细则
-- [CONTRACT.json](references/CONTRACT.json)：机器事实来源
-${routes.length ? "- [routes/](references/routes/)：已确认组合路线\n" : ""}`;
-}
-
-export function buildPlaybook(displayName: string, capabilities: CapabilityContract[], routes: CapabilityRoute[]) {
-  const { primary } = classifyExported(capabilities);
-  const query = primary.find(capability => capability.operation === "query");
-  const write = primary.find(capability => capability.confirmation.required);
-  const itemsPath = query ? itemsPathOf(query.outputSchema) : undefined;
-  const listCommand = itemsPath
-    ? `\`python scripts/format_list.py --input '-' --items-path '${itemsPath}'\``
-    : "`python scripts/format_list.py --input '-' --items-path '<合同输出中的列表路径>'`";
-  return `# ${safeCell(displayName)}：规划、输出与失败
-
-只在规划举例、整理结果或处理失败时读取。不要用本页代替路由手册。
-
-## 规划例子
-
-${planningExamples(primary, routes)}
-
-规划结束后，回到 \`SKILL.md\` 的可执行约定执行。
-
-## 输出约定
-
-### 列表
-
-${listCommand}
-
-- 无数据时输出「无数据」。
-- 表头、分隔行、数据行之间不插空行。
-- 单元格换行使用 \`<br>\`；不要把内部 ID 单独当成业务编号。
-${query ? `- 「${query.title}」优先展示用户能辨认的业务列。` : ""}
-
-### 写操作
-
-${write ? `「${write.title}」成功后只报告：已提交、合同完成条件已满足、用户能核对的关键字段。不要倾倒完整返回体。` : "写操作成功后只报告完成条件和可核对字段。"}
-失败时报告 HTTP 状态和合同未满足的断言，不要重试。
-
-## 失败细则
-
-- 外部运行时凭据缺失或返回 401/403：停止并提示重新登录；也可显式提供 \`SKILL_AUTH_HEADERS\` 或 \`SKILL_AUTH_FILE\`。
-- 超时、连接失败：写明改走 Fallback；读操作可整段改走，写操作不自动重试。
-- 业务返回失败字段：展示合同里存在的错误信息，不编造成功。
-- \`invalid_question_arguments\` 且可重试：一次修正全部 issue 后替换提问。
-- \`cancelled\` 或不可重试失败：停止当前流程，等待用户下一条消息。
+- [CAPABILITIES.md](references/CAPABILITIES.md)：仅在能力边界不明确时读取相关行。
+- [INPUT_FORMS.md](references/INPUT_FORMS.md)：仅在需要映射或补充当前能力输入时读取对应小节。
+- [OPTIONS.md](references/OPTIONS.md)：仅在当前字段需要候选时读取。
+${routes.length ? "- [routes/](references/routes/)：仅在用户目标命中已确认组合路线时读取一个路线文件。\n" : ""}- [CONTRACT.json](references/CONTRACT.json)：脚本使用的机器事实来源；普通调用无需预读。
 `;
 }
 
 export function buildCapabilities(capabilities: CapabilityContract[], routes: CapabilityRoute[]) {
   const { primary, lookups } = classifyExported(capabilities);
-  const items = primary.map(capability => {
+  const rows = primary.map(capability => {
     const caller = capability.inputForm.filter(field => field.source === "caller" && !/^(pageNo|pageSize|pageNum|page|size)$/i.test(field.name));
     const input = caller.length
       ? capability.operation === "query"
-        ? `调用方可提供 ${caller.map(field => field.label).join("、")}；未点名则不收集`
-        : `调用方必填 ${caller.filter(field => field.required).map(field => field.label).join("、") || "见当前表单"}`
+        ? `${caller.map(field => field.label).join("、")}（按需筛选）`
+        : caller.map(field => `${field.label}${field.required ? "*" : ""}`).join("、")
       : "无需调用方字段";
-    return `## ${safeCell(capability.title)}
-
-- 何时用：${intentForCapability(capability)}
-- 读写：${capability.confirmation.required ? "写" : "读"} · ${operationNames[capability.operation]}
-- 能力编号：\`${capability.id}\`
-- 输入概况：${input}
-- 完成：HTTP ${capability.completion.acceptedHttpStatuses.join(" / ")}
-- 执行：\`python scripts/execute.py --capability ${capability.id} --input '{...}'${capability.confirmation.required ? " --confirm-write" : ""}\`
-- 表单：[INPUT_FORMS.md](INPUT_FORMS.md#${capability.id})
-- 候选：[OPTIONS.md](OPTIONS.md#${capability.id})
-`;
+    const output = [
+      `HTTP ${capability.completion.acceptedHttpStatuses.join("/")}`,
+      ...(capability.completion.requiredOutputPaths || []).map(item => item),
+      ...(capability.completion.assertions || []).map(item => `${item.path} ${item.kind}`)
+    ].join("；");
+    return `| ${safeCell(intentForCapability(capability))} | ${safeCell(capability.title)} | \`${capability.id}\` | ${capability.confirmation.required ? "写" : "读"} | ${safeCell(input)} | ${safeCell(output)} |`;
   }).join("\n");
   const lookupNote = lookups.length
-    ? `字段候选（${lookups.map(capability => capability.title).join("、")}）不是主能力，见 [OPTIONS.md](OPTIONS.md)。`
+    ? `字段候选（${lookups.map(capability => capability.title).join("、")}）只服务于输入选择，不作为最终业务动作。`
     : "当前没有字段候选接口。";
   const routeIndexLines = routes.length
     ? routes.map(route => `- [${safeCell(route.title)}](routes/${route.id}.md)`).join("\n")
     : "- 暂无已确认组合路线。";
   return `# 能力索引
 
-先用本页选择一个主能力。只有确定执行目标后，才读取对应表单、候选或路线。
+仅在 \`SKILL.md\` 无法唯一确定能力时读取本页。星号表示写操作必填字段；具体控件和默认规则只在 [INPUT_FORMS.md](INPUT_FORMS.md) 定义。
 
-${items}
+| 何时用 | 能力 | 编号 | 读写 | 调用方输入概况 | 完成概况 |
+| --- | --- | --- | --- | --- | --- |
+${rows}
+
 ${lookupNote}
 
-# 已确认组合路线
+## 已确认组合路线
 
 ${routeIndexLines}
 `;
@@ -583,7 +374,7 @@ ${fields.map(field => {
     const dataSource = publishedDataSource(field, capabilities);
     let candidate = field.requestFormat === "html" ? "富文本：调用方传文本，系统按真实请求格式编码为 HTML" : "自由输入";
     if (field.candidates?.type === "static") {
-      candidate = field.candidates.values.map(item => `${item.label}=${String(item.value)}`).join("；");
+      candidate = "页面固定枚举；值见 OPTIONS.md 的同能力小节";
     } else if (dataSource) {
       candidate = `dataSource: ${JSON.stringify(dataSource)}`;
     } else if (isDateField(field)) {
@@ -620,27 +411,26 @@ export function buildInputForms(capabilities: CapabilityContract[]) {
   const { primary } = classifyExported(capabilities);
   return `# 输入表单
 
-只读取当前能力的小节。仅向用户询问“调用方提供”的字段。
+只读取当前能力的小节。这里是提问和系统补值的唯一说明；候选取值规则只在 [OPTIONS.md](OPTIONS.md) 定义。
 
 需要补充字段时必须原生调用 \`ask_user_question\`，不得在普通文本中模拟。把同一阶段字段合并为一次 \`title + questions[]\`；\`questions[].id\` 使用下表提问编号。调用前按合同 \`defaultStrategy\` 生成本次非空推荐值，不能复制未见过的值。类型或候选转换不唯一时，只重问错误字段；\`cancelled\` 后立即停止。
 
 ${primary.map(capability => `## ${capability.id}
 
-${safeCell(capability.title)} · ${operationNames[capability.operation]} · \`${capability.transport.method} ${capability.transport.pathTemplate}\`
+${safeCell(capability.title)} · ${operationNames[capability.operation]}
 ${capability.confirmation.required ? "\n写操作：字段齐备后调用 `{\"confirm\":true,\"formIds\":[\"<answered.formId>\"]}`，得到 `confirmed` 再加 `--confirm-write`。\n" : "\n查询：只收集用户点名的筛选条件。\n"}
 ${callerFieldTable(capability, capabilities)}${systemFieldTable(capability)}
 `).join("\n")}
 `;
 }
 
-function candidateText(field: InputFormField, capabilities: CapabilityContract[]) {
+function candidateText(field: InputFormField) {
   const candidates = field.candidates;
   if (!candidates) return "";
   if (candidates.type === "static") {
-    return `- \`${field.path}\`（${field.label}）：页面固定枚举，直接选择 ${candidates.values.map(item => `${safeCell(item.label)} = ${safeCell(item.value)}`).join("；")}`;
+    return `- \`${field.path}\`（${field.label}）：页面固定枚举；${candidates.values.map(item => `${safeCell(item.label)} = ${safeCell(item.value)}`).join("；")}`;
   }
-  const dataSource = publishedDataSource(field, capabilities);
-  return `- \`${field.path}\`（${field.label}）：接口候选。用户看显示名，接口收稳定值。dataSource: \`${JSON.stringify(dataSource)}\``;
+  return `- \`${field.path}\`（${field.label}）：运行候选命令；从已验证能力 \`${candidates.capabilityId}\` 的 \`${candidates.labelPath}\` 显示名称，并把唯一匹配的 \`${candidates.valuePath}\` 交给接口。`;
 }
 
 export function buildOptions(capabilities: CapabilityContract[]) {
@@ -648,18 +438,20 @@ export function buildOptions(capabilities: CapabilityContract[]) {
   const sections = primary.flatMap(capability => {
     const fields = capability.inputForm.filter(field => field.candidates);
     return fields.length
-      ? [`## ${capability.id}\n\n${fields.map(field => candidateText(field, capabilities)).join("\n")}`]
+      ? [`## ${capability.id}\n\n${fields.map(field => candidateText(field)).join("\n")}`]
       : [];
   });
   return `# 候选项规则
 
-仅在当前字段具有候选规则时读取。这些接口只给调用方选值，不是独立业务操作。
+仅在当前字段具有候选规则时读取。这是候选获取与“显示名 → 接口值”转换的唯一说明；表单控件和 dataSource 在 [INPUT_FORMS.md](INPUT_FORMS.md)。
 
-动态候选：
+对静态和动态候选统一运行：
 
 \`python scripts/candidates.py --capability <目标能力编号> --field <字段路径> --input '<已收集的 JSON>'\`
 
-dataSource 必须声明 \`type\`、\`endpoint\`、\`method\`、\`params\`、\`resultPath\`、\`idField\`、\`labelField\`。没有观察到固定入参时 \`params\` 写 \`{}\`。只有候选接口本身带搜索或分页字段时，再补充 \`searchParam\`、\`pageParam\`、\`pageSizeParam\`、\`pageSize\`、\`totalPath\`。不要编造未观察到的参数名。
+- 向用户展示 \`label\`，向业务接口传 \`value\`；脚本会把唯一匹配的显示名转换为真实值。
+- 无匹配或多匹配时只重问当前字段，不传显示名、不猜数字。
+- 动态候选的请求参数和返回路径以 INPUT_FORMS 中的 dataSource 为准。
 
 ${sections.length ? sections.join("\n\n") : "当前没有记录到候选项规则。"}
 `;
