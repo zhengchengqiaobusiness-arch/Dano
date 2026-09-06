@@ -2202,6 +2202,76 @@ test("page snapshot does not force a full-document innerText read", () => {
   assert.equal(/document\.body\.innerText/.test(source), false, source.slice(0, 200));
 });
 
+test("snapshot and exercise-form cover component radios backed by hidden native inputs", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-component-radio-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body>
+      <form class="el-form">
+        <div class="el-form-item">
+          <label class="el-form-item__label">状态</label>
+          <div class="el-form-item__content">
+            <label class="el-radio is-checked" style="display:inline-flex;width:80px;height:32px">
+              <span class="el-radio__input is-checked">
+                <input class="el-radio__original" type="radio" name="status" value="0" checked
+                  style="position:absolute;opacity:0;width:0;height:0">
+              </span>
+              <span class="el-radio__label">启用</span>
+            </label>
+            <label class="el-radio" style="display:inline-flex;width:80px;height:32px">
+              <span class="el-radio__input">
+                <input class="el-radio__original" type="radio" name="status" value="1"
+                  style="position:absolute;opacity:0;width:0;height:0">
+              </span>
+              <span class="el-radio__label">停用</span>
+            </label>
+          </div>
+        </div>
+      </form>
+      <script>
+        document.querySelectorAll(".el-radio").forEach(label => {
+          label.addEventListener("click", () => {
+            document.body.dataset.radioClicks = String(Number(document.body.dataset.radioClicks || "0") + 1);
+          });
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "component-radio", undefined, [], true);
+    const before: any = await recorder.control({ action: "snapshot" });
+    const status = (before.formFields || []).find((field: any) => field.label === "状态");
+    assert.ok(status, JSON.stringify(before.formFields));
+    assert.equal(status.kind, "radio", JSON.stringify(status));
+    assert.equal(status.value, "启用", JSON.stringify(status));
+    assert.equal(status.selector, "label=启用", JSON.stringify(status));
+
+    const result: any = await recorder.control({ action: "exercise-form" });
+    assert.equal(result.ok, true, JSON.stringify(result.failed || result));
+    const clicks = await (recorder as any).currentPage().locator("body").getAttribute("data-radio-clicks");
+    assert.ok(Number(clicks) >= 1, `expected selected radio to be deliberately exercised, got ${clicks}`);
+    const after = (result.formFields || []).find((field: any) => field.label === "状态");
+    assert.equal(after?.value, "启用", JSON.stringify(result.formFields));
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("snapshot expands filter fields and records datetime controls without losing time precision", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-expanded-datetime-"));
   const server = http.createServer((_request, response) => {

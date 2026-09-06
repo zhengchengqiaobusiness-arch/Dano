@@ -256,6 +256,28 @@ export const PAGE_HELPERS = String.raw`
     return null;
   };
 
+  const choiceHostOf = (el) => {
+    if (!(el instanceof Element)) return null;
+    const type = (el.getAttribute("type") || "").toLowerCase();
+    const role = (el.getAttribute("role") || "").toLowerCase();
+    if (type !== "radio" && type !== "checkbox" && role !== "radio" && role !== "checkbox" && role !== "switch") return null;
+    let node = el;
+    for (let i = 0; i < 6 && node && node !== document.body; i += 1, node = node.parentElement) {
+      if (node !== el && node.matches(FORM_ITEM_SEL)) break;
+      const cls = String(node.className || "");
+      const choiceWrapper = node.matches("label, [role='radio'], [role='checkbox'], [role='switch']")
+        || /(?:^|\s)(?:el-radio|el-checkbox|ant-radio-wrapper|ant-checkbox-wrapper|arco-radio|arco-checkbox|n-radio|n-checkbox)(?:\s|$)/.test(cls);
+      if (choiceWrapper && isVisible(node)) return node;
+    }
+    return null;
+  };
+
+  const choiceTextOf = (el) => {
+    const host = choiceHostOf(el);
+    if (!host) return "";
+    return clean(host.getAttribute("aria-label") || stripControls(host) || host.getAttribute("title") || "");
+  };
+
   const isValueSlot = (node) => node.matches("[class*='selection-item'], [class*='selected-item'], [class*='selected'], [class*='placeholder'], [class*='tag'], [data-slot$='-value'], [data-slot='select-value'], [data-slot='combobox-value']");
   const chooserSurface = (host) => {
     if (!(host instanceof Element)) return false;
@@ -310,7 +332,9 @@ export const PAGE_HELPERS = String.raw`
   };
 
   const displayValue = (el) => {
-    if (el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")) return el.checked ? "true" : "";
+    if (el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")) {
+      return el.checked ? (choiceTextOf(el) || clean(el.value) || "true") : "";
+    }
     if (el instanceof HTMLSelectElement) {
       return [...el.selectedOptions].map((item) => clean(item.textContent || item.value)).filter(Boolean).join(",");
     }
@@ -595,7 +619,7 @@ export const PAGE_HELPERS = String.raw`
   const isFieldControl = (el) => {
     if (!(el instanceof Element) || el.closest(PICKER_SEL + ", " + CHROME_SEL)) return false;
     if (!isVisible(el)) {
-      const host = chooserHostOf(el);
+      const host = chooserHostOf(el) || choiceHostOf(el);
       if (!(host && isVisible(host))) return false;
     }
     const type = (el.getAttribute("type") || "").toLowerCase();
@@ -746,7 +770,7 @@ export const PAGE_HELPERS = String.raw`
   const markLabeledControl = (root, name, mark) => {
     const el = controlForLabel(root, name);
     if (!el) return false;
-    const host = chooserHostOf(el);
+    const host = chooserHostOf(el) || choiceHostOf(el);
     const target = isVisible(el) ? el : (host && isVisible(host) ? host : el);
     target.setAttribute("data-bss-locate", mark);
     return true;
@@ -837,7 +861,10 @@ export const PAGE_HELPERS = String.raw`
       const host = chooserHostOf(el);
       return host && host !== el ? fieldFromControl(host, item) : null;
     }
-    if (!isVisible(el) && !(chooserHostOf(el) && isVisible(chooserHostOf(el)))) return null;
+    if (!isVisible(el)) {
+      const host = chooserHostOf(el) || choiceHostOf(el);
+      if (!(host && isVisible(host))) return null;
+    }
     const chooser = el.closest(DIALOG_SEL);
     if (chooser && isChooserDialog(chooser)) return null;
     if (el.closest(PICKER_SEL + ", " + CHROME_SEL + ", thead, .el-table__header, .el-table__header-wrapper, .ant-table-thead, .vxe-header--row")) return null;
@@ -888,6 +915,8 @@ export const PAGE_HELPERS = String.raw`
   const fieldSelector = (el, label, identity, phCounts) => {
     const header = tableHeaderOf(el);
     if (header && el.closest("td, th, .el-table__cell, .ant-table-cell, .vxe-body--column, .vxe-cell")) return "column=" + header;
+    const choice = choiceTextOf(el);
+    if (choice) return "label=" + choice;
     if (identity && (phCounts.get(identity) || 0) === 1) return "placeholder=" + identity;
     if (label) return "label=" + label;
     return selectorOf(el);
@@ -913,6 +942,31 @@ export const PAGE_HELPERS = String.raw`
       const controls = itemControls(item);
       const prop = range.length >= 2 ? nameOf(range[0]) : undefined;
       const drafted = controls.map((el) => isPickerSlot(el) ? null : fieldFromControl(el, item));
+      const radioGroups = new Map();
+      controls.forEach((el) => {
+        const type = (el.getAttribute("type") || "").toLowerCase();
+        const role = (el.getAttribute("role") || "").toLowerCase();
+        if (type !== "radio" && role !== "radio") return;
+        const key = nameOf(el) || "__unnamed_radio_group__";
+        const group = radioGroups.get(key) || [];
+        group.push(el);
+        radioGroups.set(key, group);
+      });
+      for (const group of radioGroups.values()) {
+        const representative = group.find((el) => el instanceof HTMLInputElement && el.checked)
+          || group.find((el) => el.getAttribute("aria-checked") === "true")
+          || group[0];
+        const field = fieldFromControl(representative, item);
+        group.forEach((el) => seenEls.add(el));
+        if (!field) continue;
+        const label = formItemLabel(item) || field.label;
+        add({
+          ...field,
+          label,
+          selector: fieldSelector(representative, label, identityPlaceholder(representative), phCounts),
+          groupIndex: undefined
+        });
+      }
       const fieldEntries = controls.map((el, index) => ({ el, field: drafted[index] })).filter((entry) => entry.field);
       const semanticLabels = groupLabels(fieldEntries.map((entry) => entry.el), fieldEntries.map((entry) => entry.field.label || ""));
       const labelByControl = new Map(fieldEntries.map((entry, index) => [entry.el, semanticLabels[index]]));
