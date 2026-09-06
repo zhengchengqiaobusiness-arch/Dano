@@ -131,6 +131,8 @@ test("unnamed successful form fields map to request leaves without equal-value l
     ]
   );
   assert.equal(byPath.get("$.oaReimburseFeeitemList[*].billType")?.candidates?.type, "static");
+  assert.equal(byPath.get("$.oaReimburseFeeitemList[*].startCity")?.widget, "text");
+  assert.equal(byPath.get("$.oaReimburseFeeitemList[*].endCity")?.widget, "text");
 
   const replay = materializeHttpRequest(create, {
     startTime: "2026-09-07",
@@ -212,4 +214,18 @@ test("query and create forms sharing one URL do not leak required flags or field
     ["$.startTime", "$.endTime"].map(path => [path, createCapability.inputForm.find(item => item.path === path)?.source]),
     [["$.startTime", "caller"], ["$.endTime", "caller"]]
   );
+});
+
+test("a rich-text page value keeps the recorded HTML request format", () => {
+  const events: EvidenceEvent[] = [
+    ui("save-rich", 1, "保存", [{ label: "使用描述", type: "textarea", value: "合同说明", required: false }]),
+    network("create-rich", 1, "POST", "/prod-api/oa/sealApply", {}, { useInfo: "<p>合同说明</p>" }, { code: 200, data: { id: "created" } }, "save-rich")
+  ];
+  const create = finalizeCapabilities(buildCapabilityCandidates(events), events)
+    .find(item => item.transport.pathTemplate.endsWith("/oa/sealApply"))!;
+  const field = create.inputForm.find(item => item.name === "useInfo")!;
+  assert.equal(field.source, "caller");
+  assert.equal(field.richText, true);
+  assert.equal(materializeHttpRequest(create, { useInfo: "新的说明" }).body?.useInfo, "<p>新的说明</p>");
+  assert.equal(materializeHttpRequest(create, { useInfo: "<p>已有格式</p>" }).body?.useInfo, "<p>已有格式</p>");
 });

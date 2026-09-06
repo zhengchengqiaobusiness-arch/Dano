@@ -113,6 +113,7 @@ function exportedField(field: InputFormField) {
   if (field.defaultRule) exported.defaultRule = field.defaultRule;
   if (field.dateClock) exported.dateClock = field.dateClock;
   if (field.dateClocks?.length) exported.dateClocks = field.dateClocks;
+  if (field.richText) exported.richText = true;
   if (field.sourceDetail) exported.sourceDetail = field.sourceDetail;
   if (field.candidates) exported.candidates = field.candidates;
   return exported;

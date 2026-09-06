@@ -206,6 +206,15 @@ function applyCandidate(field: InputFormField, value: unknown, options?: Materia
 function coerceFieldValue(value: unknown, field: InputFormField, options?: MaterializeOptions) {
   if (value === undefined || value === null) return value;
   let next = applyCandidate(field, value, options);
+  if (field.richText && typeof next === "string" && next && !/<\/?[a-z][^>]*>/i.test(next)) {
+    const escape = (text: string) => text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+    next = next.split(/\r?\n/).map(line => `<p>${line ? escape(line) : "<br>"}</p>`).join("");
+  }
   if (field.valueType === "array" && Array.isArray(next) && field.dateClocks?.length === next.length) {
     return next.map((item, index) =>
       typeof item === "string" && isDateInput(item.trim())

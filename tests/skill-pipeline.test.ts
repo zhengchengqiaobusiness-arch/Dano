@@ -334,11 +334,15 @@ test("exported executor resolves a dynamic candidate label before a write", asyn
   lookup.outputSchema = { type: "object", properties: { data: { type: "array", items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" } } } } } };
   const create = verifiedCapability("create-seal", "create");
   create.role = "primary";
-  create.inputSchema = { type: "object", properties: { sealId: { type: "string" } }, required: ["sealId"] };
+  create.inputSchema = { type: "object", properties: { sealId: { type: "string" }, useInfo: { type: "string" } }, required: ["sealId"] };
   create.inputForm = [{
     path: "$.sealId", name: "sealId", label: "选择公章", valueType: "string", source: "caller",
     required: true, requiredBasis: "ui-required", systemHandled: false, sourceDetail: "来自已验证查询",
     widget: "select", candidates: { type: "capability", capabilityId: lookup.id, valuePath: "$.data[*].id", labelPath: "$.data[*].name" }
+  }, {
+    path: "$.useInfo", name: "useInfo", label: "使用描述", valueType: "string", source: "caller",
+    required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面富文本",
+    widget: "textarea", richText: true
   }];
   try {
     const exported = await exportSkill(temporary, "用印申请", [lookup, create]);
@@ -351,10 +355,11 @@ test("exported executor resolves a dynamic candidate label before a write", asyn
       "mod.execute_capability=lambda *_args,**_kwargs:{'ok':True,'body':{'data':[{'id':'seal-1','name':'合同章'}]}}",
       "contract=mod.load_contract()",
       "target=next(x for x in contract['capabilities'] if x['id']=='create-seal')",
-      "print(json.dumps(mod.prepare_input(target,{'sealId':'合同章'},contract),ensure_ascii=False))"
+      "print(json.dumps(mod.prepare_input(target,{'sealId':'合同章','useInfo':'说明'},contract),ensure_ascii=False))"
     ].join(";");
     const { stdout } = await execFileAsync("python", ["-c", probe, script]);
     assert.equal(JSON.parse(stdout).sealId, "seal-1");
+    assert.equal(JSON.parse(stdout).useInfo, "<p>说明</p>");
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

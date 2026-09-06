@@ -36,6 +36,7 @@ export function normalizeField(field: Partial<InputFormField> & Pick<InputFormFi
     defaultRule: field.defaultRule,
     dateClock: field.dateClock,
     dateClocks: field.dateClocks,
+    richText: field.richText,
     candidates: field.candidates
   };
 }
