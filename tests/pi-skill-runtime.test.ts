@@ -111,8 +111,13 @@ test("hotel room fields bind by compound semantics when every recorded value is 
       { label: "房间类型", type: "select", value: "标准间", required: false },
       { label: "房间数量", type: "text", value: "1", required: false },
       { label: "房间等级", type: "select", value: "标准", required: false },
-      { label: "入住人数", type: "text", value: "1", required: false }
+      { label: "入住人数", type: "text", value: "1", required: false },
+      { label: "入住时间", type: "date", value: "2026-09-07", required: false }
     ]
+  }, {
+    id: "ui-hotel-date-input", kind: "ui", sessionId: "hotel", at: "2026-09-06T00:00:00.250Z",
+    pageUrl: "https://x/oa/hotelApply", eventType: "input", label: "入住时间", inputType: "text", value: "2026-09-07",
+    form: [{ label: "入住时间", type: "date", value: "2026-09-07", required: false }]
   }, {
     id: "ui-hotel-dropdown-click", kind: "ui", sessionId: "hotel", at: "2026-09-06T00:00:00.500Z",
     pageUrl: "https://x/oa/hotelApply", eventType: "click", label: "房间类型", inputType: "text", value: "标准间大床房",
@@ -124,8 +129,8 @@ test("hotel room fields bind by compound semantics when every recorded value is 
     id: "net-hotel-list", kind: "network", sessionId: "hotel", at: "2026-09-06T00:00:01.000Z",
     pageUrl: "https://x/oa/hotelApply", correlatedUiEvidenceId: "ui-hotel-search",
     request: {
-      method: "GET", url: "https://x/oa/hotelApply/list?pageNum=1&roomType=1&roomCount=1&roomLevel=1&userCount=1",
-      resourceType: "xhr", headers: {}, query: { pageNum: "1", roomType: "1", roomCount: "1", roomLevel: "1", userCount: "1" }
+      method: "GET", url: "https://x/oa/hotelApply/list?pageNum=1&roomType=1&roomCount=1&roomLevel=1&userCount=1&useTime=2026-09-07",
+      resourceType: "xhr", headers: {}, query: { pageNum: "1", roomType: "1", roomCount: "1", roomLevel: "1", userCount: "1", useTime: "2026-09-07" }
     },
     response: { status: 200, headers: {}, body: { code: 200, rows: [] } }
   }];
@@ -146,6 +151,7 @@ test("hotel room fields bind by compound semantics when every recorded value is 
     assert.equal(input?.defaultRule, undefined, JSON.stringify(query.inputForm));
     if (name === "roomType" || name === "roomLevel") assert.equal(input?.widget, "select", JSON.stringify(query.inputForm));
   }
+  assert.equal(query.inputForm.find(item => item.name === "useTime")?.widget, "date", JSON.stringify(query.inputForm));
 });
 
 test("unnamed same-value selects use their displayed labels to choose the exact dictionary", () => {

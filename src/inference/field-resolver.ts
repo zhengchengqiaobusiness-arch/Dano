@@ -535,11 +535,15 @@ function mergeObservations(items: UiObservation[]) {
   if (!items.length) return undefined;
   const texts = items.filter(looksTextObservation);
   const choices = items.filter(looksChoiceObservation);
+  const structured = items.filter(item => /^(?:date|datetime|daterange|time|number|checkbox|boolean)$/i.test(item.type || ""));
   const hasValue = (item: UiObservation) => item.value !== undefined && item.value !== "";
   const textHasEvidence = texts.some(hasValue);
   const choiceHasEvidence = choices.some(item => hasValue(item) || Boolean(item.options?.length));
+  const structuredHasEvidence = structured.some(hasValue);
   const pool = texts.length && choices.length
     ? (choiceHasEvidence ? choices : textHasEvidence ? texts : choices)
+    : texts.length && structured.length && structuredHasEvidence
+      ? structured
     : items;
   const named = pool.find(item => item.name);
   return pool.reduce((best, item) => ({
