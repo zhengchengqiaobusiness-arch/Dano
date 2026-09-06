@@ -44,7 +44,51 @@ function dateFormat(field: InputFormField) {
   return field.dateFormat || "YYYY-MM-DD";
 }
 
-export function inputType(field: InputFormField) {
+function schemaAtField(schema: JsonSchema | undefined, fieldPath: string) {
+  let current = schema;
+  for (const part of fieldPath.replace(/^\$\.?/, "").split(".").filter(Boolean)) {
+    current = current?.properties?.[part];
+    if (!current) return undefined;
+  }
+  return current;
+}
+
+function objectArrayColumns(schema: JsonSchema | undefined) {
+  const items = schema?.items;
+  if (schema?.type !== "array" || !items || (items.type !== "object" && !items.properties)) return [];
+  return Object.entries(items.properties || {}).map(([id, node]) => ({
+    id,
+    label: String(node.title || id),
+    type: String(Array.isArray(node.type) ? node.type.find(type => type !== "null") || "string" : node.type || "string")
+  }));
+}
+
+function objectArraySections(schema: JsonSchema | undefined) {
+  const columns = objectArrayColumns(schema);
+  const items = schema?.items;
+  const sectionNames = String(schema?.title || "")
+    .split(/\s*[/；;]\s*/)
+    .map(item => item.trim())
+    .filter(Boolean);
+  if (!columns.length || sectionNames.length <= 1 || !items?.properties) return [];
+  return sectionNames.flatMap(title => {
+    const sectionColumns = columns.flatMap(column => {
+      const raw = items.properties?.[column.id]?.["x-dano-section-titles"];
+      const titles = raw && typeof raw === "object" && !Array.isArray(raw)
+        ? raw as Record<string, unknown>
+        : undefined;
+      if (!titles) return [column];
+      const label = titles[title];
+      return label === undefined || label === null || label === ""
+        ? []
+        : [{ ...column, label: String(label) }];
+    });
+    return sectionColumns.length ? [{ title, columns: sectionColumns }] : [];
+  });
+}
+
+export function inputType(field: InputFormField, schema?: JsonSchema) {
+  if (objectArrayColumns(schema).length) return "table";
   if (field.widget === "date" || isDateField(field)) return "date";
   if (field.widget === "textarea" || field.widget === "json") return "textarea";
   if (field.widget === "boolean") return "radio";
@@ -177,18 +221,29 @@ export function questionKey(field: InputFormField, siblings: InputFormField[] = 
   return field.path.replace(/^\$\./, "").replace(/\[\*\]/g, "");
 }
 
-export function exportedQuestion(field: InputFormField, capabilities: CapabilityContract[], siblings: InputFormField[] = []) {
+export function exportedQuestion(
+  field: InputFormField,
+  capabilities: CapabilityContract[],
+  siblings: InputFormField[] = [],
+  owner?: CapabilityContract
+) {
+  const fieldSchema = owner ? schemaAtField(owner.inputSchema, field.path) : undefined;
+  const type = inputType(field, fieldSchema);
   const question: Record<string, unknown> = {
     id: questionKey(field, siblings),
     question: (() => {
       const hint = /页面未唯一对应：(.+)$/.exec(field.sourceDetail || "")?.[1];
       return hint && field.label === field.name ? `${field.label}（${hint}）` : field.label;
     })(),
-    inputType: inputType(field),
-    multiple: field.valueType === "array" || field.widget === "multiselect",
+    inputType: type,
     required: field.required,
     defaultStrategy: defaultStrategy(field)
   };
+  if (type !== "table") question.multiple = field.valueType === "array" || field.widget === "multiselect";
+  const columns = objectArrayColumns(fieldSchema);
+  if (columns.length) question.columns = columns;
+  const sections = objectArraySections(fieldSchema);
+  if (sections.length) question.sections = sections;
   if (isDateField(field)) question.dateFormat = dateFormat(field);
   if (field.dateClocks?.length) question.dateClocks = field.dateClocks;
   if (field.candidates?.type === "static") question.options = field.candidates.values;
@@ -261,9 +316,10 @@ description: >
 1. 从下表选择唯一原子能力。目标不唯一时，只读 [CAPABILITIES.md](references/CAPABILITIES.md) 的相关行；仍不唯一再问用户。
 2. 调用方已给出合同字段且类型明确时直接执行。需要把业务名称映射为字段、补字段或生成写操作确认表单时，只读 [INPUT_FORMS.md](references/INPUT_FORMS.md) 的对应能力小节。
 3. 仅当当前字段需要枚举或接口候选时，运行 \`python scripts/candidates.py --capability <能力编号> --field <字段路径> --input '<JSON>'\`；处理规则见 [OPTIONS.md](references/OPTIONS.md)。显示名由脚本转换为真实接口值。
-4. 查询只传用户明确提供的筛选条件。写操作把本阶段调用方字段合并为一次原生 \`ask_user_question\`，再调用 \`{"confirm":true,"formIds":["<answered.formId>"]}\`；只有 \`confirmed\` 才执行。
-5. 从 Skill 根目录运行下述命令。认证由外部同名运行时凭据提供；也可显式使用 \`SKILL_AUTH_HEADERS\` 或 \`SKILL_AUTH_FILE\`。凭据不得进入 Skill、合同或对话。
-6. HTTP 状态与合同全部完成断言同时满足才算完成；写操作结果不明时不重试。
+4. 每次模型响应最多原生调用一次 \`ask_user_question\`。同一阶段所有缺少的调用方字段必须合并为一次 \`title + questions[]\`；\`questions[].id\` 与对应调用方字段名一致，每项包含正确控件、\`required\` 和基于当前意图生成的非空 \`default\`。不得逐字段连续询问。
+5. 查询只传用户明确提供的筛选条件。写操作收齐字段后，再调用 \`{"confirm":true,"formIds":["<answered.formId>"]}\`；只有 \`confirmed\` 才执行。
+6. 从 Skill 根目录运行下述命令。认证由外部同名运行时凭据提供；也可显式使用 \`SKILL_AUTH_HEADERS\` 或 \`SKILL_AUTH_FILE\`。凭据不得进入 Skill、合同或对话。
+7. HTTP 状态与合同全部完成断言同时满足才算完成；写操作结果不明时不重试。\`invalid_question_arguments\` 要读取全部 \`issues[].path\` 并一次修正；\`duplicate_question_call\` 要合并为一次 \`questions[]\`。
 
 ## Atomic capabilities
 
@@ -389,7 +445,10 @@ ${fields.map(field => {
     }
     const hint = /页面未唯一对应：(.+)$/.exec(field.sourceDetail || "")?.[1];
     const label = hint && field.label === field.name ? `${field.label}（${hint}）` : field.label;
-    return `| \`${safeCell(questionKey(field, capability.inputForm))}\` | ${safeCell(label)} | \`${inputType(field)}\` | ${field.required ? "是" : "否"} | ${safeCell(recommendedDefault(field, capability))} | ${safeCell(candidate)} |`;
+    const schema = schemaAtField(capability.inputSchema, field.path);
+    const tableColumns = objectArrayColumns(schema);
+    if (tableColumns.length) candidate = `columns: ${JSON.stringify(tableColumns)}`;
+    return `| \`${safeCell(questionKey(field, capability.inputForm))}\` | ${safeCell(label)} | \`${inputType(field, schema)}\` | ${field.required ? "是" : "否"} | ${safeCell(recommendedDefault(field, capability))} | ${safeCell(candidate)} |`;
   }).join("\n")}`;
 }
 
@@ -413,7 +472,7 @@ export function buildInputForms(capabilities: CapabilityContract[]) {
 
 只读取当前能力的小节。这里是提问和系统补值的唯一说明；候选取值规则只在 [OPTIONS.md](OPTIONS.md) 定义。
 
-需要补充字段时必须原生调用 \`ask_user_question\`，不得在普通文本中模拟。把同一阶段字段合并为一次 \`title + questions[]\`；\`questions[].id\` 使用下表提问编号。调用前按合同 \`defaultStrategy\` 生成本次非空推荐值，不能复制未见过的值。类型或候选转换不唯一时，只重问错误字段；\`cancelled\` 后立即停止。
+需要补充字段时必须原生调用 \`ask_user_question\`，不得在普通文本中模拟。每次模型响应最多原生调用一次；把同一阶段所有缺少字段合并为一次 \`title + questions[]\`，不得一个一个询问。\`questions[].id\` 使用下表提问编号并与对应调用方字段名一致。每项必须包含正确 \`inputType\`、\`required\` 和按合同 \`defaultStrategy\` 生成的本次非空 \`default\`，不能复制未见过的值。对象数组使用 \`inputType: table\` 及合同中的 \`columns\`/\`sections\`。类型或候选转换不唯一时，只重问错误字段；\`cancelled\` 后立即停止。
 
 ${primary.map(capability => `## ${capability.id}
 

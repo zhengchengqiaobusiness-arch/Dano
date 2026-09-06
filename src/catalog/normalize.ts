@@ -73,14 +73,37 @@ export function normalizeCapability(capability: CapabilityContract): CapabilityC
 }
 
 export function normalizeCatalog(capabilities: CapabilityContract[]) {
-  return capabilities.map(normalizeCapability);
+  return uniqueCatalogByTransport(capabilities.map(normalizeCapability));
 }
 
 export function catalogTransportKey(capability: CapabilityContract) {
   return `${capability.transport.method}|${capability.transport.pathTemplate}`;
 }
 
+function authorityScore(capability: CapabilityContract) {
+  const successfulNetwork = capability.evidence.filter(item => item.kind === "network" && item.status !== undefined && item.status < 400).length;
+  return (capability.validation.status === "verified" ? 1_000_000 : 0)
+    + (capability.operation !== "unknown" ? 100_000 : 0)
+    + successfulNetwork * 10_000
+    + capability.evidence.length * 100
+    + capability.inputForm.length;
+}
+
+export function uniqueCatalogByTransport(capabilities: CapabilityContract[]) {
+  const selected = new Map<string, CapabilityContract>();
+  for (const capability of capabilities) {
+    const key = catalogTransportKey(capability);
+    const previous = selected.get(key);
+    if (!previous || authorityScore(capability) > authorityScore(previous)) selected.set(key, capability);
+  }
+  return [...selected.values()];
+}
+
 export function mergeCatalogByTransport(incoming: CapabilityContract[], existing: CapabilityContract[]) {
-  const incomingKeys = new Set(incoming.map(catalogTransportKey));
-  return [...incoming, ...existing.filter(item => !incomingKeys.has(catalogTransportKey(item)))];
+  const authoritativeIncoming = uniqueCatalogByTransport(incoming);
+  const incomingKeys = new Set(authoritativeIncoming.map(catalogTransportKey));
+  return uniqueCatalogByTransport([
+    ...authoritativeIncoming,
+    ...existing.filter(item => !incomingKeys.has(catalogTransportKey(item)))
+  ]);
 }

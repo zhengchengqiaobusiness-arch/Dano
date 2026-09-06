@@ -463,6 +463,7 @@ test("model judgment cannot bind a field to the capability being executed", asyn
         description: query.description,
         fields: [{
           path: "$.days",
+          required: true,
           source: "binding",
           defaultRule: `from:${query.id}:$.rows[*].days`,
           candidateCapabilityId: query.id,
@@ -476,7 +477,49 @@ test("model judgment cannot bind a field to the capability being executed", asyn
   const [judged] = await applyPiCatalogJudgment([query], [], reasoner as any, process.cwd(), true);
   const days = judged!.inputForm[0]!;
   assert.equal(days.source, "caller");
+  assert.equal(days.required, false);
   assert.equal(days.defaultRule, undefined);
   assert.equal(days.candidates, undefined);
   assert.equal(judged!.bindings.some(binding => binding.fromCapabilityId === judged!.id), false);
+});
+
+test("model judgment cannot invent that an optional recorded field is required", async () => {
+  const query = cap({
+    id: "query-duty-optional",
+    operation: "query",
+    role: "primary",
+    transport: {
+      method: "GET",
+      urlTemplate: "https://x/oa/dutyApply/list?leaveType={leaveType}",
+      origin: "https://x",
+      pathTemplate: "/oa/dutyApply/list"
+    },
+    inputForm: [field({
+      name: "leaveType",
+      label: "请假类型",
+      source: "caller",
+      systemHandled: false,
+      required: false,
+      requiredBasis: "not-observed",
+      sourceDetail: "页面同名字段有输入，由调用方提供"
+    })]
+  });
+  const reasoner = {
+    model: "test",
+    available: () => true,
+    parseStructured: async () => ({
+      capabilities: [{
+        id: query.id,
+        operation: "query",
+        role: "primary",
+        title: query.title,
+        description: query.description,
+        fields: [{ path: "$.leaveType", required: true }]
+      }]
+    })
+  };
+
+  const [judged] = await applyPiCatalogJudgment([query], [], reasoner as any, process.cwd(), true);
+
+  assert.equal(judged!.inputForm[0]?.required, false);
 });

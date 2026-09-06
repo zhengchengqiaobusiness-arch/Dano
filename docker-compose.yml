@@ -14,6 +14,7 @@ services:
       BSS_HOST: 0.0.0.0
       BSS_PORT: 4310
       PLAYWRIGHT_BROWSERS_PATH: ${PLAYWRIGHT_BROWSERS_PATH:-/root/.cache/ms-playwright}
+      SKILL_CREDENTIAL_GID: ${SKILL_CREDENTIAL_GID:-1000}
     ports:
       - "4310:4310"
     shm_size: 1gb

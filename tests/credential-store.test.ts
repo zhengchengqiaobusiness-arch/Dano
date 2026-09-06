@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { copyFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import os from "node:os";
@@ -77,6 +77,26 @@ test("materializes a per-skill credential file outside the skill directory", asy
       "x-tenant-id": "tenant-7"
     });
     assert.equal(JSON.stringify(profile).includes("content-type"), false);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("materialized runtime credentials are readable only by their shared runtime group", {
+  skip: process.platform === "win32"
+}, async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-skill-shared-credentials-"));
+  const dataDir = path.join(temporary, "data");
+  const outputRoot = path.join(temporary, ".agents", "skills");
+  try {
+    await persistOriginCredentials(dataDir, "https://erp.example.test/orders", {
+      authorization: "Bearer shared-runtime"
+    });
+    const file = await materializeSkillCredentials(dataDir, outputRoot, "orders-sk_shared", ["https://erp.example.test"]);
+    const directoryMode = (await stat(path.dirname(file!))).mode & 0o7777;
+    const fileMode = (await stat(file!)).mode & 0o777;
+    assert.equal(directoryMode, 0o2750);
+    assert.equal(fileMode, 0o640);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

@@ -12,6 +12,7 @@ import { finalizeCapabilities } from "../src/inference/finalize-capabilities.js"
 import { validateCapability } from "../src/validation/validator.js";
 import { buildApprovedRoutes } from "../src/planner/routes.js";
 import { exportSkill } from "../src/export/skill-exporter.js";
+import { exportedQuestion } from "../src/export/skill-handbook.js";
 import { SkillLibrary } from "../src/catalog/skill-library.js";
 
 const execFileAsync = promisify(execFile);
@@ -209,6 +210,10 @@ test("exports a progressively disclosed Python Skill package", async () => {
     const forms = await readFile(path.join(result.dir, "references", "INPUT_FORMS.md"), "utf8");
     const route = await readFile(path.join(result.dir, "references", "routes", "route-review-order.md"), "utf8");
     assert.match(skill, /ask_user_question/);
+    assert.match(skill, /每次模型响应最多原生调用一次/);
+    assert.match(skill, /同一阶段所有缺少的调用方字段.*title \+ questions\[\]/);
+    assert.match(skill, /questions\[\]\.id.*调用方字段名/);
+    assert.match(skill, /非空.*default/);
     assert.match(skill, /approved: true/);
     assert.match(skill, /SKILL_AUTH_HEADERS/);
     assert.match(skill, /Use when/);
@@ -229,6 +234,7 @@ test("exports a progressively disclosed Python Skill package", async () => {
     assert.match(capabilities, /审核销售订单/);
     assert.doesNotMatch(capabilities, /scripts\/execute\.py|ask_user_question/);
     assert.match(forms, /ask_user_question/);
+    assert.match(forms, /每次模型响应最多原生调用一次/);
     assert.match(forms, /comment/);
     assert.doesNotMatch(forms, /执行器/);
     assert.match(route, /## Sequence/);
@@ -321,6 +327,77 @@ test("exported executor preserves a recorded date-only string", async () => {
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
+});
+
+test("object-array caller fields use the Dano table question contract", () => {
+  const capability = verifiedCapability("review-order", "review");
+  capability.inputSchema = {
+    type: "object",
+    properties: {
+      items: {
+        type: "array",
+        title: "工作内容；验收结果",
+        items: {
+          type: "object",
+          properties: {
+            content: { type: "string", title: "工作内容" },
+            result: {
+              type: "string",
+              title: "验收结果",
+              "x-dano-section-titles": {
+                工作内容: "完成结果",
+                验收结果: "验收结论"
+              }
+            },
+            progress: {
+              type: "number",
+              title: "完成进度",
+              "x-dano-section-titles": { 工作内容: "完成进度" }
+            }
+          }
+        }
+      }
+    }
+  };
+  const items = {
+    path: "$.items",
+    name: "items",
+    label: "工作内容；验收结果",
+    valueType: "array" as const,
+    source: "caller" as const,
+    required: true,
+    requiredBasis: "ui-required" as const,
+    systemHandled: false,
+    sourceDetail: "页面表格由调用方填写",
+    widget: "json" as const
+  };
+  capability.inputForm = [items];
+
+  const question = exportedQuestion(items, [capability], capability.inputForm, capability);
+
+  assert.equal(question.inputType, "table");
+  assert.deepEqual(question.columns, [
+    { id: "content", label: "工作内容", type: "string" },
+    { id: "result", label: "验收结果", type: "string" },
+    { id: "progress", label: "完成进度", type: "number" }
+  ]);
+  assert.deepEqual(question.sections, [
+    {
+      title: "工作内容",
+      columns: [
+        { id: "content", label: "工作内容", type: "string" },
+        { id: "result", label: "完成结果", type: "string" },
+        { id: "progress", label: "完成进度", type: "number" }
+      ]
+    },
+    {
+      title: "验收结果",
+      columns: [
+        { id: "content", label: "工作内容", type: "string" },
+        { id: "result", label: "验收结论", type: "string" }
+      ]
+    }
+  ]);
 });
 
 test("exported executor preserves month precision and encodes recorded rich text", async () => {

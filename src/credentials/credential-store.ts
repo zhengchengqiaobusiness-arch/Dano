@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, chown, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { defaultSkillCredentialRoot } from "../config.js";
 import type { CapabilityContract, EvidenceEvent } from "../domain.js";
 import { isSecretBearingHeader } from "../security/redact.js";
@@ -62,6 +62,20 @@ async function writePrivateJson(file: string, value: unknown) {
   await chmod(directory, 0o700).catch(() => {});
   await writeFile(file, JSON.stringify(value, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
   await chmod(file, 0o600).catch(() => {});
+}
+
+async function writeRuntimeJson(file: string, value: unknown) {
+  const directory = path.dirname(file);
+  await mkdir(directory, { recursive: true, mode: 0o2750 });
+  const currentDirectory = await stat(directory);
+  const configuredGroup = Number.parseInt(process.env.SKILL_CREDENTIAL_GID || "", 10);
+  const group = Number.isInteger(configuredGroup) && configuredGroup >= 0 ? configuredGroup : currentDirectory.gid;
+  await chown(directory, currentDirectory.uid, group).catch(() => {});
+  await chmod(directory, 0o2750).catch(() => {});
+  await writeFile(file, JSON.stringify(value, null, 2) + "\n", { encoding: "utf8", mode: 0o640 });
+  const currentFile = await stat(file);
+  await chown(file, currentFile.uid, group).catch(() => {});
+  await chmod(file, 0o640).catch(() => {});
 }
 
 async function serializedWrite(file: string, work: () => Promise<void>) {
@@ -144,7 +158,7 @@ export async function materializeSkillCredentials(
   }
   if (!Object.keys(selected).length) return undefined;
   const file = skillCredentialFile(outputRoot, skillName);
-  await writePrivateJson(file, {
+  await writeRuntimeJson(file, {
     version: 1,
     skill: skillName,
     origins: selected,

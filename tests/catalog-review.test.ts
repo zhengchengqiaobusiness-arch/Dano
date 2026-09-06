@@ -688,3 +688,32 @@ test("applyReviewActionPolicy keeps major primary gaps on re-record", () => {
   assert.equal(remapped?.next, "re-analyze");
   assert.match(remapped?.message || "", /不要重新录制/);
 });
+
+test("catalog merge emits one authoritative capability per transport", () => {
+  const transport = {
+    method: "POST",
+    urlTemplate: "https://x/oa/dutyApply",
+    origin: "https://x",
+    pathTemplate: "/oa/dutyApply"
+  };
+  const weaker = cap({
+    id: "create-duty",
+    operation: "create",
+    transport,
+    evidence: [{ eventId: "ui", sessionId: "s", kind: "ui", at: "2026-09-06T00:00:00.000Z" }]
+  });
+  const stronger = cap({
+    id: "create-duty",
+    operation: "create",
+    transport,
+    evidence: [
+      { eventId: "ui", sessionId: "s", kind: "ui", at: "2026-09-06T00:00:00.000Z" },
+      { eventId: "net", sessionId: "s", kind: "network", at: "2026-09-06T00:00:01.000Z", status: 200 }
+    ]
+  });
+
+  const merged = mergeCatalogByTransport([weaker, stronger], []);
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0]?.evidence.length, 2);
+});

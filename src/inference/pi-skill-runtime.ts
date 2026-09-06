@@ -42,7 +42,6 @@ const FieldPatch = z.object({
   label: z.string().optional(),
   source: z.enum(["caller", "fixed", "session", "generated", "computed", "binding", "system"]).optional(),
   widget: z.enum(["text", "number", "boolean", "select", "multiselect", "json", "textarea", "date"]).optional(),
-  required: z.boolean().optional(),
   defaultRule: z.string().optional(),
   sourceDetail: z.string().optional(),
   candidateCapabilityId: z.string().optional(),
@@ -872,8 +871,6 @@ function applyFieldPatch(
     label: patch.label || field.label,
     source,
     widget: patch.widget || field.widget,
-    required: patch.required ?? field.required,
-    requiredBasis: patch.required ? "ui-required" : field.requiredBasis,
     systemHandled: source !== "caller",
     defaultRule: patch.defaultRule ?? field.defaultRule,
     sourceDetail: patch.sourceDetail || field.sourceDetail

@@ -241,7 +241,7 @@ export class WorkbenchPage {
         try {
           if (!this.transcriptOpen || generation !== this.promptGeneration || this.pi.status().streaming || this.manualTakeover || !this.recorder.activeSession()) return;
           const readiness = await this.recorder.stopReadiness();
-          if (!this.transcriptOpen || generation !== this.promptGeneration) return;
+          if (!this.transcriptOpen || generation !== this.promptGeneration || !this.recorder.activeSession()) return;
           const remaining = readiness.pageCoverage?.remaining || 0;
           const missingPageOperations = readiness.missingPageOperations || [];
           const missingOperations = readiness.missingOperations || [];
