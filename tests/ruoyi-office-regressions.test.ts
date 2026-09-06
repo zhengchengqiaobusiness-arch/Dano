@@ -160,6 +160,63 @@ test("record stop does not use an initial list load to hide a failed clicked que
   assert.equal(ready.ready, true, JSON.stringify(ready));
 });
 
+test("a slow response keeps the UI action captured when the request started", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "slow-query-correlation-"));
+  const server = http.createServer((request, response) => {
+    if (request.url?.startsWith("/api/list")) {
+      setTimeout(() => {
+        response.setHeader("content-type", "application/json; charset=utf-8");
+        response.end(JSON.stringify({ code: 200, rows: [] }));
+      }, 2_200);
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body>
+      <label>关键字<input name="keyword" placeholder="请输入关键字"></label>
+      <button type="button" id="search">搜索</button>
+      <script>
+        document.getElementById("search").addEventListener("click", () => {
+          fetch("/api/list?keyword=" + encodeURIComponent(document.querySelector("[name=keyword]").value));
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    const session = await recorder.start(`http://127.0.0.1:${address.port}/`, "slow-query", undefined, ["query"], true);
+    await recorder.control({ action: "exercise-form" });
+    await recorder.control({ action: "click", selector: 'role=button[name="搜索"]' });
+    await recorder.control({ action: "snapshot" });
+    await new Promise(resolve => setTimeout(resolve, 2_500));
+    await recorder.stop();
+
+    const eventText = await readFile(path.join(temporary, "data", "recordings", session.id, "events.jsonl"), "utf8");
+    const events = eventText.trim().split(/\r?\n/).map(line => JSON.parse(line)) as EvidenceEvent[];
+    const query = events.find((event): event is NetworkEvidence => event.kind === "network" && event.request.url.includes("/api/list?"));
+    assert.ok(query?.correlatedUiEvidenceId, JSON.stringify(events));
+    const trigger = events.find(event => event.id === query.correlatedUiEvidenceId);
+    assert.equal(trigger?.kind, "ui");
+    assert.equal(trigger?.kind === "ui" ? trigger.text : undefined, "搜索");
+    assert.equal(recordingStopReadiness(events, ["query"], undefined, true).ready, true);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("a generic save or submit inherits the active create or update form intent", () => {
   const list = "https://ruoyioffice.com/web/#/oa/seal/seal-apply-list";
   const form = "https://ruoyioffice.com/web/#/oa/seal/seal-apply-info?t=1";

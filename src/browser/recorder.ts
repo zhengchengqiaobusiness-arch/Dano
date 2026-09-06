@@ -317,6 +317,7 @@ interface ActiveRecording {
   context: BrowserContext;
   eventsFile: string;
   requestIds: WeakMap<Request, string>;
+  requestUiIds: WeakMap<Request, string>;
   lastUiByPage: WeakMap<Page, UiEvidence>;
   recentUi: UiEvidence[];
   manualEvents: UiEvidence[];
@@ -623,6 +624,7 @@ export class BrowserRecorder {
       context,
       eventsFile,
       requestIds: new WeakMap(),
+      requestUiIds: new WeakMap(),
       lastUiByPage: new WeakMap(),
       recentUi: [],
       manualEvents: [],
@@ -706,6 +708,9 @@ export class BrowserRecorder {
     context.on("request", request => {
       if (!this.active) return;
       this.active.requestIds.set(request, id("net"));
+      const page = this.pageFor(request);
+      const ui = this.recentUi(page, this.active);
+      if (ui) this.active.requestUiIds.set(request, ui.id);
       if (this.shouldCapture(request) && !this.isNoiseUrl(request.url())) {
         this.pendingRequests.set(request, Date.now());
       }
@@ -831,7 +836,7 @@ export class BrowserRecorder {
       sessionId: active.session.id,
       at: new Date().toISOString(),
       pageUrl: page?.url(),
-      correlatedUiEvidenceId: ui?.id,
+      correlatedUiEvidenceId: active.requestUiIds.get(request) || ui?.id,
       request: await this.requestPart(request),
       failure: request.failure()?.errorText || "request failed"
     };
@@ -904,7 +909,7 @@ export class BrowserRecorder {
       sessionId: active.session.id,
       at: new Date().toISOString(),
       pageUrl: page?.url(),
-      correlatedUiEvidenceId: ui?.id,
+      correlatedUiEvidenceId: active.requestUiIds.get(request) || ui?.id,
       request: await this.requestPart(request),
       response: {
         status: response.status(),
