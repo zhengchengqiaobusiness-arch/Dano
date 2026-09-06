@@ -26,6 +26,7 @@ import {
   sameFormShape,
   sameSynonymGroup,
   sameValue,
+  semanticConcepts,
   uiNameMatches,
   type UiObservation
 } from "./field-resolver.js";
@@ -415,7 +416,19 @@ export function applyExactEvidenceJoin(capability: CapabilityContract, events: E
     if (named) return asExactCaller(field, named, value);
     const observed = findObservation(field, value, observations, [], sample);
     if (observed) return asExactCaller(field, observed, value);
-    const semantic = [...new Map(observations
+    const sharedBusinessValue = values.some(item =>
+      item.field.path !== field.path
+      && !PAGE_NAME.test(item.field.name)
+      && sameValue(item.value, value)
+    );
+    const sameNamedCollectionLeaf = values.some(item =>
+      item.field.path !== field.path
+      && item.field.name === field.name
+      && item.field.path.includes("[*]") !== field.path.includes("[*]")
+    );
+    const semantic = sharedBusinessValue && !sameNamedCollectionLeaf && semanticConcepts(field).size < 2
+      ? []
+      : [...new Map(observations
       .filter(item => sameSynonymGroup(field, item))
       .filter(item =>
         sameValue(item.value, value)
