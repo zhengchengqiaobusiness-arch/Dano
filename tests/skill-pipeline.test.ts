@@ -231,8 +231,9 @@ test("exports a progressively disclosed Python Skill package", async () => {
     assert.match(forms, /ask_user_question/);
     assert.match(forms, /comment/);
     assert.doesNotMatch(forms, /执行器/);
-    assert.match(route, /自然语言组合/);
-    assert.match(route, /可执行约定/);
+    assert.match(route, /## Sequence/);
+    assert.match(route, /## Run/);
+    assert.match(route, /--route route-review-order/);
     assert.match(route, /find-orders/);
     const contract = JSON.parse(await readFile(path.join(result.dir, "references", "CONTRACT.json"), "utf8"));
     assert.equal(contract.schemaVersion, "2.0");
@@ -398,6 +399,72 @@ test("exported executor queries dynamic options before sending a display name", 
       "--input", JSON.stringify({ reportType: "周报" })
     ]);
     assert.deepEqual(requests, ["/types", "/reports?reportType=2"]);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exported executor runs an approved query-to-write route with one command", async () => {
+  const requests: Array<{ url: string; body?: unknown }> = [];
+  let queryRows = [{ id: "order-7" }];
+  const server = http.createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", chunk => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8");
+      requests.push({ url: request.url || "", ...(raw ? { body: JSON.parse(raw) } : {}) });
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(request.url === "/find-orders"
+        ? { data: queryRows }
+        : { success: true, reviewedId: "order-7" }));
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const origin = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+  const query = verifiedCapability("find-orders");
+  query.transport = { method: "GET", origin, pathTemplate: "/find-orders", urlTemplate: `${origin}/find-orders` };
+  const review = verifiedCapability("review-order", "review");
+  review.transport = { method: "POST", origin, pathTemplate: "/review-order", urlTemplate: `${origin}/review-order` };
+  review.inputSchema = {
+    type: "object",
+    properties: { orderId: { type: "string" }, comment: { type: "string" } },
+    required: ["orderId", "comment"]
+  };
+  review.inputForm.push({
+    path: "$.comment", name: "comment", label: "审核意见", valueType: "string", source: "caller",
+    required: true, requiredBasis: "ui-required", systemHandled: false, sourceDetail: "由调用方提供", widget: "text"
+  });
+  review.bindings.push({
+    id: "bind-order", fromCapabilityId: query.id, fromPath: "$.data[*].id", toPath: "$.orderId",
+    confidence: 1, evidenceIds: [], approved: true, approvalSource: "human", approvedAt: "2026-09-01T00:00:00.000Z"
+  });
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-skill-route-"));
+  try {
+    const exported = await exportSkill(temporary, "销售订单审核", [query, review]);
+    const script = path.join(exported.dir, "scripts", "execute.py");
+    await assert.rejects(execFileAsync("python", [
+      script, "--route", "route-review-order", "--input", JSON.stringify({ "review-order": { comment: "同意" } })
+    ]), /明确确认/);
+    assert.equal(requests.length, 0);
+    queryRows = [{ id: "order-7" }, { id: "order-8" }];
+    await assert.rejects(execFileAsync("python", [
+      script, "--route", "route-review-order", "--input", JSON.stringify({ "review-order": { comment: "同意" } }), "--confirm-write"
+    ]), /无法唯一确定/);
+    assert.deepEqual(requests, [{ url: "/find-orders" }]);
+    requests.length = 0;
+    queryRows = [{ id: "order-7" }];
+    const { stdout } = await execFileAsync("python", [
+      script, "--route", "route-review-order", "--input", JSON.stringify({ "review-order": { comment: "同意" } }), "--confirm-write"
+    ]);
+    const result = JSON.parse(stdout);
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.steps.map((item: { capabilityId: string }) => item.capabilityId), ["find-orders", "review-order"]);
+    assert.deepEqual(requests, [
+      { url: "/find-orders" },
+      { url: "/review-order", body: { comment: "同意", orderId: "order-7" } }
+    ]);
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(temporary, { recursive: true, force: true });

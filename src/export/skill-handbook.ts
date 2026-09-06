@@ -231,7 +231,7 @@ function routingRows(primary: CapabilityContract[]) {
 function routeIndex(routes: CapabilityRoute[]) {
   if (!routes.length) return "当前没有已确认组合路线。不要自行串联。";
   return routes.map(route =>
-    `- [${safeCell(route.title)}](references/routes/${route.id}.md)：仅当用户目标就是这条最终操作时使用。`
+    `- [${safeCell(route.title)}](references/routes/${route.id}.md)：\`${route.id}\``
   ).join("\n");
 }
 
@@ -282,7 +282,7 @@ ${lookups.length ? `| 只为字段选择${lookupNames || "目录值"} | 运行�
 
 ${routeIndex(routes)}
 
-组合只允许使用路线文档和合同中 \`approved: true\` 的绑定。没有路线时只能执行单一原子能力；不得凭字段名相似自行串联。上游结果为空或不能唯一确定时停止并让用户选择。
+${routes.length ? "命中路线后一次运行：`python scripts/execute.py --route <路线编号> --input '<JSON>'`；路线含写操作时在确认后追加 `--confirm-write`。\n\n" : ""}组合只允许使用路线文档和合同中 \`approved: true\` 的绑定。没有路线时只能执行单一原子能力；不得凭字段名相似自行串联。上游结果为空或不能唯一确定时停止并让用户选择。
 
 ## Output and failures
 
@@ -463,37 +463,40 @@ export function buildRoute(route: CapabilityRoute, capabilities: CapabilityContr
     capability.bindings.filter(binding => binding.id === bindingId).map(binding => ({ binding, targetCapabilityId: capability.id }))
   ));
   const titles = route.steps.map(step => byId.get(step.capabilityId)?.title || step.capabilityId);
+  const hasWrite = route.steps.some(step => byId.get(step.capabilityId)?.confirmation.required);
+  const inputShape = Object.fromEntries(route.steps.map(step => [step.capabilityId, {}]));
   return `# ${safeCell(route.title)}
 
-仅当用户目标明确包含本路线的最终操作时使用。所有步骤和传值均来自已确认绑定。
+仅当用户目标明确包含最后一步“${safeCell(titles.at(-1) || route.targetCapabilityId)}”时使用。该路线用一条命令顺序执行，接口和传值均来自已验证合同。
 
-## 自然语言组合
+## Sequence
 
-先${titles.slice(0, -1).join("，再") || "准备输入"}，再${titles.at(-1) || "执行最终操作"}。中间结果只按已确认绑定往下传；不能唯一确定时停下来让用户选。
+${route.steps.map(step => `${step.order}. \`${step.capabilityId}\`：${safeCell(byId.get(step.capabilityId)?.title || step.capabilityId)}`).join("\n")}
 
-## 可执行约定
+## Input and confirmation
 
-${route.steps.map(step => {
-    const capability = byId.get(step.capabilityId)!;
-    return `${step.order}. 执行 \`${capability.id}\`：${safeCell(capability.title)}。${capability.confirmation.required ? "字段校验完成后单独确认，再带 `--confirm-write` 执行。" : "满足输入条件后执行。"}`;
-  }).join("\n")}
+- 一次收齐各步骤尚需调用方提供的字段。只为实际缺少的步骤读取 [INPUT_FORMS.md](../INPUT_FORMS.md) 对应小节。
+- 输入可直接放公共顶层；同名字段含义不同时，按能力编号分组。结构模板：\`${JSON.stringify(inputShape)}\`。
+${hasWrite ? "- 路线包含写操作：先提交分组表单，再调用 `{\"confirm\":true,\"formIds\":[\"<answered.formId>\"]}`；只有 `confirmed` 才追加 `--confirm-write`。" : "- 本路线全部为只读操作，不需要写确认。"}
 
-## 已确认传值
+## Run
+
+\`python scripts/execute.py --route ${route.id} --input '<JSON>'${hasWrite ? " --confirm-write" : ""}\`
+
+脚本只在上一步成功且绑定值唯一时继续；返回的 \`steps\` 保留每一步结果，\`body\` 是最后一步结果。
+
+## Approved bindings
 
 ${bindings.map(item =>
     `- \`${item.binding.fromCapabilityId}${item.binding.fromPath}\` → \`${item.targetCapabilityId}${item.binding.toPath}\`（绑定 \`${item.binding.id}\`）`
   ).join("\n") || "- 无自动传值。"}
 
-- 每一步使用 \`python scripts/execute.py --capability <能力编号> --input '<本步 JSON>'\`。
-- 上游结果为空或不能唯一确定时停止，展示候选让用户选择。
-- 不得用字段名相似代替合同绑定。
-
-## 停止条件
+## Stop conditions
 
 ${route.stopConditions.map(condition => `- ${condition}`).join("\n")}
 
-## 完成条件
+## Completion
 
-${route.completion}，并满足 \`references/CONTRACT.json\` 中该能力的全部完成断言。
+${route.completion}，并满足 [CONTRACT.json](../CONTRACT.json) 中该能力的全部完成断言。
 `;
 }

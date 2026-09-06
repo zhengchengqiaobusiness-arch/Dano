@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""执行 CONTRACT.json 中经过验证的单个原子能力。"""
+"""执行 CONTRACT.json 中经过验证的原子能力或已批准组合路线。"""
 
 from __future__ import annotations
 
@@ -773,21 +773,97 @@ def execute_capability(
     return {"ok": status_ok and all(item["ok"] for item in assertions), "status": status, "body": body, "assertions": assertions}
 
 
+def route_step_input(supplied: dict[str, Any], capability_id: str, capability_ids: set[str]) -> dict[str, Any]:
+    prepared = {key: copy.deepcopy(value) for key, value in supplied.items() if key not in capability_ids}
+    scoped = supplied.get(capability_id)
+    if scoped is not None:
+        if not isinstance(scoped, dict):
+            raise ValueError(f"路线输入 {capability_id} 必须是 JSON 对象")
+        prepared.update(copy.deepcopy(scoped))
+    return prepared
+
+
+def unique_binding_value(body: Any, json_path: str, binding_id: str) -> Any:
+    values = extract_many(body, json_path)
+    distinct: list[Any] = []
+    keys: set[str] = set()
+    for value in values:
+        key = json.dumps(value, ensure_ascii=False, sort_keys=True) if isinstance(value, (dict, list)) else repr(value)
+        if key not in keys:
+            keys.add(key)
+            distinct.append(value)
+    if len(distinct) != 1:
+        raise ValueError(f"绑定 {binding_id} 的上游结果无法唯一确定（得到 {len(distinct)} 个不同值）")
+    return distinct[0]
+
+
+def execute_route(
+    route: dict[str, Any],
+    supplied: dict[str, Any],
+    confirm_write: bool = False,
+) -> dict[str, Any]:
+    contract = load_contract()
+    capabilities = {item.get("id"): item for item in contract.get("capabilities", [])}
+    steps = route.get("steps") or []
+    if not steps:
+        raise ValueError("组合路线没有步骤")
+    capability_ids = {str(step.get("capabilityId")) for step in steps}
+    if any(capabilities.get(capability_id, {}).get("confirmation", {}).get("required") for capability_id in capability_ids) and not confirm_write:
+        raise ValueError("组合路线包含写操作，需要本次执行的明确确认")
+
+    approved_ids = set(route.get("approvedBindingIds") or [])
+    outputs: dict[str, Any] = {}
+    results: list[dict[str, Any]] = []
+    for step in steps:
+        capability_id = step.get("capabilityId")
+        capability = capabilities.get(capability_id)
+        if capability is None or capability.get("validation", {}).get("status") != "verified":
+            raise ValueError(f"路线能力不可执行：{capability_id}")
+        step_input = route_step_input(supplied, capability_id, capability_ids)
+        bindings = {item.get("id"): item for item in capability.get("bindings", []) if item.get("approved") is True}
+        for binding_id in step.get("bindingIds") or []:
+            binding = bindings.get(binding_id)
+            if binding_id not in approved_ids or binding is None:
+                raise ValueError(f"路线包含未批准绑定：{binding_id}")
+            source_id = binding.get("fromCapabilityId")
+            if source_id not in outputs:
+                raise ValueError(f"绑定 {binding_id} 缺少上游结果：{source_id}")
+            value = unique_binding_value(outputs[source_id], binding.get("fromPath") or "", binding_id)
+            set_by_path(step_input, binding.get("toPath") or "", value)
+        result = execute_capability(capability, step_input, confirm_write)
+        results.append({"capabilityId": capability_id, **result})
+        if not result.get("ok"):
+            return {"ok": False, "route": route.get("id"), "steps": results}
+        outputs[capability_id] = result.get("body")
+    return {"ok": True, "route": route.get("id"), "steps": results, "body": results[-1].get("body")}
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="执行一个已验证的原子能力")
-    parser.add_argument("--capability", required=True, help="能力编号")
+    parser = argparse.ArgumentParser(description="执行已验证的原子能力或组合路线")
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--capability", help="能力编号")
+    target.add_argument("--route", help="组合路线编号")
     parser.add_argument("--input", default="{}", help="JSON 字符串，或 @JSON文件")
     parser.add_argument("--confirm-write", action="store_true", help="仅在用户已明确确认本次写操作后使用")
     parser.add_argument("--prepare-only", action="store_true", help="只组装请求，不访问业务系统")
     args = parser.parse_args()
     try:
         contract = load_contract()
-        capability = next((item for item in contract["capabilities"] if item["id"] == args.capability), None)
-        if capability is None:
-            raise ValueError(f"未知能力：{args.capability}")
         supplied = parse_json_argument(args.input)
         if not isinstance(supplied, dict):
             raise ValueError("--input 必须是 JSON 对象")
+        if args.route:
+            if args.prepare_only:
+                raise ValueError("组合路线不能使用 --prepare-only；绑定值必须来自真实上游结果")
+            route = next((item for item in contract.get("routes", []) if item.get("id") == args.route), None)
+            if route is None:
+                raise ValueError(f"未知组合路线：{args.route}")
+            result = execute_route(route, supplied, args.confirm_write)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result["ok"] else 2
+        capability = next((item for item in contract["capabilities"] if item["id"] == args.capability), None)
+        if capability is None:
+            raise ValueError(f"未知能力：{args.capability}")
         if args.prepare_only:
             prepared = prepare_input(capability, supplied, contract, resolve_lookups=False)
             url, options = build_request(capability, prepared)
