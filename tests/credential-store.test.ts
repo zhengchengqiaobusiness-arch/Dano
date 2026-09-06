@@ -129,6 +129,12 @@ test("the exported Python runtime reads its same-name external credential file",
       { Accept: "application/json", authorization: "Bearer python-runtime", "x-tenant-id": "tenant-9" },
       { Accept: "application/json", authorization: "Bearer python-runtime", "x-tenant-id": "tenant-9" }
     ]);
+    const linuxPathProbe = probe.replace(
+      "print(json.dumps([module.auth_headers('https://erp.example.test/orders'), module.auth_headers('https://erp.example.test:443/orders')], ensure_ascii=False))",
+      "module.sys.platform = 'linux'; print(module.default_auth_file())"
+    );
+    const linuxPath = await execFileAsync("python", ["-c", linuxPathProbe, script]);
+    assert.equal(path.normalize(linuxPath.stdout.trim()), path.join(temporary, ".agents", "bak", `${skillName}.json`));
     const disableProbe = probe.replace(
       "print(json.dumps([module.auth_headers('https://erp.example.test/orders'), module.auth_headers('https://erp.example.test:443/orders')], ensure_ascii=False))",
       "print(json.dumps(module.auth_headers('https://erp.example.test/orders'), ensure_ascii=False))"

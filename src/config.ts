@@ -1,7 +1,7 @@
 import path from "node:path";
 
 export const LINUX_SKILL_OUTPUT_ROOT = "/opt/dano/runtime-data/.agents/skills";
-export const LINUX_SKILL_CREDENTIAL_ROOT = "/opt/dano/runtime-data/.agents/credentials";
+export const LINUX_SKILL_CREDENTIAL_ROOT = "/opt/dano/runtime-data/.agents/bak";
 
 export function defaultSkillOutputRoot(rootDir: string, platform = process.platform) {
   return platform === "linux"
@@ -11,7 +11,7 @@ export function defaultSkillOutputRoot(rootDir: string, platform = process.platf
 
 export function defaultSkillCredentialRoot(outputRoot: string, platform = process.platform) {
   return platform === "linux"
-    ? path.posix.join(path.posix.dirname(outputRoot), "credentials")
+    ? LINUX_SKILL_CREDENTIAL_ROOT
     : path.join(path.dirname(path.resolve(outputRoot)), "credentials");
 }
 

@@ -87,7 +87,7 @@ Linux 环境默认导出到 `/opt/dano/runtime-data/.agents/skills/<skill-name>/
 
 `references/CONTRACT.json` 是能力、字段、绑定、路线和完成条件的唯一机器事实来源。能力索引、当前表单、候选项、规划例子与组合路线按需加载。产品、供应商、账户、人员等目录接口只作为字段候选，不作为独立业务能力。
 
-导出的 Skill 不包含生成器实现过程、项目代码结构、录制证据清单、凭据、Cookie 或 secret-bearing headers。录制器从已登录业务请求中提取认证头，脱离证据流保存；导出时在 Skill 目录外生成同名运行时凭据文件。Linux 默认位置为 `/opt/dano/runtime-data/.agents/credentials/<skill-name>.json`，文件权限为 `0600`。导出的 Python 执行器会自动读取，也可通过 `SKILL_AUTH_HEADERS` 或 `SKILL_AUTH_FILE` 显式覆盖。
+导出的 Skill 不包含生成器实现过程、项目代码结构、录制证据清单、凭据、Cookie 或 secret-bearing headers。录制器从已登录业务请求中提取认证头，脱离证据流保存；导出时在 Skill 目录外生成同名临时 Token/运行时凭据文件。Linux 默认位置为 `/opt/dano/runtime-data/.agents/bak/<skill-name>.json`，文件权限为 `0600`。导出的 Python 执行器会自动读取，也可通过 `SKILL_AUTH_HEADERS` 或 `SKILL_AUTH_FILE` 显式覆盖。
 
 ## 修改 Skill 还是修改平台
 

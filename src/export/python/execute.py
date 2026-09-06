@@ -562,7 +562,8 @@ def checked_headers(value: Any, source: str) -> dict[str, str]:
 
 
 def default_auth_file() -> Path:
-    return SKILL_ROOT.parent.parent / "credentials" / f"{SKILL_ROOT.name}.json"
+    directory = "bak" if sys.platform.startswith("linux") else "credentials"
+    return SKILL_ROOT.parent.parent / directory / f"{SKILL_ROOT.name}.json"
 
 
 def url_origin(url: str) -> str:

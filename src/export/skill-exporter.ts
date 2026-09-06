@@ -179,6 +179,8 @@ export async function exportSkill(
   const directory = path.join(outputRoot, skillName);
   const referencesDir = path.join(directory, "references");
   const scriptsDir = path.join(directory, "scripts");
+  await mkdir(outputRoot, { recursive: true });
+  await mkdir(directory);
   const routesDir = path.join(referencesDir, "routes");
   await mkdir(routesDir, { recursive: true });
   await mkdir(scriptsDir, { recursive: true });

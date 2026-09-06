@@ -1,8 +1,8 @@
 import path from "node:path";
-import { readdir, rename, stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import type { CapabilityContract, EvidenceEvent, SkillListItem, SkillRecord } from "../domain.js";
 import { exportSkill, normalizeSkillName } from "../export/skill-exporter.js";
-import { ensureDir, readJson, writeJson } from "../utils.js";
+import { readJson, writeJson } from "../utils.js";
 import { moveDirectory } from "./skill-files.js";
 import { materializeSkillCredentials, requiredCredentialOrigins } from "../credentials/credential-store.js";
 
@@ -94,11 +94,9 @@ export class SkillLibrary {
       record.status !== "deleted" && record.displayName.trim() === name.trim()
     );
 
-    const temporaryRoot = path.join(this.stateDir, "staging", `${slug}-${Date.now()}`);
-    const exported = await exportSkill(temporaryRoot, name, capabilities, [], events);
-    const destination = path.join(this.outputRoot, exported.skillName);
+    const exported = await exportSkill(this.outputRoot, name, capabilities, [], events);
+    const destination = exported.dir;
     assertInside(this.outputRoot, destination);
-    if (await exists(destination)) throw new Error(`导出目录已存在：${exported.skillName}`);
     const exportedIds = new Set(exported.capabilityIds);
     const exportedCapabilities = capabilities.filter(capability => exportedIds.has(capability.id));
     const credentialFile = await materializeSkillCredentials(
@@ -108,9 +106,6 @@ export class SkillLibrary {
       exportedCapabilities.map(capability => capability.transport.origin),
       requiredCredentialOrigins(exportedCapabilities, events)
     );
-    await ensureDir(this.outputRoot);
-    await rename(exported.dir, destination);
-
     const now = new Date().toISOString();
     const record: SkillRecord = {
       id: exported.skillName,
