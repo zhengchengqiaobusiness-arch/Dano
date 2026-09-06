@@ -71,6 +71,17 @@ export function buildFinalAnalysisPrompt(latestSeq) {
 }
 
 export const MAX_EMPTY_FINAL_SETTLES = 3;
+const ABORT_RESIDUE_MS = 150;
+const RETRY_AFTER_ABORT_MS = 80;
+
+export function isAbortLikeError(error) {
+  return /abort/i.test(String(error?.message || error || ""));
+}
+
+export function isBusyPromptError(error) {
+  const message = String(error?.message || error || "");
+  return message.includes("already processing") || message.includes("streamingBehavior");
+}
 
 export class LivePiSession {
   constructor({
@@ -143,11 +154,11 @@ export class LivePiSession {
     }
     try {
       await this.session.prompt(text);
+      return { queued: false };
     } catch (error) {
-      const message = String(error?.message || error);
-      if (message.includes("already processing") || message.includes("streamingBehavior")) {
+      if (isBusyPromptError(error)) {
         await this.session.prompt(text, { streamingBehavior: "followUp" });
-        return;
+        return { queued: true };
       }
       throw error;
     }
@@ -178,6 +189,7 @@ export class LivePiSession {
     const checkResult = typeof hasResult === "function" ? hasResult : null;
     let lastToolCount = this.#trace.toolCount;
     let lastToolAt = Date.now();
+    let lastPromptAt = Date.now();
     let lastSeenTools = this.#trace.toolCount;
     let emptySettles = 0;
     let retryTimer = null;
@@ -223,9 +235,12 @@ export class LivePiSession {
     };
     const scheduleRetry = (text) => {
       const toolsNow = this.#trace.toolCount;
+      const abortResidue = interrupted && Date.now() - lastPromptAt < ABORT_RESIDUE_MS;
       if (toolsNow > lastSeenTools) {
         lastSeenTools = toolsNow;
         emptySettles = 0;
+      } else if (abortResidue) {
+        logPiOnly("[PI分析] 中止后的空轮不算空转，继续等待提交");
       } else {
         emptySettles += 1;
       }
@@ -242,15 +257,22 @@ export class LivePiSession {
         retryTimer = null;
         if (settled || !this.alive) return;
         startPrompt(text);
-      }, 0);
+      }, abortResidue ? RETRY_AFTER_ABORT_MS : 0);
     };
     const interruptHungTurn = () => {
       if (settled || !this.alive || interrupted) return;
       interrupted = true;
+      if (typeof this.session.abort !== "function") {
+        logPiOnly("[PI分析] 催促后仍无新工具，当前运行时不能中止，继续等当前轮提交");
+        this.#emitThought({ kind: "text", text: "当前轮仍在进行，继续等待提交" });
+        lastToolAt = Date.now();
+        return;
+      }
       restartAfterAbort = true;
+      emptySettles = 0;
       logPiOnly("[PI分析] 催促后仍无新工具，中止当前轮并要求立刻提交");
       this.#emitThought({ kind: "text", text: "分析卡住，中止当前轮并要求立刻提交" });
-      Promise.resolve(this.session.abort?.())
+      Promise.resolve(this.session.abort())
         .catch(() => {})
         .finally(() => {
           if (settled || !this.alive) return;
@@ -270,8 +292,11 @@ export class LivePiSession {
         return;
       }
       if (!checkResult) {
-        if (error) settleErr(error);
-        else settleOk();
+        if (error && !isAbortLikeError(error)) settleErr(error);
+        else if (!error) settleOk();
+        return;
+      }
+      if (isAbortLikeError(error)) {
         return;
       }
       if (error) {
@@ -290,6 +315,7 @@ export class LivePiSession {
     };
     const startPrompt = (text, options) => {
       if (settled || !this.alive) return;
+      lastPromptAt = Date.now();
       let task;
       try {
         task = options ? this.session.prompt(text, options) : this.#promptNow(text);
@@ -298,7 +324,17 @@ export class LivePiSession {
         return;
       }
       Promise.resolve(task).then(
-        () => onPromptSettled(),
+        (result) => {
+          if (result?.queued) {
+            if (!checkResult) {
+              onPromptSettled();
+              return;
+            }
+            logPiOnly("[PI分析] 当前轮仍在进行，已排队催促，不算空转");
+            return;
+          }
+          onPromptSettled();
+        },
         (error) => onPromptSettled(error),
       );
     };
@@ -333,6 +369,13 @@ export class LivePiSession {
       if (this.#trace.toolCount !== lastToolCount) {
         lastToolCount = this.#trace.toolCount;
         lastToolAt = Date.now();
+        steered = false;
+        interrupted = false;
+        return;
+      }
+      const lastEventAt = Number(this.#trace.lastEventAt) || 0;
+      if (lastEventAt > lastToolAt) {
+        lastToolAt = lastEventAt;
         steered = false;
         interrupted = false;
         return;

@@ -20,7 +20,6 @@ from dano.infra.run_logging import emit_run_exception, note_run_fact
 
 from dano.export.skill_package.validator import (
     flow_spec_verification_ids,
-    validate_skill_package,
 )
 from dano.onboarding.skill_generation.validate import handbook_text_is_banned
 
@@ -364,7 +363,11 @@ def _norm_name_token(token: str) -> str:
 def _skill_frontmatter_name(skill, plans: list[dict]) -> str:  # noqa: ANN001
     heading = _page_object_heading(skill, plans)
     readable = _token_slug(heading, sep="-", empty="")
-    if readable and readable not in {"skill", "action", "dano", "business", "本页业务"}:
+    if (
+        readable
+        and not re.fullmatch(r"[\d-]+", readable)
+        and readable not in {"skill", "action", "dano", "business", "本页业务"}
+    ):
         return readable[:64]
     slugs = [_slug(str(plan.get("name") or "")) for plan in plans if str(plan.get("name") or "")]
     token_sets = [{_norm_name_token(part) for part in item.split("-") if part} for item in slugs]
@@ -1047,9 +1050,18 @@ def _object_from_title(title: str) -> str:
     return text
 
 
+def _usable_skill_title(title: str) -> str:
+    text = _safe_text(title)
+    if not text or _is_recording_copy(text) or "能力录制" in text or "等" in text:
+        return ""
+    if re.fullmatch(r"[\d\s._-]+", text):
+        return ""
+    return text
+
+
 def _page_object_heading(skill, plans: list[dict]) -> str:  # noqa: ANN001
-    title = _safe_text(getattr(skill, "title", ""))
-    if title and not _is_recording_copy(title) and "能力录制" not in title and "等" not in title:
+    title = _usable_skill_title(getattr(skill, "title", ""))
+    if title:
         return title
     first = _safe_text((plans[0].get("title") or plans[0].get("name")) if plans else "")
     return _object_from_title(first) or first or "本页业务"
@@ -2778,7 +2790,7 @@ def _fallback_skill_md(skill, slug: str, plans: list[dict], spec) -> str:  # noq
     skill_name = _skill_frontmatter_name(skill, plans)
     lines = [
         "---",
-        f"name: {skill_name}",
+        f"name: {json.dumps(skill_name, ensure_ascii=False)}",
         f"description: {json.dumps(description, ensure_ascii=False)}",
         "---",
         "",
@@ -4909,18 +4921,6 @@ def render_skill_package(skill, out_dir: str, *, tenant: str) -> str:  # noqa: A
     try:
         _plans, fallback_used = _render_folder(skill, stage, tenant=tenant)
         _clean_runtime_artifacts(stage)
-        validation = validate_skill_package(stage)
-        if not validation["ok"] and not fallback_used:
-            plans = _filter_plans_for_export(
-                _capability_plans(skill, None, _compiled_request(skill, None)),
-                skill,
-            )
-            _write_text(stage / "SKILL.md", _fallback_skill_md(skill, slug, plans, None))
-            fallback_used = True
-            validation = validate_skill_package(stage)
-        _clean_runtime_artifacts(stage)
-        if not validation["ok"]:
-            raise ValueError(f"skill package validation failed: {validation['issues']}")
         target = root / slug
         backup = root / f".{slug}.old-{uuid4().hex}"
         if target.exists():

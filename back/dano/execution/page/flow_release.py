@@ -660,7 +660,11 @@ def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
 
     apply_recorded_unknown_policy(current)
     ensure_recorded_body_source(current)
-    return current
+    from dano.execution.page.flow_materialization.links import (
+        order_steps_for_link_dependencies,
+    )
+
+    return order_steps_for_link_dependencies(current)
 
 
 def prepare_flow_release_candidate(spec: FlowSpec) -> tuple[FlowSpec, dict[str, Any]]:

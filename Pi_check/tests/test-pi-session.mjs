@@ -236,6 +236,144 @@ test("PI 空转未提交时停止分析，不刷屏重试", async () => {
   assert.equal(pi.status, "failed");
 });
 
+test("读完证据后生成提交被中止，随后空轮不得立刻判失败", async () => {
+  const prompts = [];
+  let rejectPending;
+  let pending = new Promise((_, reject) => {
+    rejectPending = reject;
+  });
+  let postAbortPrompts = 0;
+  let submitted = false;
+  const session = {
+    prompts,
+    aborted: 0,
+    async prompt(text, options = {}) {
+      prompts.push({ text, options });
+      if (options.streamingBehavior === "steer") return;
+      if (this.aborted === 0) {
+        await pending;
+        return;
+      }
+      postAbortPrompts += 1;
+      if (postAbortPrompts >= 5) submitted = true;
+    },
+    async abort() {
+      this.aborted += 1;
+      rejectPending?.(new Error("aborted"));
+      pending = new Promise((_, reject) => {
+        rejectPending = reject;
+      });
+    },
+  };
+  const { createPiTrace } = await import("../src/pi-trace.mjs");
+  const trace = createPiTrace();
+  for (const seq of [604, 612, 632, 839, 901, 905]) {
+    trace.recordTool("read_evidence_item", { seq }, "ok", true);
+  }
+  const pi = new LivePiSession({
+    session,
+    sessionId: "pi_abort_empty",
+    dispose: () => {},
+    trace,
+  });
+  await pi.requestFinalAnalysis({
+    timeoutMs: 1500,
+    idleSubmitMs: 40,
+    hasResult: async () => submitted,
+  });
+  assert.equal(pi.status, "submitted");
+  assert.ok(session.aborted >= 1);
+  assert.ok(submitted);
+  assert.ok(postAbortPrompts >= 5);
+});
+
+test("模型仍在流式产出时不算空闲，不得中止当前轮", async () => {
+  const prompts = [];
+  let resolvePending;
+  const pending = new Promise((resolve) => {
+    resolvePending = resolve;
+  });
+  const session = {
+    prompts,
+    aborted: 0,
+    async prompt(text, options = {}) {
+      prompts.push({ text, options });
+      if (options.streamingBehavior === "steer") return;
+      await pending;
+    },
+    async abort() {
+      this.aborted += 1;
+    },
+  };
+  const { createPiTrace } = await import("../src/pi-trace.mjs");
+  const trace = createPiTrace();
+  trace.recordTool("list_recording_index", {}, "items=2", true);
+  const pi = new LivePiSession({
+    session,
+    sessionId: "pi_stream_idle",
+    dispose: () => {},
+    trace,
+  });
+  const started = Date.now();
+  const pump = setInterval(() => {
+    trace.handleEvent({ type: "text_delta", delta: "{" });
+  }, 15);
+  try {
+    await pi.requestFinalAnalysis({
+      timeoutMs: 400,
+      idleSubmitMs: 40,
+      hasResult: async () => Date.now() - started > 160,
+    });
+  } finally {
+    clearInterval(pump);
+    resolvePending?.();
+  }
+  assert.equal(pi.status, "submitted");
+  assert.equal(session.aborted, 0);
+  assert.equal(prompts.filter((item) => item.options.streamingBehavior === "steer").length, 0);
+});
+
+test("运行时没有 abort 时不得另开一轮空转", async () => {
+  const prompts = [];
+  let resolvePending;
+  const pending = new Promise((resolve) => {
+    resolvePending = resolve;
+  });
+  const session = {
+    prompts,
+    async prompt(text, options = {}) {
+      prompts.push({ text, options });
+      if (options.streamingBehavior === "steer" || options.streamingBehavior === "followUp") {
+        return;
+      }
+      await pending;
+    },
+  };
+  const { createPiTrace } = await import("../src/pi-trace.mjs");
+  const trace = createPiTrace();
+  trace.recordTool("read_evidence_item", { seq: 901 }, "ok", true);
+  const pi = new LivePiSession({
+    session,
+    sessionId: "pi_no_abort",
+    dispose: () => {},
+    trace,
+  });
+  const started = Date.now();
+  try {
+    await pi.requestFinalAnalysis({
+      timeoutMs: 400,
+      idleSubmitMs: 40,
+      hasResult: async () => Date.now() - started > 200,
+    });
+  } finally {
+    resolvePending?.();
+  }
+  assert.equal(pi.status, "submitted");
+  const blocking = prompts.filter((item) => !item.options.streamingBehavior);
+  assert.equal(blocking.length, 1);
+  assert.equal(prompts.filter((item) => item.options.streamingBehavior === "followUp").length, 0);
+});
+
 test("PI prompt 抛错后停止分析，不再立刻重开一轮", async () => {
   const prompts = [];
   const session = {

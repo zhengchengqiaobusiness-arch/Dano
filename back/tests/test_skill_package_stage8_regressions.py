@@ -22,6 +22,7 @@ from dano.export.skill_package.renderer import (
     _consumer_contract,
     consume_upstream_input_schema,
     _execution_protocol,
+    _fallback_skill_md,
     _field_label,
     _format_list_py,
     _handbook_text,
@@ -32,6 +33,7 @@ from dano.export.skill_package.renderer import (
     _script_invocation,
     _script_slug,
     _skill_description,
+    _skill_frontmatter_name,
     _workflow_table,
     package_slug,
     render_skill_package,
@@ -1394,6 +1396,78 @@ def test_list_formatter_contains_only_public_output_schema() -> None:
     assert "secret" not in source
 
 
+def test_numeric_display_title_keeps_string_name_and_lists_original_operations() -> None:
+    import yaml
+
+    plans = [
+        {"name": "搜索工作日报列表", "title": "搜索工作日报列表"},
+        {"name": "查看工作日报详情", "title": "查看工作日报详情"},
+        {"name": "新增并提交工作日报", "title": "新增并提交工作日报"},
+    ]
+    skill = type("Skill", (), {
+        "title": "1111",
+        "action": "action_f5f8e87f59794afba0a1cd94850704a6",
+        "call_metadata": {},
+        "api_request": {},
+    })()
+
+    name = _skill_frontmatter_name(skill, plans)
+    heading, description = _skill_description(skill, plans, None)
+    md = _fallback_skill_md(skill, "action_f5f8e87f59794afba0a1cd94850704a6", plans, None)
+    metadata = yaml.safe_load(md.split("---", 2)[1])
+
+    assert isinstance(name, str) and name.strip()
+    assert not name.isdigit()
+    assert isinstance(metadata.get("name"), str) and metadata["name"].strip()
+    assert heading != "1111"
+    assert "工作日报" in heading or "工作日报" in description
+    assert "搜索工作日报列表" in md
+    assert "查看工作日报详情" in md
+    assert "新增并提交工作日报" in md
+
+
+def test_numeric_display_title_does_not_block_export(tmp_path: Path) -> None:
+    capabilities = [
+        {
+            "capability_id": "cap_search_daily_report",
+            "name": "搜索工作日报列表",
+            "title": "搜索工作日报列表",
+            "kind": "query",
+            "input_schema": {"type": "object", "properties": {}},
+            "output_schema": {"type": "object"},
+            "requires_human_confirm": False,
+            "execution_contract": {
+                "steps": [{
+                    "step_id": "step_search_list",
+                    "method": "GET",
+                    "url": "https://example.test/list",
+                    "path": "/list",
+                }],
+                "links": [],
+                "verification_ids": [],
+            },
+        },
+    ]
+    skill = SkillSpec(
+        skill_id="oa.action_f5f8e87f59794afba0a1cd94850704a6",
+        tenant="test",
+        subsystem=Subsystem("oa"),
+        action="action_f5f8e87f59794afba0a1cd94850704a6",
+        risk_level=RiskLevel.L3,
+        title="1111",
+        api_request={"capabilities": capabilities},
+        call_metadata={},
+        capabilities=capabilities,
+    )
+
+    folder = tmp_path / render_skill_package(skill, str(tmp_path), tenant="test")
+
+    assert folder.exists()
+    assert (folder / "SKILL.md").exists()
+    handbook = (folder / "SKILL.md").read_text(encoding="utf-8")
+    assert "搜索工作日报列表" in handbook
+
+
 def test_frontmatter_description_is_concise_and_does_not_copy_full_playbook() -> None:
     plans = [
         {"name": "查询销售订单", "title": "查询销售订单"},
@@ -1774,7 +1848,7 @@ def test_result_then_playbook_renders_combination_route_and_readable_scripts(tmp
     assert "确认哪些项目仍需新增" in handbook
     assert "按用户说明办理" in handbook
     assert "没有已确认绑定" in handbook
-    assert "name: 日报填写" in handbook
+    assert 'name: "日报填写"' in handbook or "name: 日报填写" in handbook
     assert "capability_" not in "\n".join(scripts)
     assert "查询工作汇报统计.py" in scripts
     assert "新增并提交工作日报.py" in scripts

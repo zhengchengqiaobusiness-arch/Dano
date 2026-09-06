@@ -1331,6 +1331,11 @@ def flow_spec_to_api_request(
     if not _prepared:
         spec = prepare_flow_spec_for_publish(spec)
         hydrate_recorded_write_bodies(spec)
+    from dano.execution.page.flow_materialization.links import (
+        order_steps_for_link_dependencies,
+    )
+
+    spec = order_steps_for_link_dependencies(spec)
     active_step_ids = _active_capability_step_ids(spec)
     strict_source_contract = int(
         (spec.meta or {}).get("stage_1_6_contract_version") or 0

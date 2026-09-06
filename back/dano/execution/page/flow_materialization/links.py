@@ -468,6 +468,53 @@ def _dependency_closure_step_ids(spec: FlowSpec, target_ids: set[str]) -> set[st
     return keep
 
 
+def order_steps_for_link_dependencies(spec: FlowSpec) -> FlowSpec:
+    """Put each link source before its target. Keep the original order otherwise.
+
+    PI drafts often list detail/readback steps next to the capability they
+    belong to, even when a later write produces the identity those steps need.
+    Compile requires source_idx < target_idx; reorder instead of failing.
+    """
+    steps = list(spec.steps or [])
+    if len(steps) < 2 or not spec.links:
+        return spec
+    ids = [str(step.step_id or "") for step in steps if str(step.step_id or "")]
+    by_id = {str(step.step_id): step for step in steps if str(step.step_id or "")}
+    if len(by_id) != len(ids):
+        return spec
+    dependents: dict[str, list[str]] = {step_id: [] for step_id in ids}
+    indegree = {step_id: 0 for step_id in ids}
+    for link in spec.links or []:
+        source_id = str(link.source_step_id or "")
+        target_id = str(link.target_step_id or "")
+        if not source_id or not target_id or source_id == target_id:
+            continue
+        if source_id not in indegree or target_id not in indegree:
+            continue
+        if target_id in dependents[source_id]:
+            continue
+        dependents[source_id].append(target_id)
+        indegree[target_id] += 1
+    ready = [step_id for step_id in ids if indegree[step_id] == 0]
+    ordered: list[str] = []
+    while ready:
+        step_id = ready.pop(0)
+        ordered.append(step_id)
+        newly_ready = []
+        for target_id in dependents[step_id]:
+            indegree[target_id] -= 1
+            if indegree[target_id] == 0:
+                newly_ready.append(target_id)
+        ready = sorted(ready + newly_ready, key=ids.index)
+    if len(ordered) != len(ids):
+        return spec
+    if ordered == ids:
+        return spec
+    leftovers = [step for step in steps if str(step.step_id or "") not in by_id]
+    spec.steps = [by_id[step_id] for step_id in ordered] + leftovers
+    return spec
+
+
 def _dependency_sig(source_step_id: str, source_path: str, target_step_id: str, target_path: str) -> str:
     raw = "|".join([source_step_id or "", source_path or "", target_step_id or "", target_path or ""])
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()

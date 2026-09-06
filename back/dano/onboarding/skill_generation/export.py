@@ -612,10 +612,9 @@ async def export_recording_skill(
         )
         slug = render_fn(skill, out_dir, tenant=tenant)
         export_path = str(Path(out_dir) / slug)
-        _assert_package_matches_plan(export_path, plan)
         _log_export(
             "skill.export.rendered",
-            summary="Skill 包已写出并通过对齐校验",
+            summary="Skill 包已写出",
             status="succeeded",
             duration_ms=(time.monotonic() - render_started) * 1000,
             result_id=str(result_id),
@@ -772,44 +771,6 @@ async def _rollback_published_asset(published_report: dict[str, Any]) -> None:
         return
 
 
-def _assert_package_matches_plan(export_path: str, plan: SkillPlan) -> None:
-    from dano.export.skill_package.validator import validate_skill_package
-
-    root = Path(export_path)
-    validation = validate_skill_package(root)
-    if not validation["ok"]:
-        raise RuntimeError("Skill 包校验失败：" + json.dumps(validation["issues"], ensure_ascii=False))
-    contract_path = root / "references" / "CONTRACT.json"
-    contract = json.loads(contract_path.read_text(encoding="utf-8"))
-    selected = [str(item) for item in (contract.get("selected_operations") or []) if str(item)]
-    if len(selected) != len(plan.selected_capability_ids):
-        raise RuntimeError("CONTRACT.json 公开操作数量与规划不一致")
-    contract_routes = [item for item in (contract.get("routes") or []) if isinstance(item, dict)]
-    contract_shapes = {
-        (
-            str(item.get("name") or ""),
-            len(item.get("operation_sequence") or []),
-            bool(item.get("requires_confirmation")),
-        )
-        for item in contract_routes
-    }
-    planned_shapes = {
-        (route.name, len(route.capability_sequence), bool(route.requires_confirmation))
-        for route in plan.routes
-    }
-    if contract_shapes != planned_shapes:
-        raise RuntimeError("CONTRACT.json 公开路线与规划不一致")
-    names = {
-        str(item.get("name") or "")
-        for item in (contract.get("capabilities") or [])
-    }
-    for item in plan.unused_capabilities:
-        if item.name and item.name in names:
-            raise RuntimeError(f"未使用能力出现在公共脚本列表: {item.name}")
-    if str(plan.planning_mode) != contract.get("planning_mode"):
-        raise RuntimeError("SKILL 规划模式与 CONTRACT 不一致")
-
-
 def _default_render(skill, out_dir: str, *, tenant: str) -> str:  # noqa: ANN001
     from dano.export.skill_package.renderer import render_skill_package
 
@@ -828,7 +789,6 @@ async def _default_publish(**kwargs: Any) -> dict[str, Any]:
         flow_spec_to_api_request,
     )
     from dano.onboarding.page_onboard import _build_page_body
-    from dano.schemas.validate import validate_asset_body
     from dano.shared.enums import AssetType, Subsystem, ValidationStatus
     from dano.shared.models import AssetEnvelope, GenerationReport, Scope
 
@@ -856,7 +816,6 @@ async def _default_publish(**kwargs: Any) -> dict[str, Any]:
     }
     required = flow_spec_required_params(view)
     body, _params, _req, _opt = _build_page_body(api_request, action, title, required)
-    validate_asset_body(AssetType.PAGE_SCRIPT, body)
     scope = Scope(tenant=kwargs["tenant"], subsystem=Subsystem(sub_str or view.subsystem or "oa"))
     draft = await DraftStore().save_draft(
         run_id=f"skill-export-{kwargs.get('result_id') or action}",

@@ -684,3 +684,149 @@ def test_command_kind_write_route_requires_confirmation(tmp_path: Path) -> None:
         for step in route.get("steps") or []:
             if step.get("operation") in {"handle_record", "办理记录", "create_record"}:
                 assert step.get("confirm_before_execute") is True
+
+
+def _readback_after_create_payload() -> dict:
+    """PI 常按能力声明顺序排步骤，但回读链接是提交 → 详情。"""
+    return {
+        "title": "业务办理",
+        "capabilities": [
+            {
+                "capability_id": "cap_search",
+                "name": "搜索列表",
+                "title": "搜索列表",
+                "kind": "query",
+                "step_ids": ["step_search"],
+                "request_refs": [{"step_id": "step_search", "usage": "execute"}],
+                "input_schema": {"type": "object", "properties": {"keyword": {"type": "string"}}},
+            },
+            {
+                "capability_id": "cap_view",
+                "name": "查看详情",
+                "title": "查看详情",
+                "kind": "detail",
+                "step_ids": ["step_get_detail"],
+                "request_refs": [{"step_id": "step_get_detail", "usage": "execute"}],
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "capability_id": "cap_create",
+                "name": "新增并提交",
+                "title": "新增并提交",
+                "kind": "mutation",
+                "step_ids": ["step_preflight", "step_submit"],
+                "request_refs": [
+                    {"step_id": "step_preflight", "usage": "preflight"},
+                    {"step_id": "step_submit", "usage": "execute"},
+                ],
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}},
+                },
+            },
+        ],
+        "steps": [
+            {
+                "step_id": "step_search",
+                "name": "搜索列表",
+                "method": "GET",
+                "path": "/api/records",
+                "url": "https://example.test/api/records",
+                "params": [
+                    {
+                        "key": "keyword",
+                        "path": "query.keyword",
+                        "label": "关键字",
+                        "source_kind": "user_input",
+                        "exposed_to_user": True,
+                    }
+                ],
+            },
+            {
+                "step_id": "step_get_detail",
+                "name": "获取详情",
+                "method": "GET",
+                "path": "/api/records/get",
+                "url": "https://example.test/api/records/get",
+                "params": [
+                    {
+                        "key": "id",
+                        "path": "query.id",
+                        "label": "记录ID",
+                        "source_kind": "selected_record_identity",
+                        "exposed_to_user": False,
+                        "required": True,
+                    }
+                ],
+            },
+            {
+                "step_id": "step_preflight",
+                "name": "获取流程定义",
+                "method": "GET",
+                "path": "/api/process/get",
+                "url": "https://example.test/api/process/get",
+                "params": [
+                    {
+                        "key": "key",
+                        "path": "query.key",
+                        "source_kind": "constant",
+                        "exposed_to_user": False,
+                        "default_value": "biz_record",
+                    }
+                ],
+            },
+            {
+                "step_id": "step_submit",
+                "name": "提交",
+                "method": "POST",
+                "path": "/api/records/submit",
+                "url": "https://example.test/api/records/submit",
+                "params": [
+                    {
+                        "key": "title",
+                        "path": "body.title",
+                        "label": "标题",
+                        "source_kind": "user_input",
+                        "exposed_to_user": True,
+                        "default_value": "示例",
+                    }
+                ],
+            },
+        ],
+        "links": [
+            {
+                "source_step_id": "step_submit",
+                "source_path": "response.data",
+                "target_step_id": "step_get_detail",
+                "target_path": "query.id",
+                "description": "提交成功返回记录ID，用于回读详情。",
+            }
+        ],
+    }
+
+
+def test_readback_link_after_create_does_not_block_export_compile() -> None:
+    spec = FlowSpec.model_validate(_readback_after_create_payload())
+    request = SkillGenerationRequest(
+        title="业务办理",
+        business_description="先搜索列表然后新增。",
+        out_dir="out",
+    )
+    plan = propose_deterministic_plan(
+        spec, request, {cap.capability_id for cap in spec.capabilities}, "fp-readback",
+    )
+    from dano.onboarding.skill_generation.export_view import build_export_view
+
+    view = build_export_view(spec, list(plan.selected_capability_ids))
+    skill = build_export_skill_spec(
+        view,
+        tenant="test",
+        skill_id="oa.action_abcd1234abcd1234abcd1234abcd1234",
+        title="业务办理",
+        plan=plan,
+    )
+    api_request = skill.api_request or {}
+    assert api_request.get("capabilities")
+    order = [str(step.get("step_id") or "") for step in api_request.get("steps") or []]
+    assert "step_submit" in order and "step_get_detail" in order
+    assert order.index("step_submit") < order.index("step_get_detail")
