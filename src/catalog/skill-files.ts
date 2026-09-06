@@ -13,7 +13,7 @@ const defaultMover: DirectoryMover = { rename, cp, rm, ensureDir };
 
 export function isRetryableFsError(error: unknown) {
   const code = error && typeof error === "object" && "code" in error ? String((error as { code?: string }).code) : "";
-  return ["EPERM", "EACCES", "EBUSY", "ENOTEMPTY", "EAGAIN", "EIO"].includes(code);
+  return ["EXDEV", "EPERM", "EACCES", "EBUSY", "ENOTEMPTY", "EAGAIN", "EIO"].includes(code);
 }
 
 function wait(ms: number) {
@@ -31,6 +31,7 @@ export async function moveDirectory(from: string, to: string, io: DirectoryMover
     } catch (error) {
       lastError = error;
       if (!isRetryableFsError(error)) throw error;
+      if ((error as { code?: string })?.code === "EXDEV") break;
     }
   }
   await io.cp(from, to, { recursive: true, force: true });
