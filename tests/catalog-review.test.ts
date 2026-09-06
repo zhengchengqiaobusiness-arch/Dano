@@ -93,7 +93,8 @@ test("unexplained write field blocks export and asks for re-analyze", () => {
   assert.equal(review.status, "blocked");
   assert.equal(review.next, "re-analyze");
   assert.match(review.summary, /审核未通过/);
-  assert.match(review.summary, /不要进入补录循环|不要对同一审核结果再分析或再录/);
+  assert.match(review.summary, /平台自动修复|平台根据已有成功证据/);
+  assert.match(review.summary, /不要求调用方|不得交给用户/);
   assert.match(review.summary, /单位/);
 });
 
@@ -160,7 +161,7 @@ test("unsound computed formula blocks export", () => {
   assert.match(review.summary, /编号、枚举或时间戳/);
 });
 
-test("missing successful write evidence asks to re-record", () => {
+test("missing successful write evidence routes the platform to re-record", () => {
   const catalog = [
     cap({
       id: "create-order",
@@ -177,7 +178,7 @@ test("missing successful write evidence asks to re-record", () => {
   const review = reviewCatalog(catalog);
   assert.equal(review.status, "blocked");
   assert.equal(review.next, "re-record");
-  assert.match(review.summary, /回到页面补录/);
+  assert.match(review.summary, /平台自动返回页面补齐真实证据/);
 });
 
 test("complete field coverage blocks a blank visible filter and an unexercised business detail collection", () => {
@@ -654,7 +655,8 @@ test("lookup evidence gaps remapped to re-analyze when primary writes already su
   assert.ok(leftover, review.summary);
   assert.equal(leftover.next, "re-analyze");
   assert.equal(review.next, "re-analyze");
-  assert.match(review.summary, /不要进入补录循环|不要重新录制/);
+  assert.match(review.summary, /平台自动修复|平台根据已有成功证据/);
+  assert.match(review.summary, /不要求调用方|不得交给用户/);
   assert.equal(isMajorEvidenceGap(leftover, [query, create]), false);
 });
 

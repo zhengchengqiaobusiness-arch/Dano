@@ -167,6 +167,7 @@ test("a second review with the same findings stops instead of analyzing again", 
   assert.equal(second.review.status, "blocked");
   assert.equal(second.review.next, "re-analyze");
   assert.match(second.review.summary, /审核结果与上次相同/);
+  assert.match(second.review.summary, /不要求调用方|不是调用方/);
   assert.equal((await studio.evaluateRerecord(DOC_FORM)).allowed, false);
   assert.equal((await studio.evaluateRerecord(LEAVE_PAGE)).allowed, true);
   await rm(temporary, { recursive: true, force: true });

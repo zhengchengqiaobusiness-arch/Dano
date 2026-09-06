@@ -119,7 +119,8 @@ test("produce-review-gate-repair-review-export stays on one session slice", asyn
     const catalogBefore = await readFile(path.join(temporary, "catalog", "capabilities.json"), "utf8");
     const second = await studio.review("now");
     const catalogAfter = await readFile(path.join(temporary, "catalog", "capabilities.json"), "utf8");
-    assert.match(second.review.summary, /审核结果与上次相同|不要再分析/);
+    assert.match(second.review.summary, /审核结果与上次相同|平台已完成本轮自动修复/);
+    assert.match(second.review.summary, /不要求调用方|不是调用方/);
     assert.equal(catalogAfter, catalogBefore);
     await assert.rejects(() => studio.export("单据", path.join(temporary, "skills"), [], "now"));
   } else {

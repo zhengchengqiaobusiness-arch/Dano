@@ -20,9 +20,9 @@ const OPERATION_LABEL: Partial<Record<OperationKind, string>> = {
 };
 const NEXT_RANK: Record<ReviewNext, number> = { "re-record": 0, "re-analyze": 1, manual: 2, export: 3 };
 const NEXT_LABEL: Record<ReviewNext, string> = {
-  "re-record": "回到页面补录",
-  "re-analyze": "根据已有成功证据重新分析再验证，不要重新录制",
-  manual: "需要人工改目录或平台后再验证",
+  "re-record": "平台自动返回页面补齐真实证据",
+  "re-analyze": "平台根据已有成功证据自动修复并复审",
+  manual: "平台能力缺口，保持阻断等待平台修复",
   export: "可以导出"
 };
 const BUSINESS_DETAIL_COLLECTION = /(detail|item|line|entry|row|明细|清单)/i;
@@ -219,7 +219,7 @@ export function reviewCatalog(
       severity: "block",
       stage: "analyze",
       next: "re-record",
-      message: "没有识别到本页主能力（查询/新建/修改/审核/删除）。用户分页、产品下拉、库存带出不是主能力。请回到页面把业务操作录完整。"
+      message: "没有识别到本页主能力（查询/新建/修改/审核/删除）。用户分页、产品下拉、库存带出不是主能力。平台应自动返回页面补齐缺失的业务操作证据。"
     });
   }
 
@@ -232,7 +232,7 @@ export function reviewCatalog(
       severity: "block",
       stage: "record",
       next: "re-record",
-      message: `本次录制要求包含「${label}」，但没有找到对应且可验证的主能力。请回到该页面真实完成一次${label}并取得成功响应后再导出。`
+      message: `本次录制要求包含「${label}」，但没有找到对应且可验证的主能力。平台应自动回到该页面完成一次${label}并取得成功响应后继续导出闭环。`
     });
   }
 
@@ -358,8 +358,10 @@ export function reviewCatalog(
   const primaryTitles = primary.map(item => item.title);
   const lookupTitles = neededLookups.map(item => item.title);
   const blockedLead = next === "re-record"
-    ? `审核未通过，不能导出。下一步：${NEXT_LABEL[next]}。仅当缺少要求的主操作或其成功响应、或全字段覆盖仍有可填写空字段/空明细时才开新录制。`
-    : `审核未通过，不能导出。下一步：${NEXT_LABEL[next]}。禁止为字段归属或候选查询再开一轮录制；不要进入补录循环，结果相同则停止。`;
+    ? `审核未通过，统一导出流程不会写出残缺 Skill。下一步：${NEXT_LABEL[next]}。平台只为缺失的主操作、成功响应、可填写空字段或空明细补充真实证据。`
+    : next === "re-analyze"
+      ? `审核未通过，统一导出流程不会写出残缺 Skill。下一步：${NEXT_LABEL[next]}。字段归属、候选查询和合同问题由平台自动修复，不要求调用方补录或修改生成文件。`
+      : `审核未通过，统一导出流程不会写出残缺 Skill。下一步：${NEXT_LABEL[next]}。这是平台能力问题，不得交给用户修改生成文件。`;
   const lines = [
     status === "passed"
       ? `审核通过，可以导出。通过标准：本页主能力均已验证，写字段均有唯一来源规则，公式不用编号/枚举/时间戳做运算，选人暴露已录制查询，请求键均有着落，用到的候选查询可用。`
@@ -368,8 +370,10 @@ export function reviewCatalog(
   ];
   if (findings.length) {
     lines.push(next === "re-record"
-      ? "处理顺序：先补齐缺失的主操作成功证据，再分析一次、验证一次。"
-      : "处理顺序：不要补录。不要对同一审核结果再分析或再录；停止并报告本页未通过原因。");
+      ? "处理顺序：平台自动补齐缺失的主操作成功证据，再由统一导出入口分析、复审并导出。"
+      : next === "re-analyze"
+        ? "处理顺序：平台自动修复并复审；若问题稳定未解，则保留为平台缺陷，不要求调用方处理。"
+        : "处理顺序：保持阻断并修复平台能力；不得交给用户编辑目录或生成文件。");
     lines.push(...findings.map(item => `- ${item.capabilityTitle || item.code}：${item.message}`));
   }
   return {

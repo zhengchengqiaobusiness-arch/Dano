@@ -278,7 +278,7 @@ export class StudioService {
         ...result,
         review: {
           ...result.review,
-          summary: `审核结果与上次相同，已停止自动修复。不要再分析、不要开新录制。\n${result.review.summary}`
+          summary: `审核结果与上次相同。平台已完成本轮自动修复并保持阻断；这不是调用方补录或修改生成文件的任务。\n${result.review.summary}`
         }
       };
     }
