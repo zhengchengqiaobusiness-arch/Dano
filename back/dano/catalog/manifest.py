@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from dano.business_packs import action_titles_for
 from dano.catalog.identity import is_generated_action_id, public_capability_id
+from dano.execution.page.request_capture import option_source_url
 from dano.orchestrator.types import SkillSpec
 from dano.shared.enums import RiskLevel
 from dano.shared.std_fields import is_flow_internal, is_form_envelope, is_numeric_field, standard_fields_for
@@ -178,7 +179,7 @@ def _enum_facts(sel: dict | None) -> tuple[list[str], dict[str, object], bool, b
         opts = []
         option_map = {}
     cnt = int((sel or {}).get("count") or len(opts))
-    has_source = bool((sel or {}).get("source_url"))
+    has_source = bool(option_source_url(sel))
     enum_source = str((sel or {}).get("enum_source") or "")
     static_source = enum_source in {"dom", "manual"}
     truncated = bool(opts) and cnt > len(opts)
@@ -213,7 +214,7 @@ def _select_semantic_type(declared: str | None, sel: dict | None) -> str | None:
         return declared
     if sel.get("multi"):
         return "list-enum"
-    if sel.get("source_url") or sel.get("options") or sel.get("option_map") or sel.get("enum_source"):
+    if option_source_url(sel) or sel.get("options") or sel.get("option_map") or sel.get("enum_source"):
         return "enum"
     return declared
 
@@ -337,8 +338,9 @@ def _field_call_metadata(skill: SkillSpec, props: dict, sels: dict) -> dict:
             enum_value_map = {}
         if enum_value_map:
             info["enum_value_map"] = dict(enum_value_map)
-        if sel.get("source_url"):
-            info["options_source"] = sel.get("source_url")
+        source_url = option_source_url(sel)
+        if source_url:
+            info["options_source"] = source_url
         if sel.get("enum_source"):
             info["enum_source"] = sel.get("enum_source")
         if isinstance(sel.get("enum_confirmed"), bool):
@@ -599,7 +601,14 @@ def _sanitize_capability_parameter_schema(schema: dict, cap: dict) -> dict:
                 # must not advertise a live source to downstream callers.
                 prop.pop("x-options-source", None)
                 prop.pop("x-options-source-meta", None)
-            is_dynamic = name in dynamic or prop.get("x-options-source") is True
+            is_dynamic = (
+                name in dynamic
+                or prop.get("x-options-source") is True
+                or (
+                    isinstance(prop.get("dataSource"), dict)
+                    and option_source_url(prop.get("dataSource"))
+                )
+            )
             if is_dynamic:
                 # Only the recorder's explicitly proven snapshot may survive
                 # beside a live option source.  Historical ``x-options`` may

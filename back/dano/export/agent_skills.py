@@ -347,7 +347,15 @@ def _schema_option_fields(schema: dict) -> list[str]:
             if not isinstance(prop, dict):
                 continue
             item = prop.get("items") if isinstance(prop.get("items"), dict) else {}
-            if prop.get("format") == "name-ref" or item.get("format") == "name-ref" or prop.get("x-options-source"):
+            if (
+                prop.get("format") == "name-ref"
+                or item.get("format") == "name-ref"
+                or prop.get("x-options-source")
+                or (
+                    isinstance(prop.get("dataSource"), dict)
+                    and (prop.get("dataSource") or {}).get("endpoint")
+                )
+            ):
                 if name not in fields:
                     fields.append(name)
             visit(prop)
@@ -1152,6 +1160,7 @@ def _question_control(schema: dict, field: str = "") -> str:
         or schema.get("x-dano-option-source")
         or schema.get("x-options-source-meta")
         or schema.get("x-enum-value-map")
+        or schema.get("dataSource")
     )
     if selectable:
         live = schema.get("x-dano-option-source") or schema.get("x-options-source-meta") or {}
@@ -1242,7 +1251,7 @@ def _question_option_source(schema: dict, field: str = "<字段名>") -> str:
     options = _question_options(schema)
     if options:
         return f"`options: {json.dumps(options, ensure_ascii=False)}`"
-    if schema.get("x-options-source") or schema.get("x-dano-option-source"):
+    if schema.get("x-options-source") or schema.get("x-dano-option-source") or schema.get("dataSource"):
         return (
             f"先运行 `--list-options {field}`；把返回的 `options` 对象数组原样用于表单，"
             "用户选择后按所选 `id` 找回 `label`，name-ref 参数提交 `label`"
@@ -1254,18 +1263,23 @@ def _question_data_source(schema: dict) -> dict | None:
     """Return only a complete ask_user_question remote-option contract."""
     schema = schema or {}
     source = {}
-    for key in ("x-dano-option-source", "x-options-source-meta", "x-options-source"):
-        value = schema.get(key)
-        if isinstance(value, dict) and value:
-            source = value
-            break
+    public = schema.get("dataSource") if isinstance(schema.get("dataSource"), dict) else {}
+    if public:
+        source = public
+    else:
+        for key in ("x-dano-option-source", "x-options-source-meta", "x-options-source"):
+            value = schema.get(key)
+            if isinstance(value, dict) and value:
+                source = value
+                break
     endpoint = str(
         source.get("endpoint") or source.get("source_url") or source.get("url") or ""
     ).strip()
     if not endpoint:
         return None
     if not (
-        schema.get("x-options-source")
+        public
+        or schema.get("x-options-source")
         or schema.get("x-dano-option-source")
         or schema.get("x-options-source-meta")
     ):

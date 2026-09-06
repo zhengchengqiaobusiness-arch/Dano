@@ -3844,8 +3844,8 @@ class _FetchedItems(list):
 async def _fetch_select_list(sel: dict, base_url: str, storage_state, token_key: str | None,
                              verify: bool, auth_headers: dict | None) -> list:
     """按录制事实执行选项源；POST 仅允许已识别为读接口的请求。"""
-    url = str(sel.get("source_url") or "")
-    method = str(sel.get("source_method") or "GET").upper()
+    url = option_source_url(sel)
+    method = option_source_method(sel)
     role = str(sel.get("source_role") or "")
     if method in {"GET", "HEAD"} and not sel.get("source_body"):
         return await _fetch_list(url, base_url, storage_state, token_key, verify, auth_headers)
@@ -3898,13 +3898,42 @@ def _filter_category(items: list, sel: dict) -> list:
     return [it for it in items if isinstance(it, dict) and str(it.get(ck)) == str(cv)]
 
 
+def option_source_url(sel: dict | None) -> str:
+    """Public packages write endpoint; older recordings still write source_url."""
+    sel = sel or {}
+    return str(sel.get("source_url") or sel.get("endpoint") or sel.get("url") or "").strip()
+
+
+def option_source_method(sel: dict | None) -> str:
+    sel = sel or {}
+    return str(sel.get("source_method") or sel.get("method") or "GET").upper()
+
+
 def find_field_select(api_request: dict, field: str) -> dict | None:
     """在 api_request(单请求 + 多步各步)里找参数名==field 的 select 元数据(source_url/value_key/label_key)。
     供运行期"实时拉该字段当前可选项"(问题1:把接口放进 skill,选字段时直接调接口)。无则 None。"""
     sels = list((api_request or {}).get("selects") or [])
     for st in (api_request or {}).get("steps") or []:
         sels += list((st or {}).get("selects") or [])
-    return next((s for s in sels if s.get("param") == field), None)
+    hit = next((s for s in sels if s.get("param") == field), None)
+    if hit:
+        return hit
+    for cap in (api_request or {}).get("capabilities") or []:
+        if not isinstance(cap, dict):
+            continue
+        props = ((cap.get("input_schema") or cap.get("parameters") or {}).get("properties") or {})
+        node = props.get(field)
+        source = node.get("dataSource") if isinstance(node, dict) else None
+        if isinstance(source, dict) and option_source_url(source):
+            return {
+                "param": field,
+                "endpoint": option_source_url(source),
+                "source_url": option_source_url(source),
+                "source_method": option_source_method(source),
+                "value_key": source.get("idField") or source.get("value_key") or "id",
+                "label_key": source.get("labelField") or source.get("label_key") or "name",
+            }
+    return None
 
 
 async def fetch_field_options(api_request: dict, field: str, *, base_url: str = "",
@@ -3927,7 +3956,7 @@ async def fetch_field_options(api_request: dict, field: str, *, base_url: str = 
             lab = str(x).strip()
             if lab:
                 snapshot.append({"label": lab, "value": opt_map.get(lab, x)})
-    if not sel.get("source_url"):
+    if not option_source_url(sel):
         if snapshot:
             return {"field": field, "options": snapshot, "count": len(snapshot),
                     "note": "该字段候选来自录制页面真实下拉快照"}
@@ -4002,12 +4031,12 @@ async def _resolve_selects(api_request: dict, fields: dict, *, base_url: str, st
         name = fields[param]
         opt_map = s.get("option_map") or {}
         map_is_dom = s.get("option_map_source_url") == "dom"
-        if isinstance(opt_map, dict) and (map_is_dom or not s.get("source_url")) and str(name) in {str(k) for k in opt_map}:
+        if isinstance(opt_map, dict) and (map_is_dom or not option_source_url(s)) and str(name) in {str(k) for k in opt_map}:
             match_key = next(k for k in opt_map if str(k) == str(name))
             mapped = opt_map[match_key]
             fields[param] = mapped
             continue
-        if not s.get("source_url"):
+        if not option_source_url(s):
             continue
         items = await _fetch_select_list(
             s, base_url, storage_state, token_key, verify, api_request.get("auth_headers"),
@@ -4101,7 +4130,7 @@ async def _resolve_list_selects(api_request: dict, fields: dict, *, base_url: st
             continue
         lk = s.get("label_key")
         tmpl, label_sub = s.get("element_template") or {}, s.get("label_subkey")
-        if not s.get("source_url"):
+        if not option_source_url(s):
             opt_map = s.get("option_map") or {}
             if isinstance(opt_map, dict) and opt_map:
                 fields[param] = [opt_map.get(nm, nm) for nm in names]

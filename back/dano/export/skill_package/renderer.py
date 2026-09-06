@@ -313,9 +313,16 @@ def _capabilities(skill, spec, api_request: dict) -> list[dict]:  # noqa: ANN001
 
 def _base_url(steps: list[dict]) -> str:
     for step in steps:
-        parsed = urlparse(str(step.get("url") or ""))
-        if parsed.scheme in {"http", "https"} and parsed.netloc:
-            return f"{parsed.scheme}://{parsed.netloc}"
+        for candidate in (step.get("url"), step.get("path")):
+            parsed = urlparse(str(candidate or ""))
+            if parsed.scheme in {"http", "https"} and parsed.netloc:
+                return f"{parsed.scheme}://{parsed.netloc}"
+        for item in step.get("selects") or []:
+            if not isinstance(item, dict):
+                continue
+            parsed = urlparse(str(item.get("source_url") or item.get("endpoint") or item.get("url") or ""))
+            if parsed.scheme in {"http", "https"} and parsed.netloc:
+                return f"{parsed.scheme}://{parsed.netloc}"
     return ""
 
 
@@ -2005,7 +2012,7 @@ def _project_capability_step(
     projected["selects"] = [
         item for item in selects
         if _step_uses_option(projected, str(item.get("param") or ""), str(item.get("path") or item.get("id_path") or ""))
-        or (execute_step and not item.get("param") and item.get("source_url"))
+        or (execute_step and not item.get("param") and (item.get("source_url") or item.get("endpoint")))
     ]
     projected["params"] = [name for name in params if str(name) in caller_names]
     return projected
@@ -4851,6 +4858,7 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
     if not plans:
         raise ValueError(f"{skill.skill_id} has no capability")
     steps = [step for plan in plans for step in (plan.get("steps") or [])]
+    origin_steps = list(api_request.get("steps") or []) or steps
     slug = package_slug(skill.skill_id)
     skill_md = _fallback_skill_md(skill, slug, plans, None)
 
@@ -4880,7 +4888,7 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
     config = {
         "tenant": tenant,
         "subsystem": str(skill.subsystem.value if hasattr(skill.subsystem, "value") else skill.subsystem),
-        "base_url": _base_url(steps),
+        "base_url": _base_url(origin_steps) or _base_url(steps),
         "identity_probes": probes,
     }
     _write_text(scripts / "client.py", _CLIENT_TEMPLATE.replace("__CONFIG__", repr(json.dumps(config, ensure_ascii=False))))

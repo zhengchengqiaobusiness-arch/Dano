@@ -1,4 +1,4 @@
-﻿"""主智能体编排(流程6 状态机)—— 纯逻辑,依赖可注入。
+"""主智能体编排(流程6 状态机)—— 纯逻辑,依赖可注入。
 
 主智能体只编排、不直接执行;任一闸门/断言不过即停;终态只有确定的几种。
 与 Temporal 解耦:本类是可离线测试的业务逻辑,workflow.py 只做持久化薄包装。
@@ -635,6 +635,10 @@ class Orchestrator:
         apir = (env.body or {}).get("api_request") if env else None
         if not apir:
             return {"field": field, "options": [], "count": 0, "note": "该 skill 无接口请求"}
+        if not apir.get("capabilities"):
+            import copy as _copy
+            apir = _copy.deepcopy(apir)
+            apir["capabilities"] = list(getattr(skill, "capabilities", None) or [])
         if capability:
             capability_def = next((
                 item for item in (getattr(skill, "capabilities", None) or apir.get("capabilities") or [])
