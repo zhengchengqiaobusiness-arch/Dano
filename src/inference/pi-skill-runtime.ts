@@ -142,7 +142,9 @@ function joinUiEvents(capability: CapabilityContract, events: EvidenceEvent[]) {
   const slots = new Set([...names].map(rangeIndexOf).filter((item): item is number => item !== undefined));
   const at = richest ? Date.parse(richest.at) : Number.POSITIVE_INFINITY;
   const ownerPage = evidencePage(
-    richest?.pageUrl
+    owner?.pageUrl
+    || (richest?.correlatedUiEvidenceId ? uiById.get(richest.correlatedUiEvidenceId)?.pageUrl : undefined)
+    || richest?.pageUrl
     || nearby.find(item => item.pageUrl)?.pageUrl
     || related.find((event): event is UiEvidence => event.kind === "ui" && Boolean(event.pageUrl))?.pageUrl
   );
