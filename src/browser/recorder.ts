@@ -1439,14 +1439,74 @@ export class BrowserRecorder {
       pageCoverage: undefined,
       missingPages: [] as Array<{ url: string; title?: string }>,
       missingPageOperations: [] as Array<{ url: string; label: string; operations: OperationKind[] }>,
+      missingFields: [] as NonNullable<PageSnapshot["todoFields"]>,
+      nextAction: { action: "none" },
       message: "当前没有活动录制。"
     };
-    await this.drainNetwork(300);
+    return this.recordingAudit(300);
+  }
+
+  private async recordingAudit(drainMs = 0, knownSnapshot?: PageSnapshot) {
+    const active = this.active;
+    if (!active) throw new Error("No active recording");
+    if (drainMs > 0) await this.drainNetwork(drainMs);
     const events = await readJsonl<EvidenceEvent>(active.eventsFile);
     const pageCoverage = active.session.completePageCoverage
       ? { ...this.navigationCoverage(), operationRequirements: this.pageOperationCoverage() }
       : undefined;
-    return recordingStopReadiness(events, active.session.expectedOperations || [], pageCoverage);
+    const base = recordingStopReadiness(events, active.session.expectedOperations || [], pageCoverage);
+    const snapshot = active.session.completeFieldCoverage
+      ? knownSnapshot || await this.actions.captureSnapshot()
+      : knownSnapshot;
+    const missingFields = active.session.completeFieldCoverage
+      ? (snapshot?.todoFields || []).filter(field => !field.skip && !field.disabled)
+      : [];
+    const currentPageKey = this.navigationKey(String(snapshot?.url || this.currentPage().url()), this.currentPage().url());
+    const currentPageOperations = base.missingPageOperations.find(item => this.navigationKey(item.url) === currentPageKey)?.operations || [];
+    const ready = base.ready && missingFields.length === 0;
+    const nextAction = missingFields.length
+      ? { action: "exercise-form", fields: missingFields.map(field => field.label || field.name).filter(Boolean) }
+      : currentPageOperations.length
+        ? { action: "perform-operation", operations: currentPageOperations }
+        : base.missingOperations.length
+          ? { action: "perform-operation", operations: base.missingOperations }
+          : base.missingPages.length
+            ? { action: "next-page", target: base.missingPages[0] }
+            : { action: "record-stop" };
+    const fieldMessage = missingFields.length
+      ? ` 当前页面仍缺 ${missingFields.length} 个字段：${missingFields.slice(0, 8).map(field => field.label || field.name).filter(Boolean).join("、")}。`
+      : "";
+    return {
+      ...base,
+      ready,
+      missingFields,
+      nextAction,
+      message: ready
+        ? "实时审核通过：要求的页面、字段、操作和业务成功响应均已覆盖，可以结束录制。"
+        : `实时审核未通过。${base.message}${fieldMessage}只继续处理 nextAction 指向的缺口。`
+    };
+  }
+
+  private manualTakeoverReason(action: string, selector?: string, detail?: string) {
+    const formAction = action === "exercise-form" || action === "submit-form";
+    const location = selector || (formAction ? "当前表单" : "当前页面");
+    const instruction = action === "click"
+      ? `在左侧内置浏览器找到并点击“${location}”`
+      : action === "fill"
+        ? `在左侧内置浏览器的“${location}”字段填写页面接受的值`
+        : action === "choose" || action === "select"
+          ? `在左侧内置浏览器打开“${location}”并选择一个真实候选`
+          : action === "submit-form"
+            ? "在左侧内置浏览器检查表单报错，补齐后点击提交/确定，直到页面确认成功"
+            : action === "exercise-form"
+              ? "在左侧内置浏览器按页面提示补齐当前表单仍为空或报错的字段"
+              : `在左侧内置浏览器完成“${action}”这一步`;
+    return [
+      `自动${action}连续失败 ${FORM_ACTION_BUDGET} 次。`,
+      `问题位置：${location}`,
+      `失败原因：${detail || "页面没有确认该操作成功"}`,
+      `请手动操作：${instruction}。完成并确认页面已生效后，点击右侧“我已完成，继续自动执行”。`
+    ].join("\n");
   }
 
   private stopBecauseStuck(reason: string) {
@@ -1465,21 +1525,20 @@ export class BrowserRecorder {
     this.active.guard.consecutiveFailures = 0;
   }
 
-  private recordFailure(action: string, detail?: string) {
+  private recordFailure(action: string, detail?: string, selector?: string) {
     if (!this.active) return undefined;
     this.active.guard.consecutiveFailures += 1;
     if (this.active.guard.consecutiveFailures < FORM_ACTION_BUDGET) return undefined;
-    const suffix = detail ? ` 最后一次失败：${detail}` : "";
-    return this.stopBecauseStuck(`自动${action}连续失败 ${FORM_ACTION_BUDGET} 次，请人工完成当前页面后继续。${suffix}`);
+    return this.stopBecauseStuck(this.manualTakeoverReason(action, selector, detail));
   }
 
-  private async guardedPageAction<T>(action: string, _selector: string | undefined, work: () => Promise<T>): Promise<T | ReturnType<BrowserRecorder["stopBecauseStuck"]>> {
+  private async guardedPageAction<T>(action: string, selector: string | undefined, work: () => Promise<T>): Promise<T | ReturnType<BrowserRecorder["stopBecauseStuck"]>> {
     try {
       const result = await work();
       this.resetFailureStreak();
       return result;
     } catch (error: any) {
-      const stopped = this.recordFailure(action, String(error?.message || error));
+      const stopped = this.recordFailure(action, String(error?.message || error), selector);
       if (stopped) return stopped;
       throw error;
     }
@@ -1489,7 +1548,7 @@ export class BrowserRecorder {
     await this.ensureFormScope();
     try {
       for (let automaticAttempts = 1; automaticAttempts <= FORM_ACTION_BUDGET; automaticAttempts += 1) {
-        const result = await work() as { ok?: boolean; retryReady?: boolean; businessFailure?: string; loginRequired?: boolean; loginReason?: string };
+        const result = await work() as { ok?: boolean; retryReady?: boolean; businessFailure?: string; loginRequired?: boolean; loginReason?: string; todoFields?: Array<{ label?: string; name?: string }> };
         if (result.loginRequired) {
           return {
             ...result,
@@ -1503,12 +1562,14 @@ export class BrowserRecorder {
           this.resetFailureStreak();
           return { ...result, automaticAttempts, followManualSteps: false };
         }
-        const stopped = this.recordFailure(action, result.businessFailure);
+        const unfinished = (result.todoFields || []).map(field => field.label || field.name).filter(Boolean).slice(0, 8);
+        const detail = result.businessFailure || (unfinished.length ? `未能完成字段：${unfinished.join("、")}` : undefined);
+        const stopped = this.recordFailure(action, detail);
         if (stopped) return { ...result, automaticAttempts, ...stopped };
         if (action === "submit-form" && result.retryReady) continue;
         return { ...result, automaticAttempts, followManualSteps: false };
       }
-      return this.stopBecauseStuck(`自动${action}连续失败 ${FORM_ACTION_BUDGET} 次，请人工完成当前页面后继续。`);
+      return this.stopBecauseStuck(this.manualTakeoverReason(action));
     } catch (error: any) {
       const stopped = this.recordFailure(action, String(error?.message || error));
       if (stopped) return stopped;
@@ -1716,7 +1777,15 @@ export class BrowserRecorder {
       });
     }
     if (command.action === "click") this.watchLayerPaint();
-    return result;
+    if (!LOGIN_BLOCKED_ACTIONS.has(command.action)) return result;
+    const resultObject = result && typeof result === "object" ? result as Record<string, unknown> : { result };
+    const knownSnapshot = command.action === "next-page"
+      ? resultObject.snapshot as PageSnapshot | undefined
+      : undefined;
+    return {
+      ...resultObject,
+      recordingAudit: await this.recordingAudit(0, knownSnapshot)
+    };
   }
 
   disposeImmediate() {

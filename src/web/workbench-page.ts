@@ -216,26 +216,34 @@ export class WorkbenchPage {
   private scheduleCoverageContinuation() {
     if (this.coverageContinuationPending || this.manualTakeover || this.mode !== "automatic") return;
     const session = this.recorder.activeSession();
-    if (!session?.completePageCoverage) return;
+    if (!session || (!session.completePageCoverage && !session.completeFieldCoverage && !(session.expectedOperations || []).length)) return;
     this.coverageContinuationPending = true;
     setTimeout(() => {
       void (async () => {
         try {
-          if (this.pi.status().streaming || this.manualTakeover || !this.recorder.activeSession()?.completePageCoverage) return;
+          if (this.pi.status().streaming || this.manualTakeover || !this.recorder.activeSession()) return;
           const readiness = await this.recorder.stopReadiness();
           const remaining = readiness.pageCoverage?.remaining || 0;
-          const missingOperations = readiness.missingPageOperations || [];
-          if (!remaining && !missingOperations.length) return;
+          const missingPageOperations = readiness.missingPageOperations || [];
+          const missingOperations = readiness.missingOperations || [];
+          const missingFields = readiness.missingFields || [];
           const continuationLimit = Math.max(24, (readiness.pageCoverage?.discovered || 0) * 2);
           if (this.coverageContinuations >= continuationLimit) {
-            this.onLog("ERROR", `Full-page recording still has ${remaining} unvisited pages and ${missingOperations.length} page operations after ${continuationLimit} automatic continuations.`);
-            this.broadcast({ type: "agent_error", message: `全页面录制还有 ${remaining} 个菜单页面未访问、${missingOperations.length} 个页面能力未取得成功响应，自动续跑次数已达到 ${continuationLimit}。` });
+            this.onLog("ERROR", `Live recording audit did not finish after ${continuationLimit} automatic continuations.`);
+            this.broadcast({ type: "agent_error", message: `实时审核闭环在 ${continuationLimit} 次自动续跑后仍未完成。` });
             return;
           }
           this.coverageContinuations += 1;
-          this.onLog("PI", `Continuing full-page recording automatically; ${remaining} discovered pages and ${missingOperations.length} page operations remain.`);
-          const missing = missingOperations.slice(0, 8).map(item => `${item.label}（${item.operations.join("、")}）`).join("、");
-          await this.pi.prompt(`继续当前同一录制，不要总结、不要重启录制。还有 ${remaining} 个已发现菜单页面未访问，${missingOperations.length} 个页面缺少成功能力证据${missing ? `：${missing}` : ""}。先完成当前页的 snapshot、完整字段 exercise-form 和适用的 submit-form；任何 ok=false 必须在当前页修复。然后持续调用 next-page，直到 done=true；保持输出简短。`);
+          if (readiness.ready) {
+            this.onLog("PI", "Live recording audit passed; resuming the same task to stop and export.");
+            await this.pi.prompt("当前同一录制的实时审核已经通过。不要继续点击页面；立即调用 business_skill_record_stop，然后调用 business_skill_export 完成内部分析、审核、修复、复审和导出。不要只总结结果。");
+            return;
+          }
+          this.onLog("PI", `Continuing recording from live audit; ${remaining} pages, ${missingPageOperations.length} page operations, ${missingOperations.length} global operations, and ${missingFields.length} fields remain.`);
+          const missing = missingPageOperations.slice(0, 8).map(item => `${item.label}（${item.operations.join("、")}）`).join("、");
+          const operations = missingOperations.slice(0, 8).join("、");
+          const fields = missingFields.slice(0, 8).map(field => field.label || field.name).filter(Boolean).join("、");
+          await this.pi.prompt(`继续当前同一录制，不要总结、不要重启录制。实时审核 nextAction=${readiness.nextAction.action}；还有 ${remaining} 个页面未访问、${missingPageOperations.length} 个页面能力缺少成功证据${missing ? `：${missing}` : ""}、${missingOperations.length} 个总体操作缺口${operations ? `：${operations}` : ""}、${missingFields.length} 个字段未完成${fields ? `：${fields}` : ""}。只处理当前缺口；每次 business_browser_control 后读取 recordingAudit 并继续，直到 recordingAudit.ready=true，再结束录制并导出。`);
         } catch (error) {
           this.onLog("WARN", `Automatic full-page continuation failed: ${error instanceof Error ? error.message : String(error)}`);
         } finally {

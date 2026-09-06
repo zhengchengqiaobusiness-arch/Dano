@@ -69,6 +69,42 @@ test("Pi RPC exposes processId so workbench abort/dispose does not throw", () =>
   assert.equal(bridge.processId(), undefined);
 });
 
+test("a settled agent is resumed to stop and export after the live recording audit passes", async () => {
+  const page = new WorkbenchPage("page_finalizeaudit", {
+    rootDir: ".",
+    dataDir: ".business-skill-studio",
+    recordingsDir: ".business-skill-studio/recordings",
+    catalogDir: ".business-skill-studio/catalog",
+    profileDir: ".business-skill-studio/browser-profile",
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  }, "http://127.0.0.1:4310", value => value, () => {});
+  const prompts: string[] = [];
+  (page.recorder as any).activeSession = () => ({
+    id: "rec_finalizeaudit",
+    completeFieldCoverage: true,
+    completePageCoverage: false,
+    expectedOperations: ["query"]
+  });
+  (page.recorder as any).stopReadiness = async () => ({
+    ready: true,
+    pageCoverage: undefined,
+    missingPageOperations: [],
+    missingFields: [],
+    nextAction: { action: "record-stop" }
+  });
+  (page.pi as any).status = () => ({ streaming: false });
+  (page.pi as any).prompt = async (prompt: string) => { prompts.push(prompt); };
+
+  (page as any).scheduleCoverageContinuation();
+  await new Promise(resolve => setTimeout(resolve, 260));
+
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0]!, /business_skill_record_stop/);
+  assert.match(prompts[0]!, /business_skill_export/);
+});
+
 test("manual takeover waits for the person and then restores automatic execution", async () => {
   const events: any[] = [];
   const page = new WorkbenchPage("page_takeover123", {

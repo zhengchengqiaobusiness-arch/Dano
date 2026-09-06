@@ -258,6 +258,7 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.match(bridge, /审核通过|re-record|re-analyze/);
   assert.match(bridge, /business_skill_export after record_stop/);
   assert.match(bridge, /owns analyze, review, repair, re-review, and export/);
+  assert.match(bridge, /After every mutating business_browser_control call, inspect recordingAudit/);
   assert.doesNotMatch(bridge, /stop and report; do not analyze, validate, or record again/);
   assert.match(extension, /session\?\.blocked/);
   assert.match(extension, /requireConversationSession/);
@@ -271,6 +272,7 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.match(extension, /本次识别主能力|本次录制主能力|已导出主能力/);
   assert.match(extension, /审核通过|审核未通过/);
   assert.match(await readFile(path.join(root, "src", "studio-service.ts"), "utf8"), /sessionCatalogSlice|reviewSession/);
+  assert.match(await readFile(path.join(root, "src", "web", "workbench-page.ts"), "utf8"), /missingFields/);
   assert.doesNotMatch(extension, /details:\s*\{\s*review,\s*capabilities\s*\}/);
 });
 

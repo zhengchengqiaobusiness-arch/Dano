@@ -2949,6 +2949,9 @@ test("manual takeover starts only after three consecutive failed clicks", async 
     assert.equal(third.stopped, true, JSON.stringify(third));
     assert.equal(third.followManualSteps, true);
     assert.match(String(third.reason || ""), /连续失败 3 次/);
+    assert.match(String(third.reason || ""), /问题位置：text=不存在的按钮/);
+    assert.match(String(third.reason || ""), /请手动操作：/);
+    assert.match(String(third.reason || ""), /我已完成，继续自动执行/);
     const snap: any = await recorder.control({ action: "snapshot" });
     assert.equal(snap.followManualSteps, true);
   } finally {
@@ -2997,6 +3000,8 @@ test("first two exercise-form failures do not stop; third failure follows manual
     const third: any = await recorder.control({ action: "exercise-form" });
     assert.equal(third.ok, false, JSON.stringify(third));
     assert.equal(third.followManualSteps, true, JSON.stringify(third));
+    assert.match(String(third.reason || ""), /问题位置：当前表单/);
+    assert.match(String(third.reason || ""), /请手动操作：/);
   } finally {
     if (recorder.isActive()) await recorder.stop().catch(() => {});
     await new Promise<void>(resolve => server.close(() => resolve()));

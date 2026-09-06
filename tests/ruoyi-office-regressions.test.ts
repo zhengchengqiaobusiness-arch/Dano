@@ -637,7 +637,10 @@ test("complete page coverage follows grounded menu URLs and blocks stop until ev
     const blocked: any = await recorder.stopReadiness();
     assert.equal(blocked.ready, false, JSON.stringify(blocked));
     assert.equal(blocked.missingPages.length, 1, JSON.stringify(blocked));
-    await recorder.control({ action: "click", selector: 'role=button[name="搜索"]' });
+    const firstSearch: any = await recorder.control({ action: "click", selector: 'role=button[name="搜索"]' });
+    assert.equal(firstSearch.recordingAudit.ready, false, JSON.stringify(firstSearch));
+    assert.equal(firstSearch.recordingAudit.nextAction.action, "next-page", JSON.stringify(firstSearch));
+    assert.equal(firstSearch.recordingAudit.missingPages.length, 1, JSON.stringify(firstSearch));
     const next: any = await recorder.control({ action: "next-page" });
     assert.equal(next.ok, true, JSON.stringify(next));
     assert.equal(next.snapshot.title, "第二页", JSON.stringify(next));
@@ -647,7 +650,9 @@ test("complete page coverage follows grounded menu URLs and blocks stop until ev
     assert.deepEqual(missingSecondQuery.missingPageOperations.map((item: any) => ({ url: item.url, operations: item.operations })), [
       { url: `http://127.0.0.1:${address.port}/second`, operations: ["query"] }
     ]);
-    await recorder.control({ action: "click", selector: 'role=button[name="搜索"]' });
+    const secondSearch: any = await recorder.control({ action: "click", selector: 'role=button[name="搜索"]' });
+    assert.equal(secondSearch.recordingAudit.ready, true, JSON.stringify(secondSearch));
+    assert.equal(secondSearch.recordingAudit.nextAction.action, "record-stop", JSON.stringify(secondSearch));
     const ready: any = await recorder.stopReadiness();
     assert.equal(ready.ready, true, JSON.stringify(ready));
   } finally {
