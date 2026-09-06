@@ -761,10 +761,17 @@ export class PageActions {
     if (await this.nativeSelect(target)) return target;
     await this.completeChooserDialog();
     await this.dismissTransientOverlays();
+    const selfIsSurface = await target.evaluate(el => (
+      !el.matches("input, textarea")
+      && (el.matches(".el-select, .el-select__wrapper, .el-input__wrapper, .ant-select, .ant-select-selector, .arco-select, .arco-select-view, [role='combobox'], [data-slot='select-trigger'], [data-slot='combobox-trigger']"))
+    )).catch(() => false);
+    const ancestorSurface = target.locator("xpath=ancestor::*[contains(@class,'el-select__wrapper') or contains(@class,'el-input__wrapper') or contains(@class,'ant-select-selector') or contains(@class,'arco-select-view') or @role='combobox' or contains(@data-slot,'select-trigger') or contains(@data-slot,'combobox-trigger')][1]");
     const surface = target.locator(WIDGET_SURFACES);
     const nested = target.locator(".el-select__wrapper, .el-input__wrapper, .ant-select-selector, .arco-select-view, [class*='arco-select-view'], [role='combobox'], [data-slot='select-trigger'], [data-slot='combobox-trigger']");
-    const clickable = (await surface.count())
-      ? surface.first()
+    const clickable = selfIsSurface
+      ? target
+      : (await ancestorSurface.count()) ? ancestorSurface.first()
+      : (await surface.count()) ? surface.first()
       : (await nested.count()) ? nested.first() : target;
     const opened = async (before: { dialogs: number; drops: string; dates: string }) => {
       if (!(await this.chooserOpened(before))) return undefined;
@@ -1309,10 +1316,10 @@ export class PageActions {
     return Boolean(await this.page().evaluate(`(() => {
       const root = document.querySelector('[data-bss-chooser="${mark}"]');
       if (!root) return false;
-      const rows = [...root.querySelectorAll(".vxe-body--row, .ant-table-tbody tr.ant-table-row, .el-table__body .el-table__row")]
+      const rows = [...root.querySelectorAll(".vxe-body--row, .ant-table-tbody tr.ant-table-row, .el-table__body .el-table__row, tbody tr")]
         .filter(function(el) {
           if (!el.getClientRects().length || getComputedStyle(el).visibility === "hidden") return false;
-          return Boolean(el.querySelector(".vxe-cell--checkbox, .col--checkbox .vxe-cell, input[type=checkbox], input[type=radio], .ant-checkbox"));
+          return Boolean(el.querySelector(".vxe-cell--checkbox, .col--checkbox .vxe-cell, input[type=checkbox], input[type=radio], [role=checkbox], [role=radio], .el-checkbox, .ant-checkbox, .arco-checkbox, .n-checkbox"));
         });
       const row = rows[${Number(rowIndex) || 0}];
       if (!row) return false;
@@ -1324,7 +1331,11 @@ export class PageActions {
       }
       const box = row.querySelector("input[type=checkbox]:not([disabled]), input[type=radio]:not([disabled])");
       if (box) box.click();
-      else row.click();
+      else {
+        const customBox = row.querySelector("[role=checkbox], [role=radio], .el-checkbox, .ant-checkbox, .arco-checkbox, .n-checkbox");
+        if (customBox) customBox.click();
+        else row.click();
+      }
       return true;
     })()`).catch(() => false));
   }

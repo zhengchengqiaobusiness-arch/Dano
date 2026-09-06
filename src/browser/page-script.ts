@@ -318,7 +318,10 @@ export const PAGE_HELPERS = String.raw`
       const own = clean(el.value);
       if (own && !EMPTY_VALUE.test(own)) return own;
     }
-    const hosts = [chooserHostOf(el), el.parentElement, el.closest("[data-slot='form-item'], [class*='form-item']"), el];
+    const chooserHost = chooserHostOf(el);
+    const hosts = chooserHost
+      ? [chooserHost, el.parentElement, el]
+      : [el.parentElement, el.closest("[data-slot='form-item'], [class*='form-item']"), el];
     for (const host of hosts) {
       const shown = hostDisplay(host);
       if (shown) return shown;
