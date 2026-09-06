@@ -586,6 +586,9 @@ export class BrowserRecorder {
     });
     const sessionCookies = await loadSessionCookies(this.config.profileDir);
     if (sessionCookies.length) await context.addCookies(sessionCookies);
+    const restoredPages = context.pages();
+    const page = restoredPages[0] || await context.newPage();
+    await Promise.all(restoredPages.slice(1).map(stale => stale.close().catch(() => {})));
 
     const eventsFile = path.join(dir, "events.jsonl");
     const session: RecordingSession = {
@@ -621,7 +624,6 @@ export class BrowserRecorder {
     for (const existing of context.pages()) armPage(existing);
     context.on("page", armPage);
 
-    const page = context.pages()[0] || await context.newPage();
     this.setFocused(page);
     try {
       await page.goto(startUrl, { waitUntil: "domcontentloaded" });
