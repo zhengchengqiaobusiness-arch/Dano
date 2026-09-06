@@ -17,6 +17,7 @@ import {
   summarizeCatalog
 } from "../src/inference/export-scope.js";
 import { reviewCatalog, reviewSession } from "../src/review/catalog-review.js";
+import { applyPiCatalogJudgment } from "../src/inference/pi-skill-runtime.js";
 
 function field(partial: Partial<InputFormField> & Pick<InputFormField, "name">): InputFormField {
   return {
@@ -435,4 +436,47 @@ test("recalculate stays action and is still exportable as a primary", () => {
   ];
   assert.deepEqual(summarizeCatalog(catalog).primary.map(item => item.id), ["recalculate"]);
   assert.deepEqual(exportableCapabilities(catalog).map(item => item.id), ["recalculate"]);
+});
+
+test("model judgment cannot bind a field to the capability being executed", async () => {
+  const query = cap({
+    id: "query-duty",
+    operation: "query",
+    role: "primary",
+    transport: {
+      method: "GET",
+      urlTemplate: "https://x/oa/dutyApply/list?days={days}",
+      origin: "https://x",
+      pathTemplate: "/oa/dutyApply/list"
+    },
+    inputForm: [field({ name: "days", source: "caller", systemHandled: false })]
+  });
+  const reasoner = {
+    model: "test",
+    available: () => true,
+    parseStructured: async () => ({
+      capabilities: [{
+        id: query.id,
+        operation: "query",
+        role: "primary",
+        title: query.title,
+        description: query.description,
+        fields: [{
+          path: "$.days",
+          source: "binding",
+          defaultRule: `from:${query.id}:$.rows[*].days`,
+          candidateCapabilityId: query.id,
+          candidateValuePath: "$.rows[*].days",
+          candidateLabelPath: "$.rows[*].days"
+        }]
+      }]
+    })
+  };
+
+  const [judged] = await applyPiCatalogJudgment([query], [], reasoner as any, process.cwd(), true);
+  const days = judged!.inputForm[0]!;
+  assert.equal(days.source, "caller");
+  assert.equal(days.defaultRule, undefined);
+  assert.equal(days.candidates, undefined);
+  assert.equal(judged!.bindings.some(binding => binding.fromCapabilityId === judged!.id), false);
 });

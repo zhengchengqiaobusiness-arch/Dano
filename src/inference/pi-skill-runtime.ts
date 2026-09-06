@@ -780,7 +780,14 @@ export function applyDeterministicCatalogJudgment(
   return applySameResourceCandidates(applyExactCandidateJoin(withRoles, events));
 }
 
-function applyFieldPatch(field: InputFormField, patch: z.infer<typeof FieldPatch>, catalogIds: Set<string>): InputFormField {
+function applyFieldPatch(
+  field: InputFormField,
+  patch: z.infer<typeof FieldPatch>,
+  catalogIds: Set<string>,
+  ownerCapabilityId: string
+): InputFormField {
+  const fromCapabilityId = /^from:([^:]+):/.exec(patch.defaultRule || "")?.[1];
+  if (fromCapabilityId === ownerCapabilityId || patch.candidateCapabilityId === ownerCapabilityId) return field;
   const source = (patch.source || field.source) as FieldSource;
   let next: InputFormField = {
     ...field,
@@ -825,13 +832,13 @@ function applyJudgment(
     if (!patch) return { ...capability, role: capability.role || fallbackRole(capability, capabilities) };
     const inputForm = capability.inputForm.map(field => {
       const fieldPatch = patch.fields.find(item => item.path === field.path);
-      return fieldPatch ? applyFieldPatch(field, fieldPatch, catalogIds) : field;
+      return fieldPatch ? applyFieldPatch(field, fieldPatch, catalogIds, capability.id) : field;
     });
     const bindings = [
       ...capability.bindings,
       ...inputForm.flatMap(field => {
         const parsed = /^from:([^:]+):([^|]+)/.exec(field.defaultRule || "");
-        if (!parsed || !catalogIds.has(parsed[1]!)) return [];
+        if (!parsed || parsed[1] === capability.id || !catalogIds.has(parsed[1]!)) return [];
         const key = `${parsed[1]}|${parsed[2]}|${field.path}`;
         if (capability.bindings.some(item => `${item.fromCapabilityId}|${item.fromPath}|${item.toPath}` === key)) return [];
         return [{
