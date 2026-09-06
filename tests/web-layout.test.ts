@@ -206,6 +206,8 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
   assert.doesNotMatch(await readFile(path.join(root, "src", "browser", "recorder.ts"), "utf8"), /startScreencast|screencastFrame|attachScreencast/);
   assert.match(app, /if \(state\.pollInFlight\) return;/);
   assert.match(app, /if \(!state\.browserActive \|\| state\.frameLoading \|\| document\.hidden\) return;/);
+  assert.match(app, /blob\.size < 800/);
+  assert.match(app, /naturalWidth < 200/);
   assert.match(app, /setInterval\(\(\) => \{ if \(!document\.hidden && state\.browserActive\) void refreshBrowserFrame\(\); \}, 240\)/);
   assert.match(app, /for \(const ms of \[160, 420, 900, 1500\]\)/);
   assert.match(await readFile(path.join(root, "src", "browser", "recorder.ts"), "utf8"), /watchLayerPaint|layerHotUntil|nudgeOverlayFrames/);

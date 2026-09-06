@@ -176,6 +176,54 @@ export function normalizePreviewViewport(input?: { width?: number; height?: numb
   return { width, height, scale: 1 };
 }
 
+export const MIN_PREVIEW_BYTES = 800;
+export const MIN_PREVIEW_WIDTH = 200;
+export const MIN_PREVIEW_HEIGHT = 120;
+
+export function readJpegDimensions(buffer: Buffer): { width: number; height: number } | undefined {
+  if (buffer.length < 4 || buffer[0] !== 0xff || buffer[1] !== 0xd8) return undefined;
+  let offset = 2;
+  while (offset + 1 < buffer.length) {
+    if (buffer[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    const marker = buffer.readUInt8(offset + 1);
+    if (marker === 0x00 || marker === 0xff) {
+      offset += 1;
+      continue;
+    }
+    if (marker === 0xd8) {
+      offset += 2;
+      continue;
+    }
+    if (marker === 0xd9) break;
+    if (marker >= 0xd0 && marker <= 0xd7) {
+      offset += 2;
+      continue;
+    }
+    if (offset + 3 >= buffer.length) return undefined;
+    const size = buffer.readUInt16BE(offset + 2);
+    if (size < 2) return undefined;
+    if (marker >= 0xc0 && marker <= 0xc3) {
+      if (offset + 8 >= buffer.length) return undefined;
+      const height = buffer.readUInt16BE(offset + 5);
+      const width = buffer.readUInt16BE(offset + 7);
+      if (width < 1 || height < 1) return undefined;
+      return { width, height };
+    }
+    offset += 2 + size;
+  }
+  return undefined;
+}
+
+export function isUsablePreviewBuffer(buffer: Buffer | undefined | null): buffer is Buffer {
+  if (!buffer || buffer.byteLength < MIN_PREVIEW_BYTES) return false;
+  const size = readJpegDimensions(buffer);
+  if (!size) return true;
+  return size.width >= MIN_PREVIEW_WIDTH && size.height >= MIN_PREVIEW_HEIGHT;
+}
+
 const INSPECT_TARGET_IN_PAGE = new Function("el", String.raw`
   const text = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 800);
   const form = el.closest("form");
@@ -255,11 +303,6 @@ interface ActiveRecording {
   authenticationFailure?: { at: number; reason: string; pageUrl?: string };
 }
 
-const EMPTY_JPEG = Buffer.from(
-  "/9j/4AAQSkZJRgABAQAAAQABAAD/2wAAAAF/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9k=",
-  "base64"
-);
-
 export class BrowserRecorder {
   private active?: ActiveRecording;
   private browserPid?: number;
@@ -268,6 +311,7 @@ export class BrowserRecorder {
   private readonly networkJobs = new Set<Promise<void>>();
   private readonly pendingRequests = new Map<Request, number>();
   private previewInFlight?: Promise<Buffer>;
+  private screenshotInFlight?: Promise<Buffer | undefined>;
   private lastPreview?: { at: number; buffer: Buffer };
   private focused?: Page;
   private pageError?: string;
@@ -416,10 +460,12 @@ export class BrowserRecorder {
   }
 
   async preview(): Promise<Buffer> {
+    const cached = this.lastGoodPreview();
     const layerHot = this.layerHotUntil > Date.now();
-    if (this.lastPreview && !layerHot && (this.actionBusy > 0 || Date.now() - this.lastPreview.at < 180)) {
-      return this.lastPreview.buffer;
+    if (cached && !layerHot && (this.actionBusy > 0 || Date.now() - cached.at < 180)) {
+      return cached.buffer;
     }
+    if (cached && this.screenshotInFlight) return cached.buffer;
     if (this.previewInFlight) return this.previewInFlight;
     this.previewInFlight = this.capturePreview().finally(() => {
       this.previewInFlight = undefined;
@@ -427,24 +473,43 @@ export class BrowserRecorder {
     return this.previewInFlight;
   }
 
-  private async capturePreview() {
-    const page = this.currentPage();
-    if (this.isErrorUrl(page.url())) {
-      this.pageError = this.pageError || `页面打开失败：${page.url()}`;
-      return this.lastPreview?.buffer || EMPTY_JPEG;
-    }
-    const buffer = await this.withTimeout<Buffer | undefined>(page.screenshot({
+  private lastGoodPreview() {
+    return this.lastPreview && isUsablePreviewBuffer(this.lastPreview.buffer) ? this.lastPreview : undefined;
+  }
+
+  private takePreviewScreenshot(page: Page): Promise<Buffer | undefined> {
+    if (this.screenshotInFlight) return this.screenshotInFlight;
+    this.screenshotInFlight = page.screenshot({
       type: "jpeg",
       quality: 82,
       scale: "css",
       fullPage: false,
-      animations: "disabled",
-      caret: "hide"
-    }), 900, undefined);
-    if (!buffer || buffer.length < 800) return this.lastPreview?.buffer || EMPTY_JPEG;
-    this.lastPreview = { at: Date.now(), buffer };
-    this.lastGoodUrl = page.url();
-    return buffer;
+      animations: "allow",
+      caret: "hide",
+      timeout: 4_000
+    }).then(buffer => {
+      if (!isUsablePreviewBuffer(buffer)) return undefined;
+      this.lastPreview = { at: Date.now(), buffer };
+      this.lastGoodUrl = page.url();
+      return buffer;
+    }).catch(() => undefined).finally(() => {
+      this.screenshotInFlight = undefined;
+    });
+    return this.screenshotInFlight;
+  }
+
+  private async capturePreview() {
+    const page = this.currentPage();
+    const cached = this.lastGoodPreview();
+    if (this.isErrorUrl(page.url())) {
+      this.pageError = this.pageError || `页面打开失败：${page.url()}`;
+      if (cached) return cached.buffer;
+      throw new Error("preview unavailable");
+    }
+    const buffer = await this.withTimeout(this.takePreviewScreenshot(page), 1_600, undefined);
+    if (isUsablePreviewBuffer(buffer)) return buffer;
+    if (cached) return cached.buffer;
+    throw new Error("preview unavailable");
   }
 
   private setFocused(page?: Page) {
@@ -457,7 +522,6 @@ export class BrowserRecorder {
       return await work();
     } finally {
       this.actionBusy -= 1;
-      this.lastPreview = undefined;
     }
   }
 
@@ -577,7 +641,6 @@ export class BrowserRecorder {
       if (current?.width === size.width && current?.height === size.height) continue;
       await page.setViewportSize({ width: size.width, height: size.height });
     }
-    this.lastPreview = undefined;
     return size;
   }
 
@@ -1039,7 +1102,6 @@ export class BrowserRecorder {
 
   private watchLayerPaint() {
     this.layerHotUntil = Date.now() + 2_800;
-    this.lastPreview = undefined;
     if (this.layerWatch) return;
     this.layerWatch = (async () => {
       const started = Date.now();
@@ -1050,12 +1112,10 @@ export class BrowserRecorder {
           if (frame === page.mainFrame()) continue;
           await frame.waitForLoadState("domcontentloaded").catch(() => {});
         }
-        this.lastPreview = undefined;
         await new Promise(resolve => setTimeout(resolve, 160));
       }
     })().catch(() => {}).finally(() => {
       this.layerWatch = undefined;
-      this.lastPreview = undefined;
     });
   }
 
@@ -1670,6 +1730,7 @@ export class BrowserRecorder {
     this.lastTitle = { at: 0, value: "" };
     this.lastPreview = undefined;
     this.previewInFlight = undefined;
+    this.screenshotInFlight = undefined;
     this.actionBusy = 0;
     this.layerHotUntil = 0;
     this.manualPointer = undefined;
@@ -1700,6 +1761,7 @@ export class BrowserRecorder {
     this.lastTitle = { at: 0, value: "" };
     this.lastPreview = undefined;
     this.previewInFlight = undefined;
+    this.screenshotInFlight = undefined;
     this.actionBusy = 0;
     this.layerHotUntil = 0;
     this.manualPointer = undefined;

@@ -9,6 +9,7 @@ import { loadConfig } from "../config.js";
 import { formatProcessLog, killCommandLineMatches } from "../process-lifecycle.js";
 import { StudioService } from "../studio-service.js";
 import type { OperationKind } from "../domain.js";
+import { isUsablePreviewBuffer } from "../browser/recorder.js";
 import { isPageSessionId, sendEvent, WorkbenchPage } from "./workbench-page.js";
 
 const host = "127.0.0.1";
@@ -214,6 +215,10 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     }
     try {
       const frame = await page.recorder.preview();
+      if (!isUsablePreviewBuffer(frame)) {
+        response.writeHead(204, { "Cache-Control": "no-store" }).end();
+        return;
+      }
       response.writeHead(200, {
         "Content-Type": "image/jpeg",
         "Content-Length": String(frame.byteLength),

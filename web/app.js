@@ -403,16 +403,16 @@ async function refreshBrowserFrame(force = false) {
   const epoch = state.frameEpoch;
   state.frameLoading = true;
   try {
-    const response = await fetch(`/api/browser/frame?t=${Date.now()}`, { cache: "no-store", headers: pageHeaders(), signal: AbortSignal.timeout(1200) });
+    const response = await fetch(`/api/browser/frame?t=${Date.now()}`, { cache: "no-store", headers: pageHeaders(), signal: AbortSignal.timeout(2500) });
     if (epoch !== state.frameEpoch) return;
     if (response.status === 204 || !response.ok) return;
     const blob = await response.blob();
-    if (!blob || blob.size < 80) return;
+    if (!blob || blob.size < 800) return;
     const url = URL.createObjectURL(blob);
     const probe = new Image();
     probe.src = url;
     await (probe.decode ? probe.decode() : Promise.resolve()).catch(() => {});
-    if (epoch !== state.frameEpoch) {
+    if (epoch !== state.frameEpoch || !probe.naturalWidth || probe.naturalWidth < 200 || !probe.naturalHeight || probe.naturalHeight < 120) {
       URL.revokeObjectURL(url);
       return;
     }
@@ -440,7 +440,7 @@ async function pollBrowserState() {
     state.browserMode = browser.mode || state.browserMode;
     showManualTakeover(browser.manualTakeover);
     renderBrowserMode();
-    elements.browserFrame.classList.toggle("active", state.browserActive);
+    elements.browserFrame.classList.toggle("active", state.browserActive && Boolean(state.frameBlobUrl || elements.browserFrame.getAttribute("src")));
     elements.reloadBrowser.disabled = !state.browserActive;
     renderRecordingActions();
     if (!state.browserActive) {
