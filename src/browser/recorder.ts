@@ -462,7 +462,7 @@ export class BrowserRecorder {
   async preview(): Promise<Buffer> {
     const cached = this.lastGoodPreview();
     const layerHot = this.layerHotUntil > Date.now();
-    if (cached && !layerHot && (this.actionBusy > 0 || Date.now() - cached.at < 180)) {
+    if (cached && (this.actionBusy > 0 || layerHot || Date.now() - cached.at < 180)) {
       return cached.buffer;
     }
     if (cached && this.screenshotInFlight) return cached.buffer;
@@ -1101,18 +1101,16 @@ export class BrowserRecorder {
   }
 
   private watchLayerPaint() {
-    this.layerHotUntil = Date.now() + 2_800;
+    this.layerHotUntil = Date.now() + 650;
     if (this.layerWatch) return;
     this.layerWatch = (async () => {
-      const started = Date.now();
-      while (Date.now() - started < 2_400 && this.isActive()) {
-        await this.actions.nudgeOverlayFrames();
-        const page = this.currentPage();
-        for (const frame of page.frames()) {
-          if (frame === page.mainFrame()) continue;
-          await frame.waitForLoadState("domcontentloaded").catch(() => {});
-        }
-        await new Promise(resolve => setTimeout(resolve, 160));
+      await new Promise(resolve => setTimeout(resolve, 420));
+      if (!this.isActive()) return;
+      await this.actions.nudgeOverlayFrames();
+      const page = this.currentPage();
+      for (const frame of page.frames()) {
+        if (frame === page.mainFrame()) continue;
+        await frame.waitForLoadState("domcontentloaded").catch(() => {});
       }
     })().catch(() => {}).finally(() => {
       this.layerWatch = undefined;

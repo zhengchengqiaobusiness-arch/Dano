@@ -2631,6 +2631,74 @@ test("preview stays fresh while a delayed panel paints and in-page clicks do not
   }
 });
 
+test("preview keeps the last frame while an action is inside a black paint transition", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-preview-transition-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><head><title>过渡页</title></head>
+      <body data-phase="ready" style="margin:0;background:#fff">
+        <button id="transition">打开弹层</button>
+        <script>
+          document.getElementById("transition").onclick = () => {
+            document.body.dataset.phase = "black-transition";
+            document.body.style.background = "#000";
+            setTimeout(() => {
+              document.body.dataset.phase = "ready";
+              document.body.style.background = "#fff";
+            }, 600);
+          };
+        </script>
+      </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "preview-transition");
+    const page = (recorder as any).currentPage();
+    const screenshot = page.screenshot.bind(page);
+    const capturedPhases: string[] = [];
+    const actions = (recorder as any).actions;
+    const nudgeOverlayFrames = actions.nudgeOverlayFrames.bind(actions);
+    let nudgeCount = 0;
+    actions.nudgeOverlayFrames = async () => {
+      nudgeCount += 1;
+      return nudgeOverlayFrames();
+    };
+    page.screenshot = async (options: unknown) => {
+      capturedPhases.push(await page.locator("body").getAttribute("data-phase"));
+      return screenshot(options);
+    };
+    await recorder.preview();
+    await recorder.control({ action: "click", selector: "#transition" });
+    const before = capturedPhases.length;
+    const action = recorder.control({ action: "wait", ms: 300 });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    await recorder.preview();
+    await action;
+    assert.equal(capturedPhases.length, before, `preview captured during action: ${capturedPhases.join(",")}`);
+    await recorder.preview();
+    await new Promise(resolve => setTimeout(resolve, 400));
+    await recorder.preview();
+    assert.doesNotMatch(capturedPhases.join(","), /black-transition/);
+    assert.ok(nudgeCount <= 2, `overlay watcher repeatedly touched the page: ${nudgeCount}`);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("clicking a page control waits for the opened overlay iframe to paint", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-overlay-"));
   const server = http.createServer((request, response) => {
