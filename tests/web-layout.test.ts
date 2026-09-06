@@ -276,6 +276,16 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.doesNotMatch(extension, /details:\s*\{\s*review,\s*capabilities\s*\}/);
 });
 
+test("managed Skill export runs in the workbench service that owns persistent storage", async () => {
+  const [extension, server] = await Promise.all([
+    readFile(path.join(root, ".pi", "extensions", "business-skill-studio.ts"), "utf8"),
+    readFile(path.join(root, "src", "web", "server.ts"), "utf8")
+  ]);
+
+  assert.match(extension, /browserServiceUrl\s*\?\s*browserRequest<any>\("\/export"/);
+  assert.match(server, /pathname === "\/internal\/browser\/export"[\s\S]*studio\.exportManaged/);
+});
+
 test("Windows Pi host uses powershell instead of bash", async () => {
   const [settings, bridge, studioSkill, browserSkill] = await Promise.all([
     readFile(path.join(root, ".pi", "settings.json"), "utf8"),

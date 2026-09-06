@@ -442,6 +442,16 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
       sendJson(response, 200, await page.recorder.stopReadiness());
       return;
     }
+    if (request.method === "POST" && pathname === "/internal/browser/export") {
+      if (typeof body.name !== "string" || !body.name.trim()) throw new Error("请输入 Skill 名称");
+      const sessionId = typeof body.sessionId === "string" && body.sessionId.trim()
+        ? body.sessionId.trim()
+        : page.lastRecordingSessionId;
+      const record = await studio.exportManaged(body.name, true, sessionId);
+      sendJson(response, 200, record);
+      broadcastAll({ type: "skills_changed" });
+      return;
+    }
     if (request.method === "POST" && pathname === "/internal/browser/inspect") {
       if (typeof body.selector !== "string" || !body.selector) throw new Error("A selector is required");
       sendJson(response, 200, await page.recorder.inspectTarget(body.selector));

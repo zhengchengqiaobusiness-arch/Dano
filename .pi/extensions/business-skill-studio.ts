@@ -61,6 +61,9 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   const controlBrowser = (command: any) => browserServiceUrl
     ? browserRequest<any>("/control", command)
     : studio.recorder.control(command);
+  const exportSkillPackage = (name: string, sessionId: string) => browserServiceUrl
+    ? browserRequest<any>("/export", { name, sessionId })
+    : studio.exportManaged(name, true, sessionId);
 
   pi.on("session_shutdown", async () => {
     lastRecordingSessionId = undefined;
@@ -343,7 +346,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       sessionId: { type: "string" }
     }, ["name"]),
     async execute(_id, params: any) {
-      const result = await studio.exportManaged(params.name, true, requireConversationSession(params));
+      const result = await exportSkillPackage(params.name, requireConversationSession(params));
       return {
         content: [{
           type: "text",
