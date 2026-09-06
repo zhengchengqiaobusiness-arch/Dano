@@ -324,6 +324,10 @@ function asExactCaller(field: InputFormField, observation: UiObservation | undef
   const options = !picker ? optionsWithRecordedValue(observation, value) : undefined;
   const widget = widgetFromObservation(field, observation);
   const clock = recordedClock(value);
+  const dateHasTime = widget === "date" && (
+    /datetime|time/.test(String(observation?.type || "").toLowerCase())
+    || (typeof observation?.value === "string" && /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(observation.value.trim()))
+  );
   const htmlRequest = richTextPlain(value);
   const requestFormat = htmlRequest !== undefined && sameValue(htmlRequest, observation?.value) ? "html" as const : undefined;
   return {
@@ -336,8 +340,10 @@ function asExactCaller(field: InputFormField, observation: UiObservation | undef
     widget,
     defaultRule: keptJudgedRule(field) ? field.defaultRule : undefined,
     candidates: options?.length ? { type: "static", values: options } : field.candidates,
-    dateFormat: widget === "date" ? recordedDateFormat(value) || field.dateFormat : undefined,
-    dateClock: widget === "date" && clock ? clock : field.dateClock,
+    dateFormat: widget === "date"
+      ? recordedDateFormat(observation?.value, dateHasTime) || recordedDateFormat(value) || field.dateFormat
+      : undefined,
+    dateClock: widget === "date" ? (dateHasTime ? undefined : clock || field.dateClock) : field.dateClock,
     requestFormat: requestFormat || field.requestFormat,
     sourceDetail: requestFormat
       ? "页面由调用方输入文本，系统按录制到的请求格式编码为 HTML"
@@ -640,13 +646,6 @@ export function matchExactCandidateSource(
 ) {
   if (field.source !== "caller") return undefined;
   if (field.candidates?.type === "capability") return undefined;
-  if (field.candidates?.type === "static" && field.candidates.values.length >= 2 && !looksPickerField(field) && !looksDirectoryPicker(field)) {
-    const ids = identityValues(value);
-    const values = field.candidates.values.map(item => item.value);
-    const covers = ids.length > 0 && ids.every(item => values.some(entry => sameValue(entry, item)));
-    const sameKind = ids.length > 0 && values.every(item => typeof item === typeof ids[0]);
-    if (covers && sameKind) return undefined;
-  }
   if (!looksExactPicker(field) && field.candidates?.type !== "static") return undefined;
   const ids = identityValues(value);
   if (ids.length === 1) {
@@ -681,16 +680,6 @@ export function matchExactCandidateSource(
 function sourceIsClosedEnum(source: ReturnType<typeof exactCandidateSources>[number]) {
   return Boolean(source.dictionaryType) || source.rows.length >= 2
     && source.rows.every(row => row.value !== undefined && row.value !== null && row.value !== "");
-}
-
-function staticFromSource(source: ReturnType<typeof exactCandidateSources>[number]) {
-  return {
-    type: "static" as const,
-    values: source.rows.map(row => ({
-      value: rowIdentity(row),
-      label: rowDisplays(row)[0] || String(rowIdentity(row) ?? "")
-    }))
-  };
 }
 
 function rowKeysForObservation(
@@ -771,10 +760,17 @@ export function applyExactChooserJoin(catalog: CapabilityContract[], events: Evi
           source.rows.some(row => sameValue(rowIdentity(row), ids[0]) && observationMatchesRow(unique[0]!, row))
         );
         const next = asExactCaller(field, unique[0], ids[0]);
-        if (matched && sourceIsClosedEnum(matched)) {
-          return { ...next, widget: "select", candidates: staticFromSource(matched) };
-        }
-        return next;
+        return matched ? {
+          ...next,
+          widget: next.valueType === "array" ? "multiselect" : "select",
+          candidates: {
+            type: "capability",
+            capabilityId: matched.capabilityId,
+            valuePath: matched.valuePath,
+            labelPath: matched.labelPath
+          },
+          sourceDetail: `录制查询 ${matched.capabilityId} 的列表唯一对应了该字段的值，由调用方从该查询选择`
+        } : next;
       })
     };
   });
@@ -796,14 +792,6 @@ export function applyExactCandidateJoin(catalog: CapabilityContract[], events: E
         );
         const hit = matchExactCandidateSource(field, requestValueAt(sample, field.path), sources, capability.id, observation);
         if (!hit) return field;
-        if (sourceIsClosedEnum(hit)) {
-          return {
-            ...field,
-            widget: field.valueType === "array" ? "multiselect" : "select",
-            candidates: staticFromSource(hit),
-            sourceDetail: "录制枚举列表唯一对应了该字段的值，由调用方选择"
-          };
-        }
         return {
           ...field,
           widget: field.valueType === "array" ? "multiselect" : "select",

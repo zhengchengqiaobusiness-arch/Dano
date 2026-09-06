@@ -226,12 +226,22 @@ test("caller page values rematerialize the recorded query string and create body
   const { catalog } = leaveCatalog();
   const query = catalog.find(item => item.transport.pathTemplate.includes("duty-leave/page"))!;
   const create = catalog.find(item => item.transport.pathTemplate.includes("submit-process"))!;
+  const typeCandidates = fieldByName(query, "type")?.candidates;
+  assert.equal(typeCandidates?.type, "capability");
+  const typeLookupId = typeCandidates?.type === "capability" ? typeCandidates.capabilityId : "";
+  const typeLookupBody = { data: [
+    { dictType: "oa_duty_leave_type", value: "1", label: "病假" },
+    { dictType: "oa_duty_leave_type", value: "2", label: "事假" },
+    { dictType: "oa_duty_leave_type", value: "3", label: "年假" }
+  ] };
   const queryRequest = materializeHttpRequest(query, {
     type: "年假",
     processStatus: "未提交",
     reason: "1",
     "createTime[0]": "2026-09-15",
     "createTime[1]": "2026-09-17"
+  }, {
+    lookupBodies: { [typeLookupId]: typeLookupBody }
   });
   assert.deepEqual(queryRequest.query, RECORDED_QUERY);
 
@@ -249,9 +259,12 @@ test("caller page values rematerialize the recorded query string and create body
     projectCode: "12312",
     projectName: "123",
     Activity_0ag2wyz: 173
-  }, lookupId ? {
-    lookupBodies: { [lookupId]: { data: { leaveBalance: 0 } } }
-  } : undefined);
+  }, {
+    lookupBodies: {
+      [typeLookupId]: typeLookupBody,
+      ...(lookupId ? { [lookupId]: { data: { leaveBalance: 0 } } } : {})
+    }
+  });
   assert.deepEqual(createRequest.body, RECORDED_CREATE);
 });
 

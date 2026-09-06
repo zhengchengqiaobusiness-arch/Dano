@@ -5,7 +5,7 @@
  */
 import type { EvidenceEvent, InputFormField, NetworkEvidence, UiEvidence } from "../domain.js";
 import { ASK_KEY } from "./heuristics.js";
-import { clockFromEpoch, dateDay, isDateOnly, isIsoInstant, recordedClock } from "./date-format.js";
+import { clockFromEpoch, dateDay, isDateOnly, isIsoInstant, recordedClock, recordedDateFormat } from "./date-format.js";
 
 const GENERATED_NAME = /^(el-id-\d+|el-[a-z]+-\d+|reka-v-\d+-form-item|input-\d+|select-\d+|aria-id|:r[0-9a-z]+$)/i;
 const PAGE_NAME = /^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i;
@@ -937,6 +937,10 @@ function asCaller(
       : options?.length || picker || /select|combobox|picker/i.test(`${matched?.type || ""}`)
         ? choiceWidget
         : widgetFromObservation(field, matched);
+  const dateHasTime = widget === "date" && (
+    /datetime|time/.test(String(matched?.type || "").toLowerCase())
+    || (typeof matched?.value === "string" && /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(matched.value.trim()))
+  );
   return {
     ...field,
     label: observedLabel(field, matched),
@@ -946,7 +950,10 @@ function asCaller(
     systemHandled: false,
     widget,
     candidates: options?.length ? { type: "static", values: options } : field.candidates,
-    dateClock: looksDateControl(matched || field) && clock ? clock : field.dateClock,
+    dateFormat: widget === "date"
+      ? recordedDateFormat(matched?.value, dateHasTime) || recordedDateFormat(requestValue) || field.dateFormat
+      : undefined,
+    dateClock: widget === "date" ? (dateHasTime ? undefined : clock || field.dateClock) : field.dateClock,
     sourceDetail: options?.length
       ? "页面固定枚举，调用方直接选择，不要写成录制时的固定样本"
       : picker

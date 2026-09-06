@@ -439,6 +439,44 @@ test("exported executor preserves month precision and encodes recorded rich text
   }
 });
 
+test("exported executor preserves caller datetime precision", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-skill-datetime-"));
+  const create = verifiedCapability("create-duty-leave", "create");
+  create.inputSchema = {
+    type: "object",
+    properties: { startTime: { type: "string" }, endTime: { type: "string" } },
+    required: ["startTime", "endTime"]
+  };
+  create.inputForm = ["startTime", "endTime"].map(name => ({
+    path: `$.${name}`,
+    name,
+    label: name === "startTime" ? "开始时间" : "结束时间",
+    valueType: "string" as const,
+    source: "caller" as const,
+    required: true,
+    requiredBasis: "ui-required" as const,
+    systemHandled: false,
+    sourceDetail: "保持页面日期时间精度",
+    widget: "date" as const,
+    dateFormat: "YYYY-MM-DD HH:mm" as const
+  }));
+  try {
+    const exported = await exportSkill(temporary, "请假申请", [create]);
+    const { stdout } = await execFileAsync("python", [
+      path.join(exported.dir, "scripts", "execute.py"),
+      "--capability", create.id,
+      "--input", JSON.stringify({ startTime: "2026-10-19 00:00", endTime: "2026-10-20 00:00" }),
+      "--prepare-only"
+    ]);
+    assert.deepEqual(JSON.parse(stdout).prepared, {
+      startTime: "2026-10-19 00:00:00",
+      endTime: "2026-10-20 00:00:00"
+    });
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("exported executor queries dynamic options before sending a display name", async () => {
   const requests: string[] = [];
   const server = http.createServer((request, response) => {

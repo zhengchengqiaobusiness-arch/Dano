@@ -1,5 +1,6 @@
 export const BUSINESS_TZ_OFFSET_MS = 8 * 60 * 60 * 1000;
 const DATE_ONLY = /^(\d{4}-\d{2}-\d{2})$/;
+const DATE_MINUTE = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})$/;
 const DATE_TIME = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/;
 
 function pad(value: number) {
@@ -7,7 +8,7 @@ function pad(value: number) {
 }
 
 export function isDateInput(value: unknown): value is string {
-  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2})?$/.test(value.trim());
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?$/.test(value.trim());
 }
 
 export function isDateOnly(value: unknown) {
@@ -20,24 +21,26 @@ export function isIsoInstant(value: unknown) {
 
 export function recordedClock(value: unknown) {
   if (typeof value === "string") {
-    const match = value.trim().replace("T", " ").match(/^\d{4}-\d{2}-\d{2} (\d{2}:\d{2}:\d{2})/);
-    if (match?.[1]) return match[1];
+    const match = value.trim().replace("T", " ").match(/^\d{4}-\d{2}-\d{2} (\d{2}:\d{2})(?::(\d{2}))?/);
+    if (match?.[1]) return `${match[1]}:${match[2] || "00"}`;
   }
   return clockFromEpoch(value);
 }
 
-export function recordedDateFormat(value: unknown): "YYYY" | "YYYY-MM" | "YYYY-MM-DD" | undefined {
+export function recordedDateFormat(value: unknown, includeTime = false): "YYYY" | "YYYY-MM" | "YYYY-MM-DD" | "YYYY-MM-DD HH:mm" | undefined {
   if (typeof value === "number" && Number.isFinite(value) && value > 10_000_000_000) return "YYYY-MM-DD";
   if (typeof value !== "string") return undefined;
   const text = value.trim();
   if (/^\d{4}$/.test(text)) return "YYYY";
   if (/^\d{4}-\d{2}$/.test(text)) return "YYYY-MM";
+  if (includeTime && /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?$/.test(text)) return "YYYY-MM-DD HH:mm";
   if (/^\d{4}-\d{2}-\d{2}(?:[ T]|$)/.test(text)) return "YYYY-MM-DD";
   return undefined;
 }
 
 export function dateToMillis(value: string, clock?: string) {
-  const raw = value.trim().replace("T", " ");
+  let raw = value.trim().replace("T", " ");
+  if (DATE_MINUTE.test(raw)) raw += ":00";
   const day = raw.length >= 10 ? raw.slice(0, 10) : raw;
   const fromValue = raw.length >= 19 ? raw.slice(11, 19) : undefined;
   const suffix = raw.length === 10 && clock && /^\d{2}:\d{2}:\d{2}$/.test(clock)
@@ -50,6 +53,7 @@ export function dateToMillis(value: string, clock?: string) {
 
 export function normalizeDateString(value: string, clock?: string) {
   const raw = value.trim().replace("T", " ");
+  if (DATE_MINUTE.test(raw)) return `${raw}:00`;
   if (DATE_ONLY.test(raw)) {
     return clock && /^\d{2}:\d{2}:\d{2}$/.test(clock) ? `${raw} ${clock}` : raw;
   }
@@ -58,7 +62,7 @@ export function normalizeDateString(value: string, clock?: string) {
 
 export function dateDay(value: unknown) {
   if (typeof value === "string") {
-    const match = value.trim().match(DATE_TIME) || value.trim().match(DATE_ONLY);
+    const match = value.trim().match(DATE_TIME) || value.trim().match(DATE_MINUTE) || value.trim().match(DATE_ONLY);
     if (match?.[1]) return match[1];
     if (/^\d{11,}$/.test(value.trim())) return dateDay(Number(value.trim()));
     return undefined;

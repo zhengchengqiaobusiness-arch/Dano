@@ -102,16 +102,20 @@ def set_by_path(target: dict[str, Any], json_path: str, value: Any) -> None:
         current = current[part]
 
 
-def date_to_millis(value: str) -> int:
+def date_to_millis(value: str, clock: str | None = None) -> int:
     raw = value.strip().replace("T", " ")
     if len(raw) == 10:
-        raw += " 00:00:00"
+        raw += f" {clock}" if clock and re.fullmatch(r"\d{2}:\d{2}:\d{2}", str(clock)) else " 00:00:00"
+    elif re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", raw):
+        raw += ":00"
     moment = dt.datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=dt.timezone(dt.timedelta(hours=8)))
     return int(moment.timestamp() * 1000)
 
 
 def normalize_date_string(value: str, clock: str | None = None) -> str:
     raw = value.strip().replace("T", " ")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", raw):
+        return f"{raw}:00"
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
         if clock and re.fullmatch(r"\d{2}:\d{2}:\d{2}", str(clock)):
             return f"{raw} {clock}"
@@ -417,13 +421,13 @@ def coerce(value: Any, value_type: str, field_path: str, field: dict[str, Any] |
     if value_type == "array" and isinstance(value, list) and len(date_clocks) == len(value):
         return [
             normalize_date_string(item, date_clocks[index])
-            if isinstance(item, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2})?", item.strip())
+            if isinstance(item, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?", item.strip())
             else item
             for index, item in enumerate(value)
         ]
-    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2})?", value.strip()):
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?", value.strip()):
         if value_type in {"integer", "number"}:
-            return date_to_millis(value)
+            return date_to_millis(value, (field or {}).get("dateClock"))
         if value_type == "string":
             return normalize_date_string(value, (field or {}).get("dateClock"))
     if value_type == "string":

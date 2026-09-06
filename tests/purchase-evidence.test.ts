@@ -8,11 +8,6 @@ import { promisify } from "node:util";
 import type { CapabilityContract, EvidenceEvent, InputFormField } from "../src/domain.js";
 
 const execFileAsync = promisify(execFile);
-function staticCandidateValue(field: InputFormField | undefined, label: string) {
-  return field?.candidates?.type === "static"
-    ? field.candidates.values.find(item => item.label === label)?.value
-    : undefined;
-}
 import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
 import { finalizeCapabilities } from "../src/inference/finalize-capabilities.js";
 import { applyDeterministicCatalogJudgment } from "../src/inference/pi-skill-runtime.js";
@@ -356,7 +351,7 @@ test("nameless forms bind only uniquely evidenced fields", () => {
   assert.equal(search.inputForm.find(field => field.name === "productId")?.label, "产品");
   assert.equal(search.inputForm.find(field => field.name === "status")?.source, "caller");
   assert.equal(search.inputForm.find(field => field.name === "status")?.label, "状态");
-  assert.equal(staticCandidateValue(search.inputForm.find(field => field.name === "status"), "未审核"), 10);
+  assert.equal(search.inputForm.find(field => field.name === "status")?.candidates?.type, "capability");
   assert.equal(search.inputForm.find(field => field.name === "inStatus")?.source, "system");
   assert.equal(search.inputForm.find(field => field.name === "returnStatus")?.source, "system");
   assert.equal(search.inputForm.find(field => field.name === "inStatus")?.defaultRule, "literal:0");

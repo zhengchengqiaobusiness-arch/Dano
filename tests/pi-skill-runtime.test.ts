@@ -222,19 +222,13 @@ test("recorded dictionary and directory APIs supply work-report select candidate
 
   assert.equal(related.some(item => item.transport.pathTemplate.endsWith("/dict-data/simple-list")), true);
   assert.equal(related.some(item => item.transport.pathTemplate.endsWith("/dept/simple-list")), true);
-  assert.deepEqual(result.inputForm.find(item => item.name === "reportType")?.candidates, {
-    type: "static",
-    values: [{ value: "1", label: "日报" }, { value: "2", label: "周报" }, { value: "3", label: "月报" }]
-  });
-  assert.deepEqual(result.inputForm.find(item => item.name === "processStatus")?.candidates, {
-    type: "static",
-    values: [{ value: "-1", label: "未提交" }, { value: "1", label: "审批中" }]
-  });
+  assert.equal(result.inputForm.find(item => item.name === "reportType")?.candidates?.type, "capability");
+  assert.equal(result.inputForm.find(item => item.name === "processStatus")?.candidates?.type, "capability");
   const dept = result.inputForm.find(item => item.name === "deptId")?.candidates;
   assert.equal(dept?.type, "capability");
   assert.match(dept?.type === "capability" ? dept.capabilityId : "", /dept-simple-list/);
   const judgedStatistics = judged.find(item => item.id === statistics.id)!;
-  assert.equal(judgedStatistics.inputForm.find(item => item.name === "reportType")?.candidates?.type, "static");
+  assert.equal(judgedStatistics.inputForm.find(item => item.name === "reportType")?.candidates?.type, "capability");
   assert.equal(judgedStatistics.inputForm.find(item => item.name === "deptId")?.candidates?.type, "capability");
 });
 
@@ -280,15 +274,8 @@ test("standard RuoYi dictValue and dictLabel rows resolve an unnamed select", ()
   const status = query.inputForm.find(item => item.name === "status");
   assert.equal(status?.source, "caller");
   assert.equal(status?.label, "流程状态");
-  assert.deepEqual(status?.candidates, {
-    type: "static",
-    values: [
-      { value: "0", label: "未提交" },
-      { value: "1", label: "审批中" },
-      { value: "2", label: "已完成" },
-      { value: "3", label: "被驳回" }
-    ]
-  });
+  assert.equal(status?.candidates?.type, "capability");
+  assert.match(status?.candidates?.type === "capability" ? status.candidates.capabilityId : "", /type-oa-flow-billstatus/);
   const bootstrapStatus = catalog
     .find(item => item.transport.pathTemplate.endsWith("/queryCompanyTenant"))
     ?.inputForm.find(item => item.name === "status");

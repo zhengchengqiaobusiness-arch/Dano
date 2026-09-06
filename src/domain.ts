@@ -109,7 +109,7 @@ export interface InputFormField {
   sourceDetail: string;
   widget: "text" | "number" | "boolean" | "select" | "multiselect" | "json" | "textarea" | "date";
   defaultRule?: string;
-  dateFormat?: "YYYY" | "YYYY-MM" | "YYYY-MM-DD";
+  dateFormat?: "YYYY" | "YYYY-MM" | "YYYY-MM-DD" | "YYYY-MM-DD HH:mm";
   dateClock?: string;
   dateClocks?: string[];
   requestFormat?: "html";
