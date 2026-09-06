@@ -475,7 +475,13 @@ export function applyExactEvidenceJoin(capability: CapabilityContract, events: E
         .filter(item => semanticLabelScore(field, item) > 0)
         .map(item => [item.label || item.name || "", item])).values()]
         .filter(item => item.label || item.name);
-      if (compound.length === 1) return asExactCaller(field, compound[0], value);
+      if (compound.length === 1) {
+        const richer = observations.find(item =>
+          item.label === compound[0]!.label
+          && /select|combobox|picker|date|time|number/i.test(item.type || "")
+        ) || compound[0];
+        return asExactCaller(field, richer, value);
+      }
     }
     const sharedBusinessValue = values.some(item =>
       item.field.path !== field.path

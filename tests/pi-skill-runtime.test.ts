@@ -137,6 +137,7 @@ test("hotel room fields bind by compound semantics when every recorded value is 
     assert.equal(input?.source, "caller", JSON.stringify(query.inputForm));
     assert.equal(input?.systemHandled, false, JSON.stringify(query.inputForm));
     assert.equal(input?.defaultRule, undefined, JSON.stringify(query.inputForm));
+    if (name === "roomType" || name === "roomLevel") assert.equal(input?.widget, "select", JSON.stringify(query.inputForm));
   }
 });
 
