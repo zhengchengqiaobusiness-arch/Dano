@@ -218,7 +218,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_validate",
     label: "Validate business capabilities",
-    description: "Inspect the evidence review and its automatic repair result. This is a diagnostic view, not a caller-operated gate: the complete analyze-review-repair-re-review-export workflow is owned by business_skill_export. Never hand generated-file repairs to the user.",
+    description: "Inspect the review result already produced by the live recordingAudit loop. This is a diagnostic view, not a caller-operated gate and not a repair stage. Recording owns capability build, deterministic contract repair, validation, and review after each action; export only checks consistency and writes the verified package. Never hand generated-file repairs to the user.",
     parameters: parameters({
       sessionId: { type: "string" }
     }),

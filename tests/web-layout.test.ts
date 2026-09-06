@@ -255,9 +255,9 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.match(bridge, /Windows|Never use bash|WSL/);
   assert.match(bridge, /exclude-tools[\s\S]*bash|The bash tool is disabled/);
   assert.match(bridge, /sessionId from record_stop|主能力 and 字段候选接口/);
-  assert.match(bridge, /审核通过|re-record|re-analyze/);
-  assert.match(bridge, /business_skill_export after record_stop/);
-  assert.match(bridge, /owns analyze, review, repair, re-review, and export/);
+  assert.match(bridge, /recordingAudit.ready=true/);
+  assert.match(bridge, /business_skill_export only after record_stop/);
+  assert.match(bridge, /Capability construction, request-contract repair, validation, and review happen during recording/);
   assert.match(bridge, /After every mutating business_browser_control call, inspect recordingAudit/);
   assert.doesNotMatch(bridge, /stop and report; do not analyze, validate, or record again/);
   assert.match(extension, /session\?\.blocked/);
@@ -267,7 +267,7 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.match(extension, /正式闭环以录制阶段的 recordingAudit 为准/);
   assert.doesNotMatch(extension, /停止并报告未通过原因/);
   const workflowSkill = await readFile(path.join(root, ".pi", "skills", "business-skill-studio", "SKILL.md"), "utf8");
-  assert.match(workflowSkill, /Export owns Analyze → Review → Repair → Re-review → Export/);
+  assert.match(workflowSkill, /Recording owns Build → Repair → Validate → Review/);
   assert.doesNotMatch(workflowSkill, /This is the gate/);
   assert.match(extension, /本次识别主能力|本次录制主能力|已导出主能力/);
   assert.match(extension, /审核通过|审核未通过/);
