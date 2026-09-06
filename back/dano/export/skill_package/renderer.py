@@ -64,7 +64,7 @@ def _token_slug(value: str, *, sep: str, empty: str) -> str:
 
 def _script_slug(value: str) -> str:
     raw = str(value or "capability")
-    slug = _token_slug(raw, sep="_", empty="capability")
+    slug = re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", raw.casefold())).strip("_")
     if not slug or slug in {"capability"}:
         slug = "capability_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
     if slug in sys.stdlib_module_names or slug in {"client", "wire_format", "format_list"}:
@@ -808,9 +808,10 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
             for step_index, step in enumerate(all_steps)
         }
         name = str(cap.get("name") or cap.get("capability_id") or f"capability_{index}")
-        script = _script_slug(name)
+        script_source = str(cap.get("capability_id") or name)
+        script = _script_slug(script_source)
         if script in used_scripts:
-            script += "_" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:6]
+            script += "_" + hashlib.sha256(f"{script_source}:{index}".encode("utf-8")).hexdigest()[:6]
         used_scripts.add(script)
         compiled_schema = cap.get("input_schema") or cap.get("parameters") or {}
         schema = consume_upstream_input_schema(
@@ -2475,11 +2476,11 @@ def _execution_protocol() -> list[str]:
         "   Done when: 只打开当前路线和当前步骤真正需要的资源。",
         "3. 按当前能力输入表单原样展示全部调用方字段。只有本轮已校验的回答、固定值、系统值和已确认绑定不重复询问。",
         "   Done when: 表单已覆盖该能力全部调用方字段，或用户取消。",
-        "4. 按合同处理绑定或人工交接，不猜测跨步字段，不默认第一条候选。",
+        "4. 按合同处理绑定或人工交接；没有已确认绑定时先完成前一步，再请用户选择，不猜测跨步字段，不默认第一条候选。",
         "   Done when: 下一步输入已确认，或已停止并说明原因。",
         "5. 所有变更操作先按「展示与确认」核对页面字段，获得确认后再执行带 `--confirm` 的脚本；只读操作收集齐输入后直接执行。",
         "   Done when: 已按契约确认或跳过确认，脚本返回成功，或用户拒绝后未执行。",
-        "6. 按路线完成条件验证结果；失败或结果未知时停止，不得静默重试写入。",
+        "6. 按路线完成条件验证结果；列表或数组结果用 `scripts/format_list.py` 格式化。失败或结果未知时停止，不得静默重试写入。",
         "   Done when: 已按完成条件判定成功、失败或未知。",
         "7. 只报告已确认完成的步骤、未执行步骤和需要用户处理的事项。",
         "   Done when: 汇报与实际执行一致。",
@@ -2796,12 +2797,9 @@ def _fallback_skill_md(skill, slug: str, plans: list[dict], spec) -> str:  # noq
         f"# {heading}",
         "",
     ]
-    lines.extend(_applicable_sections(skill, plans))
     lines.extend(_workflow_table(skill, plans))
     lines.append("")
-    lines.extend(_composition_rules(skill))
     lines.extend(_execution_protocol())
-    lines.extend(_success_failure_section(skill))
     lines.extend(_on_demand_resources(skill, plans))
     return "\n".join(lines).rstrip() + "\n"
 

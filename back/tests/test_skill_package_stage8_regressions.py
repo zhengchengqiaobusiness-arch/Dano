@@ -1538,8 +1538,8 @@ def test_consumer_handbook_does_not_say_caller_fields() -> None:
     assert "调用方" not in _handbook_text("补齐调用方字段")
 
 
-def test_chinese_operation_names_keep_readable_script_slugs() -> None:
-    assert _script_slug("查询工作汇报统计") == "查询工作汇报统计"
+def test_script_slugs_are_ascii_python_module_names() -> None:
+    assert _script_slug("查询工作汇报统计") == "capability_257f407649"
     assert _script_slug("query_records") == "query_records"
     assert _script_slug("Query-Records") == "query_records"
 
@@ -1982,9 +1982,15 @@ def test_result_then_playbook_renders_combination_route_and_readable_scripts(tmp
     assert "确认哪些项目仍需新增" in handbook
     assert "没有已确认绑定" in handbook
     assert 'name: "日报填写"' in handbook or "name: 日报填写" in handbook
-    assert "capability_" not in "\n".join(scripts)
-    assert "查询工作汇报统计.py" in scripts
-    assert "新增并提交工作日报.py" in scripts
+    assert "stats.py" in scripts
+    assert "create.py" in scripts
+    assert all(name.isascii() for name in scripts)
+    assert "## 适用场景" not in handbook
+    assert "## 不适用场景" not in handbook
+    assert "## 组合与交接规则" not in handbook
+    assert "## 成功、失败与停止" not in handbook
+    assert "## 选择工作流" in handbook
+    assert "## 执行协议" in handbook
     assert "提交 query" not in contract
     assert "本场" not in contract
     assert (folder / "references" / "routes" / "查询工作汇报统计-然后-新增并提交工作日报.md").exists()

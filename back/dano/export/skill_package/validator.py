@@ -15,8 +15,7 @@ from dano.onboarding.skill_generation.validate import HANDBOOK_BAN_MARKERS
 
 
 _REQUIRED_SKILL_SECTIONS = (
-    "适用场景", "不适用场景", "选择工作流", "组合与交接规则",
-    "执行协议", "成功、失败与停止", "按需读取资源",
+    "选择工作流", "执行协议", "按需读取资源",
 )
 _LEGACY_SKILL_SECTIONS = (
     "适用场景", "不适用场景", "能力关系", "操作路由", "输入",
