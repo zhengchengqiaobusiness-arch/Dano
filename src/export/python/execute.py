@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime as dt
+import html
 import json
 import os
 import re
@@ -410,6 +411,8 @@ def coerce(value: Any, value_type: str, field_path: str, field: dict[str, Any] |
     if value is None:
         return value
     value = apply_candidate(field or {}, value)
+    if (field or {}).get("requestFormat") == "html" and isinstance(value, str) and value and not re.search(r"</?[a-z][^>]*>", value, re.I):
+        value = "".join(f"<p>{html.escape(line) if line else '<br>'}</p>" for line in value.splitlines())
     date_clocks = (field or {}).get("dateClocks") or []
     if value_type == "array" and isinstance(value, list) and len(date_clocks) == len(value):
         return [

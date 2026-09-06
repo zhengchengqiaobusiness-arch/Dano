@@ -26,6 +26,16 @@ export function recordedClock(value: unknown) {
   return clockFromEpoch(value);
 }
 
+export function recordedDateFormat(value: unknown): "YYYY" | "YYYY-MM" | "YYYY-MM-DD" | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 10_000_000_000) return "YYYY-MM-DD";
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  if (/^\d{4}$/.test(text)) return "YYYY";
+  if (/^\d{4}-\d{2}$/.test(text)) return "YYYY-MM";
+  if (/^\d{4}-\d{2}-\d{2}(?:[ T]|$)/.test(text)) return "YYYY-MM-DD";
+  return undefined;
+}
+
 export function dateToMillis(value: string, clock?: string) {
   const raw = value.trim().replace("T", " ");
   const day = raw.length >= 10 ? raw.slice(0, 10) : raw;

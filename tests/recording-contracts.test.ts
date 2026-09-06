@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { EvidenceEvent, UiEvidence } from "../src/domain.js";
 import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
 import { finalizeCapabilities } from "../src/inference/finalize-capabilities.js";
+import { materializeHttpRequest } from "../src/execution/http-executor.js";
 
 const origin = "https://oa.example.test";
 
@@ -101,4 +102,35 @@ test("live contract review keeps query and create controls on their owning forms
     ["$.startTime", "$.endTime"].map(path => [path, createCapability.inputForm.find(item => item.path === path)?.source]),
     [["$.startTime", "caller"], ["$.endTime", "caller"]]
   );
+});
+
+test("live contract records rich-text encoding, real controls, and month precision", () => {
+  const events: EvidenceEvent[] = [
+    ui("save-formatted", 10, "保存", [
+      { label: "使用描述", type: "textarea", value: "合同说明", required: false },
+      { label: "统计月份", type: "date", value: "2026-09", required: false }
+    ]),
+    network(
+      "create-formatted",
+      10,
+      "POST",
+      "/prod-api/oa/sealApply",
+      {},
+      { useInfo: "<p>合同说明</p>", month: "2026-09" },
+      "save-formatted"
+    )
+  ];
+  const create = finalizeCapabilities(buildCapabilityCandidates(events), events)
+    .find(item => item.transport.pathTemplate.endsWith("/oa/sealApply"))!;
+  const useInfo = create.inputForm.find(item => item.name === "useInfo")!;
+  const month = create.inputForm.find(item => item.name === "month")!;
+
+  assert.equal(useInfo.source, "caller");
+  assert.equal(useInfo.widget, "textarea");
+  assert.equal(useInfo.requestFormat, "html");
+  assert.equal(month.source, "caller");
+  assert.equal(month.widget, "date");
+  assert.equal(month.dateFormat, "YYYY-MM");
+  const replay = materializeHttpRequest(create, { useInfo: "新的说明", month: "2026-10" });
+  assert.deepEqual(replay.body, { useInfo: "<p>新的说明</p>", month: "2026-10" });
 });

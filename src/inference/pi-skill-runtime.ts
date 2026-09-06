@@ -9,7 +9,7 @@ import path from "node:path";
 import { z } from "zod";
 import type { CapabilityContract, EvidenceEvent, FieldSource, InputFormField, NetworkEvidence, UiEvidence } from "../domain.js";
 import { OpenAIReasoner } from "../llm/openai.js";
-import { dateDay, recordedClock } from "./date-format.js";
+import { dateDay, recordedClock, recordedDateFormat } from "./date-format.js";
 import { isExecutableRule } from "./field-derivation.js";
 import { directoryLookupEntity, isLookupQueryPath, isNoiseCapability, isPageResultQuery, sameResource } from "./export-scope.js";
 import { ASK_KEY, SEARCH_KEY } from "./heuristics.js";
@@ -23,6 +23,7 @@ import {
   pickerEntity,
   relatedUiEvents,
   requestValueAt,
+  richTextPlain,
   sameFormShape,
   sameSynonymGroup,
   sameValue,
@@ -261,6 +262,7 @@ function widgetFromObservation(field: InputFormField, observation?: UiObservatio
   if (type === "select" || type === "select-one" || type === "combobox" || type === "picker") {
     return field.valueType === "array" ? "multiselect" : "select";
   }
+  if (/^(text|input|search|email|tel|url|password)$/.test(type)) return "text";
   return field.widget;
 }
 
@@ -299,6 +301,8 @@ function asExactCaller(field: InputFormField, observation: UiObservation | undef
   const options = !picker ? optionsWithRecordedValue(observation, value) : undefined;
   const widget = widgetFromObservation(field, observation);
   const clock = recordedClock(value);
+  const htmlRequest = richTextPlain(value);
+  const requestFormat = htmlRequest !== undefined && sameValue(htmlRequest, observation?.value) ? "html" as const : undefined;
   return {
     ...field,
     label: displayLabel(observation?.label, field.label) || field.label,
@@ -309,8 +313,12 @@ function asExactCaller(field: InputFormField, observation: UiObservation | undef
     widget,
     defaultRule: keptJudgedRule(field) ? field.defaultRule : undefined,
     candidates: options?.length ? { type: "static", values: options } : field.candidates,
+    dateFormat: widget === "date" ? recordedDateFormat(value) || field.dateFormat : undefined,
     dateClock: widget === "date" && clock ? clock : field.dateClock,
-    sourceDetail: options?.length
+    requestFormat: requestFormat || field.requestFormat,
+    sourceDetail: requestFormat
+      ? "页面由调用方输入文本，系统按录制到的请求格式编码为 HTML"
+      : options?.length
       ? "页面同名控件有固定选项，由调用方选择"
       : picker
         ? "页面同名选择控件，由调用方提供"

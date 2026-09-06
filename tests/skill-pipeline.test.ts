@@ -328,6 +328,45 @@ test("exported executor preserves a recorded date-only string", async () => {
   }
 });
 
+test("exported executor preserves month precision and encodes recorded rich text", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-skill-formats-"));
+  const create = verifiedCapability("create-seal", "create");
+  create.title = "新建用印";
+  create.inputSchema = {
+    type: "object",
+    properties: { month: { type: "string" }, useInfo: { type: "string" } },
+    required: ["month", "useInfo"]
+  };
+  create.inputForm = [{
+    path: "$.month", name: "month", label: "统计月份", valueType: "string", source: "caller",
+    required: true, requiredBasis: "ui-required", systemHandled: false, sourceDetail: "保持页面月份精度", widget: "date",
+    dateFormat: "YYYY-MM"
+  }, {
+    path: "$.useInfo", name: "useInfo", label: "使用描述", valueType: "string", source: "caller",
+    required: true, requiredBasis: "ui-required", systemHandled: false, sourceDetail: "系统编码为 HTML", widget: "textarea",
+    requestFormat: "html"
+  }];
+  try {
+    const exported = await exportSkill(temporary, "用印申请", [create]);
+    const { stdout } = await execFileAsync("python", [
+      path.join(exported.dir, "scripts", "execute.py"),
+      "--capability", create.id,
+      "--input", JSON.stringify({ month: "2026-10", useInfo: "第一行\n第二行" }),
+      "--prepare-only"
+    ]);
+    assert.deepEqual(JSON.parse(stdout).prepared, {
+      month: "2026-10",
+      useInfo: "<p>第一行</p><p>第二行</p>"
+    });
+    const contract = JSON.parse(await readFile(path.join(exported.dir, "references", "CONTRACT.json"), "utf8"));
+    const fields = contract.capabilities[0].inputForm;
+    assert.equal(fields.find((item: any) => item.name === "month").dateFormat, "YYYY-MM");
+    assert.equal(fields.find((item: any) => item.name === "useInfo").requestFormat, "html");
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("exported executor queries dynamic options before sending a display name", async () => {
   const requests: string[] = [];
   const server = http.createServer((request, response) => {

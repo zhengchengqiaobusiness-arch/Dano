@@ -111,8 +111,10 @@ function exportedField(field: InputFormField) {
     widget: field.widget
   };
   if (field.defaultRule) exported.defaultRule = field.defaultRule;
+  if (field.dateFormat) exported.dateFormat = field.dateFormat;
   if (field.dateClock) exported.dateClock = field.dateClock;
   if (field.dateClocks?.length) exported.dateClocks = field.dateClocks;
+  if (field.requestFormat) exported.requestFormat = field.requestFormat;
   if (field.sourceDetail) exported.sourceDetail = field.sourceDetail;
   if (field.candidates) exported.candidates = field.candidates;
   return exported;

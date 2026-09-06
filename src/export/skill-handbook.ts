@@ -37,7 +37,11 @@ export function safeCell(value: unknown) {
 }
 
 export function isDateField(field: InputFormField) {
-  return /time|date|start|end/i.test(`${field.name} ${field.label}`);
+  return field.widget === "date";
+}
+
+function dateFormat(field: InputFormField) {
+  return field.dateFormat || "YYYY-MM-DD";
 }
 
 export function inputType(field: InputFormField) {
@@ -58,8 +62,8 @@ export function classifyExported(capabilities: CapabilityContract[]) {
 }
 
 function defaultStrategy(field: InputFormField) {
-  if (isDateField(field) && field.valueType === "array") return "按页面顺序提供日期数组，每项格式 YYYY-MM-DD，不复制未见过的值";
-  if (isDateField(field)) return "根据当前请求和当前日期推导，格式 YYYY-MM-DD，不复制未见过的值";
+  if (isDateField(field) && field.valueType === "array") return `按页面顺序提供日期数组，每项格式 ${dateFormat(field)}，不复制未见过的值`;
+  if (isDateField(field)) return `根据当前请求和当前日期推导，格式 ${dateFormat(field)}，不复制未见过的值`;
   if (field.valueType === "number" || field.valueType === "integer") return "从当前用户意图提取可唯一转换的数字，不任意使用 0";
   if (field.valueType === "array" || field.valueType === "object") return "根据当前意图生成满足字段 schema 的合法 JSON，不复制未见过的值";
   if (field.valueType === "boolean") return "根据当前用户意图选择有证据支持的布尔值；不能确定时先询问";
@@ -197,7 +201,7 @@ export function exportedQuestion(field: InputFormField, capabilities: Capability
     required: field.required,
     defaultStrategy: defaultStrategy(field)
   };
-  if (isDateField(field)) question.dateFormat = "YYYY-MM-DD";
+  if (isDateField(field)) question.dateFormat = dateFormat(field);
   if (field.dateClocks?.length) question.dateClocks = field.dateClocks;
   if (field.candidates?.type === "static") question.options = field.candidates.values;
   const dataSource = publishedDataSource(field, capabilities);
@@ -577,15 +581,15 @@ function callerFieldTable(capability: CapabilityContract, capabilities: Capabili
 |---|---|---|---|---|---|
 ${fields.map(field => {
     const dataSource = publishedDataSource(field, capabilities);
-    let candidate = "自由输入";
+    let candidate = field.requestFormat === "html" ? "富文本：调用方传文本，系统按真实请求格式编码为 HTML" : "自由输入";
     if (field.candidates?.type === "static") {
       candidate = field.candidates.values.map(item => `${item.label}=${String(item.value)}`).join("；");
     } else if (dataSource) {
       candidate = `dataSource: ${JSON.stringify(dataSource)}`;
     } else if (isDateField(field)) {
       candidate = field.dateClock
-        ? `dateFormat: YYYY-MM-DD，请求补 ${field.dateClock}`
-        : "dateFormat: YYYY-MM-DD";
+        ? `dateFormat: ${dateFormat(field)}，请求补 ${field.dateClock}`
+        : `dateFormat: ${dateFormat(field)}`;
       if (field.sourceDetail && /毫秒|时间戳|dateClock|YYYY-MM-DD/.test(field.sourceDetail)) {
         candidate = `${candidate}；${field.sourceDetail.replaceAll("执行器", "系统")}`;
       }
