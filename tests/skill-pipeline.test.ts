@@ -758,6 +758,7 @@ test("exported executor turns an object-picker display name into the recorded re
     assert.equal(question.inputType, "select");
     assert.equal(question.multiple, true);
     assert.equal(question.columns, undefined);
+    assert.equal(question.defaultStrategy, "从本次有效候选中选择显示名；系统转换为接口值");
     assert.equal(question.dataSource.idField, "userId");
     assert.equal(question.dataSource.labelField, "nickName");
     const { stdout: candidateOutput } = await execFileAsync("python", [

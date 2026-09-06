@@ -123,9 +123,9 @@ function defaultStrategy(field: InputFormField) {
   if (isDateField(field) && field.valueType === "array") return `按页面顺序提供日期数组，每项格式 ${dateFormat(field)}，不复制未见过的值`;
   if (isDateField(field)) return `根据当前请求和当前日期推导，格式 ${dateFormat(field)}，不复制未见过的值`;
   if (field.valueType === "number" || field.valueType === "integer") return "从当前用户意图提取可唯一转换的数字，不任意使用 0";
+  if (field.candidates) return "从本次有效候选中选择显示名；系统转换为接口值";
   if (field.valueType === "array" || field.valueType === "object") return "根据当前意图生成满足字段 schema 的合法 JSON，不复制未见过的值";
   if (field.valueType === "boolean") return "根据当前用户意图选择有证据支持的布尔值；不能确定时先询问";
-  if (field.candidates) return "从本次有效候选中选择稳定值；没有语义依据时不猜测";
   return "根据当前用户意图生成简洁、非空且可编辑的业务值，不复制未见过的值";
 }
 
@@ -532,6 +532,9 @@ function candidateText(field: InputFormField) {
   if (!candidates) return "";
   if (candidates.type === "static") {
     return `- \`${field.path}\`（${field.label}）：页面固定枚举；${candidates.values.map(item => `${safeCell(item.label)} = ${safeCell(item.value)}`).join("；")}`;
+  }
+  if (candidates.valueTemplate) {
+    return `- \`${field.path}\`（${field.label}）：运行候选命令；从已验证能力 \`${candidates.capabilityId}\` 的 \`${candidates.labelPath}\` 显示名称，选择后由系统按录制映射构造接口对象，不要求调用方填写编号或对象内部字段。`;
   }
   return `- \`${field.path}\`（${field.label}）：运行候选命令；从已验证能力 \`${candidates.capabilityId}\` 的 \`${candidates.labelPath}\` 显示名称，并把唯一匹配的 \`${candidates.valuePath}\` 交给接口。`;
 }
