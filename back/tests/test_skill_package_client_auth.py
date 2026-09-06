@@ -108,6 +108,33 @@ def test_exported_operation_exposes_authenticated_list_options_command() -> None
     assert "option_choices(PLAN, args.list_options, context)" in _CAPABILITY_TEMPLATE
 
 
+def test_exported_client_lists_fixed_enum_without_dynamic_source(tmp_path: Path) -> None:
+    client = _load_client(_render_client(tmp_path))
+
+    options = client.option_choices(
+        {
+            "input_schema": {
+                "properties": {
+                    "status": {
+                        "enum": ["0", "1"],
+                        "x-enum-options": [
+                            {"id": "0", "label": "未提交"},
+                            {"id": "1", "label": "审批中"},
+                        ],
+                    },
+                },
+            },
+            "steps": [],
+        },
+        "status",
+    )
+
+    assert options == [
+        {"id": "0", "label": "未提交"},
+        {"id": "1", "label": "审批中"},
+    ]
+
+
 def test_exported_client_lists_people_with_safe_display_extras(
     tmp_path: Path,
     monkeypatch,

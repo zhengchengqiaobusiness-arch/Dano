@@ -3584,6 +3584,14 @@ def option_choices(plan, field, values=None):
             top_level = path.removeprefix("body.").removeprefix("query.").split("[", 1)[0].split(".", 1)[0]
             if field in {param, top_level}:
                 matches.append(binding)
+    schema = ((plan.get("input_schema") or {}).get("properties") or {}).get(field) or {}
+    fixed_options = schema.get("x-enum-options") or schema.get("x-options") or []
+    if not matches and fixed_options:
+        return [
+            {"id": str(item["id"]), "label": str(item.get("label") or item["id"])}
+            for item in fixed_options
+            if isinstance(item, dict) and item.get("id") not in (None, "")
+        ]
     if len(matches) != 1:
         raise ValueError(f"dynamic option field {field!r} does not resolve to exactly one source")
     binding = matches[0]
