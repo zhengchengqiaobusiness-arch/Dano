@@ -309,6 +309,64 @@ test("a shared amount value never becomes an unrelated chooser id", () => {
   }
 });
 
+test("same-named header and detail fields bind to their exact visible controls", () => {
+  const events: EvidenceEvent[] = [{
+    id: "bill-types", kind: "network", sessionId: "expense", at: "2026-09-06T00:00:00.000Z",
+    pageUrl: "https://x/oa/reimburseApply/form/add",
+    request: {
+      method: "GET", url: "https://x/system/dict/data/type/reimburse_bill_type",
+      resourceType: "xhr", headers: {}, query: {}
+    },
+    response: { status: 200, headers: {}, body: { code: 200, data: [
+      { dictType: "reimburse_bill_type", dictValue: "0", dictLabel: "车船票" },
+      { dictType: "reimburse_bill_type", dictValue: "1", dictLabel: "出租车票" }
+    ] } }
+  }, {
+    id: "expense-save", kind: "ui", sessionId: "expense", at: "2026-09-06T00:00:01.000Z",
+    pageUrl: "https://x/oa/reimburseApply/form/add", eventType: "click", text: "保存", label: "保存",
+    form: [
+      { label: "票据总数", type: "number", value: "1", required: true },
+      { label: "票据类型", type: "select", value: "车船票" },
+      { label: "票据张数", type: "number", value: "1" },
+      { label: "款项金额", type: "number", value: "1" }
+    ]
+  }, {
+    id: "expense-create", kind: "network", sessionId: "expense", at: "2026-09-06T00:00:01.100Z",
+    pageUrl: "https://x/oa/reimburseApply/form/add", correlatedUiEvidenceId: "expense-save",
+    request: {
+      method: "POST", url: "https://x/oa/reimburseApply", resourceType: "xhr", headers: {}, query: {},
+      body: {
+        totalAmt: "1.00", billAmt: 1, billType: "reimburse", billCount: "1",
+        oaReimburseFeeitemList: [{ itemAmt: "1", billType: "0", billCount: "1" }]
+      }
+    },
+    response: { status: 200, headers: {}, body: { code: 200, data: { id: "expense-1" } } }
+  }];
+
+  const catalog = applyDeterministicCatalogJudgment(buildCapabilityCandidates(events), events);
+  const create = catalog.find(item => item.operation === "create")!;
+  const byPath = (path: string) => create.inputForm.find(item => item.path === path);
+  assert.equal(byPath("$.totalAmt")?.source, "system");
+  assert.equal(byPath("$.billAmt")?.source, "system");
+  assert.equal(byPath("$.billType")?.source, "system");
+  assert.deepEqual(
+    [byPath("$.billCount")?.source, byPath("$.billCount")?.label, byPath("$.billCount")?.widget],
+    ["caller", "票据总数", "number"]
+  );
+  assert.deepEqual(
+    [byPath("$.oaReimburseFeeitemList[*].itemAmt")?.source, byPath("$.oaReimburseFeeitemList[*].itemAmt")?.label, byPath("$.oaReimburseFeeitemList[*].itemAmt")?.widget],
+    ["caller", "款项金额", "number"]
+  );
+  assert.deepEqual(
+    [byPath("$.oaReimburseFeeitemList[*].billCount")?.source, byPath("$.oaReimburseFeeitemList[*].billCount")?.label, byPath("$.oaReimburseFeeitemList[*].billCount")?.widget],
+    ["caller", "票据张数", "number"]
+  );
+  const detailType = byPath("$.oaReimburseFeeitemList[*].billType");
+  assert.deepEqual([detailType?.source, detailType?.label, detailType?.widget], ["caller", "票据类型", "select"]);
+  assert.equal(detailType?.candidates?.type, "capability");
+  assert.match(detailType?.candidates?.type === "capability" ? detailType.candidates.capabilityId : "", /reimburse-bill-type/);
+});
+
 test("recorded dictionary and directory APIs supply work-report select candidates", () => {
   const events: EvidenceEvent[] = [{
     id: "dicts-unauthorized", kind: "network", sessionId: "s", at: "2026-09-05T23:59:59.000Z",

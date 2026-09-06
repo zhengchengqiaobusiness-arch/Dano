@@ -420,6 +420,11 @@ export function applyExactEvidenceJoin(capability: CapabilityContract, events: E
 
   const inputForm = values.map(({ field, value }) => {
     if (keptJudgedRule(field)) return field;
+    const sameNamedCollectionLeaf = values.some(item =>
+      item.field.path !== field.path
+      && item.field.name === field.name
+      && item.field.path.includes("[*]") !== field.path.includes("[*]")
+    );
     if (PAGE_NAME.test(field.name)) {
       return {
         ...field,
@@ -471,8 +476,14 @@ export function applyExactEvidenceJoin(capability: CapabilityContract, events: E
     if (observed) return asExactCaller(field, observed, value);
     const concepts = semanticConcepts(field);
     if (concepts.size >= 2) {
-      const compound = [...new Map(observations
+      const compoundMatches = observations
         .filter(item => semanticLabelScore(field, item) > 0)
+        .filter(item => {
+          if (!sameNamedCollectionLeaf) return true;
+          const total = semanticConcepts(item).has("total");
+          return field.path.includes("[*]") ? !total : total;
+        });
+      const compound = [...new Map(compoundMatches
         .map(item => [item.label || item.name || "", item])).values()]
         .filter(item => item.label || item.name);
       if (compound.length === 1) {
@@ -487,11 +498,6 @@ export function applyExactEvidenceJoin(capability: CapabilityContract, events: E
       item.field.path !== field.path
       && !PAGE_NAME.test(item.field.name)
       && sameValue(item.value, value)
-    );
-    const sameNamedCollectionLeaf = values.some(item =>
-      item.field.path !== field.path
-      && item.field.name === field.name
-      && item.field.path.includes("[*]") !== field.path.includes("[*]")
     );
     const semanticMatches = sharedBusinessValue && !sameNamedCollectionLeaf && concepts.size < 2
       ? []
