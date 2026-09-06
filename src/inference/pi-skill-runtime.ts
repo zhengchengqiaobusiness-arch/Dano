@@ -138,8 +138,6 @@ function joinUiEvents(capability: CapabilityContract, events: EvidenceEvent[]) {
   const sample = richest ? requestInput(richest) : undefined;
   const nearby = richest ? relatedUiEvents(richest, uiById, sample) : [];
   const owner = richest ? owningFormEvent(richest, uiEvents, sample) : undefined;
-  const ownerLabels = new Set((owner?.form || []).map(field => field.label).filter(Boolean));
-  const ownerNames = new Set((owner?.form || []).map(field => field.name).filter(Boolean));
   const names = sample ? requestNamesOf(sample) : new Set<string>();
   const slots = new Set([...names].map(rangeIndexOf).filter((item): item is number => item !== undefined));
   const at = richest ? Date.parse(richest.at) : Number.POSITIVE_INFINITY;
@@ -148,6 +146,27 @@ function joinUiEvents(capability: CapabilityContract, events: EvidenceEvent[]) {
     || nearby.find(item => item.pageUrl)?.pageUrl
     || related.find((event): event is UiEvidence => event.kind === "ui" && Boolean(event.pageUrl))?.pageUrl
   );
+  const ownerLabels = new Set((owner?.form || []).map(field => field.label).filter((item): item is string => Boolean(item)));
+  const sameOwnerForm = (event: UiEvidence) => {
+    if (!event.form?.length || !owner?.form?.length) return false;
+    if (sameFormShape(owner, event)) return true;
+    const eventLabels = new Set(event.form.map(field => field.label).filter((item): item is string => Boolean(item)));
+    return ownerLabels.size > 0 && [...ownerLabels].every(label => eventLabels.has(label));
+  };
+  const ownerFamily = uiEvents.filter(event => {
+    if (!richest || event.sessionId !== richest.sessionId || Date.parse(event.at) > at + 500) return false;
+    const page = evidencePage(event.pageUrl);
+    if (ownerPage && page && page !== ownerPage) return false;
+    return sameOwnerForm(event);
+  });
+  const ownerFamilyLabels = new Set([
+    ...ownerLabels,
+    ...ownerFamily.flatMap(event => (event.form || []).map(field => field.label).filter((item): item is string => Boolean(item)))
+  ]);
+  const ownerFamilyNames = new Set([
+    ...(owner?.form || []).map(field => field.name).filter((item): item is string => Boolean(item)),
+    ...ownerFamily.flatMap(event => (event.form || []).map(field => field.name).filter((item): item is string => Boolean(item)))
+  ]);
   const formMatchesRequest = (form: NonNullable<UiEvidence["form"]> | undefined) => {
     const named = (form || []).map(field => field.name).filter((item): item is string => Boolean(item && !/^(el-id-|el-[a-z]+-\d+)/i.test(item)));
     if (!named.length) return false;
@@ -157,12 +176,15 @@ function joinUiEvents(capability: CapabilityContract, events: EvidenceEvent[]) {
   };
   const belongsToOwner = (event: UiEvidence) => {
     if (!richest || event.sessionId !== richest.sessionId) return false;
+    if (Date.parse(event.at) > at + 500) return false;
+    const page = evidencePage(event.pageUrl);
+    if (ownerPage && page && page !== ownerPage) return false;
     if (event.id === richest.correlatedUiEvidenceId) return true;
-    if (event.form?.length && owner?.form?.length) return sameFormShape(owner, event);
+    if (event.form?.length && owner?.form?.length && sameOwnerForm(event)) return true;
     if (!owner?.form?.length) return true;
     return Boolean(
-      event.label && ownerLabels.has(event.label)
-      || event.name && ownerNames.has(event.name)
+      event.label && ownerFamilyLabels.has(event.label)
+      || event.name && ownerFamilyNames.has(event.name)
     );
   };
   const base = mergeUi([
@@ -422,6 +444,20 @@ export function applyExactEvidenceJoin(capability: CapabilityContract, events: E
       };
     }
     if (named) return asExactCaller(field, named, value);
+    const slot = rangeIndexOf(field.name);
+    const day = dateDay(value);
+    if (slot !== undefined) {
+      const ranged = observations.filter(item => item.rangeIndex === slot);
+      if (ranged.length === 1) return asExactCaller(field, ranged[0], value);
+      const dateSlots = [...new Map(
+        observations
+          .filter(item => item.rangeIndex !== undefined || dateDay(item.value) || /date|time/i.test(item.type || ""))
+          .map(item => [item.label || item.name || String(item.rangeIndex), item])
+      ).values()].sort((left, right) => (left.rangeIndex ?? 99) - (right.rangeIndex ?? 99));
+      const indexed = dateSlots.find(item => item.rangeIndex === slot)
+        || (dateSlots.length > 1 ? dateSlots[slot] : undefined);
+      if (indexed) return asExactCaller(field, indexed, value);
+    }
     const observed = findObservation(field, value, observations, [], sample);
     if (observed) return asExactCaller(field, observed, value);
     const sharedBusinessValue = values.some(item =>
@@ -446,20 +482,6 @@ export function applyExactEvidenceJoin(capability: CapabilityContract, events: E
       .map(item => [item.label || item.name || "", item])).values()]
       .filter(item => item.label || item.name);
     if (semantic.length === 1) return asExactCaller(field, semantic[0], value);
-    const slot = rangeIndexOf(field.name);
-    const day = dateDay(value);
-    if (slot !== undefined) {
-      const ranged = observations.filter(item => item.rangeIndex === slot);
-      if (ranged.length === 1) return asExactCaller(field, ranged[0], value);
-      const dateSlots = [...new Map(
-        observations
-          .filter(item => item.rangeIndex !== undefined || dateDay(item.value) || /date|time/i.test(item.type || ""))
-          .map(item => [item.label || item.name || String(item.rangeIndex), item])
-      ).values()].sort((left, right) => (left.rangeIndex ?? 99) - (right.rangeIndex ?? 99));
-      const indexed = dateSlots.find(item => item.rangeIndex === slot)
-        || (dateSlots.length > 1 ? dateSlots[slot] : undefined);
-      if (indexed) return asExactCaller(field, indexed, value);
-    }
     if (day && uniqueDayOwner.get(day) === field.path) {
       const dayHits = [...new Map(
         observations
