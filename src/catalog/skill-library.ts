@@ -1,10 +1,10 @@
 import path from "node:path";
-import { readdir, stat } from "node:fs/promises";
+import { chmod, mkdir, readdir, rename, stat } from "node:fs/promises";
 import type { CapabilityContract, EvidenceEvent, SkillListItem, SkillRecord } from "../domain.js";
 import { exportSkill, normalizeSkillName } from "../export/skill-exporter.js";
 import { readJson, writeJson } from "../utils.js";
 import { moveDirectory } from "./skill-files.js";
-import { materializeSkillCredentials, requiredCredentialOrigins } from "../credentials/credential-store.js";
+import { materializeSkillCredentials, requiredCredentialOrigins, skillCredentialFile } from "../credentials/credential-store.js";
 
 async function exists(target: string) {
   try {
@@ -149,21 +149,32 @@ export class SkillLibrary {
     const record = records.find(item => item.name === name && item.status !== "deleted");
     if (!record) throw new Error("Skill 不存在");
     assertInside(this.outputRoot, record.directory);
+    const deletionId = `${record.name}-v${record.version}-${Date.now()}`;
     let recoverableFrom: string | undefined;
     if (await exists(record.directory)) {
-      recoverableFrom = path.join(this.trashDir, `${record.name}-v${record.version}-${Date.now()}`);
+      recoverableFrom = path.join(this.trashDir, deletionId);
       try {
         await moveDirectory(record.directory, recoverableFrom);
       } catch {
         recoverableFrom = await exists(recoverableFrom) ? recoverableFrom : record.directory;
       }
     }
+    const credentialFile = skillCredentialFile(this.outputRoot, record.name);
+    let credentialRecoverableFrom: string | undefined;
+    if (await exists(credentialFile)) {
+      const credentialTrashDir = path.join(path.dirname(credentialFile), ".trash");
+      await mkdir(credentialTrashDir, { recursive: true, mode: 0o700 });
+      await chmod(credentialTrashDir, 0o700).catch(() => {});
+      credentialRecoverableFrom = path.join(credentialTrashDir, `${deletionId}.json`);
+      await rename(credentialFile, credentialRecoverableFrom);
+    }
     record.status = "deleted";
     record.deletedAt = new Date().toISOString();
     record.updatedAt = record.deletedAt;
     record.recoverableFrom = recoverableFrom;
+    record.credentialRecoverableFrom = credentialRecoverableFrom;
     await this.save(records);
-    return { ...await this.enrich(record), recoverableFrom };
+    return { ...await this.enrich(record), recoverableFrom, credentialRecoverableFrom };
   }
 
   async invocation(name: string, goal: string) {

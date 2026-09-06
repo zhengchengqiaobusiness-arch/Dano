@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import path from "node:path";
 import os from "node:os";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { CapabilityContract, EvidenceEvent } from "../src/domain.js";
@@ -14,6 +14,7 @@ import { buildApprovedRoutes } from "../src/planner/routes.js";
 import { exportSkill } from "../src/export/skill-exporter.js";
 import { exportedQuestion } from "../src/export/skill-handbook.js";
 import { SkillLibrary } from "../src/catalog/skill-library.js";
+import { skillCredentialFile } from "../src/credentials/credential-store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -284,11 +285,17 @@ test("manages export versions, freezing and recoverable deletion", async () => {
     assert.notEqual(second.directory, first.directory);
     await stat(first.directory);
     await stat(second.directory);
+    const secondCredential = skillCredentialFile(path.join(temporary, "dist"), second.name);
+    await mkdir(path.dirname(secondCredential), { recursive: true });
+    await writeFile(secondCredential, "{}\n", "utf8");
     await assert.rejects(() => library.delete(second.name, false), /明确确认/);
     const deleted = await library.delete(second.name, true);
     assert.equal(deleted.status, "deleted");
     assert.ok(deleted.recoverableFrom);
     await stat(deleted.recoverableFrom!);
+    assert.ok(deleted.credentialRecoverableFrom);
+    await stat(deleted.credentialRecoverableFrom!);
+    await assert.rejects(stat(secondCredential));
     const remaining = await library.list();
     assert.equal(remaining.length, 1);
     assert.equal(remaining[0]!.name, first.name);

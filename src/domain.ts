@@ -226,6 +226,7 @@ export interface SkillRecord {
   frozenAt?: string;
   deletedAt?: string;
   recoverableFrom?: string;
+  credentialRecoverableFrom?: string;
 }
 
 export interface SkillListItem extends SkillRecord {
