@@ -142,7 +142,7 @@ function exportedCapability(capability: CapabilityContract, capabilities: Capabi
     inputForm: capability.inputForm.map(exportedField),
     inputQuestions: (() => {
       const caller = capability.inputForm.filter(field => field.source === "caller");
-      return caller.map(field => exportedQuestion(field, capabilities, caller));
+      return caller.map(field => exportedQuestion(field, capabilities, capability.inputForm));
     })(),
     sideEffect: capability.sideEffect,
     confirmation: capability.confirmation,

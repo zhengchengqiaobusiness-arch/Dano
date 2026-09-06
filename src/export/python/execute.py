@@ -138,7 +138,7 @@ def parse_collection_leaf_path(path: str) -> dict[str, Any] | None:
 
 def collection_field_input_keys(field: dict[str, Any], siblings: list[dict[str, Any]]) -> list[str]:
     path = field.get("path") or ""
-    keys = {path, path.removeprefix("$.")}
+    keys = {path, path.removeprefix("$."), item_input_key(field)}
     name = field.get("name")
     if name and sum(1 for item in siblings if item.get("name") == name) <= 1:
         keys.add(name)
@@ -188,6 +188,10 @@ def apply_collection_templates(capability: dict[str, Any], prepared: dict[str, A
                     rows[leaf["index"]][leaf["key"]] = value
                 if key != child.get("name") or child.get("name") not in header_names:
                     prepared.pop(key, None)
+            child_path = child.get("path") or ""
+            prepared.pop(child_path, None)
+            prepared.pop(child_path.removeprefix("$."), None)
+            prepared.pop(item_input_key(child), None)
         for key, value in list(prepared.items()):
             if key in header_names or key == field.get("name"):
                 continue

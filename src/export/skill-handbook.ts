@@ -598,7 +598,7 @@ ${fields.map(field => {
     }
     const hint = /页面未唯一对应：(.+)$/.exec(field.sourceDetail || "")?.[1];
     const label = hint && field.label === field.name ? `${field.label}（${hint}）` : field.label;
-    return `| \`${safeCell(questionKey(field, fields))}\` | ${safeCell(label)} | \`${inputType(field)}\` | ${field.required ? "是" : "否"} | ${safeCell(recommendedDefault(field, capability))} | ${safeCell(candidate)} |`;
+    return `| \`${safeCell(questionKey(field, capability.inputForm))}\` | ${safeCell(label)} | \`${inputType(field)}\` | ${field.required ? "是" : "否"} | ${safeCell(recommendedDefault(field, capability))} | ${safeCell(candidate)} |`;
   }).join("\n")}`;
 }
 
