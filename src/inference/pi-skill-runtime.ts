@@ -830,6 +830,15 @@ export function applySameResourceCandidates(catalog: CapabilityContract[]): Capa
   }));
 }
 
+function normalizeCandidateWidgets(catalog: CapabilityContract[]) {
+  return catalog.map(capability => ({
+    ...capability,
+    inputForm: capability.inputForm.map(field => field.candidates
+      ? { ...field, widget: field.valueType === "array" ? "multiselect" as const : "select" as const }
+      : field)
+  }));
+}
+
 export function applyDeterministicCatalogJudgment(
   capabilities: CapabilityContract[],
   events: EvidenceEvent[]
@@ -839,7 +848,7 @@ export function applyDeterministicCatalogJudgment(
     events
   );
   const withRoles = joined.map(item => ({ ...item, role: item.role || fallbackRole(item, joined) }));
-  return applySameResourceCandidates(applyExactCandidateJoin(withRoles, events));
+  return normalizeCandidateWidgets(applySameResourceCandidates(applyExactCandidateJoin(withRoles, events)));
 }
 
 function applyFieldPatch(
@@ -876,9 +885,6 @@ function applyFieldPatch(
     };
   } else if (patch.staticCandidates?.length) {
     next = { ...next, widget: next.widget === "text" ? "select" : next.widget, candidates: { type: "static", values: patch.staticCandidates } };
-  }
-  if (next.candidates) {
-    next = { ...next, widget: next.valueType === "array" ? "multiselect" : "select" };
   }
   return next;
 }
@@ -966,5 +972,5 @@ export async function applyPiCatalogJudgment(
     "catalog_judgment"
   );
   if (!parsed) return judged;
-  return applyJudgment(judged, parsed, reasoner.model);
+  return normalizeCandidateWidgets(applyJudgment(judged, parsed, reasoner.model));
 }
