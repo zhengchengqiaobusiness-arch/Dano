@@ -148,6 +148,50 @@ test("hotel room fields bind by compound semantics when every recorded value is 
   }
 });
 
+test("unnamed same-value selects use their displayed labels to choose the exact dictionary", () => {
+  const events: EvidenceEvent[] = [{
+    id: "room-types", kind: "network", sessionId: "hotel", at: "2026-09-06T00:00:00.000Z",
+    pageUrl: "https://x/oa/hotelApply",
+    request: { method: "GET", url: "https://x/system/dict/data/type/office_hotel_room_type", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { code: 200, data: [
+      { dictType: "office_hotel_room_type", dictValue: "1", dictLabel: "标准间" },
+      { dictType: "office_hotel_room_type", dictValue: "2", dictLabel: "大床房" }
+    ] } }
+  }, {
+    id: "room-levels", kind: "network", sessionId: "hotel", at: "2026-09-06T00:00:00.100Z",
+    pageUrl: "https://x/oa/hotelApply",
+    request: { method: "GET", url: "https://x/system/dict/data/type/office_hotel_room_level", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { code: 200, data: [
+      { dictType: "office_hotel_room_level", dictValue: "1", dictLabel: "标准" },
+      { dictType: "office_hotel_room_level", dictValue: "2", dictLabel: "豪华" }
+    ] } }
+  }, {
+    id: "hotel-search", kind: "ui", sessionId: "hotel", at: "2026-09-06T00:00:01.000Z",
+    pageUrl: "https://x/oa/hotelApply", eventType: "click", text: "搜索", label: "搜索",
+    form: [
+      { label: "房间类型", type: "select", value: "标准间" },
+      { label: "房间等级", type: "select", value: "标准" }
+    ]
+  }, {
+    id: "hotel-list", kind: "network", sessionId: "hotel", at: "2026-09-06T00:00:01.100Z",
+    pageUrl: "https://x/oa/hotelApply", correlatedUiEvidenceId: "hotel-search",
+    request: {
+      method: "GET", url: "https://x/oa/hotelApply/list?roomType=1&roomLevel=1",
+      resourceType: "xhr", headers: {}, query: { roomType: "1", roomLevel: "1" }
+    },
+    response: { status: 200, headers: {}, body: { code: 200, rows: [] } }
+  }];
+
+  const catalog = applyDeterministicCatalogJudgment(buildCapabilityCandidates(events), events);
+  const query = catalog.find(item => item.transport.pathTemplate.endsWith("/oa/hotelApply/list"))!;
+  const roomType = query.inputForm.find(item => item.name === "roomType")?.candidates;
+  const roomLevel = query.inputForm.find(item => item.name === "roomLevel")?.candidates;
+  assert.equal(roomType?.type, "capability");
+  assert.match(roomType?.type === "capability" ? roomType.capabilityId : "", /room-type/);
+  assert.equal(roomLevel?.type, "capability");
+  assert.match(roomLevel?.type === "capability" ? roomLevel.capabilityId : "", /room-level/);
+});
+
 test("leftover one-to-one does not bind an unrelated remark to a hidden token", () => {
   const capability = cap({
     id: "write",

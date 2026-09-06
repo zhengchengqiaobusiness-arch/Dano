@@ -612,6 +612,26 @@ function observationMatchesRow(observation: UiObservation, row: Record<string, u
   return rowDisplays(row).some(item => item === display || sameValue(item, display));
 }
 
+function exactCandidateObservation(field: InputFormField, observations: UiObservation[]) {
+  const valued = observations.filter(item => item.value !== undefined && item.value !== "");
+  const named = valued.filter(item => uiNameMatches(item.name, field.name));
+  if (named.length) return named.find(item => /select|combobox|picker/i.test(item.type || "")) || named[0];
+
+  const label = displayLabel(field.label, field.name);
+  const labeled = valued.filter(item => displayLabel(item.label, item.name) === label);
+  if (labeled.length) return labeled.find(item => /select|combobox|picker/i.test(item.type || "")) || labeled[0];
+
+  if (semanticConcepts(field).size < 2) return undefined;
+  const semantic = valued.filter(item => semanticLabelScore(field, item) > 0);
+  const unique = [...new Map(semantic.map(item => [item.label || item.name || "", item])).values()]
+    .filter(item => item.label || item.name);
+  if (unique.length !== 1) return undefined;
+  return semantic.find(item =>
+    (item.label || item.name) === (unique[0]!.label || unique[0]!.name)
+    && /select|combobox|picker/i.test(item.type || "")
+  ) || unique[0];
+}
+
 function rangeIndexOf(name: string) {
   const match = /\[(\d+)\]$/.exec(name);
   return match ? Number(match[1]) : undefined;
@@ -802,11 +822,7 @@ export function applyExactCandidateJoin(catalog: CapabilityContract[], events: E
     return {
       ...capability,
       inputForm: capability.inputForm.map(field => {
-        const observation = observations.find(item =>
-          uiNameMatches(item.name, field.name)
-          && item.value !== undefined
-          && item.value !== ""
-        );
+        const observation = exactCandidateObservation(field, observations);
         const hit = matchExactCandidateSource(field, requestValueAt(sample, field.path), sources, capability.id, observation);
         if (!hit) return field;
         return {
