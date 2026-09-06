@@ -89,4 +89,8 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(prompt, /不要编新键|不要编造写请求里没有的键/);
   assert.match(prompt, /x-dano-option-source/);
   assert.match(prompt, /藏在 description|type=number/);
+  assert.match(prompt, /自动计算但仍可手工修改.*调用方/);
+  assert.match(prompt, /param\.path.*末级键.*execute.*真实 query\/body 键/);
+  assert.match(prompt, /execute step\.selects.*禁止写到 result 顶层/);
+  assert.match(prompt, /multi、label_subkey.*element_template/);
 });
