@@ -640,7 +640,7 @@ test("live product list plus echoed page rows still verify query and create", ()
       request: {
         ...event.request,
         body: {
-          supplierId: 68,
+          supplierId: 12,
           accountId: 2,
           orderTime: 1788364800000,
           remark: "样例-备注",
