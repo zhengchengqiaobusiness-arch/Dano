@@ -264,7 +264,7 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.match(extension, /requireConversationSession/);
   assert.match(extension, /当前对话还没有录制证据/);
   assert.match(extension, /lastRecordingSessionId = undefined/);
-  assert.match(extension, /完整闭环由 business_skill_export 负责/);
+  assert.match(extension, /正式闭环以录制阶段的 recordingAudit 为准/);
   assert.doesNotMatch(extension, /停止并报告未通过原因/);
   const workflowSkill = await readFile(path.join(root, ".pi", "skills", "business-skill-studio", "SKILL.md"), "utf8");
   assert.match(workflowSkill, /Export owns Analyze → Review → Repair → Re-review → Export/);

@@ -244,15 +244,16 @@ export class WorkbenchPage {
           }
           this.coverageContinuations += 1;
           if (readiness.ready) {
-            this.onLog("PI", "Live recording audit passed; resuming the same task to stop and export.");
-            await this.pi.prompt("当前同一录制的实时审核已经通过。不要继续点击页面；立即调用 business_skill_record_stop，然后调用 business_skill_export 完成内部分析、审核、修复、复审和导出。不要只总结结果。");
+            this.onLog("PI", "Live recording evidence and contract audit passed; resuming the same task to stop and export.");
+            await this.pi.prompt("当前同一录制已在录制阶段完成能力构建、请求合同修复、验证和审核，recordingAudit.ready=true。不要继续点击页面；立即调用 business_skill_record_stop，再调用 business_skill_export 写出已通过的合同。导出只做最终一致性复核，不得把首次审核或修复推迟到导出。不要只总结结果。");
             return;
           }
           this.onLog("PI", `Continuing recording from live audit; ${remaining} pages, ${missingPageOperations.length} page operations, ${missingOperations.length} global operations, and ${missingFields.length} fields remain.`);
           const missing = missingPageOperations.slice(0, 8).map(item => `${item.label}（${item.operations.join("、")}）`).join("、");
           const operations = missingOperations.slice(0, 8).join("、");
           const fields = missingFields.slice(0, 8).map(field => field.label || field.name).filter(Boolean).join("、");
-          await this.pi.prompt(`继续当前同一录制，不要总结、不要重启录制。实时审核 nextAction=${readiness.nextAction.action}；还有 ${remaining} 个页面未访问、${missingPageOperations.length} 个页面能力缺少成功证据${missing ? `：${missing}` : ""}、${missingOperations.length} 个总体操作缺口${operations ? `：${operations}` : ""}、${missingFields.length} 个字段未完成${fields ? `：${fields}` : ""}。只处理当前缺口；每次 business_browser_control 后读取 recordingAudit 并继续，直到 recordingAudit.ready=true，再结束录制并导出。`);
+          const contractFindings = readiness.contractReview?.findings || [];
+          await this.pi.prompt(`继续当前同一录制，不要总结、不要重启录制。实时审核 nextAction=${readiness.nextAction.action}；还有 ${remaining} 个页面未访问、${missingPageOperations.length} 个页面能力缺少成功证据${missing ? `：${missing}` : ""}、${missingOperations.length} 个总体操作缺口${operations ? `：${operations}` : ""}、${missingFields.length} 个字段未完成${fields ? `：${fields}` : ""}、${contractFindings.length} 个请求合同缺口${contractFindings.length ? `：${contractFindings.slice(0, 3).map(item => item.message).join("；")}` : ""}。只处理 recordingAudit 指向的当前缺口；每次 business_browser_control 后立即读取新的 recordingAudit，直到页面、字段、操作、成功响应和请求合同同时通过，再结束录制并导出。`);
         } catch (error) {
           this.onLog("WARN", `Automatic full-page continuation failed: ${error instanceof Error ? error.message : String(error)}`);
         } finally {

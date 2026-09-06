@@ -1454,6 +1454,7 @@ export class BrowserRecorder {
       missingPages: [] as Array<{ url: string; title?: string }>,
       missingPageOperations: [] as Array<{ url: string; label: string; operations: OperationKind[] }>,
       missingFields: [] as NonNullable<PageSnapshot["todoFields"]>,
+      contractReview: reviewCatalog([]),
       nextAction: { action: "none" },
       message: "当前没有活动录制。"
     };

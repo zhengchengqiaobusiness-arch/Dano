@@ -118,7 +118,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_record_stop",
     label: "Stop business recording",
-    description: "Stop only after every expected operation has a real business-success response. If any required operation is missing or only returned a business error inside HTTP 200, this tool keeps the current browser session open and returns the exact unfinished operations so automation can continue instead of exporting a partial Skill.",
+    description: "Stop only after the live recording audit has verified pages, fields, expected operations, business-success responses, and request contracts. If any evidence or contract gap remains, this tool keeps the current browser session open and returns the exact next action.",
     parameters: parameters({}),
     async execute() {
       const readiness = await stopReadiness();
@@ -142,7 +142,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_browser_control",
     label: "Control recording browser",
-    description: "Control the active embedded browser with goto/next-page/snapshot/click/fill/select/choose/press/wait/screenshot/exercise-form/submit-form. Every mutating result includes recordingAudit; immediately follow only recordingAudit.nextAction and continue until recordingAudit.ready=true instead of postponing review until stop. next-page opens the next unvisited URL from the real menu inventory; never guess a route. Snapshot includes navigationCoverage, operationInventory and enabled availableOperations. In complete-field mode exercise-form fills every currently visible eligible field in one pass and is the authoritative whole-form action; direct single-field mutations are rejected until it has run once for that page/form. A detected login page stops before any automatic action. The first or second failure must be repaired automatically from refreshed page evidence; only actual failures consume the budget, and a successful operation clears the consecutive-failure streak. The third consecutive failure pauses with the exact problem location, last error, and manual click instructions.",
+    description: "Control the active embedded browser with goto/next-page/snapshot/click/fill/select/choose/press/wait/screenshot/exercise-form/submit-form. Every mutating result includes the authoritative recordingAudit, which builds, repairs, validates, and reviews the current request contracts while recording remains open. Follow only recordingAudit.nextAction and continue until recordingAudit.ready=true; do not defer contract review to stop or export. next-page opens the next unvisited URL from the real menu inventory; never guess a route. Snapshot includes navigationCoverage, operationInventory and enabled availableOperations. In complete-field mode exercise-form fills every currently visible eligible field in one pass and is the authoritative whole-form action; direct single-field mutations are rejected until it has run once for that page/form. A detected login page stops before any automatic action. The first or second failure must be repaired automatically from refreshed page evidence; only actual failures consume the budget, and a successful operation clears the consecutive-failure streak. The third consecutive failure pauses with the exact problem location, last error, and manual click instructions.",
     parameters: parameters({
       action: { type: "string", enum: ["goto", "next-page", "snapshot", "click", "fill", "select", "choose", "press", "wait", "screenshot", "exercise-form", "submit-form"] },
       selector: { type: "string" },
@@ -175,7 +175,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       return {
         content: [{
           type: "text",
-          text: `本次会话识别主能力 ${summary.primary.length} 项：${primaryTitles}。字段候选接口 ${summary.lookups.length} 个，后台轮询 ${summary.noise.length} 项不会进入 Skill。主能力只统计本次会话页面的查询/新建/修改/审核/删除，不要把其它页已有能力当成这次的补录对象。用户分页、产品下拉、库存带出不是主能力。该工具用于查看中间结果；完整闭环由 business_skill_export 负责。`
+          text: `本次会话识别主能力 ${summary.primary.length} 项：${primaryTitles}。字段候选接口 ${summary.lookups.length} 个，后台轮询 ${summary.noise.length} 项不会进入 Skill。主能力只统计本次会话页面的查询/新建/修改/审核/删除，不要把其它页已有能力当成这次的补录对象。用户分页、产品下拉、库存带出不是主能力。该工具仅查看中间结果；正式闭环以录制阶段的 recordingAudit 为准。`
         }],
         details: caps
       };
@@ -337,7 +337,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_export",
     label: "Export business skill",
-    description: "Single completion entry for a recorded session: analyze raw evidence, review, automatically repair and re-review, then export a verified Agent Skill package. It never exports a blocked catalog.",
+    description: "Write the Agent Skill package only after the recording-stage audit has already built, repaired, validated, and approved the request contracts. Export performs a final consistency review and never exports a blocked catalog.",
     parameters: parameters({
       name: { type: "string" },
       sessionId: { type: "string" }
