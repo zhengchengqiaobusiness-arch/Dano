@@ -277,7 +277,7 @@ function collectionTemplateRows(cap: CapabilityContract, prefix: string) {
 }
 
 function collectionFieldInputKeys(field: InputFormField, siblings: InputFormField[]) {
-  const keys = new Set<string>([field.path, field.path.replace(/^\$\./, "")]);
+  const keys = new Set<string>([field.path, field.path.replace(/^\$\./, ""), itemInputKey(field)]);
   const clashes = siblings.filter(item => item.name === field.name);
   if (clashes.length <= 1) keys.add(field.name);
   return [...keys];

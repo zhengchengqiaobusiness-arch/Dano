@@ -409,3 +409,45 @@ test("exported executor queries dynamic options before sending a display name", 
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+test("detail question ids do not overwrite same-named header fields", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-skill-detail-questions-"));
+  const create = verifiedCapability("create-reimburse", "create");
+  create.role = "primary";
+  create.inputSchema = { type: "object", properties: { billType: { type: "string" }, items: { type: "array" } } };
+  create.inputForm = [{
+    path: "$.billType", name: "billType", label: "业务类型", valueType: "string", source: "system",
+    required: false, requiredBasis: "not-observed", systemHandled: true, sourceDetail: "页面无同名输入",
+    widget: "text", defaultRule: "literal:reimburse"
+  }, {
+    path: "$.items", name: "items", label: "明细", valueType: "array", source: "system",
+    required: false, requiredBasis: "not-observed", systemHandled: true, sourceDetail: "录制成功请求模板",
+    widget: "json", defaultRule: 'literal:[{"billType":"0","billCount":"1"}]'
+  }, {
+    path: "$.items[*].billType", name: "billType", label: "票据类型", valueType: "string", source: "caller",
+    required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面固定枚举",
+    widget: "select", candidates: { type: "static", values: [{ label: "车船票", value: "0" }] }
+  }, {
+    path: "$.items[*].billCount", name: "billCount", label: "票据张数", valueType: "string", source: "caller",
+    required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面同名字段",
+    widget: "number"
+  }];
+  try {
+    const exported = await exportSkill(temporary, "报销申请", [create]);
+    const contract = JSON.parse(await readFile(path.join(exported.dir, "references", "CONTRACT.json"), "utf8"));
+    const target = contract.capabilities.find((item: { id: string }) => item.id === create.id);
+    assert.deepEqual(target.inputQuestions.map((item: { id: string }) => item.id), ["items.billType", "billCount"]);
+    const { stdout } = await execFileAsync("python", [
+      path.join(exported.dir, "scripts", "execute.py"),
+      "--capability", create.id,
+      "--input", JSON.stringify({ "items.billType": "车船票", billCount: "2" }),
+      "--prepare-only"
+    ]);
+    assert.deepEqual(JSON.parse(stdout).prepared, {
+      billType: "reimburse",
+      items: [{ billType: "0", billCount: "2" }]
+    });
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
