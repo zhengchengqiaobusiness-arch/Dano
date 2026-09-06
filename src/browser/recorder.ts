@@ -12,8 +12,10 @@ import { killCommandLineMatches, killProcessTree } from "../process-lifecycle.js
 import { persistOriginCredentials } from "../credentials/credential-store.js";
 import { buildCapabilityCandidates } from "../inference/build-candidates.js";
 import { summarizeCatalog } from "../inference/export-scope.js";
+import { finalizeCapabilities } from "../inference/finalize-capabilities.js";
 import { authenticationFailureReason, businessFailureReason, inferUiOperationIntent, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
 import { loadSessionCookies, saveSessionCookies } from "./login-profile.js";
+import { reviewCatalog } from "../review/catalog-review.js";
 
 const FORM_ACTION_BUDGET = 3;
 const EXPECTABLE_OPERATIONS = new Set<OperationKind>(["query", "create", "update", "review", "delete", "upload", "download", "action"]);
@@ -58,10 +60,11 @@ function normalizeNavigationUrl(rawUrl: string, baseUrl?: string) {
 export function recordingStopReadiness(
   events: EvidenceEvent[],
   expectedOperations: OperationKind[] = [],
-  pageCoverage?: NavigationCoverage
+  pageCoverage?: NavigationCoverage,
+  completeFieldCoverage = false
 ) {
   const byId = new Map(events.map(event => [event.id, event]));
-  const candidates = buildCapabilityCandidates(events);
+  const candidates = finalizeCapabilities(buildCapabilityCandidates(events), events);
   const primary = summarizeCatalog(candidates).primary;
   const successfulOperations = new Set(primary.filter(capability => capability.evidence.some(ref => {
     const event = byId.get(ref.eventId);
@@ -110,17 +113,22 @@ export function recordingStopReadiness(
     const reason = businessFailureReason(event);
     return reason ? [{ url: event.request.url, reason }] : [];
   });
+  const contractReview = reviewCatalog(candidates, events, expected, completeFieldCoverage);
+  const coverageReady = missingOperations.length === 0 && missingPages.length === 0 && missingPageOperations.length === 0;
   return {
-    ready: missingOperations.length === 0 && missingPages.length === 0 && missingPageOperations.length === 0,
+    ready: coverageReady && contractReview.status === "passed",
     expectedOperations: expected,
     successfulOperations: [...successfulOperations],
     missingOperations,
     pageCoverage,
     missingPages,
     missingPageOperations,
-    message: missingOperations.length || missingPages.length || missingPageOperations.length
+    contractReview,
+    message: !coverageReady
       ? `录制尚未完成：${missingOperations.length ? `${missingOperations.map(operation => OPERATION_LABEL[operation] || operation).join("、")}没有取得业务成功响应。` : ""}${missingPages.length ? `还有 ${missingPages.length} 个已发现菜单页面没有实际访问：${missingPages.slice(0, 8).map(item => item.label).join("、")}${missingPages.length > 8 ? "等" : ""}。` : ""}${missingPageOperations.length ? `还有 ${missingPageOperations.length} 个页面缺少能力成功证据：${missingPageOperations.slice(0, 8).map(item => `${item.label}（${item.operations.map(operation => OPERATION_LABEL[operation] || operation).join("、")}）`).join("、")}${missingPageOperations.length > 8 ? "等" : ""}。` : ""}继续当前浏览器会话，修复后再结束录制。${failures.length ? ` 最近的业务失败：${failures.at(-1)!.reason}` : ""}`
-      : "要求的操作均已取得业务成功响应，可以结束录制。"
+      : contractReview.status === "passed"
+        ? "录制证据和请求合同均已实时审核通过，可以结束录制。"
+        : `录制操作已有成功响应，但请求合同尚未通过实时审核。${contractReview.summary}`
   };
 }
 
@@ -1458,7 +1466,12 @@ export class BrowserRecorder {
     const pageCoverage = active.session.completePageCoverage
       ? { ...this.navigationCoverage(), operationRequirements: this.pageOperationCoverage() }
       : undefined;
-    const base = recordingStopReadiness(events, active.session.expectedOperations || [], pageCoverage);
+    const base = recordingStopReadiness(
+      events,
+      active.session.expectedOperations || [],
+      pageCoverage,
+      active.session.completeFieldCoverage === true
+    );
     if (active.session.completeFieldCoverage) await this.ensureFormScope();
     const snapshot = active.session.completeFieldCoverage
       ? knownSnapshot || await this.actions.captureSnapshot()
@@ -1471,14 +1484,21 @@ export class BrowserRecorder {
     const currentPageKey = this.navigationKey(String(snapshot?.url || this.currentPage().url()), this.currentPage().url());
     const currentPageOperations = base.missingPageOperations.find(item => this.navigationKey(item.url) === currentPageKey)?.operations || [];
     const ready = base.ready && missingFields.length === 0;
+    const contractFinding = base.contractReview.findings[0];
     const nextAction = missingFields.length
       ? { action: "exercise-form", fields: missingFields.map(field => field.label || field.name).filter(Boolean) }
       : currentPageOperations.length
         ? { action: "perform-operation", operations: currentPageOperations }
         : base.missingOperations.length
           ? { action: "perform-operation", operations: base.missingOperations }
-          : base.missingPages.length
+        : base.missingPages.length
             ? { action: "next-page", target: base.missingPages[0] }
+            : contractFinding
+              ? {
+                  action: contractFinding.next === "re-record" ? "perform-operation" : "repair-contract",
+                  ...(contractFinding.capabilityId ? { capabilityId: contractFinding.capabilityId } : {}),
+                  finding: contractFinding.message
+                }
             : { action: "record-stop" };
     const fieldMessage = missingFields.length
       ? ` 当前页面仍缺 ${missingFields.length} 个字段：${missingFields.slice(0, 8).map(field => field.label || field.name).filter(Boolean).join("、")}。`
@@ -1489,7 +1509,7 @@ export class BrowserRecorder {
       missingFields,
       nextAction,
       message: ready
-        ? "实时审核通过：要求的页面、字段、操作和业务成功响应均已覆盖，可以结束录制。"
+        ? "实时审核通过：要求的页面、字段、操作、业务成功响应和请求合同均已覆盖，可以结束录制。"
         : `实时审核未通过。${base.message}${fieldMessage}只继续处理 nextAction 指向的缺口。`
     };
   }

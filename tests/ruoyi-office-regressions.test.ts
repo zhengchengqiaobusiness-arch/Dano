@@ -111,7 +111,10 @@ test("record stop keeps the live session open until every expected operation has
   assert.deepEqual(blocked.missingOperations, ["create"]);
   assert.match(blocked.message, /印章编号不能为空/);
   failed.response = { status: 200, headers: {}, body: { code: 200, data: 91, msg: "操作成功" } };
-  assert.equal(recordingStopReadiness(evidence, ["create"]).ready, true);
+  const ready = recordingStopReadiness(evidence, ["create"]);
+  assert.equal(ready.ready, true);
+  assert.equal(ready.contractReview.status, "passed");
+  assert.equal(ready.contractReview.primaryCount, 1);
 });
 
 test("a generic save or submit inherits the active create or update form intent", () => {
