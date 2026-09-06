@@ -135,6 +135,35 @@ def test_exported_client_lists_fixed_enum_without_dynamic_source(tmp_path: Path)
     ]
 
 
+def test_exported_client_uses_recording_session_token_for_live_options(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = _load_client(_render_client(tmp_path, tenant="admin"))
+    assert Path(client.CONFIG["browser_state_path"]).name == "admin__oa.json"
+    session = tmp_path / "admin__oa.json"
+    session.write_text(json.dumps({
+        "cookies": [{
+            "name": "Admin-Token",
+            "value": "header.payload.signature-for-live-options",
+            "domain": "example.test",
+            "path": "/",
+        }],
+        "origins": [],
+    }), encoding="utf-8")
+    client.CONFIG["browser_state_path"] = str(session)
+    monkeypatch.setattr(client.Path, "home", staticmethod(lambda: tmp_path / "unused"))
+    monkeypatch.delenv("DANO_URL", raising=False)
+    monkeypatch.delenv("DANO_TENANT_KEY", raising=False)
+    monkeypatch.delenv("DANO_TENANT_KEYS_JSON", raising=False)
+    monkeypatch.delenv("DANO_AUTH_HEADERS", raising=False)
+
+    assert client.auth_headers() == {
+        "Cookie": "Admin-Token=header.payload.signature-for-live-options",
+        "Authorization": "Bearer header.payload.signature-for-live-options",
+    }
+
+
 def test_exported_client_lists_people_with_safe_display_extras(
     tmp_path: Path,
     monkeypatch,

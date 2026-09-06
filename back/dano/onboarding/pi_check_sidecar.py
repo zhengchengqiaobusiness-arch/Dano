@@ -12,6 +12,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,6 +25,7 @@ from urllib.parse import urlparse
 import httpx
 import structlog
 
+from dano.execution.page.sessions import save_session
 from dano.infra.run_logging import emit_run_event
 from dano.shared.enums import AssetType, Subsystem
 from dano.shared.models import Scope
@@ -36,6 +38,27 @@ HEALTH_TIMEOUT_SEC = 25
 WS_MAX_BYTES = 32 * 1024 * 1024
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PI_CHECK_ROOT = REPO_ROOT / "Pi_check"
+
+
+def load_pi_check_session_state(start_url: str) -> dict[str, Any] | None:
+    """Load the browser state that Pi_check persisted for the recorded origin."""
+    try:
+        parsed = urlparse(str(start_url or ""))
+        host = str(parsed.hostname or "").casefold()
+        if not parsed.scheme or not host:
+            return None
+        port = parsed.port
+        default_port = (
+            (parsed.scheme == "http" and port == 80)
+            or (parsed.scheme == "https" and port == 443)
+        )
+        authority = host if port is None or default_port else f"{host}:{port}"
+        filename = re.sub(r"[^A-Za-z0-9_.-]+", "_", authority) or "unknown"
+        path = PI_CHECK_ROOT / "data" / "sessions" / f"{filename}.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
 
 
 def should_adopt_existing(*, explicit_url: bool, own_process_alive: bool, healthy: bool) -> bool:
@@ -325,6 +348,9 @@ class RecordingBridgeContext:
             return raw
         if not self.action:
             self.action = str(summary.get("action") or recording_id)
+        storage_state = load_pi_check_session_state(self.start_url)
+        if storage_state and self.tenant and self.subsystem:
+            save_session(self.tenant, self.subsystem, storage_state)
         try:
             saved = await self.persist(
                 tenant=self.tenant,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -9,6 +10,7 @@ import pytest
 from dano.gateway.app import record_ws
 from dano.onboarding.pi_check_sidecar import (
     RecordingBridgeContext,
+    load_pi_check_session_state,
     pi_result_storage_body,
     record_ws_uses_legacy_gateway,
     should_adopt_existing,
@@ -92,6 +94,23 @@ def test_pi_result_storage_keeps_submitted_capabilities() -> None:
     assert body["skill_export_description"] == ""
 
 
+def test_pi_check_session_state_is_loaded_by_recorded_origin(tmp_path, monkeypatch) -> None:
+    import dano.onboarding.pi_check_sidecar as sidecar
+
+    monkeypatch.setattr(sidecar, "PI_CHECK_ROOT", tmp_path)
+    session_dir = tmp_path / "data" / "sessions"
+    session_dir.mkdir(parents=True)
+    state = {"cookies": [{"name": "Admin-Token", "value": "secret"}], "origins": []}
+    (session_dir / "boot.dianshixinxi.com_90.json").write_text(
+        json.dumps(state),
+        encoding="utf-8",
+    )
+
+    assert load_pi_check_session_state(
+        "http://boot.dianshixinxi.com:90/oa/seal/sealApply?billType=seal_apply"
+    ) == state
+
+
 @pytest.mark.asyncio
 async def test_recording_result_saved_is_rewritten_to_persisted_row() -> None:
     draft = {"capabilities": [{"name": "search_docs"}], "title": "查询"}
@@ -134,3 +153,55 @@ async def test_recording_result_saved_is_rewritten_to_persisted_row() -> None:
     payload = __import__("json").loads(rewritten)
     assert payload["result"]["id"] == str(saved_id)
     assert payload["result"]["capability_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_recording_result_saved_hands_pi_login_state_to_runtime(monkeypatch) -> None:
+    import dano.onboarding.pi_check_sidecar as sidecar
+
+    draft = {"capabilities": [{"name": "search_docs"}], "title": "查询"}
+    saved_id = uuid4()
+    state = {"cookies": [{"name": "Admin-Token", "value": "secret"}], "origins": []}
+    handed_off: list[tuple[str, str, dict]] = []
+
+    async def fake_detail(_result_id: str) -> dict:
+        return {"id": "recording_abc", "draft": draft, "request_count": 2}
+
+    async def fake_persist(**_kwargs):
+        return SimpleNamespace(
+            asset_draft_id=saved_id,
+            asset_key="recording-result:action_1",
+            created_at=None,
+            body={
+                "action": "action_1",
+                "title": "查询",
+                "goal": {"text": "产出能力"},
+                "capability_count": 1,
+                "request_count": 2,
+                "published": False,
+                "created_at": "2026-09-04T00:00:00+00:00",
+            },
+        )
+
+    monkeypatch.setattr(sidecar, "load_pi_check_session_state", lambda _url: state)
+    monkeypatch.setattr(
+        sidecar,
+        "save_session",
+        lambda tenant, subsystem, storage: handed_off.append((tenant, subsystem, storage)),
+    )
+    context = RecordingBridgeContext(
+        tenant="admin",
+        subsystem="boot-dianshixinxi-com-90",
+        title="查询",
+        goal="产出能力",
+        action="action_1",
+        start_url="http://boot.dianshixinxi.com:90/oa/seal/sealApply",
+        persist=fake_persist,
+        fetch_detail=fake_detail,
+    )
+
+    await context.rewrite_upstream(
+        '{"type":"recording_result_saved","result":{"id":"recording_abc","action":"action_1"}}'
+    )
+
+    assert handed_off == [("admin", "boot-dianshixinxi-com-90", state)]

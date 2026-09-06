@@ -3307,7 +3307,7 @@ import os
 from pathlib import Path
 import re
 import time
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 from uuid import uuid4
 
 import httpx
@@ -3349,11 +3349,44 @@ def _tenant_key(tenant):
 
 def _session_state():
     tenant = _runtime_tenant()
-    path = Path.home() / ".dano" / "sessions" / f"{tenant}__{CONFIG['subsystem'].replace('/', '_')}.json"
+    configured = str(
+        os.environ.get("DANO_BROWSER_STATE_PATH")
+        or CONFIG.get("browser_state_path")
+        or ""
+    ).strip()
+    path = (
+        Path(configured).expanduser()
+        if configured
+        else Path.home() / ".dano" / "sessions" / f"{tenant}__{CONFIG['subsystem'].replace('/', '_')}.json"
+    )
     if not path.is_file():
         return {}
     data = json.loads(path.read_text(encoding="utf-8"))
     return data if isinstance(data, dict) else {}
+
+
+def _stored_token_value(raw):
+    value = str(raw or "").strip()
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError):
+        return value.strip('"')
+    if isinstance(decoded, dict) and "v" in decoded:
+        return _stored_token_value(decoded.get("v"))
+    return str(decoded).strip() if isinstance(decoded, str) else value.strip('"')
+
+
+def _looks_like_token(name, value):
+    lowered = str(name or "").casefold()
+    token = _stored_token_value(value)
+    return (
+        any(
+            hint in lowered
+            for hint in ("token", "jwt", "authorization", "auth", "access", "session", "ticket")
+        )
+        and 16 <= len(token) <= 4096
+        and re.fullmatch(r"[A-Za-z0-9._\-+/=]+", token) is not None
+    )
 
 
 def _cache_headers():
@@ -3364,19 +3397,30 @@ def _cache_headers():
         return data["headers"]
     headers = {}
     cookies = data.get("cookies") if isinstance(data, dict) else []
-    pairs = [f"{item.get('name')}={item.get('value')}" for item in cookies or [] if item.get("name") and item.get("value")]
+    pairs = [
+        f"{item.get('name')}={quote(str(item.get('value')), safe='')}"
+        for item in cookies or []
+        if item.get("name") and item.get("value")
+    ]
     if pairs:
         headers["Cookie"] = "; ".join(pairs)
+    for item in cookies or []:
+        name = str(item.get("name") or "")
+        value = _stored_token_value(item.get("value"))
+        if _looks_like_token(name, value):
+            headers.setdefault(
+                "Authorization",
+                value if value.casefold().startswith("bearer ") else f"Bearer {value}",
+            )
     for origin in data.get("origins") or []:
         for item in origin.get("localStorage") or []:
             name = str(item.get("name") or "").casefold()
-            value = str(item.get("value") or "").strip().strip('"')
-            if (
-                value
-                and any(hint in name for hint in ("access_token", "accesstoken", "auth_token", "authorization"))
-                and re.fullmatch(r"[A-Za-z0-9._\-+/= ]{16,4096}", value)
-            ):
-                headers.setdefault("Authorization", value if value.lower().startswith("bearer ") else f"Bearer {value}")
+            value = _stored_token_value(item.get("value"))
+            if _looks_like_token(name, value):
+                headers.setdefault(
+                    "Authorization",
+                    value if value.lower().startswith("bearer ") else f"Bearer {value}",
+                )
     return headers
 
 
@@ -3585,7 +3629,7 @@ def option_choices(plan, field, values=None):
             if field in {param, top_level}:
                 matches.append(binding)
     schema = ((plan.get("input_schema") or {}).get("properties") or {}).get(field) or {}
-    fixed_options = schema.get("x-enum-options") or schema.get("x-options") or []
+    fixed_options = schema.get("x-enum-options") or []
     if not matches and fixed_options:
         return [
             {"id": str(item["id"]), "label": str(item.get("label") or item["id"])}
@@ -5058,6 +5102,9 @@ def _render_folder(skill, folder: Path, *, tenant: str) -> tuple[list[dict], boo
         "base_url": _base_url(origin_steps) or _base_url(steps),
         "identity_probes": probes,
     }
+    from dano.execution.page.sessions import session_file
+
+    config["browser_state_path"] = str(session_file(tenant, config["subsystem"]))
     _write_text(scripts / "client.py", _CLIENT_TEMPLATE.replace("__CONFIG__", repr(json.dumps(config, ensure_ascii=False))))
     from dano.execution.page import wire_format as wire_format_module
 
