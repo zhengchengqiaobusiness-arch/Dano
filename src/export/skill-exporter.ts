@@ -138,6 +138,7 @@ function exportedCapability(capability: CapabilityContract, capabilities: Capabi
     description: capability.description,
     operation: capability.operation,
     transport: capability.transport,
+    outputSchema: capability.outputSchema,
     inputForm: capability.inputForm.map(exportedField),
     inputQuestions: (() => {
       const caller = capability.inputForm.filter(field => field.source === "caller");

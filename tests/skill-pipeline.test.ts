@@ -219,6 +219,8 @@ test("exports a progressively disclosed Python Skill package", async () => {
     assert.match(skill, /Use when/);
     assert.match(skill, /## Workflow/);
     assert.match(skill, /## Atomic capabilities/);
+    assert.match(skill, /## Fast path/);
+    assert.match(skill, /python scripts\/format_list\.py --capability find-orders --input '\{\}'/);
     assert.match(skill, /## Composed workflows/);
     assert.match(skill, /## Output and failures/);
     assert.match(skill, /## Boundaries/);
@@ -246,6 +248,7 @@ test("exports a progressively disclosed Python Skill package", async () => {
     assert.equal(contract.generatedAt, undefined);
     assert.equal(contract.routes.length, 1);
     assert.equal(contract.capabilities.every((item: any) => item.validation.status === "verified"), true);
+    assert.deepEqual(contract.capabilities.find((item: any) => item.id === "find-orders")?.outputSchema, query.outputSchema);
     assert.equal(contract.capabilities.every((item: any) => item.confidence === undefined && item.evidence === undefined), true);
     assert.equal(contract.capabilities.find((item: any) => item.id === "review-order")?.role, "primary");
     const reviewContract = contract.capabilities.find((item: any) => item.id === "review-order");
@@ -325,6 +328,74 @@ test("exported executor preserves a recorded date-only string", async () => {
     ]);
     assert.equal(JSON.parse(stdout).prepared.visitDate, "2026-09-04");
   } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exported list fast path executes once and formats contract fields and enums", async () => {
+  const requests: string[] = [];
+  const server = http.createServer((request, response) => {
+    requests.push(request.url || "");
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({
+      rows: [{ searchValue: "", billCode: "Q-1", leaveType: "busy", status: 0 }],
+      total: 1
+    }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const origin = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+  const query = verifiedCapability("find-leave");
+  query.title = "查询请假申请";
+  query.transport = { method: "GET", origin, pathTemplate: "/leave", urlTemplate: `${origin}/leave` };
+  query.outputSchema = {
+    type: "object",
+    properties: {
+      rows: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            searchValue: { type: "string" },
+            billCode: { type: "string" },
+            leaveType: { type: "string" },
+            status: { type: "integer" }
+          }
+        }
+      },
+      total: { type: "integer" }
+    }
+  };
+  query.inputForm = [
+    {
+      path: "$.billCode", name: "billCode", label: "单据编号", valueType: "string", source: "caller",
+      required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "查询条件", widget: "text"
+    },
+    {
+      path: "$.leaveType", name: "leaveType", label: "请假类型", valueType: "string", source: "caller",
+      required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "查询条件", widget: "select",
+      candidates: { type: "static", values: [{ value: "busy", label: "事假" }] }
+    },
+    {
+      path: "$.status", name: "status", label: "流程状态", valueType: "integer", source: "caller",
+      required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "查询条件", widget: "select",
+      candidates: { type: "static", values: [{ value: 0, label: "未提交" }] }
+    }
+  ];
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-skill-fast-list-"));
+  try {
+    const exported = await exportSkill(temporary, "请假申请", [query]);
+    const { stdout } = await execFileAsync("python", [
+      path.join(exported.dir, "scripts", "format_list.py"),
+      "--capability", query.id,
+      "--input", "{}"
+    ]);
+    assert.deepEqual(requests, ["/leave"]);
+    assert.match(stdout, /\| 单据编号 \| 请假类型 \| 流程状态 \|/);
+    assert.match(stdout, /\| Q-1 \| 事假 \| 未提交 \|/);
+    assert.doesNotMatch(stdout, /searchValue/);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(temporary, { recursive: true, force: true });
   }
 });

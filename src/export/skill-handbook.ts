@@ -290,6 +290,21 @@ function routeIndex(routes: CapabilityRoute[]) {
   ).join("\n");
 }
 
+function schemaContainsArray(schema: JsonSchema | undefined): boolean {
+  if (!schema) return false;
+  if (schema.type === "array") return true;
+  return Object.values(schema.properties || {}).some(schemaContainsArray);
+}
+
+function fastQueryCommands(primary: CapabilityContract[]) {
+  return primary
+    .filter(capability => capability.operation === "query")
+    .map(capability => schemaContainsArray(capability.outputSchema)
+      ? `- ${safeCell(capability.title)}：\`python scripts/format_list.py --capability ${capability.id} --input '{}'\``
+      : `- ${safeCell(capability.title)}：\`python scripts/execute.py --capability ${capability.id} --input '{}'\``)
+    .join("\n");
+}
+
 export function buildSkillMd(
   skillName: string,
   displayName: string,
@@ -301,6 +316,7 @@ export function buildSkillMd(
   const actions = primary.map(capability => capability.title).join("、");
   const lookupNames = lookups.map(capability => capability.title.replace(/^查询/, "")).filter(Boolean).join("、");
   const description = skillDescriptionLines(title, capabilities).join("\n  ");
+  const queryCommands = fastQueryCommands(primary);
   return `---
 name: ${skillName}
 description: >
@@ -333,6 +349,14 @@ ${lookups.length ? `| 只为字段选择${lookupNames || "目录值"} | 运行�
 \`python scripts/execute.py --capability <能力编号> --input '<JSON>'\`
 
 写操作在确认后追加 \`--confirm-write\`。
+
+## Fast path
+
+用户只要求查询或列出、且没有提供筛选条件时，立即运行下面的单条命令；不要预读任何 references，不要先执行未格式化查询，也不要重复查询。命令已按合同选择业务列并转换固定枚举：
+
+${queryCommands || "当前没有无输入即可直接执行的查询能力。"}
+
+仅当用户明确给出筛选条件但字段映射不清楚时，才读取 [INPUT_FORMS.md](references/INPUT_FORMS.md) 的对应能力小节，然后把同一条命令中的 \`{}\` 替换为筛选 JSON。
 
 ## Composed workflows
 
