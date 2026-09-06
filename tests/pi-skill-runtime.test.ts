@@ -238,6 +238,51 @@ test("recorded dictionary and directory APIs supply work-report select candidate
   assert.equal(judgedStatistics.inputForm.find(item => item.name === "deptId")?.candidates?.type, "capability");
 });
 
+test("standard RuoYi dictValue and dictLabel rows resolve an unnamed select", () => {
+  const events: EvidenceEvent[] = [{
+    id: "statuses", kind: "network", sessionId: "seal", at: "2026-09-06T07:03:01.000Z",
+    pageUrl: "http://boot.test/oa/seal/sealApply?billType=seal_apply",
+    request: {
+      method: "GET", url: "http://boot.test/prod-api/system/dict/data/type/oa_flow_billstatus",
+      resourceType: "xhr", headers: {}, query: {}
+    },
+    response: { status: 200, headers: {}, body: { code: 200, data: [
+      { dictType: "oa_flow_billstatus", dictValue: "0", dictLabel: "未提交" },
+      { dictType: "oa_flow_billstatus", dictValue: "1", dictLabel: "审批中" },
+      { dictType: "oa_flow_billstatus", dictValue: "2", dictLabel: "已完成" },
+      { dictType: "oa_flow_billstatus", dictValue: "3", dictLabel: "被驳回" }
+    ] } }
+  }, {
+    id: "search", kind: "ui", sessionId: "seal", at: "2026-09-06T07:03:49.081Z",
+    pageUrl: "http://boot.test/oa/seal/sealApply?billType=seal_apply", eventType: "click",
+    text: "搜索", label: "搜索",
+    form: [{ label: "流程状态", type: "select", value: "未提交" }]
+  }, {
+    id: "list", kind: "network", sessionId: "seal", at: "2026-09-06T07:03:49.140Z",
+    pageUrl: "http://boot.test/oa/seal/sealApply?billType=seal_apply", correlatedUiEvidenceId: "search",
+    request: {
+      method: "GET", url: "http://boot.test/prod-api/oa/sealApply/list?status=0",
+      resourceType: "xhr", headers: {}, query: { status: "0" }
+    },
+    response: { status: 200, headers: {}, body: { code: 200, rows: [] } }
+  }];
+
+  const catalog = applyDeterministicCatalogJudgment(buildCapabilityCandidates(events), events);
+  const query = catalog.find(item => item.transport.pathTemplate.endsWith("/oa/sealApply/list"))!;
+  const status = query.inputForm.find(item => item.name === "status");
+  assert.equal(status?.source, "caller");
+  assert.equal(status?.label, "流程状态");
+  assert.deepEqual(status?.candidates, {
+    type: "static",
+    values: [
+      { value: "0", label: "未提交" },
+      { value: "1", label: "审批中" },
+      { value: "2", label: "已完成" },
+      { value: "3", label: "被驳回" }
+    ]
+  });
+});
+
 test("fallback role keeps a write primary and marks companion queries as lookup", () => {
   const write = cap({
     id: "create",

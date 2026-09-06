@@ -461,11 +461,14 @@ function responseLists(body: unknown): Array<{ path: string; rows: Record<string
 }
 
 function rowIdentity(row: Record<string, unknown>) {
-  return row.value ?? row.id ?? row.code;
+  for (const key of ["id", "value", "code", "key", "dictValue", "dictCode"]) {
+    if (row[key] !== undefined && row[key] !== null && row[key] !== "") return row[key];
+  }
+  return undefined;
 }
 
 function rowLabelPath(rows: Record<string, unknown>[]) {
-  for (const key of ["name", "label", "title", "nickname", "username"]) {
+  for (const key of ["name", "label", "title", "dictLabel", "nickname", "username", "userName", "text"]) {
     if (rows.some(row => row[key] !== undefined && row[key] !== null && row[key] !== "")) {
       return key === "username" ? "username" : key;
     }
@@ -491,7 +494,7 @@ function identityValues(value: unknown): unknown[] {
 }
 
 function rowDisplays(row: Record<string, unknown>) {
-  const values = ["name", "label", "title", "nickname", "username", "userName"]
+  const values = ["name", "label", "title", "dictLabel", "nickname", "username", "userName", "text"]
     .map(key => row[key])
     .filter(item => item !== undefined && item !== null && item !== "")
     .map(item => String(item));
@@ -524,10 +527,8 @@ export function exactCandidateSources(catalog: CapabilityContract[], events: Evi
       .find(items => items.length > 0);
     if (!lists) return [];
     return lists.flatMap(list => {
-      const identityKey = list.rows.some(row => row.id !== undefined) ? "id"
-        : list.rows.some(row => row.value !== undefined) ? "value"
-          : list.rows.some(row => row.code !== undefined) ? "code"
-            : undefined;
+      const identityKey = ["id", "value", "code", "key", "dictValue", "dictCode"]
+        .find(key => list.rows.some(row => row[key] !== undefined && row[key] !== null && row[key] !== ""));
       const labelKey = rowLabelPath(list.rows);
       if (!identityKey || !labelKey) return [];
       const dictionary = list.rows.every(row => typeof row.dictType === "string" && row.dictType);
@@ -673,11 +674,14 @@ export function applyExactChooserJoin(catalog: CapabilityContract[], events: Evi
         if (keptJudgedRule(field)) return field;
         if (field.source === "caller" && field.label !== field.name) return field;
         const ids = identityValues(requestValueAt(sample, field.path));
-        if (ids.length !== 1 || !isSkillDistinctive(ids[0])) return field;
-        const matchedSources = sources.filter(source =>
+        if (ids.length !== 1) return field;
+        let matchedSources = sources.filter(source =>
           source.capabilityId !== capability.id
           && source.rows.filter(row => sameValue(rowIdentity(row), ids[0])).length === 1
         );
+        if (!isSkillDistinctive(ids[0])) {
+          matchedSources = matchedSources.filter(sourceIsClosedEnum);
+        }
         const hits = observations.filter(observation =>
           matchedSources.some(source =>
             source.rows.filter(row =>
