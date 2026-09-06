@@ -992,7 +992,7 @@ export class BrowserRecorder {
     const fromFields = (snapshot.formFields || []).map(field => ({
       name: typeof field.name === "string" ? field.name : undefined,
       label: typeof field.label === "string" ? field.label : undefined,
-      type: String(field.kind || field.type || "text"),
+      type: String(field.type || field.kind || "text"),
       value: field.value,
       required: Boolean(field.required),
       options: Array.isArray(field.options) ? field.options : undefined,

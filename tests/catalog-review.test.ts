@@ -689,6 +689,26 @@ test("applyReviewActionPolicy keeps major primary gaps on re-record", () => {
   assert.match(remapped?.message || "", /不要重新录制/);
 });
 
+test("verified select without an option contract still blocks export", () => {
+  const catalog = [cap({
+    id: "query-report",
+    operation: "query",
+    title: "查询汇报",
+    transport: { method: "GET", urlTemplate: "https://x/oa/report/page", origin: "https://x", pathTemplate: "/oa/report/page" },
+    inputForm: [{
+      path: "$.reportType", name: "reportType", label: "汇报类型", valueType: "integer",
+      source: "caller", required: false, requiredBasis: "not-observed", systemHandled: false,
+      sourceDetail: "页面下拉选择", widget: "select"
+    }]
+  })];
+
+  const review = reviewCatalog(catalog);
+  assert.equal(review.status, "blocked");
+  assert.equal(review.next, "re-analyze");
+  assert.match(review.summary, /汇报类型/);
+  assert.match(review.summary, /候选接口|候选/);
+});
+
 test("catalog merge emits one authoritative capability per transport", () => {
   const transport = {
     method: "POST",

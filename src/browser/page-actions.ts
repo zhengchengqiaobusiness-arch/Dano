@@ -1090,6 +1090,7 @@ export class PageActions {
   }
 
   private async captureFields(): Promise<PageSnapshot> {
+    await this.revealCollapsedFilters();
     const snap = await this.page().locator("body").evaluate(SNAPSHOT_FIELDS_IN_PAGE) as PageSnapshot;
     return {
       ...snap,
@@ -1115,6 +1116,7 @@ export class PageActions {
 
   async captureSnapshot(): Promise<PageSnapshot> {
     const page = this.page();
+    await this.revealCollapsedFilters();
     type FrameSnapshot = PageSnapshot & { frameUrl: string; visible: boolean; unavailable?: boolean };
     const frames: FrameSnapshot[] = [];
     for (const frame of page.frames()) {
@@ -1668,6 +1670,34 @@ export class PageActions {
       return true;
     }
     return false;
+  }
+
+  private async revealCollapsedFilters() {
+    const roots = ".search-form, .ant-pro-table-search, .el-form--inline, .filter-container, .table-search, .vxe-grid--form-wrapper, [class*='search-form'], [class*='table-search'], [class*='filter-bar'], [class*='search-bar'], [class*='filter-form'], [class*='query-form']";
+    const expand = /^(展开|展开筛选|高级搜索|高级|更多筛选|Expand|Advanced)$/i;
+    let changed = false;
+    for (const frame of this.page().frames()) {
+      const buttons = frame.locator(roots).locator("button, a, [role='button'], .el-button, .ant-btn").filter({ visible: true });
+      const count = await buttons.count().catch(() => 0);
+      for (let index = 0; index < count; index += 1) {
+        const button = buttons.nth(index);
+        const state = await button.evaluate(el => ({
+          text: String(el.textContent || "").replace(/\s+/g, " ").trim(),
+          expanded: el.getAttribute("aria-expanded"),
+          handled: el.getAttribute("data-bss-filter-expanded") === "true"
+        })).catch(() => undefined);
+        if (!state || state.handled || state.expanded === "true" || !expand.test(state.text.replace(/\s+/g, ""))) continue;
+        await button.evaluate(el => el.setAttribute("data-bss-filter-expanded", "true")).catch(() => {});
+        try {
+          await this.clickSafely(button, "button");
+          changed = true;
+        } catch {
+          await button.evaluate(el => el.removeAttribute("data-bss-filter-expanded")).catch(() => {});
+        }
+      }
+    }
+    if (changed) await this.waitForPageQuiet(800);
+    return changed;
   }
 
   async exerciseForm(allFields = false) {

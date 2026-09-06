@@ -44,6 +44,7 @@ const CHECK_GUIDANCE: Record<string, { stage: ReviewStage; next: ReviewNext; hin
   "picker-uses-recorded-query": { stage: "analyze", next: "re-analyze", hint: "选人/弹窗必须暴露已录制查询，不要把当前页冻成枚举" },
   "write-request-keys-covered": { stage: "analyze", next: "re-analyze", hint: "录制成功请求里的键都要有字段或拼接规则，不要丢父对象" },
   "candidate-rules-backed-by-evidence": { stage: "analyze", next: "re-analyze", hint: "枚举必须来自页面选项或已验证查询" },
+  "select-candidate-contract-complete": { stage: "analyze", next: "re-analyze", hint: "选择字段必须保留页面枚举或已录制候选接口，不能让调用方直接填写接口编号" },
   "binding-structure-valid": { stage: "analyze", next: "re-analyze", hint: "绑定必须指向已录制能力和已知字段" },
   "upload-transport-executable": { stage: "validate", next: "manual", hint: "multipart 上传当前不能重放，需要改平台后再验证" }
 };
@@ -267,6 +268,24 @@ export function reviewCatalog(
   }
 
   for (const capability of [...primary, ...neededLookups]) {
+    if (capability.validation.status === "verified") {
+      for (const field of capability.inputForm.filter(item =>
+        item.source === "caller"
+        && (item.widget === "select" || item.widget === "multiselect")
+        && !item.candidates
+      )) {
+        rawFindings.push({
+          code: "select-candidate-contract-complete",
+          severity: "block",
+          stage: "analyze",
+          next: "re-analyze",
+          capabilityId: capability.id,
+          capabilityTitle: capability.title,
+          fieldPath: field.path,
+          message: `选择字段「${field.label}」缺少页面枚举或候选接口合同，调用方无法按显示名称选择。平台必须依据本次录制证据补齐后复审。`
+        });
+      }
+    }
     for (const binding of capability.bindings.filter(item => item.fromCapabilityId === capability.id)) {
       rawFindings.push({
         code: "binding-structure-valid",

@@ -381,6 +381,18 @@ export const PAGE_HELPERS = String.raw`
     return "text";
   };
 
+  const evidenceType = (item, el, kind) => {
+    if (kind !== "date") return kind;
+    const input = el instanceof HTMLInputElement ? el : el.querySelector?.("input");
+    const dateHost = el.closest?.(".el-date-editor, .el-date-picker, .ant-picker, .arco-picker, [class*='date-editor'], [class*='picker-range']")
+      || item?.querySelector?.(".el-date-editor, .el-date-picker, .ant-picker, .arco-picker, [class*='date-editor'], [class*='picker-range']");
+    const type = clean(input?.getAttribute?.("type") || "").toLowerCase();
+    const blob = clean([dateHost?.className, item?.className, el.className, input?.placeholder].join(" ")).toLowerCase();
+    return /^(datetime-local|time)$/.test(type) || /datetimerange|--datetime|--time(?:\s|$)|hh?:mm|时分|时间选择/.test(blob)
+      ? "datetime"
+      : "date";
+  };
+
   const optionRecord = (el) => {
     const label = clean(el.textContent);
     if (!label) return null;
@@ -847,6 +859,7 @@ export const PAGE_HELPERS = String.raw`
       name: nameOf(el),
       selector: selectorOf(el),
       kind,
+      type: evidenceType(item, el, kind),
       filled,
       skip: kind === "upload",
       disabled: kind === "readonly" || isDisabledWidget(el),

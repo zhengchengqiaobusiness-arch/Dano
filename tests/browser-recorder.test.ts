@@ -2202,6 +2202,57 @@ test("page snapshot does not force a full-document innerText read", () => {
   assert.equal(/document\.body\.innerText/.test(source), false, source.slice(0, 200));
 });
 
+test("snapshot expands filter fields and records datetime controls without losing time precision", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-expanded-datetime-"));
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html><body>
+      <form class="search-form el-form">
+        <button id="expand" type="button" aria-expanded="false">展开筛选</button>
+        <div id="extra" class="el-form-item" style="display:none">
+          <label class="el-form-item__label">统计周期</label>
+          <div class="el-date-editor el-date-editor--datetimerange">
+            <input placeholder="开始时间" value="2026-10-19 00:00:00">
+            <input placeholder="结束时间" value="2026-10-20 00:00:00">
+          </div>
+        </div>
+      </form>
+      <script>
+        document.getElementById("expand").addEventListener("click", () => {
+          document.getElementById("extra").style.display = "block";
+          document.getElementById("expand").textContent = "收起筛选";
+          document.getElementById("expand").setAttribute("aria-expanded", "true");
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const recorder = new BrowserRecorder({
+    rootDir: temporary,
+    dataDir: path.join(temporary, "data"),
+    recordingsDir: path.join(temporary, "data", "recordings"),
+    catalogDir: path.join(temporary, "data", "catalog"),
+    profileDir: path.join(temporary, "profile"),
+    maxResponseBytes: 32_768,
+    headless: true,
+    openaiModel: "test"
+  });
+  try {
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "expanded-datetime");
+    const snapshot: any = await recorder.control({ action: "snapshot" });
+    const period = (snapshot.formFields || []).filter((field: any) => /时间|周期/.test(String(field.label || "")));
+    assert.equal(period.length, 2, JSON.stringify(snapshot.formFields));
+    assert.equal(period.every((field: any) => field.type === "datetime"), true, JSON.stringify(period));
+    assert.deepEqual(period.map((field: any) => field.value), ["2026-10-19 00:00:00", "2026-10-20 00:00:00"]);
+  } finally {
+    if (recorder.isActive()) await recorder.stop().catch(() => {});
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("exercise-form opens a trusted-only select from the input wrapper", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-trusted-"));
   const server = http.createServer((_request, response) => {

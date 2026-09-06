@@ -211,6 +211,19 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
     return Boolean(sourceKnown && targetKnown && (!binding.approved || (binding.approvalSource && binding.approvedAt)));
   });
 
+  const missingSelectableCandidates = cap.inputForm.filter(field =>
+    field.source === "caller"
+    && (field.widget === "select" || field.widget === "multiselect")
+    && !field.candidates
+  );
+  checks.push({
+    name: "select-candidate-contract-complete",
+    ok: missingSelectableCandidates.length === 0,
+    detail: missingSelectableCandidates.length === 0
+      ? "所有调用方选择字段均有页面枚举或已录制候选查询"
+      : `选择字段缺少候选合同：${missingSelectableCandidates.map(field => field.name).join("、")}`
+  });
+
   const candidateRulesValid = cap.inputForm.every(field => {
     const rule = field.candidates;
     if (!rule) return true;
