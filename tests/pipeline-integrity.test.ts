@@ -607,6 +607,38 @@ test("model judgment cannot invent cross-capability bindings or copy rules from 
   assert.deepEqual(result.bindings, []);
 });
 
+test("model judgment cannot replace a transport-grounded capability title", async () => {
+  const officeGoods = cap({
+    id: "query-office-goods",
+    title: "查询 oa/officeGoods",
+    operation: "query",
+    role: "primary",
+    transport: {
+      method: "GET",
+      urlTemplate: "https://x/prod-api/oa/officeGoods/list",
+      origin: "https://x",
+      pathTemplate: "/prod-api/oa/officeGoods/list"
+    }
+  });
+  const reasoner = {
+    model: "test",
+    available: () => true,
+    parseStructured: async () => ({
+      capabilities: [{
+        id: officeGoods.id,
+        operation: "query",
+        role: "primary",
+        title: "查询酒店申请",
+        description: officeGoods.description,
+        fields: []
+      }]
+    })
+  };
+
+  const [judged] = await applyPiCatalogJudgment([officeGoods], [], reasoner as any, process.cwd(), true);
+  assert.equal(judged!.title, "查询 oa/officeGoods");
+});
+
 test("model judgment cannot invent that an optional recorded field is required", async () => {
   const query = cap({
     id: "query-duty-optional",

@@ -1100,7 +1100,10 @@ function applyJudgment(
     });
     return {
       ...capability,
-      title: patch.title || capability.title,
+      // The title is part of capability routing and must stay tied to this
+      // recorded transport. Model wording can otherwise leak an entity name
+      // from an adjacent page (for example, calling officeGoods a hotel).
+      title: capability.title,
       description: patch.description || capability.description,
       operation: patch.operation,
       role: patch.role,
