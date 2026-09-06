@@ -1909,7 +1909,7 @@ export class PageActions {
         ...retried,
         repaired: true,
         businessRepair,
-        submitStages: stage + 1
+        submitStages: Math.max(Number(retried.submitStages || 0), stage + 2)
       };
     }
     return {
@@ -1923,6 +1923,7 @@ export class PageActions {
       loginReason: authenticationFailure,
       businessRepair,
       retryReady: Boolean(businessRepair),
+      submitStages: stage + 1,
       errors: leftoverErrors,
       url: this.page().url(),
       scope: after.scope,

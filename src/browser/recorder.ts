@@ -1605,12 +1605,13 @@ export class BrowserRecorder {
     await this.ensureFormScope();
     try {
       for (let automaticAttempts = 1; automaticAttempts <= FORM_ACTION_BUDGET; automaticAttempts += 1) {
-        const result = await work() as { ok?: boolean; cancelled?: boolean; retryReady?: boolean; businessFailure?: string; loginRequired?: boolean; loginReason?: string; todoFields?: Array<{ label?: string; name?: string }> };
-        if (result.cancelled) return { ...result, automaticAttempts, followManualSteps: false };
+        const result = await work() as { ok?: boolean; cancelled?: boolean; retryReady?: boolean; businessFailure?: string; loginRequired?: boolean; loginReason?: string; submitStages?: number; todoFields?: Array<{ label?: string; name?: string }> };
+        const reportedAttempts = Math.max(automaticAttempts, result.submitStages || 0);
+        if (result.cancelled) return { ...result, automaticAttempts: reportedAttempts, followManualSteps: false };
         if (result.loginRequired) {
           return {
             ...result,
-            automaticAttempts,
+            automaticAttempts: reportedAttempts,
             stopped: true,
             followManualSteps: false,
             reason: `检测到登录状态失效（${result.loginReason || result.businessFailure || "未登录"}），已暂停自动操作。请在内置浏览器完成登录后点击“我已完成，继续自动执行”。`
@@ -1618,14 +1619,14 @@ export class BrowserRecorder {
         }
         if (result.ok) {
           this.resetFailureStreak();
-          return { ...result, automaticAttempts, followManualSteps: false };
+          return { ...result, automaticAttempts: reportedAttempts, followManualSteps: false };
         }
         const unfinished = (result.todoFields || []).map(field => field.label || field.name).filter(Boolean).slice(0, 8);
         const detail = result.businessFailure || (unfinished.length ? `未能完成字段：${unfinished.join("、")}` : undefined);
         const stopped = this.recordFailure(action, detail);
-        if (stopped) return { ...result, automaticAttempts, ...stopped };
+        if (stopped) return { ...result, automaticAttempts: reportedAttempts, ...stopped };
         if (action === "submit-form" && result.retryReady) continue;
-        return { ...result, automaticAttempts, followManualSteps: false };
+        return { ...result, automaticAttempts: reportedAttempts, followManualSteps: false };
       }
       return this.stopBecauseStuck(this.manualTakeoverReason(action));
     } catch (error: any) {
