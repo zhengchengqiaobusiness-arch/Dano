@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 import type { CapabilityContract, EvidenceEvent } from "../src/domain.js";
-import { materializeHttpRequest } from "../src/execution/http-executor.js";
+import { executeCapability, materializeHttpRequest } from "../src/execution/http-executor.js";
 import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
 import { attachCandidateSources } from "../src/inference/candidate-sources.js";
 import { exportedCapabilityTitle } from "../src/export/skill-exporter.js";
@@ -352,4 +353,86 @@ test("indexed collection cells keep their row path as the question key", () => {
     sourceDetail: "",
     widget: "number"
   }), "items[0].progress");
+});
+
+test("a dynamic candidate display name is queried and converted to the recorded API value", async () => {
+  const requests: string[] = [];
+  const server = http.createServer((request, response) => {
+    requests.push(request.url || "");
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify(request.url?.startsWith("/types")
+      ? { data: [{ value: 1, label: "日报" }, { value: 2, label: "周报" }, { value: 3, label: "月报" }] }
+      : { code: 200, data: [] }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const origin = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+  const sourceId = "query-report-types";
+  const target: CapabilityContract = {
+    id: "query-reports",
+    kind: "atomic",
+    title: "查询汇报",
+    description: "查询汇报",
+    operation: "query",
+    confidence: 1,
+    transport: {
+      method: "GET",
+      origin,
+      pathTemplate: "/oa/report/page",
+      urlTemplate: `${origin}/oa/report/page`
+    },
+    inputSchema: { type: "object", properties: { reportType: { type: "integer" } } },
+    outputSchema: { type: "object", properties: {} },
+    inputForm: [{
+      path: "$.reportType",
+      name: "reportType",
+      label: "汇报类型",
+      valueType: "integer",
+      source: "caller",
+      required: false,
+      requiredBasis: "not-observed",
+      systemHandled: false,
+      sourceDetail: "调用方选择显示名称，接口接收稳定值",
+      widget: "select",
+      candidates: {
+        type: "capability",
+        capabilityId: sourceId,
+        valuePath: "$.data[*].value",
+        labelPath: "$.data[*].label"
+      }
+    }],
+    evidence: [],
+    sideEffect: false,
+    confirmation: { required: false },
+    completion: { acceptedHttpStatuses: [200] },
+    bindings: [],
+    validation: { version: 2, status: "verified", checks: [] },
+    generated: { source: "heuristic", generatedAt: "2026-09-06T00:00:00.000Z" }
+  };
+
+  const request = materializeHttpRequest(target, { reportType: "周报" }, {
+    lookupBodies: {
+      [sourceId]: { data: [{ value: 1, label: "日报" }, { value: 2, label: "周报" }, { value: 3, label: "月报" }] }
+    }
+  });
+  assert.equal(new URL(request.url).searchParams.get("reportType"), "2");
+  const source: CapabilityContract = {
+    ...target,
+    id: sourceId,
+    title: "查询汇报类型",
+    description: "查询汇报类型",
+    transport: { method: "GET", origin, pathTemplate: "/types", urlTemplate: `${origin}/types` },
+    inputSchema: { type: "object", properties: {} },
+    outputSchema: {
+      type: "object",
+      properties: { data: { type: "array", items: { type: "object", properties: { value: { type: "integer" }, label: { type: "string" } } } } }
+    },
+    inputForm: []
+  };
+  try {
+    await executeCapability(target, { reportType: "周报" }, false, [target, source]);
+    assert.deepEqual(requests, ["/types", "/oa/report/page?reportType=2"]);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 });

@@ -167,18 +167,48 @@ function literalKey(jsonPath: string) {
   return literal && !literal.includes(".") ? literal : undefined;
 }
 
-function applyCandidate(field: InputFormField, value: unknown) {
+function candidateValues(body: unknown, jsonPath: string) {
+  if (!jsonPath.includes("[*]")) {
+    const value = getByPath(body, jsonPath);
+    return value === undefined ? [] : [value];
+  }
+  const [prefix, suffix] = jsonPath.split("[*]");
+  const rows = getByPath(body, prefix || "$");
+  if (!Array.isArray(rows)) return [];
+  const childPath = suffix?.replace(/^\./, "");
+  return rows.flatMap(row => {
+    const value = childPath ? getByPath(row, `$.${childPath}`) : row;
+    return value === undefined ? [] : [value];
+  });
+}
+
+function applyCandidate(field: InputFormField, value: unknown, options?: MaterializeOptions) {
   const rule = field.candidates;
-  if (!rule || rule.type !== "static" || value === undefined || value === null) return value;
-  for (const option of rule.values) {
+  if (!rule || value === undefined || value === null) return value;
+  const optionsList = rule.type === "static"
+    ? rule.values
+    : (() => {
+        const body = options?.lookupBodies?.[rule.capabilityId];
+        if (body === undefined) return [];
+        const values = candidateValues(body, rule.valuePath);
+        const labels = candidateValues(body, rule.labelPath);
+        return values.map((candidate, index) => ({ value: candidate, label: String(labels[index] ?? candidate) }));
+      })();
+  const convert = (item: unknown) => {
+    const matches = optionsList.filter(option => sameJoin(option.value, item) || String(option.label) === String(item));
+    if (matches.length === 1) return matches[0]!.value;
+    return item;
+  };
+  if (Array.isArray(value)) return value.map(convert);
+  for (const option of optionsList) {
     if (option.value === value || String(option.label) === String(value)) return option.value;
   }
   return value;
 }
 
-function coerceFieldValue(value: unknown, field: InputFormField) {
+function coerceFieldValue(value: unknown, field: InputFormField, options?: MaterializeOptions) {
   if (value === undefined || value === null) return value;
-  let next = applyCandidate(field, value);
+  let next = applyCandidate(field, value, options);
   if (field.valueType === "array" && Array.isArray(next) && field.dateClocks?.length === next.length) {
     return next.map((item, index) =>
       typeof item === "string" && isDateInput(item.trim())
@@ -313,7 +343,12 @@ function nestLineItems(cap: CapabilityContract, supplied: Record<string, unknown
   return prepared;
 }
 
-function coercePresentFields(cap: CapabilityContract, prepared: Record<string, unknown>, requireMissing: boolean) {
+function coercePresentFields(
+  cap: CapabilityContract,
+  prepared: Record<string, unknown>,
+  requireMissing: boolean,
+  options?: MaterializeOptions
+) {
   for (const field of cap.inputForm) {
     if (field.path.includes("[*]")) {
       const [prefix, suffix] = field.path.split("[*].");
@@ -338,7 +373,7 @@ function coercePresentFields(cap: CapabilityContract, prepared: Record<string, u
           }
           continue;
         }
-        current[name] = coerceFieldValue(value, field);
+        current[name] = coerceFieldValue(value, field, options);
       }
       continue;
     }
@@ -351,14 +386,14 @@ function coercePresentFields(cap: CapabilityContract, prepared: Record<string, u
       }
       continue;
     }
-    setByPath(prepared, field.path, coerceFieldValue(value, field));
+    setByPath(prepared, field.path, coerceFieldValue(value, field, options));
   }
 }
 
 function prepareInput(cap: CapabilityContract, input: Record<string, unknown>, options?: MaterializeOptions) {
   const prepared = hoistNamedFields(cap, nestLineItems(cap, input));
   applyCollectionTemplates(cap, prepared);
-  coercePresentFields(cap, prepared, false);
+  coercePresentFields(cap, prepared, false, options);
   let changed = true;
   while (changed) {
     changed = false;
@@ -378,7 +413,7 @@ function prepareInput(cap: CapabilityContract, input: Record<string, unknown>, o
           try {
             const value = resolveFieldRule(field, prepared, current, options);
             if (value !== undefined) {
-              current[name] = coerceFieldValue(value, field);
+              current[name] = coerceFieldValue(value, field, options);
               changed = true;
             }
           } catch {
@@ -391,7 +426,7 @@ function prepareInput(cap: CapabilityContract, input: Record<string, unknown>, o
       try {
         const value = resolveFieldRule(field, prepared, undefined, options);
         if (value !== undefined) {
-          setByPath(prepared, field.path, coerceFieldValue(value, field));
+          setByPath(prepared, field.path, coerceFieldValue(value, field, options));
           changed = true;
         }
       } catch {
@@ -399,7 +434,7 @@ function prepareInput(cap: CapabilityContract, input: Record<string, unknown>, o
       }
     }
   }
-  coercePresentFields(cap, prepared, true);
+  coercePresentFields(cap, prepared, true, options);
   return prepared;
 }
 
@@ -458,12 +493,17 @@ async function lookupBodiesFor(
   visiting.add(cap.id);
   for (const field of cap.inputForm) {
     const parsed = parseFromRule(field.defaultRule || "");
-    if (!parsed || bodies[parsed.capabilityId] !== undefined) continue;
-    const source = catalog.find(item => item.id === parsed.capabilityId);
-    if (!source) continue;
-    const viaInput = parsed.via && input[parsed.via] !== undefined ? { [parsed.via]: input[parsed.via] } : {};
-    const result = await executeCapability(source, viaInput, false, catalog, visiting);
-    bodies[parsed.capabilityId] = result.body;
+    const candidateId = field.candidates?.type === "capability" ? field.candidates.capabilityId : undefined;
+    for (const capabilityId of [...new Set([parsed?.capabilityId, candidateId].filter((item): item is string => Boolean(item)))]) {
+      if (bodies[capabilityId] !== undefined || capabilityId === cap.id) continue;
+      const source = catalog.find(item => item.id === capabilityId);
+      if (!source) continue;
+      const sourceInput = parsed?.capabilityId === capabilityId && parsed.via && input[parsed.via] !== undefined
+        ? { [parsed.via]: input[parsed.via] }
+        : input;
+      const result = await executeCapability(source, sourceInput, false, catalog, visiting);
+      bodies[capabilityId] = result.body;
+    }
   }
   return bodies;
 }

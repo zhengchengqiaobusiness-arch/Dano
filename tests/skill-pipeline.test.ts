@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 import path from "node:path";
 import os from "node:os";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
@@ -323,6 +324,49 @@ test("exported executor preserves a recorded date-only string", async () => {
     ]);
     assert.equal(JSON.parse(stdout).prepared.visitDate, "2026-09-04");
   } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("exported executor queries dynamic options before sending a display name", async () => {
+  const requests: string[] = [];
+  const server = http.createServer((request, response) => {
+    requests.push(request.url || "");
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify(request.url?.startsWith("/types")
+      ? { data: [{ value: 1, label: "日报" }, { value: 2, label: "周报" }] }
+      : { code: 200, data: [] }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const origin = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+  const source = verifiedCapability("report-types");
+  source.role = "lookup";
+  source.transport = { method: "GET", origin, pathTemplate: "/types", urlTemplate: `${origin}/types` };
+  source.outputSchema = {
+    type: "object",
+    properties: { data: { type: "array", items: { type: "object", properties: { value: { type: "integer" }, label: { type: "string" } } } } }
+  };
+  const target = verifiedCapability("query-reports");
+  target.role = "primary";
+  target.transport = { method: "GET", origin, pathTemplate: "/reports", urlTemplate: `${origin}/reports` };
+  target.inputSchema = { type: "object", properties: { reportType: { type: "integer" } } };
+  target.inputForm = [{
+    path: "$.reportType", name: "reportType", label: "汇报类型", valueType: "integer", source: "caller",
+    required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "显示名称转接口值", widget: "select",
+    candidates: { type: "capability", capabilityId: source.id, valuePath: "$.data[*].value", labelPath: "$.data[*].label" }
+  }];
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-skill-dynamic-candidate-"));
+  try {
+    const exported = await exportSkill(temporary, "汇报查询", [target, source]);
+    await execFileAsync("python", [
+      path.join(exported.dir, "scripts", "execute.py"),
+      "--capability", target.id,
+      "--input", JSON.stringify({ reportType: "周报" })
+    ]);
+    assert.deepEqual(requests, ["/types", "/reports?reportType=2"]);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(temporary, { recursive: true, force: true });
   }
 });

@@ -58,6 +58,23 @@ def get_by_path(value: Any, json_path: str) -> Any:
     return current
 
 
+def extract_many(value: Any, json_path: str) -> list[Any]:
+    if "[*]" not in json_path:
+        found = get_by_path(value, json_path)
+        return [] if found is None else [found]
+    prefix, suffix = json_path.split("[*]", 1)
+    rows = get_by_path(value, prefix)
+    if not isinstance(rows, list):
+        return []
+    child_path = suffix.removeprefix(".")
+    result: list[Any] = []
+    for row in rows:
+        found = get_by_path(row, f"$.{child_path}") if child_path else row
+        if found is not None:
+            result.append(found)
+    return result
+
+
 def set_by_path(target: dict[str, Any], json_path: str, value: Any) -> None:
     key = literal_key(json_path)
     if key is not None:
@@ -669,12 +686,69 @@ def response_body(raw: bytes, headers: Any) -> Any:
     return {"file": str(target), "contentType": content_type, "byteLength": len(raw)}
 
 
-def execute_capability(capability: dict[str, Any], supplied: dict[str, Any], confirm_write: bool = False) -> dict[str, Any]:
+def resolve_dynamic_candidates(
+    capability: dict[str, Any],
+    supplied: dict[str, Any],
+    contract: dict[str, Any],
+    candidate_stack: set[str],
+) -> dict[str, Any]:
+    prepared = copy.deepcopy(supplied)
+    for field in capability.get("inputForm", []):
+        rule = field.get("candidates") or {}
+        if rule.get("type") != "capability":
+            continue
+        field_path = field.get("path") or ""
+        field_name = field.get("name") or ""
+        value = get_by_path(prepared, field_path)
+        supplied_by_name = value is None and field_name in prepared
+        if supplied_by_name:
+            value = prepared[field_name]
+        if value is None:
+            continue
+        source_id = rule.get("capabilityId")
+        if not source_id or source_id == capability.get("id") or source_id in candidate_stack:
+            raise ValueError(f"候选查询形成循环：{field.get('label') or field_path}")
+        source = next((item for item in contract.get("capabilities", []) if item.get("id") == source_id), None)
+        if source is None or source.get("operation") != "query" or source.get("validation", {}).get("status") != "verified":
+            raise ValueError(f"动态候选来源不可执行：{source_id}")
+        result = execute_capability(source, prepared, False, candidate_stack)
+        if not result.get("ok"):
+            raise ValueError(f"动态候选查询失败：{source_id}")
+        values = extract_many(result.get("body"), rule.get("valuePath") or "")
+        labels = extract_many(result.get("body"), rule.get("labelPath") or "")
+        options = [(item, str(labels[index] if index < len(labels) else item)) for index, item in enumerate(values)]
+
+        def convert(item: Any) -> Any:
+            matches = [candidate for candidate, label in options if same_join(candidate, item) or label == str(item)]
+            if len(matches) != 1:
+                raise ValueError(f"无法把“{item}”唯一转换为字段“{field.get('label') or field_path}”的接口值")
+            return matches[0]
+
+        converted = [convert(item) for item in value] if isinstance(value, list) else convert(value)
+        if supplied_by_name:
+            prepared[field_name] = converted
+        else:
+            set_by_path(prepared, field_path, converted)
+    return prepared
+
+
+def execute_capability(
+    capability: dict[str, Any],
+    supplied: dict[str, Any],
+    confirm_write: bool = False,
+    candidate_stack: set[str] | None = None,
+) -> dict[str, Any]:
     if capability.get("validation", {}).get("status") != "verified":
         raise ValueError("能力没有通过验证")
     if capability.get("confirmation", {}).get("required") and not confirm_write:
         raise ValueError("写操作需要本次执行的明确确认")
-    prepared = prepare_input(capability, supplied, load_contract())
+    contract = load_contract()
+    stack = set(candidate_stack or set())
+    if capability.get("id") in stack:
+        raise ValueError(f"能力调用形成循环：{capability.get('id')}")
+    stack.add(capability.get("id"))
+    supplied = resolve_dynamic_candidates(capability, supplied, contract, stack)
+    prepared = prepare_input(capability, supplied, contract)
     url, options = build_request(capability, prepared)
     req = request.Request(url, method=options["method"], headers=options["headers"], data=options["data"])
     try:
