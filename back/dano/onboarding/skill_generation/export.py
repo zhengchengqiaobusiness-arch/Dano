@@ -3,23 +3,20 @@
 from __future__ import annotations
 
 import inspect
-import json
-import shutil
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
 import structlog
 from pydantic import BaseModel, Field, ValidationError
 
-from dano.execution.page.flow_materialization.builder import apply_recorded_unknown_policy
 from dano.execution.page.flow_spec_core.models import FlowSpec
 from dano.onboarding.skill_generation.catalog import capability_ref
 from dano.onboarding.skill_generation.export_view import (
     build_export_view,
-    promote_unconfirmed_write_fields,
 )
 from dano.onboarding.skill_generation.models import (
     SkillGenerationRequest,
@@ -285,35 +282,115 @@ async def _call_persist(persist: PersistBody | None, payload: dict[str, Any]) ->
         await result
 
 
-def _remove_previous_skill_output(out_dir: str, skill_id: str, body: dict[str, Any]) -> None:
-    """Delete the last on-disk package and leftover stage folders before rewriting."""
-    from dano.export.skill_package.renderer import package_slug
+def _capability_compilation_view(view: FlowSpec) -> FlowSpec:
+    """Add only the call nodes already declared by capability request refs."""
 
-    root = Path(out_dir)
-    slug = package_slug(skill_id) if skill_id else ""
-    candidates: list[Path] = []
-    for key in ("export_path", "skill_export_path"):
-        raw = str(body.get(key) or "").strip()
-        if raw:
-            candidates.append(Path(raw))
-    if slug:
-        candidates.append(root / slug)
-    seen: set[Path] = set()
-    for target in candidates:
-        try:
-            resolved = target.resolve()
-        except OSError:
+    from dano.execution.page.capability_refs import (
+        _capability_declared_step_ids,
+        _capability_node_step_ids,
+    )
+
+    compiled = view.model_copy(deep=True)
+    for capability in compiled.capabilities:
+        existing = set(_capability_node_step_ids(capability))
+        nodes = list(capability.nodes or [])
+        for step_id in _capability_declared_step_ids(capability):
+            if step_id in existing:
+                continue
+            nodes.append({"type": "call", "step_id": step_id})
+            existing.add(step_id)
+        capability.nodes = nodes
+    return compiled
+
+
+def _restore_declared_capability_selects(api_request: dict[str, Any], view: FlowSpec) -> dict[str, Any]:
+    """Keep explicit picker bindings when the capability schema declares the same source."""
+
+    def normalized_endpoint(value: Any) -> str:
+        raw = str(value or "").split("?", 1)[0]
+        parsed = urlparse(raw)
+        return parsed.path if parsed.scheme and parsed.netloc else raw
+
+    def source_endpoint(field: dict[str, Any]) -> str:
+        for key in ("x-dano-option-source", "x-options-source-meta", "dataSource"):
+            source = field.get(key)
+            if isinstance(source, dict):
+                endpoint = source.get("source_url") or source.get("endpoint") or source.get("url")
+                if endpoint:
+                    return normalized_endpoint(endpoint)
+        return ""
+
+    steps_by_id = {str(step.step_id): step for step in view.steps}
+    source_capabilities: dict[str, Any] = {}
+    for capability in view.capabilities:
+        for key in (capability.capability_id, capability.name):
+            if key:
+                source_capabilities[str(key)] = capability
+
+    packed = dict(api_request)
+    restored: list[dict[str, Any]] = []
+    for raw in packed.get("capabilities") or []:
+        if not isinstance(raw, dict):
             continue
-        if resolved in seen or not resolved.is_dir():
-            continue
-        name = resolved.name
-        if name == slug or name.endswith("-package") or name.startswith(f".{slug}"):
-            seen.add(resolved)
-            shutil.rmtree(resolved, ignore_errors=True)
-    if root.is_dir() and slug:
-        for stale in (*root.glob(f".{slug}-*"), *root.glob(f".{slug}.old-*")):
-            if stale.is_dir():
-                shutil.rmtree(stale, ignore_errors=True)
+        capability = dict(raw)
+        source_capability = source_capabilities.get(str(capability.get("capability_id") or ""))
+        if source_capability is None:
+            source_capability = source_capabilities.get(str(capability.get("name") or ""))
+        execution = dict(capability.get("execution_contract") or {})
+        compiled_steps = [
+            dict(step) for step in execution.get("steps") or [] if isinstance(step, dict)
+        ]
+        if source_capability is not None and compiled_steps:
+            properties = (
+                source_capability.input_schema.get("properties")
+                if isinstance(source_capability.input_schema, dict)
+                and isinstance(source_capability.input_schema.get("properties"), dict)
+                else {}
+            )
+            execute_ids = {
+                str(ref.step_id)
+                for ref in source_capability.request_refs or []
+                if str(ref.usage or "execute") in {"execute", "preflight"} and ref.step_id
+            }
+            execute_ids.update(str(item) for item in source_capability.step_ids or [] if str(item))
+            declared_by_step: dict[str, list[dict[str, Any]]] = {}
+            for step_id in execute_ids:
+                source_step = steps_by_id.get(step_id)
+                if source_step is None:
+                    continue
+                for binding in source_step.selects or []:
+                    name = str(binding.param or "")
+                    field = properties.get(name)
+                    endpoint = source_endpoint(field) if isinstance(field, dict) else ""
+                    binding_endpoint = normalized_endpoint(binding.source_url)
+                    if not endpoint or endpoint != binding_endpoint:
+                        continue
+                    item = binding.model_dump(exclude_none=True)
+                    for key in ("actor", "confidence", "verification_id", "enum_confirmed"):
+                        item.pop(key, None)
+                    if not item.get("field_projections"):
+                        item.pop("field_projections", None)
+                    declared_by_step.setdefault(step_id, []).append(item)
+            for step in compiled_steps:
+                additions = declared_by_step.get(str(step.get("step_id") or ""), [])
+                if not additions:
+                    continue
+                current = [item for item in step.get("selects") or [] if isinstance(item, dict)]
+                for addition in additions:
+                    current = [
+                        item for item in current
+                        if not (
+                            str(item.get("param") or "") == str(addition.get("param") or "")
+                            and str(item.get("path") or "") == str(addition.get("path") or "")
+                        )
+                    ]
+                    current.append(addition)
+                step["selects"] = current
+            execution["steps"] = compiled_steps
+            capability["execution_contract"] = execution
+        restored.append(capability)
+    packed["capabilities"] = restored
+    return packed
 
 
 def build_export_skill_spec(
@@ -324,25 +401,27 @@ def build_export_skill_spec(
     title: str,
     plan: SkillPlan,
 ) -> Any:
-    from dano.execution.page.flow_release import prepare_flow_release_candidate
     from dano.execution.page.flow_spec import flow_spec_release_payload, flow_spec_to_api_request
     from dano.orchestrator.types import SkillSpec
     from dano.shared.enums import RiskLevel, Subsystem
 
     from dano.export.skill_package.renderer import restore_compiled_capability_schemas
 
-    release_spec, candidate = prepare_flow_release_candidate(view)
-    release_spec = promote_unconfirmed_write_fields(release_spec)
+    # Stage 8 consumes the selected capability view directly. Running the
+    # publish preparation pipeline here would reclassify sources and rebuild
+    # schemas a second time, so the exported Skill could diverge from PI.
     api_request, errors = flow_spec_to_api_request(
-        release_spec, _prepared=True, _embed_capability_steps=True,
+        _capability_compilation_view(view),
+        _prepared=True,
+        _embed_capability_steps=True,
     )
-    if errors or not api_request:
+    if not api_request:
         raise SkillExportError(409, "导出视图无法编译为 Skill 包：" + "；".join(errors or ["未知错误"]))
     api_request = restore_compiled_capability_schemas(api_request, view)
+    api_request = _restore_declared_capability_selects(api_request, view)
     plan_payload = plan.model_dump(mode="json")
     api_request["_release_snapshot"] = {
-        **candidate,
-        "flow_spec": flow_spec_release_payload(release_spec),
+        "flow_spec": flow_spec_release_payload(view),
         "skill_plan": plan_payload,
     }
     api_request["_skill_plan"] = plan_payload
@@ -366,63 +445,6 @@ def build_export_skill_spec(
     )
 
 
-def _has_execution_contracts(api_request: dict[str, Any]) -> bool:
-    capabilities = [
-        item for item in (api_request.get("capabilities") or [])
-        if isinstance(item, dict)
-    ]
-    return bool(capabilities) and all(
-        isinstance(item.get("execution_contract"), dict)
-        and isinstance(item["execution_contract"].get("steps"), list)
-        and item["execution_contract"]["steps"]
-        for item in capabilities
-    )
-
-
-def _minimal_export_skill(
-    view: FlowSpec,
-    *,
-    tenant: str,
-    skill_id: str,
-    title: str,
-    plan: SkillPlan,
-) -> Any:
-    """Compile a SkillSpec from this recording's export view. Do not require a prior publish."""
-    from dano.execution.page.flow_spec import flow_spec_release_payload, flow_spec_to_api_request
-    from dano.export.skill_package.renderer import restore_compiled_capability_schemas
-    from dano.orchestrator.types import SkillSpec
-    from dano.shared.enums import RiskLevel, Subsystem
-
-    api_request, errors = flow_spec_to_api_request(view, _embed_capability_steps=True)
-    if errors or not api_request or not _has_execution_contracts(api_request):
-        raise SkillExportError(
-            409,
-            "导出视图无法编译为 Skill 包：" + "；".join(errors or ["缺少能力执行合同"]),
-        )
-    api_request = restore_compiled_capability_schemas(api_request, view)
-    plan_payload = plan.model_dump(mode="json")
-    api_request["_skill_plan"] = plan_payload
-    api_request["_release_snapshot"] = {
-        **dict(api_request.get("_release_snapshot") or {}),
-        "skill_plan": plan_payload,
-        "flow_spec": flow_spec_release_payload(view),
-    }
-    sub_str, _, action = skill_id.partition(".")
-    return SkillSpec(
-        skill_id=skill_id,
-        tenant=tenant,
-        subsystem=Subsystem(sub_str or view.subsystem or "oa"),
-        action=action or "skill",
-        title=title or view.title or action,
-        risk_level=RiskLevel.L3,
-        recording_asset_id=UUID(int=0),
-        api_request=api_request,
-        call_metadata={"skill_plan": plan_payload},
-        capabilities=list(api_request["capabilities"]),
-        capability_relations=list(api_request.get("capability_relations") or []),
-    )
-
-
 def _next_version(body: dict[str, Any]) -> int:
     current = int(body.get("skill_version") or 0)
     return current + 1 if current else 1
@@ -442,16 +464,6 @@ async def export_recording_skill(
 ) -> SkillExportOutcome:
     started = time.monotonic()
     title = str(request.title or body.get("title") or "").strip()
-    if not str(request.business_description or "").strip():
-        _log_export(
-            "skill.export.failed",
-            summary="业务描述为空，拒绝导出",
-            status="failed",
-            level="error",
-            result_id=str(result_id),
-            title=title,
-        )
-        raise SkillExportError(400, "业务描述不能为空")
     if not str(request.out_dir or "").strip():
         _log_export(
             "skill.export.failed",
@@ -463,7 +475,6 @@ async def export_recording_skill(
         )
         raise SkillExportError(400, "导出目录不能为空")
     spec = _current_spec(body)
-    apply_recorded_unknown_policy(spec)
     from dano.onboarding.recording_stage_seven import working_fingerprint
 
     fingerprint = working_fingerprint(spec)
@@ -578,25 +589,10 @@ async def export_recording_skill(
     if build_skill is not None:
         skill = build_skill(view, tenant=tenant, skill_id=skill_id, title=title, plan=plan)
     else:
-        try:
-            skill = build_export_skill_spec(
-                view, tenant=tenant, skill_id=skill_id, title=title, plan=plan,
-            )
-        except SkillExportError as exc:
-            _log_export(
-                "skill.export.build_fallback",
-                summary="发布准备态编译失败，改从本场导出视图重新编译",
-                status="warning",
-                level="warning",
-                result_id=str(result_id),
-                skill_id=skill_id,
-                reason=exc.detail,
-            )
-            skill = _minimal_export_skill(
-                view, tenant=tenant, skill_id=skill_id, title=title, plan=plan,
-            )
+        skill = build_export_skill_spec(
+            view, tenant=tenant, skill_id=skill_id, title=title, plan=plan,
+        )
     out_dir = str(request.out_dir).strip()
-    _remove_previous_skill_output(out_dir, skill_id, body)
     render_fn = render or _default_render
     publish_fn = publish or _default_publish
     published_report: dict[str, Any] | None = None
@@ -710,7 +706,7 @@ async def export_recording_skill(
             export_path=export_path,
             error={"code": "SKILL_EXPORT_ERROR", "type": "SkillExportError", "message": exc.detail},
         )
-        await _fail_export(body, persist, export_path, published_report)
+        await _fail_export(body, persist, published_report)
         raise
     except Exception as exc:  # noqa: BLE001 - export failure must not look published
         _log_export(
@@ -724,7 +720,7 @@ async def export_recording_skill(
             export_path=export_path,
             error={"code": type(exc).__name__, "type": type(exc).__name__, "message": str(exc) or "Skill 导出失败"},
         )
-        await _fail_export(body, persist, export_path, published_report)
+        await _fail_export(body, persist, published_report)
         return SkillExportOutcome(
             status="export_failed",
             skill_id=skill_id,
@@ -736,18 +732,10 @@ async def export_recording_skill(
 async def _fail_export(
     body: dict[str, Any],
     persist: PersistBody | None,
-    export_path: str,
     published_report: dict[str, Any] | None = None,
 ) -> None:
     if published_report:
         await _rollback_published_asset(published_report)
-    if export_path:
-        target = Path(export_path)
-        if target.exists():
-            try:
-                shutil.rmtree(target)
-            except OSError:
-                pass
     had_export = str(body.get("skill_export_status") or "") in {"exported", "succeeded"}
     await _call_persist(persist, {
         **body,
@@ -786,7 +774,6 @@ async def _default_publish(**kwargs: Any) -> dict[str, Any]:
     from dano.execution.page.flow_spec import (
         flow_spec_release_payload,
         flow_spec_required_params,
-        flow_spec_to_api_request,
     )
     from dano.onboarding.page_onboard import _build_page_body
     from dano.shared.enums import AssetType, Subsystem, ValidationStatus
@@ -800,13 +787,7 @@ async def _default_publish(**kwargs: Any) -> dict[str, Any]:
     action = action or public_skill_action(title, str(kwargs.get("action") or ""))
     api_request = dict(getattr(skill, "api_request", None) or {})
     if not api_request:
-        promoted = promote_unconfirmed_write_fields(view.model_copy(deep=True))
-        api_request, errors = flow_spec_to_api_request(
-            promoted, _embed_capability_steps=True,
-        )
-        if errors or not api_request:
-            raise RuntimeError("发布导出视图失败：" + "；".join(errors or ["未知错误"]))
-        view = promoted
+        raise RuntimeError("导出的 Skill 缺少已编译请求")
     plan_payload = dict((skill.call_metadata or {}).get("skill_plan") or {})
     api_request["_skill_plan"] = plan_payload
     api_request["_release_snapshot"] = {

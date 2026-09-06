@@ -602,14 +602,6 @@ _ENUM_ID_LABEL_RE = re.compile(
     r"(?P<id>-?\d+)\s*[=:：]\s*(?P<label>[^\s,，;；/、=：:()（）]{1,20})"
 )
 _TREE_HINT_RE = re.compile(r"树形|树选|tree(?:\s*select)?|点击[^。；;]{0,16}名称选择", re.I)
-_OPTION_TOKEN_RE = re.compile(r"[A-Za-z]+|[一-鿿]+", re.I)
-_CAMEL_TOKEN_RE = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[一-鿿]+")
-_GENERIC_OPTION_TOKENS = frozenset({
-    "id", "ids", "query", "body", "data", "list", "page", "admin", "api",
-    "system", "get", "post", "the", "and", "for", "name", "type",
-})
-
-
 def _option_source_endpoint(source: dict[str, Any] | None) -> str:
     raw = source if isinstance(source, dict) else {}
     return str(raw.get("source_url") or raw.get("endpoint") or raw.get("url") or "").strip()
@@ -719,137 +711,6 @@ def _enum_pairs_from_text(text: str, field: dict[str, Any]) -> list[dict[str, An
     return pairs if len(pairs) >= 2 else []
 
 
-def _option_ref_usage(ref: Any) -> str:
-    return str(getattr(ref, "usage", None) or (ref.get("usage") if isinstance(ref, dict) else "") or "")
-
-
-def _option_ref_step_id(ref: Any) -> str:
-    return str(getattr(ref, "step_id", None) or (ref.get("step_id") if isinstance(ref, dict) else "") or "")
-
-
-def _option_ref_path(ref: Any) -> str:
-    return str(
-        getattr(ref, "path", None)
-        or (ref.get("path") if isinstance(ref, dict) else "")
-        or getattr(ref, "url", None)
-        or (ref.get("url") if isinstance(ref, dict) else "")
-        or ""
-    )
-
-
-def _option_tokens(*parts: Any) -> set[str]:
-    found: set[str] = set()
-    for part in parts:
-        raw = str(part or "")
-        found.update(item.casefold() for item in _OPTION_TOKEN_RE.findall(raw) if len(item) > 1)
-        found.update(item.casefold() for item in _CAMEL_TOKEN_RE.findall(raw) if len(item) > 1)
-    return found - _GENERIC_OPTION_TOKENS
-
-
-def _option_tokens_align(field_tokens: set[str], source_tokens: set[str]) -> bool:
-    if field_tokens & source_tokens:
-        return True
-    for field_token in field_tokens:
-        if len(field_token) < 3:
-            continue
-        for source_token in source_tokens:
-            if len(source_token) < 3:
-                continue
-            if field_token in source_token or source_token in field_token:
-                return True
-    return False
-
-
-def _live_source_from_step(step: Any, ref: Any | None = None) -> dict[str, Any]:
-    method = str(
-        getattr(step, "method", None)
-        or getattr(ref, "method", None)
-        or (ref.get("method") if isinstance(ref, dict) else "")
-        or "GET"
-    )
-    endpoint = str(
-        getattr(step, "path", None)
-        or getattr(step, "url", None)
-        or _option_ref_path(ref)
-        or ""
-    ).strip()
-    return {
-        "source_method": method or "GET",
-        "source_url": endpoint,
-        "label_key": "name",
-        "value_key": "id",
-    }
-
-
-def _capability_option_refs(spec, cap: dict) -> list[Any]:  # noqa: ANN001
-    refs = list(cap.get("request_refs") or [])
-    if spec is None:
-        return [ref for ref in refs if _option_ref_usage(ref) == "option_source" and _option_ref_step_id(ref)]
-    keys = {str(cap.get("capability_id") or ""), str(cap.get("name") or "")} - {""}
-    for item in spec.capabilities or []:
-        if str(item.capability_id or "") in keys or str(item.name or "") in keys:
-            refs = list(item.request_refs or [])
-            break
-    return [ref for ref in refs if _option_ref_usage(ref) == "option_source" and _option_ref_step_id(ref)]
-
-
-def _option_source_from_refs(spec, cap: dict, name: str, field: dict[str, Any], param: Any | None) -> dict[str, Any] | None:  # noqa: ANN001
-    refs = _capability_option_refs(spec, cap)
-    if not refs:
-        return None
-    by_id = {str(step.step_id): step for step in (spec.steps or [])} if spec is not None else {}
-    param_path = str(getattr(param, "path", "") or "")
-    ref_ids = {_option_ref_step_id(ref) for ref in refs}
-    linked: list[str] = []
-    for link in (spec.links or []) if spec is not None else []:
-        source_id = str(getattr(link, "source_step_id", "") or "")
-        target_path = str(getattr(link, "target_path", "") or "")
-        if source_id not in ref_ids:
-            continue
-        if target_path == param_path or target_path.endswith(f".{name}") or target_path.endswith(name):
-            linked.append(source_id)
-    field_tokens = _option_tokens(
-        name,
-        field.get("title"),
-        field.get("label"),
-        field.get("description"),
-        getattr(param, "label", "") if param is not None else "",
-        getattr(param, "reason", "") if param is not None else "",
-    )
-    matched: list[str] = []
-    for ref in refs:
-        step_id = _option_ref_step_id(ref)
-        if linked and step_id not in linked:
-            continue
-        step = by_id.get(step_id)
-        source_tokens = _option_tokens(
-            _option_ref_path(ref),
-            getattr(step, "path", "") if step is not None else "",
-            getattr(step, "url", "") if step is not None else "",
-            getattr(step, "name", "") if step is not None else "",
-        )
-        if _option_tokens_align(field_tokens, source_tokens):
-            matched.append(step_id)
-    if len(dict.fromkeys(matched)) == 1:
-        candidates = list(dict.fromkeys(matched))
-    elif len(dict.fromkeys(linked)) == 1:
-        candidates = list(dict.fromkeys(linked))
-    elif _field_choice_kind(field, param) == "api_option" and len(refs) == 1:
-        candidates = [_option_ref_step_id(refs[0])]
-    else:
-        return None
-    step_id = str(candidates[0])
-    step = by_id.get(step_id)
-    ref = next((item for item in refs if _option_ref_step_id(item) == step_id), None)
-    source = _live_source_from_step(step, ref) if step is not None else {
-        "source_method": str(getattr(ref, "method", None) or (ref.get("method") if isinstance(ref, dict) else "") or "GET"),
-        "source_url": _option_ref_path(ref),
-        "label_key": "name",
-        "value_key": "id",
-    }
-    return source if _option_source_endpoint(source) else None
-
-
 def _apply_param_options_to_field(field: dict[str, Any], param: Any) -> None:
     """Copy caller-visible option contract from the capability param onto the schema field."""
     source = _param_option_source(param)
@@ -876,10 +737,6 @@ def _attach_capability_param_options(schema: dict[str, Any], spec, cap: dict) ->
         if param is not None:
             _apply_param_options_to_field(field, param)
         if _option_source_endpoint(_raw_option_source(field) or {}):
-            continue
-        ref_source = _option_source_from_refs(spec, cap, str(name), field, param)
-        if ref_source:
-            _apply_live_option_source(field, ref_source, param)
             continue
         labeled = _capability_enum_options(field)
         if labeled and not _enum_options_unlabeled(labeled):
@@ -1415,6 +1272,19 @@ def _option_binding(path: str, name: str, field: dict) -> dict | None:
         binding["category_key"] = source.get("category_key")
         if source.get("category_value") is not None:
             binding["category_value"] = source.get("category_value")
+    multi = source.get("multi")
+    if multi is None:
+        multi = field.get("multiple")
+    if multi is None and field.get("type") == "array":
+        multi = True
+    if multi:
+        binding["multi"] = True
+    for key in ("label_subkey", "element_template", "field_projections"):
+        value = source.get(key)
+        if value in (None, "", [], {}):
+            value = field.get(key)
+        if value not in (None, "", [], {}):
+            binding[key] = deepcopy(value)
     return binding
 
 
@@ -1437,9 +1307,8 @@ def _source_path(url: Any) -> str:
     return raw
 
 
-def _merge_schema_selects(existing: list[dict], schema: dict | None, cap: dict | None = None) -> list[dict]:
+def _merge_schema_selects(existing: list[dict], schema: dict | None) -> list[dict]:
     merged: list[dict] = []
-    seen_urls: set[str] = set()
     seen: set[tuple[str, str]] = set()
     for item in existing or []:
         if not isinstance(item, dict):
@@ -1448,8 +1317,6 @@ def _merge_schema_selects(existing: list[dict], schema: dict | None, cap: dict |
         if key in seen:
             continue
         seen.add(key)
-        if item.get("source_url"):
-            seen_urls.add(_source_path(item.get("source_url")))
         merged.append(item)
     for path, name, field in _iter_schema_fields(schema):
         binding = _option_binding(path, name, field)
@@ -1472,28 +1339,7 @@ def _merge_schema_selects(existing: list[dict], schema: dict | None, cap: dict |
                         existing_item[metadata_key] = deepcopy(binding[metadata_key])
             continue
         seen.add(key)
-        if binding.get("source_url"):
-            seen_urls.add(_source_path(binding.get("source_url")))
         merged.append(binding)
-    for ref in (cap or {}).get("request_refs") or []:
-        usage, _step_id = _ref_usage_and_step(ref)
-        if usage != "option_source":
-            continue
-        raw = ref if isinstance(ref, dict) else {}
-        path = str(raw.get("path") or getattr(ref, "path", "") or "")
-        method = str(raw.get("method") or getattr(ref, "method", "") or "GET").upper()
-        if not path:
-            continue
-        url = path
-        if _source_path(url) in seen_urls:
-            continue
-        seen_urls.add(_source_path(url))
-        merged.append({
-            "param": "",
-            "path": path,
-            "source_url": url,
-            "source_method": method or "GET",
-        })
     return merged
 
 
@@ -2126,7 +1972,7 @@ def _project_capability_step(
         for key in ("path", "url", "url_template"):
             if projected.get(key):
                 projected[key] = _strip_recorded_query(projected.get(key))
-    selects = _merge_schema_selects(list(projected.get("selects") or []), schema, cap)
+    selects = _merge_schema_selects(list(projected.get("selects") or []), schema)
     execute_step = (
         str(projected.get("method") or "GET").upper() not in {"GET", "HEAD"}
         or projected.get("body_template") is not None

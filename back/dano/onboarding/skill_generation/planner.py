@@ -1,9 +1,8 @@
-"""Propose a SkillPlan, then accept only a deterministically validated result."""
+"""Project a capability contract into a deterministic SkillPlan."""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -17,15 +16,9 @@ from dano.onboarding.skill_generation.catalog import (
     confirmed_fixed_or_system_inputs,
     distinct_stage8_capabilities,
     is_write_capability,
-    public_capability_catalog,
     schema_properties,
     schema_required,
     usable_relations,
-)
-from dano.onboarding.skill_generation.intent import (
-    branch_needs_clarification,
-    description_has_explicit_sequence,
-    extract_intent_branches,
 )
 from dano.onboarding.skill_generation.models import (
     CompositionMode,
@@ -43,13 +36,6 @@ from dano.onboarding.skill_generation.models import (
     StepInputSource,
     UnusedCapability,
 )
-from dano.onboarding.skill_generation.validate import (
-    PlanValidation,
-    handbook_text_is_banned,
-    is_stock_playbook,
-    validate_skill_plan,
-)
-
 log = structlog.get_logger(__name__)
 
 
@@ -74,19 +60,10 @@ def _log_plan(event: str, *, summary: str, status: str = "progress", level: str 
 
 PlanProposer = Callable[[FlowSpec, SkillGenerationRequest, set[str], str], Awaitable[SkillPlan | dict[str, Any]]]
 
-_QUERY_HINTS = ("查询", "查看", "列表", "待办", "记录", "检索", "筛选")
-_OPTION_HINTS = ("选项", "字典", "下拉", "候选")
-_SUBMIT_HINTS = ("提交", "保存", "审批", "写入", "新建", "编辑", "更新")
-_LOOKUP_HINTS = ("回查", "确认提交成功", "确认提交", "查询状态确认", "查询状态")
-_SECRET_RE = re.compile(r"(token|cookie|storage_state|password|authorization|bearer\s+\S+)", re.I)
 _OBJECT_PREFIXES = (
     "搜索/筛选", "搜索", "筛选", "查询", "查看", "新增", "新建", "修改", "编辑",
     "审批", "审核", "反审", "反审核", "删除", "提交", "办理",
 )
-
-
-def _is_recording_copy(value: Any) -> bool:
-    return handbook_text_is_banned(value) or is_stock_playbook(value)
 
 
 def _stable_route_id(sequence: list[FlowCapability]) -> str:
@@ -99,15 +76,10 @@ def _stable_route_id(sequence: list[FlowCapability]) -> str:
     return safe or "业务路线"
 
 
-_WRITE_DONE_MARKERS = ("写入已确认", "写操作已确认", "写入已确认且", "写完要能确认")
-
-
 def _route_done_when(request: SkillGenerationRequest, writes: list[FlowCapability]) -> str:
-    page = str(request.success_criteria or "").strip()
+    del request
     if writes:
-        return page or "用户已确认且写操作返回成功；有可用只读核查时已核查，否则明确标记为未回查"
-    if page and not any(token in page for token in _WRITE_DONE_MARKERS):
-        return page
+        return "用户已确认且写操作返回成功；有可用只读核查时已核查，否则明确标记为未回查"
     return "已返回可核对的查询结果"
 
 
@@ -115,63 +87,12 @@ def _family(cap: FlowCapability, spec: FlowSpec | None = None) -> str:
     return capability_family(cap, spec)
 
 
-def _text(request: SkillGenerationRequest) -> str:
-    parts = [
-        request.title,
-        request.business_description,
-        " ".join(request.example_requests),
-        request.success_criteria,
-        request.forbidden_actions,
-    ]
-    return "\n".join(str(item or "") for item in parts)
-
-
-def _mentions(text: str, hints: tuple[str, ...]) -> bool:
-    return any(hint in text for hint in hints)
-
-
-def _score_capability(cap: FlowCapability, text: str, spec: FlowSpec | None = None) -> int:
-    family = _family(cap, spec)
-    score = 0
-    title = f"{cap.title} {cap.name} {cap.intent}"
-    if cap.title and cap.title in text:
-        score += 6
-    if cap.name and cap.name in text:
-        score += 4
-    if family == "query" and _mentions(text, _QUERY_HINTS):
-        score += 3
-    if family == "option" and _mentions(text, _OPTION_HINTS):
-        score += 3
-    if family == "write" and _mentions(text, _SUBMIT_HINTS):
-        score += 3
-    if title.strip() and any(token and token in text for token in re.split(r"\s+", title) if len(token) >= 2):
-        score += 1
-    return score
-
-
-def _forbidden_capability_ids(
-    caps: list[FlowCapability],
-    request: SkillGenerationRequest,
-) -> set[str]:
-    text = str(request.forbidden_actions or "").strip()
-    if not text:
-        return set()
-    hits: set[str] = set()
-    for cap in caps:
-        title = str(cap.title or "").strip()
-        name = str(cap.name or "").strip()
-        if title and title in text:
-            hits.add(capability_ref(cap))
-        elif name and name in text:
-            hits.add(capability_ref(cap))
-    return hits
-
-
 def _select_capabilities(
     spec: FlowSpec,
     request: SkillGenerationRequest,
     verified_ids: set[str],
 ) -> tuple[list[FlowCapability], list[UnusedCapability]]:
+    del request
     verified = [
         cap for cap in spec.capabilities
         if capability_ref(cap) in verified_ids or cap.name in verified_ids
@@ -179,7 +100,6 @@ def _select_capabilities(
     caps, duplicates = distinct_stage8_capabilities(spec, verified)
     if not caps:
         return [], []
-    forbidden = _forbidden_capability_ids(caps, request)
     unused = [
         UnusedCapability(
             capability_id=capability_ref(cap),
@@ -189,41 +109,8 @@ def _select_capabilities(
         )
         for cap in verified
         if capability_ref(cap) in duplicates
-    ] + [
-        UnusedCapability(
-            capability_id=capability_ref(cap),
-            name=cap.name,
-            title=cap.title or cap.name,
-            reason="禁止或限制的操作",
-        )
-        for cap in caps
-        if capability_ref(cap) in forbidden
     ]
-    available = [cap for cap in caps if capability_ref(cap) not in forbidden]
-    if request.planning_mode == PlanningMode.DYNAMIC:
-        return available, unused
-    text = _text(request)
-    scored = [(cap, _score_capability(cap, text, spec)) for cap in available]
-    mentioned = [cap for cap, score in scored if score > 0]
-    if not mentioned:
-        selected = list(available)
-    else:
-        selected = mentioned
-        families = {_family(cap, spec) for cap in selected}
-        if "write" in families and "query" not in families and _mentions(text, _LOOKUP_HINTS):
-            selected.extend(cap for cap in available if _family(cap, spec) == "query" and cap not in selected)
-    selected_ids = {capability_ref(cap) for cap in selected}
-    unused.extend(
-        UnusedCapability(
-            capability_id=capability_ref(cap),
-            name=cap.name,
-            title=cap.title or cap.name,
-            reason="业务描述未要求该能力",
-        )
-        for cap in available
-        if capability_ref(cap) not in selected_ids
-    )
-    return selected, unused
+    return list(caps), unused
 
 
 def _relation_pair(spec: FlowSpec, left: FlowCapability, right: FlowCapability) -> list[RouteBinding]:
@@ -311,7 +198,7 @@ def _normalize_intent_text(value: Any) -> str:
 
 def _clean_when(value: Any, fallback: str) -> str:
     text = _normalize_intent_text(value)
-    if text and not _is_recording_copy(text):
+    if text:
         return text
     return fallback
 
@@ -321,16 +208,9 @@ def _example_request(
     when_to_use: str,
     sequence: list[FlowCapability],
 ) -> str:
+    del request
     titles = [_cap_title(cap) for cap in sequence]
-    for item in request.example_requests:
-        text = str(item).strip()
-        if text and not _is_recording_copy(text) and any(title and title in text for title in titles):
-            return text
-    for item in request.example_requests:
-        text = str(item).strip()
-        if text and not _is_recording_copy(text):
-            return text
-    if when_to_use and not _is_recording_copy(when_to_use):
+    if when_to_use:
         return when_to_use
     joined = "、".join(title for title in titles if title)
     return f"请{joined}" if joined else "按本页已打包操作办理"
@@ -350,9 +230,7 @@ def _object_from_title(title: str) -> str:
 
 
 def _page_object_name(request: SkillGenerationRequest, selected: list[FlowCapability]) -> str:
-    title = str(request.title or "").strip()
-    if title and not handbook_text_is_banned(title) and "能力录制" not in title and "等" not in title:
-        return title
+    del request
     first = _cap_title(selected[0]) if selected else ""
     return _object_from_title(first) or first or "本页业务"
 
@@ -362,13 +240,6 @@ def _title_for_ref(selected: list[FlowCapability], cap_id: str) -> str:
         if capability_ref(cap) == cap_id or cap.name == cap_id:
             return _cap_title(cap)
     return ""
-
-
-def _truncate_playbook(text: str, limit: int = 800) -> str:
-    value = str(text or "").strip()
-    if len(value) <= limit:
-        return value
-    return value[:limit].rstrip() + "…"
 
 
 def _operation_when(cap: FlowCapability, spec: FlowSpec | None = None) -> str:
@@ -391,10 +262,6 @@ def _binding_note(binding: RouteBinding, selected: list[FlowCapability]) -> str:
     return f"{binding.from_output} → {binding.to_input}"
 
 
-def _has_custom_playbook(request: SkillGenerationRequest) -> bool:
-    return not is_stock_playbook(request.business_description)
-
-
 def _build_composition(
     request: SkillGenerationRequest,
     selected: list[FlowCapability],
@@ -402,23 +269,11 @@ def _build_composition(
     spec: FlowSpec | None = None,
 ) -> tuple[str, list[str]]:
     titles = [_cap_title(cap) for cap in selected]
-    description = str(request.business_description or "").strip()
     page = _page_object_name(request, selected)
-    if _has_custom_playbook(request):
-        summary = _truncate_playbook(_normalize_intent_text(description))
-    else:
-        actions = "、".join(titles) if titles else "已打包操作"
-        summary = (
-            f"本页办理{page}：可{actions}。"
-            "每次只做用户当前要求的那一件；要先后办理时先查，再请用户指定记录。"
-        )
+    actions = "、".join(titles) if titles else "已打包操作"
+    summary = f"本页办理{page}：可{actions}。每次只执行用户当前要求的能力。"
     notes: list[str] = []
     combinations = [route for route in routes if len(route.capability_sequence) > 1]
-    if _has_custom_playbook(request) and combinations:
-        notes.append(
-            f"按用户说明办理：{_normalize_intent_text(description)}。"
-            "只在用户原话对应组合行时按该行顺序执行；无已确认绑定就在交接点停问，不得自动带入。"
-        )
     reads = [cap for cap in selected if not is_write_capability(cap, spec)]
     writes = [cap for cap in selected if is_write_capability(cap, spec)]
     if reads and writes:
@@ -447,27 +302,12 @@ def _build_composition(
                 )
     elif reads and writes:
         notes.append(
-            "没有已确认绑定，不能自动传值。先后办理就先查再问："
-            "先执行只读操作，停下来请用户指定记录，再写。"
+            "能力合同没有声明关联关系，因此不能自动传值或编排先后顺序；"
+            "只执行用户当前要求的一项业务操作。"
         )
     else:
-        notes.append("没有自动传值。一次对话只执行用户当前要求的那一件。")
-    return summary, [item for item in notes if item and not _is_recording_copy(item)]
-
-
-def _append_lookup(
-    sequence: list[FlowCapability],
-    queries: list[FlowCapability],
-    text: str,
-) -> list[FlowCapability]:
-    if not _mentions(text, _LOOKUP_HINTS) or not queries:
-        return list(sequence)
-    lookup = queries[0]
-    if not sequence:
-        return [lookup]
-    if any(item is lookup or capability_ref(item) == capability_ref(lookup) for item in sequence):
-        return list(sequence)
-    return [lookup, *sequence]
+        notes.append("没有自动传值。一次对话只执行用户当前要求的一项业务操作。")
+    return summary, [item for item in notes if item]
 
 
 def _pair_bindings(
@@ -487,7 +327,11 @@ def _pair_bindings(
     ]
     if matched:
         return matched
-    return _relation_pair(spec, left, right)
+    return [
+        binding
+        for binding in _relation_pair(spec, left, right)
+        if binding.from_output and binding.to_input
+    ]
 
 
 def _needs_target(cap: FlowCapability) -> bool:
@@ -529,17 +373,6 @@ def _placeholder_request(sequence: list[FlowCapability], fallback: str, spec: Fl
     if titles:
         return fallback if fallback and not fallback.startswith("按「") else f"帮我{titles[0]}"
     return fallback
-
-
-def _sequence_when(sequence: list[FlowCapability], spec: FlowSpec | None = None) -> str:
-    head = _cap_title(sequence[0]) if sequence else "前一步"
-    tail = _cap_title(sequence[-1]) if sequence else "后一步"
-    if sequence and _family(sequence[0], spec) == "query":
-        last = sequence[-1]
-        if _is_create(last):
-            return f"用户要先用「{head}」核对已有记录，再用「{tail}」补充尚未存在的项目"
-        return f"用户要先「{head}」，再对选定结果执行「{tail}」"
-    return f"用户明确要求先「{head}」，再「{tail}」"
 
 
 def _route(
@@ -663,29 +496,12 @@ def _route(
         when_to_use,
         " → ".join(_cap_title(cap) for cap in sequence) or "按本页已打包操作办理",
     )
-    example_request = _example_request(request, cleaned_when, sequence)
-    provided_examples = {
-        str(item).strip()
-        for item in request.example_requests
-        if str(item).strip() and not _is_recording_copy(item)
-    }
-    keep_provided_example = example_request in provided_examples and (
-        (
-            len(sequence) > 1
-            and all(_score_capability(cap, example_request, spec) > 0 for cap in sequence)
-        )
-        or (
-            len(sequence) == 1
-            and not description_has_explicit_sequence(example_request)
-        )
+    example_request = _placeholder_request(
+        sequence,
+        _example_request(request, cleaned_when, sequence),
+        spec,
     )
-    if not keep_provided_example:
-        if example_request in provided_examples:
-            example_request = cleaned_when
-        example_request = _placeholder_request(sequence, example_request, spec)
     failure = "任一能力失败立即停止；写操作结果不明时不得重试，先用已有只读能力核查。用户取消或候选无效时停止并报告未执行。"
-    if request.forbidden_actions:
-        failure = f"{failure} 禁止：{request.forbidden_actions}"
     ask_at = [
         f"{item.after_step} → {item.before_step}"
         for item in checkpoints
@@ -784,151 +600,43 @@ def _merge_equivalent_routes(routes: list[SkillRoute]) -> list[SkillRoute]:
     return merged
 
 
-def _compile_branch_route(
-    branch: IntentBranch,
-    spec: FlowSpec,
-    selected: list[FlowCapability],
-    request: SkillGenerationRequest,
-    queries: list[FlowCapability],
-) -> SkillRoute | str:
-    caps_index = _caps_by_id(selected)
-    sequence = [caps_index[cap_id] for cap_id in branch.capability_sequence if cap_id in caps_index]
-    if len(sequence) != len(branch.capability_sequence):
-        return f"无法把「{branch.trigger}」映射到已验证能力，请说明要使用哪一个已有操作"
-    if not sequence:
-        return branch.unresolved[0] if branch.unresolved else f"无法解释「{branch.trigger}」"
-    if (
-        len(sequence) == 1
-        and is_write_capability(sequence[0], spec)
-        and _mentions(branch.trigger, _LOOKUP_HINTS)
-    ):
-        sequence = _append_lookup(sequence, queries, branch.trigger)
-    bindings: list[RouteBinding] = []
-    for left, right in zip(sequence, sequence[1:], strict=False):
-        bindings.extend(_relation_pair(spec, left, right))
-    if len(sequence) == 1:
-        when = _operation_when(sequence[0], spec)
-        if branch.target_given and is_write_capability(sequence[0], spec):
-            when = f"要执行「{_cap_title(sequence[0])}」且目标或必要字段已经给出"
-    else:
-        when = branch.trigger if len(branch.trigger) <= 80 else _sequence_when(sequence, spec)
-    return _route(
-        route_id=_stable_route_id(sequence),
-        name=" → ".join(_cap_title(cap) for cap in sequence),
-        when_to_use=when,
-        sequence=sequence,
-        bindings=bindings,
-        request=request,
-        independent=branch.independent,
-        spec=spec,
-    )
-
-
 def _confirmed_relation_routes(
     spec: FlowSpec,
     selected: list[FlowCapability],
     request: SkillGenerationRequest,
-    mentioned: set[str],
-    queries: list[FlowCapability],
-    options: list[FlowCapability],
 ) -> list[SkillRoute]:
+    """Compile only relations explicitly present in the capability contract."""
+
+    by_ref = _caps_by_id(selected)
     routes: list[SkillRoute] = []
-    writes = [cap for cap in selected if is_write_capability(cap, spec)]
-    for write in writes:
-        if capability_ref(write) not in mentioned and write.name not in mentioned:
+    seen: set[tuple[str, str]] = set()
+    for relation in usable_relations(spec):
+        left = by_ref.get(str(relation.from_capability or ""))
+        right = by_ref.get(str(relation.to_capability or ""))
+        if left is None or right is None or left is right:
             continue
-        if queries:
-            bindings = _relation_pair(spec, queries[0], write)
-            if bindings:
-                sequence = _append_lookup([queries[0], write], queries, _text(request))
-                routes.append(_route(
-                    route_id=_stable_route_id(sequence),
-                    name=f"查询后{_cap_title(write)}",
-                    when_to_use=f"需要先查询记录，再对选中记录执行「{_cap_title(write)}」",
-                    sequence=sequence,
-                    bindings=bindings,
-                    request=request,
-                    spec=spec,
-                ))
-        if options:
-            bindings = _relation_pair(spec, options[0], write)
-            if bindings:
-                sequence = _append_lookup([options[0], write], queries, _text(request))
-                routes.append(_route(
-                    route_id=_stable_route_id(sequence),
-                    name=f"选项后{_cap_title(write)}",
-                    when_to_use=f"「{_cap_title(write)}」字段需要从选项中选择",
-                    sequence=sequence,
-                    bindings=bindings,
-                    request=request,
-                    spec=spec,
-                ))
-    return routes
-
-
-_TARGET_FIELD_NAMES = frozenset({
-    "id", "ids", "recordid", "recordids", "orderid", "orderids",
-    "bizid", "businessid", "单据id", "记录id", "订单id",
-})
-
-
-def _is_lookup_capability(cap: FlowCapability, spec: FlowSpec | None = None) -> bool:
-    title = _cap_title(cap)
-    return (
-        _family(cap, spec) == "query"
-        and not any(token in title for token in ("详情", "详细", "导出", "下载"))
-        and any(token in title for token in ("查询", "搜索", "筛选", "检索", "列表"))
-    )
-
-
-def _needs_record_selection(cap: FlowCapability) -> bool:
-    required = {
-        str(field).replace("_", "").casefold()
-        for field in schema_required(cap.input_schema)
-    }
-    title = _cap_title(cap)
-    return bool(required & _TARGET_FIELD_NAMES) or any(
-        token in title for token in ("详情", "详细", "修改", "更新", "编辑", "审核", "反审", "删除", "撤回")
-    )
-
-
-def _selection_handoff_routes(
-    spec: FlowSpec,
-    selected: list[FlowCapability],
-    request: SkillGenerationRequest,
-    existing: list[SkillRoute],
-) -> list[SkillRoute]:
-    """Plan lookup → select → operate without inventing an automatic binding."""
-
-    lookups = [cap for cap in selected if _is_lookup_capability(cap, spec)]
-    if not lookups:
-        return []
-    lookup = lookups[0]
-    existing_sequences = {tuple(route.capability_sequence) for route in existing}
-    routes: list[SkillRoute] = []
-    for target in selected:
-        if capability_ref(target) == capability_ref(lookup) or not _needs_record_selection(target):
+        pair = (capability_ref(left), capability_ref(right))
+        if pair in seen:
             continue
-        sequence = [lookup, target]
-        refs = tuple(capability_ref(cap) for cap in sequence)
-        if refs in existing_sequences:
-            continue
-        bindings = _relation_pair(spec, lookup, target)
-        title = _cap_title(target)
+        seen.add(pair)
+        sequence = [left, right]
+        bindings = [
+            binding
+            for binding in _relation_pair(spec, left, right)
+            if binding.from_output and binding.to_input
+        ]
         routes.append(_route(
             route_id=_stable_route_id(sequence),
-            name=f"先{_cap_title(lookup)}，再{title}",
+            name=f"{_cap_title(left)} → {_cap_title(right)}",
             when_to_use=(
-                f"要{title}但尚未指定目标时：先{_cap_title(lookup)}；"
-                + ("按已确认绑定带入目标" if bindings else "展示结果并请用户选定目标")
-                + f"，再{title}"
+                str(relation.reason or "").strip()
+                or f"按能力合同先「{_cap_title(left)}」，再「{_cap_title(right)}」"
             ),
             sequence=sequence,
             bindings=bindings,
             request=request,
             spec=spec,
         ))
-        existing_sequences.add(refs)
     return routes
 
 
@@ -969,104 +677,14 @@ def propose_deterministic_plan(
     source_flow_fingerprint: str,
 ) -> SkillPlan:
     selected, unused = _select_capabilities(spec, request, verified_ids)
-    text = _text(request)
-    by_family: dict[str, list[FlowCapability]] = {"query": [], "option": [], "write": [], "other": []}
-    for cap in selected:
-        by_family.setdefault(_family(cap, spec), []).append(cap)
-    queries = by_family.get("query") or []
-    options = by_family.get("option") or []
-    writes = by_family.get("write") or []
-    branches = extract_intent_branches(request, selected)
-    forbidden_ids = {item.capability_id for item in unused if "禁止" in item.reason or "限制" in item.reason}
+    # The Stage-8 plan is a projection of the capability contract. Free-form
+    # export prose must not select capabilities, create relationships, or set
+    # execution order.
+    branches: list[IntentBranch] = []
     clarifications: list[str] = []
-    routes: list[SkillRoute] = []
-
-    if request.planning_mode == PlanningMode.FIXED:
-        compiled: list[FlowCapability] = []
-        for branch in branches:
-            if branch_needs_clarification(branch):
-                clarifications.extend(branch.unresolved or [f"请澄清「{branch.trigger}」要走哪一条顺序"])
-                continue
-            if len(branch.capability_sequence) >= 2:
-                caps_index = _caps_by_id(selected)
-                compiled = [caps_index[item] for item in branch.capability_sequence if item in caps_index]
-                break
-        sequence: list[FlowCapability] = list(compiled)
-        bindings: list[RouteBinding] = []
-        if not sequence:
-            if queries and (_mentions(text, _QUERY_HINTS) or writes):
-                sequence.append(queries[0])
-            if writes:
-                write = writes[0]
-                if sequence:
-                    pair = _relation_pair(spec, sequence[-1], write)
-                    if pair:
-                        bindings.extend(pair)
-                sequence.append(write)
-        else:
-            for left, right in zip(sequence, sequence[1:], strict=False):
-                bindings.extend(_relation_pair(spec, left, right))
-        sequence = _append_lookup(sequence, queries, text)
-        if not sequence:
-            sequence = list(selected[:1] or spec.capabilities[:1])
-        routes.append(_route(
-            route_id="main",
-            name=" → ".join(_cap_title(cap) for cap in sequence) or "主要业务步骤",
-            when_to_use=_clean_when(
-                request.business_description if _has_custom_playbook(request) else "",
-                "按用户描述的顺序办理本页已选操作",
-            ),
-            sequence=sequence,
-            bindings=bindings,
-            request=request,
-            extra_preconditions=(
-                ["回查使用独立步骤，不要复用上一步的步骤身份"]
-                if _mentions(text, _LOOKUP_HINTS) and queries
-                else None
-            ),
-            spec=spec,
-        ))
-    else:
-        mentioned = {
-            cap_id
-            for branch in branches
-            for cap_id in branch.capability_sequence
-        }
-        write_mentioned = any(
-            _cap_title(cap) in text or cap.name in text or any(token in text for token in ("提交", "编辑", "审核", "删除", "新增", "新建"))
-            for cap in writes
-        )
-        for branch in branches:
-            if any(cap_id in forbidden_ids for cap_id in branch.capability_sequence):
-                continue
-            if branch_needs_clarification(branch):
-                clarifications.extend(branch.unresolved or [f"请澄清「{branch.trigger}」"])
-                continue
-            compiled_route = _compile_branch_route(branch, spec, selected, request, queries)
-            if isinstance(compiled_route, str):
-                clarifications.append(compiled_route)
-                continue
-            routes.append(compiled_route)
-        relation_ids = {capability_ref(cap) for cap in selected} if write_mentioned else mentioned
-        if relation_ids:
-            routes.extend(_confirmed_relation_routes(spec, selected, request, relation_ids, queries, options))
-        elif not branches:
-            routes.extend(_confirmed_relation_routes(
-                spec, selected, request, {capability_ref(cap) for cap in selected}, queries, options,
-            ))
-        if not routes and len(selected) == 1:
-            routes.append(_route(
-                route_id=_stable_route_id(selected[:1]),
-                name=_cap_title(selected[0]),
-                when_to_use=_operation_when(selected[0], spec),
-                sequence=selected[:1],
-                bindings=[],
-                request=request,
-                spec=spec,
-            ))
-        routes.extend(_selection_handoff_routes(spec, selected, request, routes))
-        routes.extend(_atomic_fallback_routes(selected, request, spec, routes))
-        routes = _merge_equivalent_routes(routes)
+    routes = _confirmed_relation_routes(spec, selected, request)
+    routes.extend(_atomic_fallback_routes(selected, request, spec, routes))
+    routes = _merge_equivalent_routes(routes)
 
     if request.planning_mode == PlanningMode.FIXED:
         used_ids = {cap_id for route in routes for cap_id in route.capability_sequence}
@@ -1101,21 +719,16 @@ def propose_deterministic_plan(
         "只有已确认绑定可以自动带入跨步骤字段；没有绑定就在交接点停问。",
         "不得输出 token、cookie、storage_state 或密码。",
     ]
-    if request.forbidden_actions:
-        safety.append(f"禁止或限制：{request.forbidden_actions}")
-    triggers = [
-        str(item).strip()
-        for item in request.example_requests
-        if str(item).strip() and not _is_recording_copy(item)
-    ]
+    # Triggers are capability/route facts too.  User-authored examples are not
+    # allowed to become executable behavior unless the capability contract
+    # already produced a matching route.
+    triggers: list[str] = []
     for route in routes:
         when = str(route.when_to_use or "").strip()
-        if when and when not in triggers and not _is_recording_copy(when):
+        if when and when not in triggers:
             triggers.append(when)
     composition_summary, composition_notes = _build_composition(request, selected, routes, spec)
-    summary = _normalize_intent_text(request.business_description.strip())
-    if is_stock_playbook(summary):
-        summary = composition_summary or "、".join(_cap_title(cap) for cap in selected)
+    summary = composition_summary or "、".join(_cap_title(cap) for cap in selected)
     return SkillPlan(
         source_flow_fingerprint=source_flow_fingerprint,
         planning_mode=request.planning_mode,
@@ -1132,188 +745,6 @@ def propose_deterministic_plan(
     )
 
 
-def _plan_is_usable(plan: SkillPlan) -> bool:
-    if not plan.selected_capability_ids or not plan.routes:
-        return False
-    return all(bool(route.capability_sequence) and bool(route.examples) for route in plan.routes)
-
-
-def _parse_proposed_plan(raw: SkillPlan | dict[str, Any], fallback: SkillPlan) -> SkillPlan:
-    if isinstance(raw, SkillPlan):
-        plan = raw
-    else:
-        payload = dict(raw or {})
-        payload.setdefault("source_flow_fingerprint", fallback.source_flow_fingerprint)
-        payload.setdefault("planning_mode", fallback.planning_mode)
-        plan = SkillPlan.model_validate(payload)
-    if not _plan_is_usable(plan):
-        return fallback
-    return plan
-
-
-def _clean_phrase(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text or _is_recording_copy(text):
-        return ""
-    return text
-
-
-def _merge_proposed_plan(fallback: SkillPlan, proposed: SkillPlan) -> SkillPlan:
-    """Keep recorded structure; take model wording only."""
-    if not _plan_is_usable(proposed):
-        return fallback
-    overlay = {
-        tuple(route.capability_sequence): route
-        for route in proposed.routes
-        if route.capability_sequence
-    }
-    merged_routes: list[SkillRoute] = []
-    for route in fallback.routes:
-        extra = overlay.get(tuple(route.capability_sequence))
-        payload = route.model_dump()
-        if extra is not None:
-            name = _clean_phrase(extra.name)
-            if name:
-                payload["name"] = name
-            when = _clean_phrase(extra.when_to_use)
-            if when:
-                payload["when_to_use"] = when
-            done = _clean_phrase(extra.done_when)
-            if done:
-                payload["done_when"] = done
-            failure = _clean_phrase(extra.failure_behavior)
-            if failure:
-                payload["failure_behavior"] = failure
-            if extra.steps and route.steps:
-                polished = []
-                for frozen, incoming in zip(route.steps, extra.steps, strict=False):
-                    step_payload = frozen.model_dump()
-                    step_done = _clean_phrase(incoming.done_when)
-                    if step_done:
-                        step_payload["done_when"] = step_done
-                    step_fail = _clean_phrase(incoming.on_failure)
-                    if step_fail:
-                        step_payload["on_failure"] = step_fail
-                    if frozen.checkpoint is not None and incoming.checkpoint is not None:
-                        prompt = _clean_phrase(incoming.checkpoint.prompt)
-                        if prompt:
-                            step_payload["checkpoint"] = frozen.checkpoint.model_copy(update={"prompt": prompt}).model_dump()
-                    polished.append(step_payload)
-                payload["steps"] = polished
-            examples = []
-            for example in extra.examples:
-                request_text = _clean_phrase(example.user_request)
-                if not request_text:
-                    continue
-                if example.capability_sequence and example.capability_sequence != list(route.capability_sequence):
-                    continue
-                base = route.examples[0] if route.examples else None
-                examples.append(
-                    RouteExample(
-                        user_request=request_text,
-                        route_id=route.route_id,
-                        collected_fields=list(route.required_user_inputs),
-                        capability_sequence=list(route.capability_sequence),
-                        bindings=list(route.bindings),
-                        confirmation_points=list(
-                            example.confirmation_points
-                            or (base.confirmation_points if base else [])
-                        ),
-                        done_when=done or route.done_when,
-                        input_origins=list(base.input_origins if base else []),
-                        auto_bound_fields=list(base.auto_bound_fields if base else []),
-                        ask_at=list(base.ask_at if base else []),
-                        confirm_at=list(base.confirm_at if base else []),
-                        on_cancel=base.on_cancel if base else route.failure_behavior,
-                        on_empty_or_ambiguous=base.on_empty_or_ambiguous if base else "",
-                        on_unknown_write_result=base.on_unknown_write_result if base else "",
-                    )
-                )
-            if examples:
-                payload["examples"] = [examples[0].model_dump()]
-        payload["bindings"] = [item.model_dump() for item in route.bindings]
-        payload["capability_sequence"] = list(route.capability_sequence)
-        payload["step_ids"] = list(route.step_ids)
-        payload["composition_mode"] = route.composition_mode
-        payload["checkpoints"] = [item.model_dump() for item in route.checkpoints]
-        merged_routes.append(SkillRoute.model_validate(payload))
-    return fallback.model_copy(update={
-        "routes": merged_routes,
-        "selected_capability_ids": list(fallback.selected_capability_ids),
-        "unused_capabilities": list(fallback.unused_capabilities),
-        "summary": fallback.summary,
-        "trigger_phrases": list(fallback.trigger_phrases),
-        "composition_summary": fallback.composition_summary,
-        "composition_notes": list(fallback.composition_notes),
-        "intent_branches": list(fallback.intent_branches),
-        "clarification_questions": list(fallback.clarification_questions),
-    })
-
-
-async def _llm_propose(
-    spec: FlowSpec,
-    request: SkillGenerationRequest,
-    verified_ids: set[str],
-    source_flow_fingerprint: str,
-    *,
-    frozen: SkillPlan,
-    repair_errors: list[str] | None = None,
-) -> SkillPlan:
-    from dano.infra.llm import openai_text_spawn
-
-    catalog = public_capability_catalog(spec, verified_ids)
-    relations = [
-        {
-            "from_capability": relation.from_capability,
-            "from_output": relation.from_output,
-            "to_capability": relation.to_capability,
-            "to_input": relation.to_input,
-            "confirmed": relation.confirmed,
-            "type": relation.type,
-            "transform_owner": relation.transform_owner,
-            "source_selector": relation.source_selector,
-            "target_path": relation.target_path,
-        }
-        for relation in usable_relations(spec)
-    ]
-    prompt = {
-        "task": "不要重新规划能力或路线。只润色已冻结规划的自然语言，输出完整 JSON。",
-        "purpose": (
-            "输出给办理本页业务的 Agent 阅读。"
-            "禁止阶段号、禁止录制过程、禁止把操作名复读成清单。"
-        ),
-        "rules": [
-            "selected_capability_ids、unused_capabilities、intent_branches、每条 route 的 route_id、capability_sequence、bindings、step_ids、steps、checkpoints、composition_mode 必须与 frozen_plan 完全一致",
-            "只能改 name、when_to_use、done_when、failure_behavior、checkpoint.prompt、examples.user_request 的措辞",
-            "不得新增未验证能力、不得新增或改变绑定、不得改变能力顺序、不得删除确认门禁",
-            "不得把人工交接改成自动传值，不得把未知结果改成成功",
-            "when_to_use 和例句用用户说法，示例 ID/姓名/日期必须用 <占位符>",
-            "禁止出现：阶段、原子能力、录制、FlowSpec、fingerprint、capability_id、规划依据",
-        ],
-        "request": request.model_dump(mode="json"),
-        "frozen_plan": frozen.model_dump(mode="json"),
-        "source_flow_fingerprint": source_flow_fingerprint,
-        "verified_capabilities": catalog,
-        "confirmed_relations": relations,
-        "repair_errors": list(repair_errors or []),
-    }
-    text = await openai_text_spawn(
-        json.dumps(prompt, ensure_ascii=False),
-        tag="skill_plan",
-        json_mode=True,
-    )
-    if not str(text or "").strip():
-        raise ValueError("模型没有返回规划")
-    if _SECRET_RE.search(text):
-        raise ValueError("模型输出包含敏感凭证字段")
-    payload = json.loads(text)
-    if not isinstance(payload, dict):
-        raise ValueError("模型规划必须是 JSON 对象")
-    payload.setdefault("source_flow_fingerprint", source_flow_fingerprint)
-    payload.setdefault("planning_mode", request.planning_mode)
-    return SkillPlan.model_validate(payload)
-
-
 async def generate_skill_plan(
     spec: FlowSpec,
     request: SkillGenerationRequest,
@@ -1322,18 +753,9 @@ async def generate_skill_plan(
     source_flow_fingerprint: str,
     proposer: PlanProposer | None = None,
 ) -> SkillGenerationResult:
-    if not str(request.business_description or "").strip():
-        _log_plan("skill.plan.failed", summary="业务描述为空", status="failed", level="error")
-        return SkillGenerationResult(
-            status="generation_failed",
-            errors=["业务描述不能为空"],
-        )
-    if _SECRET_RE.search(_text(request)):
-        _log_plan("skill.plan.failed", summary="业务描述包含敏感字段", status="failed", level="error")
-        return SkillGenerationResult(
-            status="generation_failed",
-            errors=["业务描述或示例不得包含 token、cookie、storage_state 或密码"],
-        )
+    # Kept only for API compatibility. Stage 8 never delegates capability facts,
+    # routes, or handbook wording to a model.
+    del proposer
     if not verified_capability_ids:
         _log_plan("skill.plan.failed", summary="没有可导出能力", status="failed", level="error")
         return SkillGenerationResult(
@@ -1342,9 +764,6 @@ async def generate_skill_plan(
         )
 
     fallback = propose_deterministic_plan(spec, request, verified_capability_ids, source_flow_fingerprint)
-    proposed: SkillPlan = fallback
-    errors: list[str] = []
-    used_llm = False
     _log_plan(
         "skill.plan.deterministic",
         summary="已生成确定性规划草案",
@@ -1361,152 +780,12 @@ async def generate_skill_plan(
             for route in fallback.routes
         ],
     )
-    fallback_checked = validate_skill_plan(
-        fallback,
-        spec,
-        verified_capability_ids=verified_capability_ids,
-        expected_fingerprint=source_flow_fingerprint,
-    )
-    if not fallback_checked.ok:
-        _log_plan(
-            "skill.plan.validation_failed",
-            summary="确定性规划未通过，不再调用模型润色或修复",
-            status="warning",
-            level="warning",
-            errors=list(fallback_checked.errors),
-            clarifications=list(fallback_checked.clarifications),
-        )
-        return _plan_outcome(fallback, fallback_checked)
-
-    if proposer is not None:
-        try:
-            proposed = _parse_proposed_plan(
-                await proposer(spec, request, verified_capability_ids, source_flow_fingerprint),
-                fallback,
-            )
-        except Exception as exc:  # noqa: BLE001 - proposer failure is reported, not guessed
-            _log_plan(
-                "skill.plan.failed",
-                summary="规划提案失败",
-                status="failed",
-                level="error",
-                error=str(exc) or "规划提案失败",
-            )
-            return SkillGenerationResult(
-                status="generation_failed",
-                errors=[str(exc) or "规划提案失败"],
-            )
-    else:
-        api_key = ""
-        try:
-            from dano.config import get_settings
-            api_key = str(get_settings().pi_api_key or "").strip()
-        except Exception:  # noqa: BLE001 - missing settings keep the deterministic plan
-            api_key = ""
-        if api_key:
-            try:
-                proposed = _merge_proposed_plan(
-                    fallback,
-                    _parse_proposed_plan(
-                        await _llm_propose(
-                            spec, request, verified_capability_ids, source_flow_fingerprint,
-                            frozen=fallback,
-                        ),
-                        fallback,
-                    ),
-                )
-                used_llm = True
-            except Exception as exc:  # noqa: BLE001 - deterministic plan is the fallback candidate
-                errors.append(str(exc) or "模型规划失败")
-                proposed = fallback
-                _log_plan(
-                    "skill.plan.llm_fallback",
-                    summary="模型规划失败，回退确定性草案",
-                    status="warning",
-                    level="warning",
-                    error=str(exc) or "模型规划失败",
-                )
-            else:
-                _log_plan(
-                    "skill.plan.llm",
-                    summary="模型用语已并入确定性规划，路线结构未改",
-                    selected_capability_ids=list(proposed.selected_capability_ids),
-                    route_ids=[route.route_id for route in proposed.routes],
-                )
-
-    checked = validate_skill_plan(
-        proposed,
-        spec,
-        verified_capability_ids=verified_capability_ids,
-        expected_fingerprint=source_flow_fingerprint,
-    )
-    if checked.ok:
-        _log_plan(
-            "skill.plan.validated",
-            summary="规划校验通过",
-            status="succeeded",
-            used_llm=used_llm,
-            selected_capability_ids=list(proposed.selected_capability_ids),
-            route_ids=[route.route_id for route in proposed.routes],
-        )
-        return SkillGenerationResult(status="planned", plan=proposed)
-
-    if used_llm:
-        _log_plan(
-            "skill.plan.llm_fallback",
-            summary="模型规划无效，已回退确定性规划",
-            status="warning",
-            level="warning",
-            errors=list(checked.errors),
-            clarifications=list(checked.clarifications),
-            selected_capability_ids=list(fallback.selected_capability_ids),
-            route_ids=[route.route_id for route in fallback.routes],
-        )
-        return SkillGenerationResult(status="planned", plan=fallback)
-    return _plan_outcome(proposed, checked, errors)
-
-
-def _plan_outcome(
-    plan: SkillPlan | None,
-    checked: PlanValidation,
-    extra_errors: list[str] | None = None,
-) -> SkillGenerationResult:
-    errors = list(checked.errors) + [item for item in (extra_errors or []) if item]
-    if checked.clarifications and not checked.errors:
-        _log_plan(
-            "skill.plan.needs_clarification",
-            summary="规划需要补充说明",
-            status="warning",
-            level="warning",
-            clarifications=list(checked.clarifications),
-            errors=list(errors),
-        )
-        return SkillGenerationResult(
-            status="needs_clarification",
-            plan=plan,
-            clarification_questions=checked.clarifications,
-            errors=errors,
-        )
-    if checked.clarifications:
-        _log_plan(
-            "skill.plan.needs_clarification",
-            summary="规划校验失败且需要补充说明",
-            status="failed",
-            level="error",
-            clarifications=list(checked.clarifications),
-            errors=errors,
-        )
-        return SkillGenerationResult(
-            status="needs_clarification",
-            plan=None,
-            clarification_questions=checked.clarifications,
-            errors=errors,
-        )
     _log_plan(
-        "skill.plan.failed",
-        summary="规划校验失败",
-        status="failed",
-        level="error",
-        errors=errors,
+        "skill.plan.projected",
+        summary="已按能力原样生成规划",
+        status="succeeded",
+        used_external_proposer=False,
+        selected_capability_ids=list(fallback.selected_capability_ids),
+        route_ids=[route.route_id for route in fallback.routes],
     )
-    return SkillGenerationResult(status="generation_failed", errors=errors)
+    return SkillGenerationResult(status="planned", plan=fallback)

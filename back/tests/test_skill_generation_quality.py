@@ -6,9 +6,11 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from dano.execution.page.flow_spec import FlowCapability, FlowSpec
+from dano.execution.page.flow_spec_core.models import CapabilityRelation
 from dano.onboarding.skill_generation import (
     PlanningMode,
     SkillGenerationRequest,
+    generate_skill_plan,
     propose_deterministic_plan,
 )
 from dano.onboarding.skill_generation.quality import (
@@ -46,12 +48,30 @@ def _cap(capability_id: str, title: str, kind: str, required: list[str] | None =
     )
 
 
+def _chain(left: str, right: str, reason: str) -> CapabilityRelation:
+    return CapabilityRelation(
+        relation_id=f"{left}-to-{right}",
+        type="suggested_call_chain",
+        mode="handoff",
+        from_capability=left,
+        to_capability=right,
+        confirmed=True,
+        reason=reason,
+    )
+
+
 def _plan():  # noqa: ANN202
-    spec = FlowSpec(capabilities=[
-        _cap("search", "查询销售订单", "query"),
-        _cap("detail", "查看销售订单详情", "inspect", ["id"]),
-        _cap("update", "修改销售订单", "update", ["id"]),
-    ])
+    spec = FlowSpec(
+        capabilities=[
+            _cap("search", "查询销售订单", "query"),
+            _cap("detail", "查看销售订单详情", "inspect", ["id"]),
+            _cap("update", "修改销售订单", "update", ["id"]),
+        ],
+        capability_relations=[
+            _chain("search", "detail", "先查询销售订单，让用户选择后查看详情"),
+            _chain("search", "update", "先查询销售订单，让用户选择后修改销售订单"),
+        ],
+    )
     plan = propose_deterministic_plan(
         spec,
         SkillGenerationRequest(
@@ -66,12 +86,50 @@ def _plan():  # noqa: ANN202
     return spec, plan
 
 
-def test_then_in_plain_chinese_is_order_not_an_unknown_action() -> None:
+async def test_stage8_projects_declared_capabilities_without_model_or_prose_routes() -> None:
     spec = FlowSpec(capabilities=[
-        _cap("stats", "查询工作汇报统计", "query"),
-        _cap("search", "搜索工作日报列表", "query"),
-        _cap("create", "新增并提交工作日报", "submit"),
+        _cap("search", "搜索申请列表", "query"),
+        _cap("create", "新增申请", "create", ["title"]),
     ])
+    proposer_called = False
+
+    async def proposer(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        nonlocal proposer_called
+        proposer_called = True
+        raise AssertionError("stage 8 must not call a model proposer")
+
+    result = await generate_skill_plan(
+        spec,
+        SkillGenerationRequest(
+            title="申请",
+            business_description="先搜索，再新增；token 只是用户说明中的普通文本",
+        ),
+        verified_capability_ids={"search", "create"},
+        source_flow_fingerprint="declared-capabilities-only",
+        proposer=proposer,
+    )
+
+    assert result.status == "planned"
+    assert proposer_called is False
+    assert result.plan is not None
+    assert result.plan.selected_capability_ids == ["search", "create"]
+    assert [route.capability_sequence for route in result.plan.routes] == [
+        ["search"],
+        ["create"],
+    ]
+
+
+def test_then_in_plain_chinese_is_order_not_an_unknown_action() -> None:
+    spec = FlowSpec(
+        capabilities=[
+            _cap("stats", "查询工作汇报统计", "query"),
+            _cap("search", "搜索工作日报列表", "query"),
+            _cap("create", "新增并提交工作日报", "submit"),
+        ],
+        capability_relations=[
+            _chain("stats", "create", "先查询工作汇报统计，然后根据返回进行新增"),
+        ],
+    )
     plan = propose_deterministic_plan(
         spec,
         SkillGenerationRequest(
@@ -94,12 +152,15 @@ def test_then_in_plain_chinese_is_order_not_an_unknown_action() -> None:
 
 
 def test_result_then_create_without_ranhou_compiles_handoff_route() -> None:
-    spec = FlowSpec(capabilities=[
-        _cap("stats", "查询工作汇报统计", "query"),
-        _cap("search", "搜索工作日报列表", "query"),
-        _cap("create", "新增并提交工作日报", "command", ["title"]),
-    ])
     playbook = "先查询工作汇报统计，根据返回进行新增"
+    spec = FlowSpec(
+        capabilities=[
+            _cap("stats", "查询工作汇报统计", "query"),
+            _cap("search", "搜索工作日报列表", "query"),
+            _cap("create", "新增并提交工作日报", "command", ["title"]),
+        ],
+        capability_relations=[_chain("stats", "create", playbook)],
+    )
     plan = propose_deterministic_plan(
         spec,
         SkillGenerationRequest(
@@ -197,10 +258,10 @@ def test_stage_six_generates_an_editable_business_description_from_operations() 
         {"search", "create"},
         "generated-description-fingerprint",
     )
-    combo = next(route for route in plan.routes if route.capability_sequence == ["search", "create"])
-    assert combo.checkpoints[0].choice_source == "free_text"
-    assert "确认哪些项目仍需新增" in combo.checkpoints[0].prompt
-    assert "结构化内容" in combo.checkpoints[0].prompt
+    assert {tuple(route.capability_sequence) for route in plan.routes} == {
+        ("search",),
+        ("create",),
+    }
     assert plan.clarification_questions == []
 
 

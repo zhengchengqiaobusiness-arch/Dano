@@ -82,6 +82,18 @@ def _cap(
     )
 
 
+def _chain(left: str, right: str, reason: str = "") -> CapabilityRelation:
+    return CapabilityRelation(
+        relation_id=f"{left}-to-{right}",
+        type="suggested_call_chain",
+        mode="handoff",
+        from_capability=left,
+        to_capability=right,
+        confirmed=True,
+        reason=reason,
+    )
+
+
 def test_recorded_skill_package_uses_only_the_action_id_as_its_folder_name() -> None:
     action = "action_8a01bc7d87ef4680b2b259147e3d3322"
 
@@ -184,7 +196,7 @@ async def test_reexporting_the_same_recording_republishes_the_catalog_entry(tmp_
         ),
     }
     published = 0
-    local_was_removed = False
+    existing_skill_was_preserved = False
     persisted: dict = {}
 
     async def proposer(current_spec, current_request, verified, source_fingerprint):  # noqa: ANN001
@@ -204,8 +216,8 @@ async def test_reexporting_the_same_recording_republishes_the_catalog_entry(tmp_
         persisted.update(next_body)
 
     def render(skill, out_dir: str, *, tenant: str) -> str:  # noqa: ANN001
-        nonlocal local_was_removed
-        local_was_removed = not existing_path.exists()
+        nonlocal existing_skill_was_preserved
+        existing_skill_was_preserved = existing_path.exists()
         return render_skill_package(skill, out_dir, tenant=tenant)
 
     outcome = await export_recording_skill(
@@ -224,7 +236,7 @@ async def test_reexporting_the_same_recording_republishes_the_catalog_entry(tmp_
     assert outcome.idempotent is False
     assert outcome.version == 2
     assert published == 1
-    assert local_was_removed is True
+    assert existing_skill_was_preserved is True
     assert persisted["skill_export_status"] == "exported"
 
 
@@ -234,7 +246,11 @@ def _sales_spec() -> FlowSpec:
             _cap("query_detail", "查询销售订单详情", "query", required=["id"]),
             _cap("update_order", "更新销售订单", "update", required=["id", "items"]),
             _cap("revoke_order", "反审核销售订单", "update", required=["ids"]),
-        ]
+        ],
+        capability_relations=[
+            _chain("query_detail", "update_order"),
+            _chain("revoke_order", "update_order"),
+        ],
     )
 
 
@@ -859,17 +875,28 @@ def test_confirmed_binding_is_executable_and_visible_in_the_main_route_table() -
     )
 
 
-def test_sales_playbook_compiles_only_the_natural_business_sequences() -> None:
-    spec = FlowSpec(capabilities=[
-        _cap("search", "按条件搜索销售订单", "query"),
-        _cap("detail", "获取销售订单详细信息", "inspect", required=["id"]),
-        _cap("create", "新增销售订单", "create", required=["items"]),
-        _cap("update", "修改销售订单信息", "update", required=["id", "items"]),
-        _cap("approve", "审核销售订单", "approve", required=["id"]),
-        _cap("unapprove", "反审核销售订单", "reject", required=["id"]),
-        _cap("delete", "删除销售订单", "delete", required=["ids"]),
-        _cap("export", "导出销售订单为Excel", "export"),
-    ])
+def test_declared_relations_compile_only_the_contract_sequences() -> None:
+    spec = FlowSpec(
+        capabilities=[
+            _cap("search", "按条件搜索销售订单", "query"),
+            _cap("detail", "获取销售订单详细信息", "inspect", required=["id"]),
+            _cap("create", "新增销售订单", "create", required=["items"]),
+            _cap("update", "修改销售订单信息", "update", required=["id", "items"]),
+            _cap("approve", "审核销售订单", "approve", required=["id"]),
+            _cap("unapprove", "反审核销售订单", "reject", required=["id"]),
+            _cap("delete", "删除销售订单", "delete", required=["ids"]),
+            _cap("export", "导出销售订单为Excel", "export"),
+        ],
+        capability_relations=[
+            _chain("search", "detail"),
+            _chain("create", "update"),
+            _chain("unapprove", "update"),
+            _chain("search", "update"),
+            _chain("search", "approve"),
+            _chain("search", "unapprove"),
+            _chain("search", "delete"),
+        ],
+    )
     request = SkillGenerationRequest(
         title="销售订单",
         planning_mode=PlanningMode.DYNAMIC,
@@ -902,10 +929,13 @@ def test_sales_playbook_compiles_only_the_natural_business_sequences() -> None:
 
 
 def test_missing_target_request_prefers_search_handoff_over_atomic_write() -> None:
-    spec = FlowSpec(capabilities=[
-        _cap("search", "查询销售订单", "query"),
-        _cap("update", "修改销售订单", "update", required=["id"]),
-    ])
+    spec = FlowSpec(
+        capabilities=[
+            _cap("search", "查询销售订单", "query"),
+            _cap("update", "修改销售订单", "update", required=["id"]),
+        ],
+        capability_relations=[_chain("search", "update")],
+    )
     plan = propose_deterministic_plan(
         spec,
         SkillGenerationRequest(
@@ -926,10 +956,13 @@ def test_missing_target_request_prefers_search_handoff_over_atomic_write() -> No
 
 
 def test_combination_example_never_claims_a_search_step_that_is_not_in_route() -> None:
-    spec = FlowSpec(capabilities=[
-        _cap("create", "新增销售订单", "create", required=["items"]),
-        _cap("update", "修改销售订单", "update", required=["id"]),
-    ])
+    spec = FlowSpec(
+        capabilities=[
+            _cap("create", "新增销售订单", "create", required=["items"]),
+            _cap("update", "修改销售订单", "update", required=["id"]),
+        ],
+        capability_relations=[_chain("create", "update")],
+    )
     plan = propose_deterministic_plan(
         spec,
         SkillGenerationRequest(
@@ -948,11 +981,14 @@ def test_combination_example_never_claims_a_search_step_that_is_not_in_route() -
     assert "修改销售订单" in combo.examples[0].user_request
 
 
-def test_explicit_example_request_is_kept_as_the_route_example() -> None:
-    spec = FlowSpec(capabilities=[
-        _cap("search", "查询销售订单", "query"),
-        _cap("update", "修改销售订单", "update", required=["id"]),
-    ])
+def test_user_example_does_not_override_the_declared_relation() -> None:
+    spec = FlowSpec(
+        capabilities=[
+            _cap("search", "查询销售订单", "query"),
+            _cap("update", "修改销售订单", "update", required=["id"]),
+        ],
+        capability_relations=[_chain("search", "update", "能力合同规定先查后改")],
+    )
     user_example = "先查询销售订单，让我选一条，再修改销售订单"
     plan = propose_deterministic_plan(
         spec,
@@ -967,7 +1003,8 @@ def test_explicit_example_request_is_kept_as_the_route_example() -> None:
     )
     combo = next(route for route in plan.routes if route.capability_sequence == ["search", "update"])
 
-    assert combo.examples[0].user_request == user_example
+    assert combo.when_to_use == "能力合同规定先查后改"
+    assert combo.examples[0].user_request != user_example
     assert match_routes(plan, user_example)[0].capability_sequence == ["search", "update"]
 
 
@@ -1203,19 +1240,23 @@ def test_capability_index_includes_a_business_output_overview() -> None:
 
 
 def test_rendered_package_is_executable_and_contains_no_generation_vocabulary(tmp_path: Path) -> None:
-    spec = FlowSpec(capabilities=[
-        _cap("query", "查询工作记录", "query", required=["ownerId"]),
-        _cap("create", "新增工作记录", "create", required=["items"]),
-    ])
+    relation_reason = (
+        "核对已有记录并补充缺失项时，先「查询工作记录」，再「新增工作记录」。"
+        "查询结果列出已有项和待处理项；新增范围仅限用户确认的未存在项目。"
+    )
+    spec = FlowSpec(
+        capabilities=[
+            _cap("query", "查询工作记录", "query", required=["ownerId"]),
+            _cap("create", "新增工作记录", "create", required=["items"]),
+        ],
+        capability_relations=[_chain("query", "create", relation_reason)],
+    )
     plan = propose_deterministic_plan(
         spec,
         SkillGenerationRequest(
             title="工作记录",
             planning_mode=PlanningMode.DYNAMIC,
-            business_description=(
-                "核对已有记录并补充缺失项时，先「查询工作记录」，再「新增工作记录」。"
-                "查询结果列出已有项和待处理项；新增范围仅限用户确认的未存在项目。"
-            ),
+            business_description=relation_reason,
         ),
         {"query", "create"},
         "rendered-package-fingerprint",
@@ -1329,7 +1370,7 @@ def test_rendered_package_is_executable_and_contains_no_generation_vocabulary(tm
     assert "组合行必须按该行步骤顺序执行" in handbook
     assert "不要把多条路线合并" not in handbook
     assert "scripts/format_list.py" in handbook
-    assert "按用户说明办理" in handbook
+    assert relation_reason in handbook
     assert "没有已确认绑定" in handbook
 
 
@@ -1853,11 +1894,14 @@ def test_object_array_form_uses_table_sections_and_column_titles() -> None:
 
 
 def test_result_then_playbook_renders_combination_route_and_readable_scripts(tmp_path: Path) -> None:
-    spec = FlowSpec(capabilities=[
-        _cap("stats", "查询工作汇报统计", "query"),
-        _cap("create", "新增并提交工作日报", "create", required=["title"]),
-    ])
     playbook = "先查询工作汇报统计，根据返回进行新增"
+    spec = FlowSpec(
+        capabilities=[
+            _cap("stats", "查询工作汇报统计", "query"),
+            _cap("create", "新增并提交工作日报", "create", required=["title"]),
+        ],
+        capability_relations=[_chain("stats", "create", playbook)],
+    )
     plan = propose_deterministic_plan(
         spec,
         SkillGenerationRequest(
@@ -1936,7 +1980,6 @@ def test_result_then_playbook_renders_combination_route_and_readable_scripts(tmp
     assert playbook in handbook
     assert "references/routes/查询工作汇报统计-然后-新增并提交工作日报.md" in handbook
     assert "确认哪些项目仍需新增" in handbook
-    assert "按用户说明办理" in handbook
     assert "没有已确认绑定" in handbook
     assert 'name: "日报填写"' in handbook or "name: 日报填写" in handbook
     assert "capability_" not in "\n".join(scripts)
@@ -2388,7 +2431,7 @@ def test_sync_schema_then_export_keeps_caller_controls() -> None:
     assert questions["reportType"]["options"][0] == {"id": 1, "label": "日报"}
 
 
-def test_export_projects_pi_option_contract_when_schema_is_bare() -> None:
+def test_export_does_not_guess_option_source_when_schema_is_bare() -> None:
     spec = FlowSpec(
         capabilities=[
             FlowCapability(
@@ -2493,20 +2536,19 @@ def test_export_projects_pi_option_contract_when_schema_is_bare() -> None:
     questions = {item["id"]: item for item in _form_questions(_input_forms_md(plans))}
     public = _public_schema(plans[0]["input_schema"])["properties"]
 
-    assert questions["deptId"]["inputType"] == "treeSelect"
-    assert questions["deptId"]["dataSource"]["endpoint"] == "/admin-api/system/dept/list"
-    assert questions["deptId"]["dataSource"]["childrenField"] == "children"
+    assert questions["deptId"]["inputType"] == "text"
+    assert "dataSource" not in questions["deptId"]
     assert questions["reportType"]["inputType"] == "select"
     assert questions["reportType"]["options"] == [
         {"id": 1, "label": "日报"},
         {"id": 2, "label": "周报"},
         {"id": 3, "label": "月报"},
     ]
-    assert public["deptId"]["dataSource"]["endpoint"] == "/admin-api/system/dept/list"
+    assert "dataSource" not in public["deptId"]
     assert public["reportType"]["x-enum-options"][0] == {"id": 1, "label": "日报"}
 
 
-def test_export_binds_option_source_ref_when_param_source_is_missing() -> None:
+def test_export_does_not_bind_an_unmapped_option_source_ref() -> None:
     spec = FlowSpec(
         capabilities=[
             FlowCapability(
@@ -2589,7 +2631,8 @@ def test_export_binds_option_source_ref_when_param_source_is_missing() -> None:
     plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), spec, api_request)
     questions = {item["id"]: item for item in _form_questions(_input_forms_md(plans))}
 
-    assert questions["deptId"]["dataSource"]["endpoint"] == "/admin-api/system/dept/list"
+    assert questions["deptId"]["inputType"] == "text"
+    assert "dataSource" not in questions["deptId"]
     assert questions["processStatus"]["options"] == [
         {"id": 1, "label": "审批中"},
         {"id": 2, "label": "已通过"},
@@ -2712,7 +2755,7 @@ def test_consume_upstream_keeps_compiled_option_contract() -> None:
     assert merged["reportType"]["x-enum-options"][0] == {"id": 1, "label": "日报"}
 
 
-def test_export_recovers_pi_caller_controls_after_option_sources_are_stripped() -> None:
+def test_export_does_not_recover_stripped_option_sources_by_guessing() -> None:
     spec = FlowSpec(
         capabilities=[
             FlowCapability(
@@ -2809,9 +2852,8 @@ def test_export_recovers_pi_caller_controls_after_option_sources_are_stripped() 
     options = _options_md(plans)
     public = _public_schema(plans[0]["input_schema"])["properties"]
 
-    assert questions["deptId"]["inputType"] == "treeSelect"
-    assert questions["deptId"]["dataSource"]["endpoint"] == "/admin-api/system/dept/list"
-    assert questions["deptId"]["dataSource"]["labelField"] == "name"
+    assert questions["deptId"]["inputType"] == "text"
+    assert "dataSource" not in questions["deptId"]
     assert "options" not in questions["deptId"]
     assert questions["reportType"]["inputType"] == "select"
     assert questions["reportType"]["options"] == [
@@ -2819,13 +2861,13 @@ def test_export_recovers_pi_caller_controls_after_option_sources_are_stripped() 
         {"id": 2, "label": "周报"},
         {"id": 3, "label": "月报"},
     ]
-    assert public["deptId"]["dataSource"]["endpoint"] == "/admin-api/system/dept/list"
+    assert "dataSource" not in public["deptId"]
     assert public["reportType"]["x-enum-options"][0] == {"id": 1, "label": "日报"}
-    assert "GET /admin-api/system/dept/list" in options
+    assert "GET /admin-api/system/dept/list" not in options
     assert "| 日报 | `1` |" in options
 
 
-def test_export_recovers_option_controls_from_compiled_refs_without_flow_spec() -> None:
+def test_export_does_not_guess_controls_from_unmapped_compiled_refs() -> None:
     api_request = {
         "capabilities": [{
             "capability_id": "stats",
@@ -2874,8 +2916,8 @@ def test_export_recovers_option_controls_from_compiled_refs_without_flow_spec() 
     plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), None, api_request)
     questions = {item["id"]: item for item in _form_questions(_input_forms_md(plans))}
 
-    assert questions["deptId"]["inputType"] == "treeSelect"
-    assert questions["deptId"]["dataSource"]["endpoint"] == "/admin-api/system/dept/list"
+    assert questions["deptId"]["inputType"] == "text"
+    assert "dataSource" not in questions["deptId"]
     assert questions["reportType"]["options"] == [
         {"id": 1, "label": "日报"},
         {"id": 2, "label": "周报"},
@@ -3039,6 +3081,50 @@ def test_export_keeps_multi_picker_template_and_source_params() -> None:
     assert step["selects"][0]["label_subkey"] == "recipientName"
     assert step["selects"][0]["result_path"] == "rows"
     assert step["selects"][0]["page_param"] == "pageNum"
+
+
+def test_schema_declared_multi_picker_metadata_reaches_runtime() -> None:
+    template = {
+        "billType": {"const": "duty_leave"},
+        "toUserId": {"item_key": "userId"},
+        "toNickName": {"item_key": "nickName"},
+        "toDeptName": {"item_key": "dept.deptName"},
+    }
+    selects = _merge_schema_selects([], {
+        "type": "object",
+        "properties": {
+            "ccedList": {
+                "type": "array",
+                "multiple": True,
+                "x-dano-option-source": {
+                    "source_method": "GET",
+                    "source_url": "/prod-api/system/user/list",
+                    "params": {"pageNum": 1, "pageSize": 20, "status": "0"},
+                    "result_path": "rows",
+                    "value_key": "userId",
+                    "label_key": "nickName",
+                    "multi": True,
+                    "label_subkey": "toNickName",
+                    "element_template": template,
+                },
+            },
+        },
+    })
+
+    assert selects == [{
+        "param": "ccedList",
+        "path": "ccedList",
+        "source_url": "/prod-api/system/user/list",
+        "source_method": "GET",
+        "value_key": "userId",
+        "label_key": "nickName",
+        "id_path": "ccedList",
+        "source_params": {"pageNum": 1, "pageSize": 20, "status": "0"},
+        "result_path": "rows",
+        "multi": True,
+        "label_subkey": "toNickName",
+        "element_template": template,
+    }]
 
 
 def test_export_projects_object_array_and_current_user_identity() -> None:

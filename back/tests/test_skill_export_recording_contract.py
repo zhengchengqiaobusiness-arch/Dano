@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 from uuid import UUID
@@ -21,6 +22,7 @@ from dano.execution.page.flow_spec_core.models import (
 from dano.execution.page.flow_spec_core.request_contract import (
     ensure_recorded_body_source,
 )
+from dano.export.skill_package import validate_skill_package
 from dano.export.skill_package.renderer import package_slug, render_skill_package
 from dano.onboarding.skill_generation.catalog import is_write_capability
 from dano.onboarding.skill_generation.export import (
@@ -230,6 +232,255 @@ async def test_recording_without_nodes_exports_a_skill_package(tmp_path: Path) -
     contract = json.loads((exported / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
     assert contract.get("capabilities")
     assert persisted.get("skill_export_status") == "exported"
+
+
+async def test_stage8_exports_without_description_or_model_review(tmp_path: Path) -> None:
+    spec = _pi_query_spec()
+
+    async def unexpected_proposer(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("stage 8 must not call a model proposer")
+
+    async def publish(**_kwargs):  # noqa: ANN003
+        return {"ok": True, "asset_version": 1, "asset_id": "asset-1"}
+
+    outcome = await export_recording_skill(
+        result_id=UUID("33333333-3333-3333-3333-333333333333"),
+        body={
+            "flow_spec": spec.model_dump(mode="json"),
+            "action": "action_33333333333333333333333333333333",
+            "subsystem": "oa",
+            "title": "业务办理",
+        },
+        tenant="test",
+        request=SkillGenerationRequest(
+            title="业务办理",
+            business_description="",
+            out_dir=str(tmp_path),
+        ),
+        proposer=unexpected_proposer,
+        publish=publish,
+    )
+
+    assert outcome.status == "exported", outcome.errors
+    contract = json.loads(
+        (tmp_path / package_slug(outcome.skill_id) / "references" / "CONTRACT.json")
+        .read_text(encoding="utf-8")
+    )
+    exported_schema = contract["capabilities"][0]["input_schema"]
+    source_schema = spec.capabilities[0].input_schema
+    assert set(exported_schema["properties"]) == set(source_schema["properties"])
+    assert exported_schema.get("required", []) == source_schema.get("required", [])
+    for name, source_field in source_schema["properties"].items():
+        assert exported_schema["properties"][name]["type"] == source_field["type"]
+        assert exported_schema["properties"][name].get("dataSource") == source_field.get("dataSource")
+
+
+async def test_failed_export_keeps_the_existing_skill_package(tmp_path: Path) -> None:
+    spec = _pi_query_spec()
+    action = "action_55555555555555555555555555555555"
+    existing = tmp_path / action
+    existing.mkdir()
+    marker = existing / "accepted.txt"
+    marker.write_text("accepted", encoding="utf-8")
+
+    def fail_render(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        assert marker.read_text(encoding="utf-8") == "accepted"
+        raise RuntimeError("render failed")
+
+    outcome = await export_recording_skill(
+        result_id=UUID("55555555-5555-5555-5555-555555555555"),
+        body={
+            "flow_spec": spec.model_dump(mode="json"),
+            "action": action,
+            "skill_id": f"oa.{action}",
+            "skill_export_status": "exported",
+            "published": True,
+            "subsystem": "oa",
+            "title": "业务办理",
+        },
+        tenant="test",
+        request=SkillGenerationRequest(title="业务办理", out_dir=str(tmp_path)),
+        render=fail_render,
+    )
+
+    assert outcome.status == "export_failed"
+    assert marker.read_text(encoding="utf-8") == "accepted"
+
+
+def test_leave_export_preserves_capability_fields_and_cced_person_picker(tmp_path: Path) -> None:
+    leave_type_source = {
+        "endpoint": "/prod-api/system/dict/data/type/duty_leave_type",
+        "method": "GET",
+        "resultPath": "data",
+        "idField": "dictValue",
+        "labelField": "dictLabel",
+    }
+    cced_source = {
+        "endpoint": "/prod-api/system/user/list",
+        "method": "GET",
+        "resultPath": "rows",
+        "idField": "userId",
+        "labelField": "nickName",
+        "extraFields": ["dept.deptName"],
+    }
+    source_schema = {
+        "type": "object",
+        "properties": {
+            "leaveType": {
+                "type": "string",
+                "title": "请假类型",
+                "dataSource": leave_type_source,
+            },
+            "startTime": {"type": "string", "format": "date-time", "title": "开始时间"},
+            "endTime": {"type": "string", "format": "date-time", "title": "结束时间"},
+            "days": {"type": "number", "title": "天数"},
+            "reason": {"type": "string", "title": "事由"},
+            "ccedList": {
+                "type": "array",
+                "title": "抄送列表",
+                "multiple": True,
+                "dataSource": cced_source,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "billType": {"type": "string"},
+                        "toUserId": {"type": "number"},
+                        "toNickName": {"type": "string"},
+                        "toDeptName": {"type": "string"},
+                    },
+                },
+            },
+        },
+        "required": ["leaveType", "startTime", "endTime"],
+    }
+    spec = FlowSpec.model_validate({
+        "subsystem": "oa",
+        "title": "请假申请",
+        "capabilities": [{
+            "capability_id": "cap_create_leave",
+            "name": "create_leave",
+            "title": "新增请假申请",
+            "kind": "create",
+            "request_refs": [
+                {"step_id": "step_leave_type", "usage": "option_source"},
+                {"step_id": "step_users", "usage": "option_source"},
+                {"step_id": "step_create_leave", "usage": "execute"},
+            ],
+            "step_ids": ["step_create_leave"],
+            "input_schema": source_schema,
+        }],
+        "steps": [
+            {
+                "step_id": "step_leave_type",
+                "method": "GET",
+                "path": "/prod-api/system/dict/data/type/duty_leave_type",
+            },
+            {
+                "step_id": "step_users",
+                "method": "GET",
+                "path": "/prod-api/system/user/list",
+            },
+            {
+                "step_id": "step_create_leave",
+                "name": "保存请假申请",
+                "method": "POST",
+                "path": "/prod-api/oa/dutyApply",
+                "body_source": json.dumps({
+                    "days": 5,
+                    "billType": "duty_leave",
+                    "ccedList": [{
+                        "billType": "duty_leave",
+                        "toUserId": 128,
+                        "toNickName": "张段誉",
+                        "toDeptName": "项目管理部",
+                    }],
+                    "leaveType": "busy",
+                    "reason": "123123",
+                    "startTime": "2026-10-11 00:00:00",
+                    "endTime": "2026-10-15 00:00:00",
+                }, ensure_ascii=False),
+                "params": [
+                    {"key": "billType", "path": "body.billType", "value": "duty_leave", "source_kind": "constant", "category": "system_const", "exposed_to_user": False},
+                    {"key": "leaveType", "path": "body.leaveType", "source_kind": "api_option", "source": {"kind": "api_option", "source_url": leave_type_source["endpoint"], "value_key": "dictValue", "label_key": "dictLabel", "result_path": "data"}, "exposed_to_user": True, "required": True},
+                    {"key": "startTime", "path": "body.startTime", "source_kind": "user_input", "exposed_to_user": True, "required": True},
+                    {"key": "endTime", "path": "body.endTime", "source_kind": "user_input", "exposed_to_user": True, "required": True},
+                    {"key": "days", "path": "body.days", "type": "number", "source_kind": "user_input", "exposed_to_user": True, "required": False},
+                    {"key": "reason", "path": "body.reason", "source_kind": "user_input", "exposed_to_user": True, "required": False},
+                    {"key": "ccedList", "path": "body.ccedList", "type": "array", "wire_type": "array", "source_kind": "api_option", "source": {"kind": "api_option", "source_url": cced_source["endpoint"], "value_key": "userId", "label_key": "nickName", "result_path": "rows", "extra_fields": ["dept.deptName"]}, "exposed_to_user": True, "required": False},
+                ],
+                "selects": [
+                    {
+                        "param": "leaveType",
+                        "path": "body.leaveType",
+                        "source_url": "/prod-api/system/dict/data/type/duty_leave_type",
+                        "value_key": "dictValue",
+                        "label_key": "dictLabel",
+                        "enum_confirmed": True,
+                    },
+                    {
+                        "param": "ccedList",
+                        "path": "body.ccedList",
+                        "source_url": "http://boot.dianshixinxi.com:90/prod-api/system/user/list",
+                        "value_key": "userId",
+                        "label_key": "nickName",
+                        "multi": True,
+                        "label_subkey": "toNickName",
+                        "element_template": {
+                            "billType": {"const": "duty_leave"},
+                            "toUserId": {"item_key": "userId"},
+                            "toNickName": {"item_key": "nickName"},
+                            "toDeptName": {"item_key": "dept.deptName"},
+                        },
+                        "enum_confirmed": True,
+                    },
+                ],
+            },
+        ],
+    })
+    request = SkillGenerationRequest(title="请假申请", business_description="", out_dir=str(tmp_path))
+    plan = propose_deterministic_plan(
+        spec, request, {"cap_create_leave"}, "leave-contract-fingerprint",
+    )
+    skill = build_export_skill_spec(
+        spec,
+        tenant="test",
+        skill_id="oa.action_44444444444444444444444444444444",
+        title="请假申请",
+        plan=plan,
+    )
+    slug = render_skill_package(skill, str(tmp_path), tenant="test")
+    contract = json.loads(
+        (tmp_path / slug / "references" / "CONTRACT.json").read_text(encoding="utf-8")
+    )
+    capability = contract["capabilities"][0]
+    exported_schema = capability["input_schema"]
+
+    assert set(exported_schema["properties"]) == set(source_schema["properties"])
+    assert exported_schema["required"] == source_schema["required"]
+    assert exported_schema["properties"]["days"]["type"] == "number"
+    assert exported_schema["properties"]["ccedList"]["type"] == "array"
+    exported_source = exported_schema["properties"]["ccedList"]["dataSource"]
+    assert all(exported_source[key] == value for key, value in cced_source.items())
+    script = tmp_path / slug / capability["script"]
+    module = ast.parse(script.read_text(encoding="utf-8"))
+    assignment = next(
+        item
+        for item in module.body
+        if isinstance(item, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "PLAN" for target in item.targets)
+    )
+    runtime_plan = json.loads(ast.literal_eval(assignment.value.args[0]))
+    cced = next(
+        item
+        for step in runtime_plan["steps"]
+        for item in step.get("selects", [])
+        if item.get("param") == "ccedList"
+    )
+    assert cced["multi"] is True
+    assert cced["element_template"]["toUserId"] == {"item_key": "userId"}
+    assert cced["element_template"]["toDeptName"] == {"item_key": "dept.deptName"}
+    validation = validate_skill_package(tmp_path / slug)
+    assert validation["ok"], validation["issues"]
 
 
 def test_renderer_compiles_missing_execution_contract_from_recording_view(tmp_path: Path) -> None:
