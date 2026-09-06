@@ -76,6 +76,33 @@ test("exact name join marks the same-name page field as caller and keeps every r
   assert.equal(create.inputForm.some(item => item.path === "$.invented"), false);
 });
 
+test("an unnamed seat count control stays caller-owned when its value equals pageNum", () => {
+  const events: EvidenceEvent[] = [{
+    id: "ui-car-search", kind: "ui", sessionId: "car", at: "2026-09-06T00:00:00.000Z",
+    pageUrl: "https://x/oa/car/car", eventType: "click", text: "搜索", label: "搜索",
+    form: [
+      { label: "座位数", type: "text", value: "1", required: false },
+      { label: "状态", type: "select", value: "启用", required: false }
+    ]
+  }, {
+    id: "net-car-list", kind: "network", sessionId: "car", at: "2026-09-06T00:00:01.000Z",
+    pageUrl: "https://x/oa/car/car", correlatedUiEvidenceId: "ui-car-search",
+    request: {
+      method: "GET", url: "https://x/oa/car/list?pageNum=1&seatCount=1&status=0",
+      resourceType: "xhr", headers: {}, query: { pageNum: "1", seatCount: "1", status: "0" }
+    },
+    response: { status: 200, headers: {}, body: { code: 200, rows: [] } }
+  }];
+
+  const judged = applyDeterministicCatalogJudgment(buildCapabilityCandidates(events), events);
+  const query = judged.find(item => item.transport.pathTemplate.endsWith("/oa/car/list"))!;
+  const seatCount = query.inputForm.find(item => item.name === "seatCount");
+  assert.equal(seatCount?.label, "座位数");
+  assert.equal(seatCount?.source, "caller");
+  assert.equal(seatCount?.systemHandled, false);
+  assert.equal(seatCount?.defaultRule, undefined);
+});
+
 test("leftover one-to-one does not bind an unrelated remark to a hidden token", () => {
   const capability = cap({
     id: "write",
