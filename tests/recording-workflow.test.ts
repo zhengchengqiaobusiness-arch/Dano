@@ -9,6 +9,6 @@ test("stopping a recording only saves evidence", async () => {
     return { id: "recording-1" };
   });
 
-  assert.deepEqual(calls.map(call => call.path), ["/api/browser/stop"]);
+  assert.deepEqual(calls.map(call => call.path), ["api/browser/stop"]);
   assert.equal(result.session.id, "recording-1");
 });

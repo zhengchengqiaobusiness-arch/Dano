@@ -184,7 +184,7 @@ async function clearSessionHistory() {
   state.clearingSession = true;
   if (elements.clearSession) elements.clearSession.disabled = true;
   try {
-    const result = await api("/api/session/clear", { method: "POST", body: "{}" });
+    const result = await api("api/session/clear", { method: "POST", body: "{}" });
     if (result?.epoch != null) state.sessionEpoch = result.epoch;
     resetWorkbench();
     await pollBrowser(true);
@@ -272,7 +272,7 @@ async function reconcileSession() {
   try {
     do {
       state.reconcileAgain = false;
-      const status = await api("/api/status");
+      const status = await api("api/status");
       if (status.epoch != null && status.epoch > state.sessionEpoch) {
         state.sessionEpoch = status.epoch;
         resetWorkbench();
@@ -363,7 +363,7 @@ async function completeManualTakeover() {
   elements.manualTakeoverComplete.disabled = true;
   elements.manualTakeoverComplete.textContent = "正在恢复…";
   try {
-    await api("/api/browser/takeover/complete", { method: "POST", body: JSON.stringify({ id: takeover.id }) });
+    await api("api/browser/takeover/complete", { method: "POST", body: JSON.stringify({ id: takeover.id }) });
     showManualTakeover();
     await pollBrowser(true);
   } catch (error) {
@@ -381,7 +381,7 @@ function renderRecordingActions() {
 }
 
 async function changeBrowserMode(mode) {
-  const result = await api("/api/browser/mode", { method: "POST", body: JSON.stringify({ mode }) });
+  const result = await api("api/browser/mode", { method: "POST", body: JSON.stringify({ mode }) });
   state.browserMode = result.mode || mode; renderBrowserMode(); await pollBrowser();
   showToast(mode === "manual" ? "已切换到手动录制：直接操作内置画面" : "已切换到 Pi 自动点击模式");
 }
@@ -403,7 +403,7 @@ async function refreshBrowserFrame(force = false) {
   const epoch = state.frameEpoch;
   state.frameLoading = true;
   try {
-    const response = await fetch(`/api/browser/frame?t=${Date.now()}`, { cache: "no-store", headers: pageHeaders(), signal: AbortSignal.timeout(2500) });
+    const response = await fetch(`api/browser/frame?t=${Date.now()}`, { cache: "no-store", headers: pageHeaders(), signal: AbortSignal.timeout(2500) });
     if (epoch !== state.frameEpoch) return;
     if (response.status === 204 || !response.ok) return;
     const blob = await response.blob();
@@ -434,7 +434,7 @@ async function pollBrowserState() {
   const epoch = state.frameEpoch;
   state.pollInFlight = true;
   try {
-    const browser = await api("/api/browser/state");
+    const browser = await api("api/browser/state");
     if (epoch !== state.frameEpoch) return;
     state.browserActive = Boolean(browser.active);
     state.browserMode = browser.mode || state.browserMode;
@@ -489,7 +489,7 @@ function syncPreviewViewport() {
 async function openBrowser(rawUrl) {
   const value = rawUrl.trim(); if (!value) return;
   const url = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`;
-  await api("/api/browser/open", { method: "POST", body: JSON.stringify({ url, name: "web-session", mode: state.browserMode }) });
+  await api("api/browser/open", { method: "POST", body: JSON.stringify({ url, name: "web-session", mode: state.browserMode }) });
   await pollBrowser();
   rememberPaneViewport();
   showToast("录制已开始");
@@ -539,7 +539,7 @@ function manualFeedback(command, result) {
 async function manualCommand(command) {
   if (!state.browserActive) return;
   const liveDrag = command.action === "drag" && (command.phase === "start" || command.phase === "move");
-  const result = await api("/api/browser/manual", { method: "POST", body: JSON.stringify(command) });
+  const result = await api("api/browser/manual", { method: "POST", body: JSON.stringify(command) });
   state.sessionLive = true;
   if (liveDrag) {
     void refreshBrowserFrame(true);
@@ -640,7 +640,7 @@ async function submitPrompt(message) {
   followSessionIfWanted();
   updateAgentStatus(true, true);
   try {
-    const result = await api("/api/chat", { method: "POST", body: JSON.stringify({ message: text }) });
+    const result = await api("api/chat", { method: "POST", body: JSON.stringify({ message: text }) });
     if (result?.epoch != null) state.sessionEpoch = result.epoch;
     adoptLocalUser(localId, result?.item);
     followSessionIfWanted();
@@ -654,7 +654,7 @@ async function submitPrompt(message) {
 
 function notifyPageLeave() {
   const id = pageSessionId();
-  const url = `/api/session/leave?pageSession=${encodeURIComponent(id)}`;
+  const url = `api/session/leave?pageSession=${encodeURIComponent(id)}`;
   try {
     const body = new Blob([JSON.stringify({ pageSession: id })], { type: "application/json" });
     if (navigator.sendBeacon(url, body)) return;
@@ -666,7 +666,7 @@ async function abortAgent() {
   if (!state.agentStreaming || state.agentAborting) return;
   state.agentAborting = true; renderAgentControls();
   try {
-    await api("/api/agent/abort", { method: "POST", body: "{}" });
+    await api("api/agent/abort", { method: "POST", body: "{}" });
     updateAgentStatus(state.agentReady, false);
     showToast("已终止 Pi 当前任务");
   } catch (error) {
@@ -731,12 +731,12 @@ async function closeConfirmation(accepted) {
   else if (ui.method === "select") response.value = elements.confirmationOptions.querySelector("input:checked")?.value || "";
   else if (ui.method === "input") response.value = elements.confirmationInput.value;
   else response.value = elements.confirmationEditor.value;
-  try { await api("/api/agent/ui-response", { method: "POST", body: JSON.stringify(response) }); }
+  try { await api("api/agent/ui-response", { method: "POST", body: JSON.stringify(response) }); }
   catch (error) { showToast(error.message); }
 }
 
 async function loadSkills() {
-  try { state.skills = (await api("/api/skills")).skills; renderSkills(); }
+  try { state.skills = (await api("api/skills")).skills; renderSkills(); }
   catch (error) { showToast(error.message); }
 }
 
@@ -840,7 +840,7 @@ function renderSkills() {
 
 async function exportSkill(name) {
   if (!(await confirmAction("导出 Python Skill", `将把当前全部已验证能力导出为“${name}”。会生成新的唯一目录，不会覆盖已有成品。未验证能力不会进入包。是否继续？`, false))) return;
-  const result = await api("/api/skills/export", { method: "POST", body: JSON.stringify({ name, confirmed: true }) });
+  const result = await api("api/skills/export", { method: "POST", body: JSON.stringify({ name, confirmed: true }) });
   showToast(`已导出主能力 ${result.primaryCount ?? 0} 项、字段候选 ${result.lookupCount ?? 0} 个（${result.name}），共 ${result.fileCount ?? 0} 个文件：${result.directory}`); await loadSkills();
 }
 
@@ -853,12 +853,12 @@ async function skillAction(skill, action) {
     if (action === "freeze") {
       const frozen = skill.status !== "frozen";
       if (!(await confirmAction(frozen ? "冻结 Skill" : "解除冻结", frozen ? "冻结后仍可从上方再导出一份新的唯一目录；本份成品保持不变。" : "解除后仍可调用这份成品。", false))) return;
-      await api(`/api/skills/${encodeURIComponent(skill.name)}/freeze`, { method: "POST", body: JSON.stringify({ frozen, confirmed: true }) });
+      await api(`api/skills/${encodeURIComponent(skill.name)}/freeze`, { method: "POST", body: JSON.stringify({ frozen, confirmed: true }) });
       showToast(frozen ? "Skill 已冻结" : "Skill 已解除冻结"); await loadSkills(); return;
     }
     if (action === "delete") {
       if (!(await confirmAction("删除 Skill", `将从目录移除“${skill.displayName}”。文件会移到项目回收区，可人工恢复。`, true))) return;
-      await api(`/api/skills/${encodeURIComponent(skill.name)}/delete`, { method: "DELETE", body: JSON.stringify({ confirmed: true }) });
+      await api(`api/skills/${encodeURIComponent(skill.name)}/delete`, { method: "DELETE", body: JSON.stringify({ confirmed: true }) });
       showToast("Skill 已移到项目回收区"); await loadSkills();
     }
   } catch (error) {
@@ -874,7 +874,7 @@ function connectEvents() {
     state.eventSource.onerror = null;
     state.eventSource.close();
   }
-  const stream = new EventSource(`/api/events?pageSession=${encodeURIComponent(pageSessionId())}`);
+  const stream = new EventSource(`api/events?pageSession=${encodeURIComponent(pageSessionId())}`);
   state.eventSource = stream;
   stream.onmessage = message => {
     const event = JSON.parse(message.data);
@@ -921,7 +921,7 @@ function connectEvents() {
 document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => setView(button.dataset.view)));
 document.querySelectorAll("[data-browser-mode]").forEach(button => button.addEventListener("click", () => void changeBrowserMode(button.dataset.browserMode).catch(error => showToast(error.message))));
 elements.addressForm.addEventListener("submit", event => { event.preventDefault(); void openBrowser(elements.browserUrl.value).catch(error => showToast(error.message)); });
-elements.reloadBrowser.addEventListener("click", () => state.browserActive && void api("/api/browser/reload", { method: "POST", body: "{}" }).then(pollBrowser).catch(error => showToast(error.message)));
+elements.reloadBrowser.addEventListener("click", () => state.browserActive && void api("api/browser/reload", { method: "POST", body: "{}" }).then(pollBrowser).catch(error => showToast(error.message)));
 elements.stopRecording.addEventListener("click", () => void completeRecording());
 elements.clearSession.addEventListener("click", () => void clearSessionHistory());
 elements.conversation.addEventListener("scroll", syncSessionFollowFromUser, { passive: true });
@@ -958,7 +958,7 @@ elements.invokeCancel.addEventListener("click", () => { elements.invokeModal.hid
 elements.invokeSubmit.addEventListener("click", async () => {
   if (!state.invokeSkill || !elements.invokeGoal.value.trim()) return showToast("请先描述业务目标");
   try {
-    await api(`/api/skills/${encodeURIComponent(state.invokeSkill.name)}/invoke`, { method: "POST", body: JSON.stringify({ goal: elements.invokeGoal.value }) });
+    await api(`api/skills/${encodeURIComponent(state.invokeSkill.name)}/invoke`, { method: "POST", body: JSON.stringify({ goal: elements.invokeGoal.value }) });
     state.sessionLive = true;
     elements.invokeModal.hidden = true; state.invokeSkill = null; setView("recording"); showToast("已交给 Pi，执行中的选择和确认会显示在这里");
   } catch (error) { showToast(error.message); }
@@ -1085,7 +1085,7 @@ elements.browserViewport.addEventListener("keydown", event => {
 });
 async function initialize() {
   try {
-    const status = await api("/api/status"); updateAgentStatus(status.agent.ready, status.agent.streaming);
+    const status = await api("api/status"); updateAgentStatus(status.agent.ready, status.agent.streaming);
     if (status.epoch != null) state.sessionEpoch = status.epoch;
     elements.modelStatus.textContent = `${status.model || "由提供商选择模型"} · ${status.thinking}`;
     reconcileSessionItems(status.sessionItems || []);

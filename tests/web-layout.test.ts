@@ -5,6 +5,25 @@ import { readFile } from "node:fs/promises";
 
 const root = path.resolve(import.meta.dirname, "..");
 
+test("static assets stay under the Studio mount path", async () => {
+  const [html, app, workflow] = await Promise.all([
+    readFile(path.join(root, "web", "index.html"), "utf8"),
+    readFile(path.join(root, "web", "app.js"), "utf8"),
+    readFile(path.join(root, "web", "recording-workflow.js"), "utf8")
+  ]);
+  const stylesheetMatch = html.match(/<link rel="stylesheet" href="([^"]+)"/);
+  const scriptMatch = html.match(/<script src="([^"]+)" type="module"/);
+  assert.ok(stylesheetMatch);
+  assert.ok(scriptMatch);
+  const stylesheet = stylesheetMatch[1]!;
+  const script = scriptMatch[1]!;
+
+  assert.equal(new URL(stylesheet, "https://example.test/pi-business-skill-studio/").pathname, "/pi-business-skill-studio/styles.css");
+  assert.equal(new URL(script, "https://example.test/pi-business-skill-studio/").pathname, "/pi-business-skill-studio/app.js");
+  assert.doesNotMatch(app, /(?:["'`])\/api\//);
+  assert.doesNotMatch(workflow, /(?:["'`])\/api\//);
+});
+
 test("recording workspace stays on one page with an internal session scroller", async () => {
   const [html, css, app] = await Promise.all([
     readFile(path.join(root, "web", "index.html"), "utf8"),
@@ -52,7 +71,7 @@ test("Pi send button becomes an immediate abort control and thinking is requeste
   assert.match(html, /id="send-prompt"[^>]*>发送</);
   assert.match(html, /id="abort-prompt"[^>]*>终止</);
   assert.match(html, /id="browser-ime"/);
-  assert.match(app, /async function abortAgent\(\)[\s\S]*\/api\/agent\/abort/);
+  assert.match(app, /async function abortAgent\(\)[\s\S]*api\/agent\/abort/);
   assert.match(app, /elements\.abortPrompt\.addEventListener\("click"/);
   assert.match(app, /void submitPrompt\(elements\.prompt\.value\)/);
   assert.doesNotMatch(app, /working \? "■" : "↑"/);
@@ -78,7 +97,7 @@ test("recording workbench can clear conversation history in one click", async ()
 
   assert.match(html, /id="clear-session"[^>]*>清空历史</);
   assert.match(css, /\.session-toolbar\s*\{/);
-  assert.match(app, /async function clearSessionHistory\(\)[\s\S]*\/api\/session\/clear/);
+  assert.match(app, /async function clearSessionHistory\(\)[\s\S]*api\/session\/clear/);
   assert.match(app, /elements\.clearSession\.addEventListener\("click"/);
   assert.match(app, /resetBrowserWorkbench/);
   assert.match(app, /已结束录制并清空全部内容；下一条消息是新对话/);
@@ -139,7 +158,7 @@ test("three failed form attempts expose a non-blocking manual takeover and resum
   assert.match(css, /\.manual-takeover\s*\{[^}]*position:\s*fixed/s);
   assert.doesNotMatch(html, /modal-backdrop[^>]*id="manual-takeover"/);
   assert.match(app, /manual_takeover_required/);
-  assert.match(app, /\/api\/browser\/takeover\/complete/);
+  assert.match(app, /api\/browser\/takeover\/complete/);
   assert.match(server, /await page\.requestManualTakeover/);
   assert.match(server, /if \(result\?\.stopped\)/);
   assert.doesNotMatch(server, /result\?\.followManualSteps\s*\|\|/);
@@ -314,7 +333,7 @@ test("refresh keeps a tab session while a new page starts isolated", async () =>
   assert.match(app, /sessionStorage\.getItem\(PAGE_SESSION_KEY\)/);
   assert.match(app, /sessionStorage\.setItem\(PAGE_SESSION_KEY/);
   assert.match(app, /X-Bss-Page-Session/);
-  assert.match(app, /\/api\/events\?pageSession=/);
+  assert.match(app, /api\/events\?pageSession=/);
   assert.doesNotMatch(app, /localStorage\.(get|set)Item\(PAGE_SESSION_KEY/);
   assert.match(server, /function getOrCreatePage/);
   assert.match(server, /function requirePage/);
@@ -408,5 +427,5 @@ test("capability catalog UI and HTTP surface are gone", async () => {
   assert.doesNotMatch(app, /loadCatalog|renderCatalog|\/api\/catalog|catalog_changed|setView\("catalog"\)/);
   assert.doesNotMatch(server, /\/api\/catalog|\/api\/bindings\/approve|\/api\/candidates\/configure|\/api\/capabilities\/|catalog_changed/);
   assert.doesNotMatch(workflow, /\/api\/catalog\/analyze/);
-  assert.match(workflow, /\/api\/browser\/stop/);
+  assert.match(workflow, /api\/browser\/stop/);
 });
