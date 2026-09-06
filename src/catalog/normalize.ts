@@ -34,6 +34,7 @@ export function normalizeField(field: Partial<InputFormField> & Pick<InputFormFi
       : "未记录到用户输入来源，按系统处理字段管理"),
     widget: field.widget,
     defaultRule: field.defaultRule,
+    dateFormat: field.dateFormat,
     dateClock: field.dateClock,
     dateClocks: field.dateClocks,
     richText: field.richText,

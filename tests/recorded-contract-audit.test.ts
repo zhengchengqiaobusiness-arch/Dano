@@ -133,6 +133,7 @@ test("unnamed successful form fields map to request leaves without equal-value l
   assert.equal(byPath.get("$.oaReimburseFeeitemList[*].billType")?.candidates?.type, "static");
   assert.equal(byPath.get("$.oaReimburseFeeitemList[*].startCity")?.widget, "text");
   assert.equal(byPath.get("$.oaReimburseFeeitemList[*].endCity")?.widget, "text");
+  assert.equal(byPath.get("$.month")?.dateFormat, "YYYY-MM");
 
   const replay = materializeHttpRequest(create, {
     startTime: "2026-09-07",

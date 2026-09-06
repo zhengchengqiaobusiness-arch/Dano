@@ -9,7 +9,7 @@ import path from "node:path";
 import { z } from "zod";
 import type { CapabilityContract, EvidenceEvent, FieldSource, InputFormField, NetworkEvidence, UiEvidence } from "../domain.js";
 import { OpenAIReasoner } from "../llm/openai.js";
-import { dateDay, recordedClock } from "./date-format.js";
+import { dateDay, recordedClock, recordedDateFormat } from "./date-format.js";
 import { isExecutableRule } from "./field-derivation.js";
 import { directoryLookupEntity, isLookupQueryPath, isNoiseCapability, isPageResultQuery, sameResource } from "./export-scope.js";
 import { ASK_KEY, SEARCH_KEY, isSuccessfulNetworkEvidence } from "./heuristics.js";
@@ -398,6 +398,7 @@ function asExactCaller(field: InputFormField, observation: UiObservation | undef
     widget,
     defaultRule: keptJudgedRule(field) ? field.defaultRule : undefined,
     candidates: options?.length ? { type: "static", values: options } : field.candidates,
+    dateFormat: widget === "date" ? recordedDateFormat(value) || field.dateFormat : undefined,
     dateClock: widget === "date" && clock ? clock : field.dateClock,
     richText: richText || field.richText,
     sourceDetail: richText
