@@ -12,9 +12,10 @@ import type { OperationKind } from "../domain.js";
 import { isUsablePreviewBuffer } from "../browser/recorder.js";
 import { isPageSessionId, sendEvent, WorkbenchPage } from "./workbench-page.js";
 
-const host = "127.0.0.1";
+const host = process.env.BSS_HOST || "127.0.0.1";
 const port = Number(process.env.BSS_PORT || 4310);
-const origin = `http://${host}:${port}`;
+const originHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+const origin = `http://${originHost}:${port}`;
 const publicDir = path.resolve(process.cwd(), "web");
 const sharedConfig = { ...loadConfig(), headless: true };
 const studio = new StudioService(sharedConfig);
