@@ -165,8 +165,21 @@ export function relatedLookupCapabilities(catalog: CapabilityContract[], scoped:
       return Boolean(entity && needed.has(entity) && DIRECTORY_LOOKUP.test(path));
     })
     : [];
+  const needsEnum = scoped.some(capability => capability.inputForm.some(field =>
+    field.source === "caller"
+    && (field.widget === "select" || field.widget === "multiselect")
+    && !pickerEntity(field)
+  ));
+  const fromEnums = needsEnum
+    ? catalog.filter(item => {
+      if (have.has(transportKey(item))) return false;
+      if (item.operation !== "query" || isNoiseCapability(item)) return false;
+      if (item.transport.origin && origins.size && !origins.has(item.transport.origin)) return false;
+      return /dict-data|\/enum(?:\/|$)/i.test(item.transport.pathTemplate || "");
+    })
+    : [];
   const seen = new Set<string>();
-  return [...fromWrites, ...fromPickers].filter(item => {
+  return [...fromWrites, ...fromPickers, ...fromEnums].filter(item => {
     const key = transportKey(item);
     if (seen.has(key)) return false;
     seen.add(key);

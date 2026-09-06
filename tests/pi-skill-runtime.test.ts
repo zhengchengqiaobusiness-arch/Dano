@@ -7,6 +7,7 @@ import {
   applyExactEvidenceJoin,
   fallbackRole
 } from "../src/inference/pi-skill-runtime.js";
+import { relatedLookupCapabilities } from "../src/inference/export-scope.js";
 
 function field(partial: Partial<InputFormField> & Pick<InputFormField, "name">): InputFormField {
   return {
@@ -146,6 +147,95 @@ test("exact list id joins a directory lookup and ignores a sibling business page
   const candidateId = assignee?.candidates?.type === "capability" ? assignee.candidates.capabilityId : "";
   assert.match(candidateId, /user/);
   assert.doesNotMatch(candidateId, /doc/);
+});
+
+test("recorded dictionary and directory APIs supply work-report select candidates", () => {
+  const events: EvidenceEvent[] = [{
+    id: "dicts-unauthorized", kind: "network", sessionId: "s", at: "2026-09-05T23:59:59.000Z",
+    pageUrl: "https://x/oa/work-report",
+    request: { method: "GET", url: "https://x/system/dict-data/simple-list", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { code: 401, msg: "账号未登录", data: null } }
+  }, {
+    id: "dicts", kind: "network", sessionId: "s", at: "2026-09-06T00:00:00.000Z",
+    pageUrl: "https://x/oa/work-report",
+    request: { method: "GET", url: "https://x/system/dict-data/simple-list", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { code: 0, data: [
+      { dictType: "unrelated", value: "1", label: "聊天" },
+      { dictType: "unrelated", value: "2", label: "图像" },
+      { dictType: "oa_work_report_type", value: "1", label: "日报" },
+      { dictType: "oa_work_report_type", value: "2", label: "周报" },
+      { dictType: "oa_work_report_type", value: "3", label: "月报" },
+      { dictType: "bpm_process_instance_status", value: "-1", label: "未提交" },
+      { dictType: "bpm_process_instance_status", value: "1", label: "审批中" }
+    ] } }
+  }, {
+    id: "depts", kind: "network", sessionId: "s", at: "2026-09-06T00:00:00.100Z",
+    pageUrl: "https://x/oa/work-report",
+    request: { method: "GET", url: "https://x/system/dept/simple-list", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { code: 0, data: [
+      { id: 103, name: "研发部门" }, { id: 106, name: "财务部门" }
+    ] } }
+  }, {
+    id: "dept-tree", kind: "network", sessionId: "s", at: "2026-09-06T00:00:00.200Z",
+    pageUrl: "https://x/oa/work-report",
+    request: { method: "GET", url: "https://x/system/dept/list", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { code: 0, data: [
+      { id: 103, name: "研发部门", parentId: 101 }, { id: 106, name: "财务部门", parentId: 101 }
+    ] } }
+  }, {
+    id: "ui", kind: "ui", sessionId: "s", at: "2026-09-06T00:00:01.000Z",
+    pageUrl: "https://x/oa/work-report", eventType: "submit",
+    form: [
+      { name: "reportType", label: "汇报类型", type: "select", value: "日报" },
+      { name: "processStatus", label: "单据状态", type: "select", value: "未提交" },
+      { name: "deptId", label: "申请部门", type: "select", value: "" }
+    ]
+  }, {
+    id: "create", kind: "network", sessionId: "s", at: "2026-09-06T00:00:02.000Z",
+    pageUrl: "https://x/oa/work-report", correlatedUiEvidenceId: "ui",
+    request: {
+      method: "POST", url: "https://x/oa/work-report/submit", resourceType: "xhr", headers: {}, query: {},
+      body: { reportType: 1, processStatus: -1, deptId: 103 }
+    },
+    response: { status: 200, headers: {}, body: { code: 0, data: 1 } }
+  }, {
+    id: "statistics", kind: "network", sessionId: "s", at: "2026-09-06T00:00:03.000Z",
+    pageUrl: "https://x/oa/work-report",
+    request: {
+      method: "GET", url: "https://x/oa/work-report/statistics?reportType=1&deptId=103",
+      resourceType: "xhr", headers: {}, query: { reportType: "1", deptId: "103" }
+    },
+    response: { status: 200, headers: {}, body: { code: 0, data: [] } }
+  }];
+  const catalog = applyDeterministicCatalogJudgment(buildCapabilityCandidates(events), events);
+  const create = catalog.find(item => item.transport.pathTemplate.endsWith("/work-report/submit"))!;
+  const statistics = catalog.find(item => item.transport.pathTemplate.endsWith("/work-report/statistics"))!;
+  const storedStatistics = {
+    ...statistics,
+    inputForm: statistics.inputForm.map(item => item.name === "reportType"
+      ? { ...item, source: "system" as const, systemHandled: true, widget: "text" as const, candidates: undefined, defaultRule: 'literal:"1"' }
+      : { ...item, widget: "text" as const, candidates: undefined })
+  };
+  const related = relatedLookupCapabilities(catalog, [create]);
+  const judged = applyDeterministicCatalogJudgment([create, storedStatistics, ...related], events);
+  const result = judged.find(item => item.id === create.id)!;
+
+  assert.equal(related.some(item => item.transport.pathTemplate.endsWith("/dict-data/simple-list")), true);
+  assert.equal(related.some(item => item.transport.pathTemplate.endsWith("/dept/simple-list")), true);
+  assert.deepEqual(result.inputForm.find(item => item.name === "reportType")?.candidates, {
+    type: "static",
+    values: [{ value: "1", label: "日报" }, { value: "2", label: "周报" }, { value: "3", label: "月报" }]
+  });
+  assert.deepEqual(result.inputForm.find(item => item.name === "processStatus")?.candidates, {
+    type: "static",
+    values: [{ value: "-1", label: "未提交" }, { value: "1", label: "审批中" }]
+  });
+  const dept = result.inputForm.find(item => item.name === "deptId")?.candidates;
+  assert.equal(dept?.type, "capability");
+  assert.match(dept?.type === "capability" ? dept.capabilityId : "", /dept-simple-list/);
+  const judgedStatistics = judged.find(item => item.id === statistics.id)!;
+  assert.equal(judgedStatistics.inputForm.find(item => item.name === "reportType")?.candidates?.type, "static");
+  assert.equal(judgedStatistics.inputForm.find(item => item.name === "deptId")?.candidates?.type, "capability");
 });
 
 test("fallback role keeps a write primary and marks companion queries as lookup", () => {

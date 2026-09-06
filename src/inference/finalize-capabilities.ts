@@ -5,7 +5,7 @@ import { attachDictEnums } from "./dict-enums.js";
 import { validateCapability } from "../validation/validator.js";
 import { attachCatalogDerivations } from "./field-derivation.js";
 import { exportableCapabilities, isCandidateSourceCapability, isPageResultQuery, isPrimaryCapability } from "./export-scope.js";
-import { applyDeterministicCatalogJudgment } from "./pi-skill-runtime.js";
+import { applyDeterministicCatalogJudgment, applySameResourceCandidates } from "./pi-skill-runtime.js";
 
 function stripUnavailableSources(capability: CapabilityContract, availableIds: Set<string>): CapabilityContract {
   let changed = false;
@@ -93,7 +93,7 @@ export function finalizeSessionSlice(
 ) {
   const availableIds = new Set(slice.map(capability => capability.id));
   const cleaned = stripPrimaryPageCandidates(slice.map(capability => stripUnavailableSources(capability, availableIds)));
-  const sourced = attachCandidateSources(cleaned, events);
+  const sourced = applySameResourceCandidates(attachCandidateSources(cleaned, events));
   if (sessionExportReady(sourced) && existing.length) return sourced;
   const finalized = finalizeCapabilities(sourced, events);
   if (!existing.length) return finalized;

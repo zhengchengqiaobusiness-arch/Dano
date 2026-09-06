@@ -11,13 +11,14 @@ import type { CapabilityContract, EvidenceEvent, FieldSource, InputFormField, Ne
 import { OpenAIReasoner } from "../llm/openai.js";
 import { dateDay, recordedClock } from "./date-format.js";
 import { isExecutableRule } from "./field-derivation.js";
-import { directoryLookupEntity, isLookupQueryPath, isNoiseCapability, isPageResultQuery } from "./export-scope.js";
+import { directoryLookupEntity, isLookupQueryPath, isNoiseCapability, isPageResultQuery, sameResource } from "./export-scope.js";
 import { ASK_KEY, SEARCH_KEY } from "./heuristics.js";
 import {
   collectUiObservations,
   flattenRequestValues,
   looksDirectoryPicker,
   looksPickerField,
+  pickerEntity,
   relatedUiEvents,
   requestValueAt,
   sameValue,
@@ -517,21 +518,37 @@ export function exactCandidateSources(catalog: CapabilityContract[], events: Evi
   return catalog.flatMap(capability => {
     if (!usableExactCandidateSource(capability)) return [];
     const related = relatedEvents(capability, events);
-    const network = related.find((event): event is NetworkEvidence => event.kind === "network");
-    if (!network?.response?.body) return [];
-    return responseLists(network.response.body).flatMap(list => {
+    const lists = related
+      .filter((event): event is NetworkEvidence => event.kind === "network")
+      .map(event => responseLists(event.response?.body))
+      .find(items => items.length > 0);
+    if (!lists) return [];
+    return lists.flatMap(list => {
       const identityKey = list.rows.some(row => row.id !== undefined) ? "id"
         : list.rows.some(row => row.value !== undefined) ? "value"
           : list.rows.some(row => row.code !== undefined) ? "code"
             : undefined;
       const labelKey = rowLabelPath(list.rows);
       if (!identityKey || !labelKey) return [];
-      return [{
+      const dictionary = list.rows.every(row => typeof row.dictType === "string" && row.dictType);
+      const grouped = new Map<string, Record<string, unknown>[]>();
+      if (dictionary) {
+        for (const row of list.rows) {
+          const key = String(row.dictType);
+          grouped.set(key, [...(grouped.get(key) || []), row]);
+        }
+      }
+      const groups: [string | undefined, Record<string, unknown>[]][] = dictionary
+        ? [...grouped.entries()]
+        : [[undefined, list.rows]];
+      return groups.map(([dictionaryType, rows]) => ({
         capabilityId: capability.id,
+        pathTemplate: capability.transport.pathTemplate,
         valuePath: `${list.path}[*].${identityKey}`,
         labelPath: `${list.path}[*].${labelKey}`,
-        rows: list.rows
-      }];
+        rows,
+        dictionaryType
+      }));
     });
   });
 }
@@ -540,7 +557,8 @@ export function matchExactCandidateSource(
   field: InputFormField,
   value: unknown,
   sources: ReturnType<typeof exactCandidateSources>,
-  selfId?: string
+  selfId?: string,
+  observation?: UiObservation
 ) {
   if (field.source !== "caller") return undefined;
   if (field.candidates?.type === "capability") return undefined;
@@ -554,10 +572,23 @@ export function matchExactCandidateSource(
   if (!looksExactPicker(field) && field.candidates?.type !== "static") return undefined;
   const ids = identityValues(value);
   if (ids.length === 1) {
-    const hits = sources.filter(source =>
+    let hits = sources.filter(source =>
       source.capabilityId !== selfId
       && source.rows.filter(row => sameValue(rowIdentity(row), ids[0])).length === 1
     );
+    const entity = pickerEntity(field);
+    if (entity) {
+      const entityHits = hits.filter(source => directoryLookupEntity(source.pathTemplate) === entity);
+      const simple = entityHits.filter(source => /simple-list$/i.test(source.pathTemplate));
+      if (simple.length === 1) hits = simple;
+      else if (entityHits.length) hits = entityHits;
+    }
+    if (observation) {
+      const displayHits = hits.filter(source => source.rows.some(row =>
+        sameValue(rowIdentity(row), ids[0]) && observationMatchesRow(observation, row)
+      ));
+      if (displayHits.length === 1) return displayHits[0];
+    }
     if (hits.length === 1) return hits[0];
   }
   if (field.candidates?.type !== "static" || field.candidates.values.length < 2) return undefined;
@@ -570,7 +601,7 @@ export function matchExactCandidateSource(
 }
 
 function sourceIsClosedEnum(source: ReturnType<typeof exactCandidateSources>[number]) {
-  return source.rows.length >= 2
+  return Boolean(source.dictionaryType) || source.rows.length >= 2
     && source.rows.every(row => row.value !== undefined && row.value !== null && row.value !== "");
 }
 
@@ -675,10 +706,16 @@ export function applyExactCandidateJoin(catalog: CapabilityContract[], events: E
   return catalog.map(capability => {
     const related = relatedEvents(capability, events);
     const sample = richestRequestSample(related);
+    const observations = collectUiObservations(joinUiEvents(capability, events));
     return {
       ...capability,
       inputForm: capability.inputForm.map(field => {
-        const hit = matchExactCandidateSource(field, requestValueAt(sample, field.path), sources, capability.id);
+        const observation = observations.find(item =>
+          uiNameMatches(item.name, field.name)
+          && item.value !== undefined
+          && item.value !== ""
+        );
+        const hit = matchExactCandidateSource(field, requestValueAt(sample, field.path), sources, capability.id, observation);
         if (!hit) return field;
         if (sourceIsClosedEnum(hit)) {
           return {
@@ -704,6 +741,28 @@ export function applyExactCandidateJoin(catalog: CapabilityContract[], events: E
   });
 }
 
+export function applySameResourceCandidates(catalog: CapabilityContract[]): CapabilityContract[] {
+  return catalog.map(capability => ({
+    ...capability,
+    inputForm: capability.inputForm.map(field => {
+      if (field.candidates) return field;
+      const matches = catalog.flatMap(source => {
+        if (source.id === capability.id
+          || source.transport.origin !== capability.transport.origin
+          || !sameResource(source.transport.pathTemplate, capability.transport.pathTemplate)) return [];
+        return source.inputForm.filter(item => item.name === field.name && Boolean(item.candidates));
+      });
+      const unique = [...new Map(matches.map(item => [JSON.stringify(item.candidates), item])).values()];
+      if (unique.length !== 1) return field;
+      return {
+        ...field,
+        widget: field.valueType === "array" ? "multiselect" as const : "select" as const,
+        candidates: unique[0]!.candidates
+      };
+    })
+  }));
+}
+
 export function applyDeterministicCatalogJudgment(
   capabilities: CapabilityContract[],
   events: EvidenceEvent[]
@@ -713,7 +772,7 @@ export function applyDeterministicCatalogJudgment(
     events
   );
   const withRoles = joined.map(item => ({ ...item, role: item.role || fallbackRole(item, joined) }));
-  return applyExactCandidateJoin(withRoles, events);
+  return applySameResourceCandidates(applyExactCandidateJoin(withRoles, events));
 }
 
 function applyFieldPatch(field: InputFormField, patch: z.infer<typeof FieldPatch>, catalogIds: Set<string>): InputFormField {
