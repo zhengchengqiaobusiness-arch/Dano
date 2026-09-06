@@ -1,0 +1,38 @@
+name: pi-business-skill-studio
+
+services:
+  studio:
+    build:
+      context: .
+      args:
+        RUNTIME_IMAGE: ${BSS_RUNTIME_IMAGE:-skillmanner-backend:latest}
+    container_name: pi-business-skill-studio
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      BSS_HOST: 0.0.0.0
+      BSS_PORT: 4310
+      PLAYWRIGHT_BROWSERS_PATH: ${PLAYWRIGHT_BROWSERS_PATH:-/root/.cache/ms-playwright}
+    ports:
+      - "4310:4310"
+    shm_size: 1gb
+    volumes:
+      - ./.business-skill-studio:/studio/.business-skill-studio
+      - ./dist:/studio/dist
+      - /opt/dano/runtime-data/.agents/skills:/opt/dano/runtime-data/.agents/skills
+      - /opt/dano/runtime-data/.agents/bak:/opt/dano/runtime-data/.agents/bak
+    networks:
+      - default
+      - dano
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4310/').then(r=>{if(!r.ok)throw Error(r.status)})"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+networks:
+  dano:
+    external: true
+    name: dano_default

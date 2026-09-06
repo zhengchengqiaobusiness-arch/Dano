@@ -1,0 +1,9 @@
+.git
+node_modules
+dist
+.env
+.business-skill-studio
+.pi/sessions
+.playwright-cli
+output/playwright
+*.log

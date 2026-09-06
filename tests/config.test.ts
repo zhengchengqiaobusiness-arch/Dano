@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   defaultSkillCredentialRoot,
@@ -21,4 +22,10 @@ test("keeps the project-local default outside Linux", () => {
     defaultSkillOutputRoot("C:\\studio", "win32"),
     path.join("C:\\studio", "dist", "skills")
   );
+});
+
+test("persists Linux Skill packages and credentials outside the workbench container", async () => {
+  const compose = await readFile(new URL("../docker-compose.yml", import.meta.url), "utf8");
+  assert.match(compose, /\/opt\/dano\/runtime-data\/\.agents\/skills:\/opt\/dano\/runtime-data\/\.agents\/skills/);
+  assert.match(compose, /\/opt\/dano\/runtime-data\/\.agents\/bak:\/opt\/dano\/runtime-data\/\.agents\/bak/);
 });
