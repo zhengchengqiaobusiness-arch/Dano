@@ -296,12 +296,17 @@ function schemaContainsArray(schema: JsonSchema | undefined): boolean {
   return Object.values(schema.properties || {}).some(schemaContainsArray);
 }
 
-function fastQueryCommands(primary: CapabilityContract[]) {
+function shellQuote(value: string) {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function fastQueryCommands(primary: CapabilityContract[], installDirectory: string) {
+  const root = shellQuote(installDirectory);
   return primary
     .filter(capability => capability.operation === "query")
     .map(capability => schemaContainsArray(capability.outputSchema)
-      ? `- ${safeCell(capability.title)}：\`python scripts/format_list.py --capability ${capability.id} --input '{}'\``
-      : `- ${safeCell(capability.title)}：\`python scripts/execute.py --capability ${capability.id} --input '{}'\``)
+      ? `- ${safeCell(capability.title)}：\`cd ${root} && python scripts/format_list.py --capability ${capability.id} --input '{}'\``
+      : `- ${safeCell(capability.title)}：\`cd ${root} && python scripts/execute.py --capability ${capability.id} --input '{}'\``)
     .join("\n");
 }
 
@@ -309,14 +314,15 @@ export function buildSkillMd(
   skillName: string,
   displayName: string,
   capabilities: CapabilityContract[],
-  routes: CapabilityRoute[]
+  routes: CapabilityRoute[],
+  installDirectory: string
 ) {
   const { primary, lookups } = classifyExported(capabilities);
   const title = displayName || skillName;
   const actions = primary.map(capability => capability.title).join("、");
   const lookupNames = lookups.map(capability => capability.title.replace(/^查询/, "")).filter(Boolean).join("、");
   const description = skillDescriptionLines(title, capabilities).join("\n  ");
-  const queryCommands = fastQueryCommands(primary);
+  const queryCommands = fastQueryCommands(primary, installDirectory);
   return `---
 name: ${skillName}
 description: >
@@ -352,7 +358,7 @@ ${lookups.length ? `| 只为字段选择${lookupNames || "目录值"} | 运行�
 
 ## Fast path
 
-用户只要求查询或列出、且没有提供筛选条件时，立即运行下面的单条命令；不要预读任何 references，不要先执行未格式化查询，也不要重复查询。目录和脚本已由导出器验证存在，不得先执行 \`ls\`、\`find\`、\`cat\` 或其它探测命令。命令已按合同选择业务列并转换固定枚举：
+用户只要求查询或列出、且没有提供筛选条件时，立即原样运行下面的单条完整命令；不要预读任何 references，不要先执行未格式化查询，也不要重复查询。命令已包含本次导出的绝对安装目录，能读到本文件就证明目录和脚本存在；不得先执行 \`ls\`、\`find\`、\`cat\` 或其它探测命令。命令已按合同选择业务列并转换固定枚举：
 
 ${queryCommands || "当前没有无输入即可直接执行的查询能力。"}
 

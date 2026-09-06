@@ -188,7 +188,7 @@ export async function exportSkill(
   const routes = buildApprovedRoutes(capabilities);
   const routeIssues = collectRouteIssues(capabilities);
   const { primary, lookups } = classifyExported(capabilities);
-  await writeFile(path.join(directory, "SKILL.md"), buildSkillMd(skillName, displayName, capabilities, routes), "utf8");
+  await writeFile(path.join(directory, "SKILL.md"), buildSkillMd(skillName, displayName, capabilities, routes, directory), "utf8");
   await writeJson(path.join(referencesDir, "CONTRACT.json"), {
     schemaVersion: "2.0",
     skill: skillName,

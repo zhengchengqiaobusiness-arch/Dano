@@ -221,6 +221,8 @@ test("exports a progressively disclosed Python Skill package", async () => {
     assert.match(skill, /## Atomic capabilities/);
     assert.match(skill, /## Fast path/);
     assert.match(skill, /python scripts\/format_list\.py --capability find-orders --input '\{\}'/);
+    assert.ok(skill.includes(`cd '${result.dir}' && python scripts/format_list.py`));
+    assert.match(skill, /命令已包含本次导出的绝对安装目录/);
     assert.match(skill, /不得先执行 `ls`、`find`、`cat`/);
     assert.match(skill, /## Composed workflows/);
     assert.match(skill, /## Output and failures/);
