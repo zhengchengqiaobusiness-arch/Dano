@@ -483,6 +483,89 @@ test("model judgment cannot bind a field to the capability being executed", asyn
   assert.equal(judged!.bindings.some(binding => binding.fromCapabilityId === judged!.id), false);
 });
 
+test("model judgment cannot invent cross-capability bindings or copy rules from equal samples", async () => {
+  const list = cap({
+    id: "query-hotel-list",
+    operation: "query",
+    role: "primary",
+    transport: {
+      method: "GET",
+      urlTemplate: "https://x/oa/hotelApply/list",
+      origin: "https://x",
+      pathTemplate: "/oa/hotelApply/list"
+    }
+  });
+  const attachmentCount = cap({
+    id: "query-attachment-count",
+    operation: "query",
+    role: "lookup",
+    transport: {
+      method: "GET",
+      urlTemplate: "https://x/common/sysAttachment/count",
+      origin: "https://x",
+      pathTemplate: "/common/sysAttachment/count"
+    }
+  });
+  const create = cap({
+    id: "create-hotel",
+    operation: "create",
+    role: "primary",
+    transport: {
+      method: "POST",
+      urlTemplate: "https://x/oa/hotelApply",
+      origin: "https://x",
+      pathTemplate: "/oa/hotelApply"
+    },
+    inputForm: [
+      field({ name: "billType", source: "system", systemHandled: true, defaultRule: 'literal:"hotel_apply"' }),
+      field({ name: "roomType", label: "房间类型", source: "caller", systemHandled: false, widget: "select" }),
+      field({ name: "roomLevel", label: "房间等级", source: "caller", systemHandled: false, widget: "select" }),
+      field({ name: "userCount", label: "入住人数", source: "caller", systemHandled: false, widget: "number" })
+    ]
+  });
+  const reasoner = {
+    model: "test",
+    available: () => true,
+    parseStructured: async () => ({
+      capabilities: [list, attachmentCount, create].map(item => ({
+        id: item.id,
+        operation: item.operation,
+        role: item.role,
+        title: item.title,
+        description: item.description,
+        fields: item.id === create.id ? [{
+          path: "$.billType",
+          source: "binding",
+          defaultRule: `from:${list.id}:$.rows[*].billType`
+        }, {
+          path: "$.roomType",
+          source: "computed",
+          defaultRule: "copy:userCount"
+        }, {
+          path: "$.roomLevel",
+          source: "computed",
+          defaultRule: "copy:userCount"
+        }, {
+          path: "$.userCount",
+          source: "binding",
+          defaultRule: `from:${attachmentCount.id}:$.data`
+        }] : []
+      }))
+    })
+  };
+
+  const judged = await applyPiCatalogJudgment([list, attachmentCount, create], [], reasoner as any, process.cwd(), true);
+  const result = judged.find(item => item.id === create.id)!;
+  const byName = new Map(result.inputForm.map(item => [item.name, item]));
+  assert.equal(byName.get("billType")?.source, "system");
+  assert.equal(byName.get("billType")?.defaultRule, 'literal:"hotel_apply"');
+  for (const name of ["roomType", "roomLevel", "userCount"]) {
+    assert.equal(byName.get(name)?.source, "caller", name);
+    assert.equal(byName.get(name)?.defaultRule, undefined, name);
+  }
+  assert.deepEqual(result.bindings, []);
+});
+
 test("model judgment cannot invent that an optional recorded field is required", async () => {
   const query = cap({
     id: "query-duty-optional",

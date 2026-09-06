@@ -7,7 +7,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import type { CapabilityContract, EvidenceEvent, FieldSource, InputFormField, NetworkEvidence, UiEvidence } from "../domain.js";
+import type { CapabilityContract, EvidenceEvent, InputFormField, NetworkEvidence, UiEvidence } from "../domain.js";
 import { OpenAIReasoner } from "../llm/openai.js";
 import { dateDay, recordedClock, recordedDateFormat } from "./date-format.js";
 import { isExecutableRule } from "./field-derivation.js";
@@ -32,7 +32,6 @@ import {
   uiNameMatches,
   type UiObservation
 } from "./field-resolver.js";
-import { id } from "../utils.js";
 
 const PAGE_NAME = /^(pageNo|pageSize|pageNum|page|size|current|offset|limit)$/i;
 const WRITE = new Set(["create", "update", "review", "delete", "upload", "action"]);
@@ -919,39 +918,16 @@ export function applyDeterministicCatalogJudgment(
 function applyFieldPatch(
   field: InputFormField,
   patch: z.infer<typeof FieldPatch>,
-  catalogIds: Set<string>,
-  ownerCapabilityId: string
+  _catalogIds: Set<string>,
+  _ownerCapabilityId: string
 ): InputFormField {
-  const fromCapabilityId = /^from:([^:]+):/.exec(patch.defaultRule || "")?.[1];
-  if (fromCapabilityId === ownerCapabilityId || patch.candidateCapabilityId === ownerCapabilityId) return field;
-  const source = (patch.source || field.source) as FieldSource;
-  let next: InputFormField = {
+  // Field provenance and executable rules are evidence, not semantic
+  // judgments. A model may improve names, but it must not turn coincidentally
+  // equal sample values into copy rules or cross-capability bindings.
+  return {
     ...field,
-    label: patch.label || field.label,
-    source,
-    widget: patch.widget || field.widget,
-    systemHandled: source !== "caller",
-    defaultRule: patch.defaultRule ?? field.defaultRule,
-    sourceDetail: patch.sourceDetail || field.sourceDetail
+    label: patch.label || field.label
   };
-  if (next.defaultRule && !isExecutableRule(next.defaultRule) && !next.defaultRule.startsWith("literal:")) {
-    next = { ...next, defaultRule: field.defaultRule };
-  }
-  if (patch.candidateCapabilityId && catalogIds.has(patch.candidateCapabilityId) && patch.candidateValuePath && patch.candidateLabelPath) {
-    next = {
-      ...next,
-      widget: next.valueType === "array" ? "multiselect" : "select",
-      candidates: {
-        type: "capability",
-        capabilityId: patch.candidateCapabilityId,
-        valuePath: patch.candidateValuePath,
-        labelPath: patch.candidateLabelPath
-      }
-    };
-  } else if (patch.staticCandidates?.length) {
-    next = { ...next, widget: next.widget === "text" ? "select" : next.widget, candidates: { type: "static", values: patch.staticCandidates } };
-  }
-  return next;
 }
 
 function applyJudgment(
@@ -968,27 +944,6 @@ function applyJudgment(
       const fieldPatch = patch.fields.find(item => item.path === field.path);
       return fieldPatch ? applyFieldPatch(field, fieldPatch, catalogIds, capability.id) : field;
     });
-    const bindings = [
-      ...capability.bindings,
-      ...inputForm.flatMap(field => {
-        const parsed = /^from:([^:]+):([^|]+)/.exec(field.defaultRule || "");
-        if (!parsed || parsed[1] === capability.id || !catalogIds.has(parsed[1]!)) return [];
-        const key = `${parsed[1]}|${parsed[2]}|${field.path}`;
-        if (capability.bindings.some(item => `${item.fromCapabilityId}|${item.fromPath}|${item.toPath}` === key)) return [];
-        return [{
-          id: id("bind"),
-          fromCapabilityId: parsed[1]!,
-          fromPath: parsed[2]!,
-          toPath: field.path,
-          confidence: 1,
-          evidenceIds: capability.evidence.map(item => item.eventId).slice(0, 4),
-          approved: true,
-          approvalSource: "evidence" as const,
-          approvedAt: new Date().toISOString(),
-          note: field.sourceDetail
-        }];
-      })
-    ];
     return {
       ...capability,
       title: patch.title || capability.title,
@@ -1001,7 +956,7 @@ function applyJudgment(
         reason: WRITE.has(patch.operation) ? "该操作会改变业务或文件数据" : undefined
       },
       inputForm,
-      bindings,
+      bindings: capability.bindings,
       confidence: Math.max(capability.confidence, 0.8),
       generated: {
         source: "pi-skill",
