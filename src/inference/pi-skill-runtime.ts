@@ -28,6 +28,7 @@ import {
   sameSynonymGroup,
   sameValue,
   semanticConcepts,
+  semanticLabelScore,
   uiNameMatches,
   type UiObservation
 } from "./field-resolver.js";
@@ -478,7 +479,7 @@ export function applyExactEvidenceJoin(capability: CapabilityContract, events: E
       && item.field.name === field.name
       && item.field.path.includes("[*]") !== field.path.includes("[*]")
     );
-    const semantic = sharedBusinessValue && !sameNamedCollectionLeaf && semanticConcepts(field).size < 2
+    const semanticMatches = sharedBusinessValue && !sameNamedCollectionLeaf && semanticConcepts(field).size < 2
       ? []
       : [...new Map(observations
       .filter(item => sameSynonymGroup(field, item))
@@ -489,6 +490,8 @@ export function applyExactEvidenceJoin(capability: CapabilityContract, events: E
       )
       .map(item => [item.label || item.name || "", item])).values()]
       .filter(item => item.label || item.name);
+    const exactSemantic = semanticMatches.filter(item => semanticLabelScore(field, item) > 0);
+    const semantic = exactSemantic.length ? exactSemantic : semanticMatches;
     if (semantic.length === 1) return asExactCaller(field, semantic[0], value);
     if (day && uniqueDayOwner.get(day) === field.path) {
       const dayHits = [...new Map(

@@ -103,6 +103,43 @@ test("an unnamed seat count control stays caller-owned when its value equals pag
   assert.equal(seatCount?.defaultRule, undefined);
 });
 
+test("hotel room fields bind by compound semantics when every recorded value is 1", () => {
+  const events: EvidenceEvent[] = [{
+    id: "ui-hotel-search", kind: "ui", sessionId: "hotel", at: "2026-09-06T00:00:00.000Z",
+    pageUrl: "https://x/oa/hotelApply", eventType: "click", text: "搜索", label: "搜索",
+    form: [
+      { label: "房间类型", type: "select", value: "标准间", required: false, options: [{ value: "1", label: "标准间" }, { value: "2", label: "大床房" }] },
+      { label: "房间数量", type: "text", value: "1", required: false },
+      { label: "房间等级", type: "select", value: "标准", required: false, options: [{ value: "1", label: "标准" }, { value: "2", label: "豪华" }] },
+      { label: "入住人数", type: "text", value: "1", required: false }
+    ]
+  }, {
+    id: "net-hotel-list", kind: "network", sessionId: "hotel", at: "2026-09-06T00:00:01.000Z",
+    pageUrl: "https://x/oa/hotelApply", correlatedUiEvidenceId: "ui-hotel-search",
+    request: {
+      method: "GET", url: "https://x/oa/hotelApply/list?pageNum=1&roomType=1&roomCount=1&roomLevel=1&userCount=1",
+      resourceType: "xhr", headers: {}, query: { pageNum: "1", roomType: "1", roomCount: "1", roomLevel: "1", userCount: "1" }
+    },
+    response: { status: 200, headers: {}, body: { code: 200, rows: [] } }
+  }];
+
+  const judged = applyDeterministicCatalogJudgment(buildCapabilityCandidates(events), events);
+  const query = judged.find(item => item.transport.pathTemplate.endsWith("/oa/hotelApply/list"))!;
+  const expected = new Map([
+    ["roomType", "房间类型"],
+    ["roomCount", "房间数量"],
+    ["roomLevel", "房间等级"],
+    ["userCount", "入住人数"]
+  ]);
+  for (const [name, label] of expected) {
+    const input = query.inputForm.find(item => item.name === name);
+    assert.equal(input?.label, label, JSON.stringify(query.inputForm));
+    assert.equal(input?.source, "caller", JSON.stringify(query.inputForm));
+    assert.equal(input?.systemHandled, false, JSON.stringify(query.inputForm));
+    assert.equal(input?.defaultRule, undefined, JSON.stringify(query.inputForm));
+  }
+});
+
 test("leftover one-to-one does not bind an unrelated remark to a hidden token", () => {
   const capability = cap({
     id: "write",
