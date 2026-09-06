@@ -868,12 +868,21 @@ async function skillAction(skill, action) {
   }
 }
 
-function connectEvents() {
+function disconnectEvents() {
   if (state.eventSource) {
     state.eventSource.onmessage = null;
     state.eventSource.onerror = null;
     state.eventSource.close();
+    state.eventSource = null;
   }
+}
+
+function connectEvents() {
+  disconnectEvents();
+  // EventSource occupies one HTTP/1.1 connection for the lifetime of the
+  // page. Keeping every background workbench tab connected can exhaust the
+  // browser's per-origin connection pool and make chat/abort requests hang.
+  if (document.hidden) return;
   const stream = new EventSource(`api/events?pageSession=${encodeURIComponent(pageSessionId())}`);
   state.eventSource = stream;
   stream.onmessage = message => {
@@ -1099,6 +1108,15 @@ async function initialize() {
   }
   window.addEventListener("resize", () => syncPreviewViewport());
   window.addEventListener("pagehide", notifyPageLeave);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      disconnectEvents();
+      return;
+    }
+    connectEvents();
+    void reconcileSession();
+    void pollBrowser(true);
+  });
   setInterval(() => { if (!document.hidden && state.browserActive) void refreshBrowserFrame(); }, 240);
   setInterval(() => { if (!document.hidden) void pollBrowserState(); }, 2000);
 }

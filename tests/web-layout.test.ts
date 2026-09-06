@@ -298,6 +298,12 @@ test("recording operations avoid generic confirmation while Skill writes require
   assert.doesNotMatch(extension, /details:\s*\{\s*review,\s*capabilities\s*\}/);
 });
 
+test("background workbench tabs release their event streams", async () => {
+  const app = await readFile(path.join(process.cwd(), "web", "app.js"), "utf8");
+  assert.match(app, /function disconnectEvents\(\)[\s\S]*eventSource\.close\(\)[\s\S]*eventSource = null/);
+  assert.match(app, /visibilitychange[\s\S]*document\.hidden[\s\S]*disconnectEvents\(\)[\s\S]*connectEvents\(\)[\s\S]*reconcileSession\(\)/);
+});
+
 test("managed Skill export runs in the workbench service that owns persistent storage", async () => {
   const [extension, server] = await Promise.all([
     readFile(path.join(root, ".pi", "extensions", "business-skill-studio.ts"), "utf8"),
