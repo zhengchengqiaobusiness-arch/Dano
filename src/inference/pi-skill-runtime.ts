@@ -381,7 +381,10 @@ export function fallbackRole(capability: CapabilityContract, catalog: Capability
   if (capability.operation === "unknown") return hasCaller ? "primary" : "lookup";
   if (capability.operation !== "query") return "lookup";
   const writes = catalog.filter(item => WRITE.has(item.operation));
-  if (writes.length && !hasCaller) return "lookup";
+  if (writes.length) {
+    const ownsWriteResource = writes.some(write => sameResource(path, write.transport.pathTemplate || ""));
+    return ownsWriteResource && isPageResultQuery(capability) ? "primary" : "lookup";
+  }
   if (hasCaller) return "primary";
   const queries = catalog.filter(item => item.operation === "query");
   return queries.length === 1 ? "primary" : "lookup";

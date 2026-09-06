@@ -237,6 +237,45 @@ test("same-resource list stays primary while its picker list stays a dependency"
   assert.deepEqual(exportableCapabilities(catalog).map(item => item.id), [query.id, picker.id, create.id]);
 });
 
+test("a write session does not promote unrelated background lists and counters to primary operations", async () => {
+  const hotelList = cap({
+    id: "query-hotel-list",
+    operation: "query",
+    transport: { method: "GET", urlTemplate: "https://x/prod-api/oa/hotelApply/list", origin: "https://x", pathTemplate: "/prod-api/oa/hotelApply/list" },
+    inputForm: [field({ name: "hotelName", label: "酒店名称", source: "caller", systemHandled: false })]
+  });
+  const flowCced = cap({
+    id: "query-flow-cced",
+    operation: "query",
+    transport: { method: "GET", urlTemplate: "https://x/prod-api/oa/flowCced/list", origin: "https://x", pathTemplate: "/prod-api/oa/flowCced/list" },
+    inputForm: [field({ name: "billType", source: "caller", systemHandled: false })]
+  });
+  const attachmentCount = cap({
+    id: "query-attachment-count",
+    operation: "query",
+    transport: { method: "GET", urlTemplate: "https://x/prod-api/common/sysAttachment/countSysAttachement", origin: "https://x", pathTemplate: "/prod-api/common/sysAttachment/countSysAttachement" },
+    inputForm: [field({ name: "billType", source: "caller", systemHandled: false })]
+  });
+  const create = cap({
+    id: "create-hotel",
+    operation: "create",
+    transport: { method: "POST", urlTemplate: "https://x/prod-api/oa/hotelApply", origin: "https://x", pathTemplate: "/prod-api/oa/hotelApply" }
+  });
+
+  const judged = await applyPiCatalogJudgment(
+    [hotelList, flowCced, attachmentCount, create],
+    [],
+    { available: () => false } as any,
+    process.cwd(),
+    false
+  );
+  const roles = new Map(judged.map(item => [item.id, item.role]));
+  assert.equal(roles.get(hotelList.id), "primary");
+  assert.equal(roles.get(create.id), "primary");
+  assert.equal(roles.get(flowCced.id), "lookup");
+  assert.equal(roles.get(attachmentCount.id), "lookup");
+});
+
 test("lookup-named API is primary only when it is the page's own query", () => {
   const balance = cap({
     id: "query-balance",
