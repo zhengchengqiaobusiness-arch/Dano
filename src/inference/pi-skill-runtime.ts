@@ -469,6 +469,14 @@ export function applyExactEvidenceJoin(capability: CapabilityContract, events: E
     }
     const observed = findObservation(field, value, observations, [], sample);
     if (observed) return asExactCaller(field, observed, value);
+    const concepts = semanticConcepts(field);
+    if (concepts.size >= 2) {
+      const compound = [...new Map(observations
+        .filter(item => semanticLabelScore(field, item) > 0)
+        .map(item => [item.label || item.name || "", item])).values()]
+        .filter(item => item.label || item.name);
+      if (compound.length === 1) return asExactCaller(field, compound[0], value);
+    }
     const sharedBusinessValue = values.some(item =>
       item.field.path !== field.path
       && !PAGE_NAME.test(item.field.name)
@@ -479,7 +487,7 @@ export function applyExactEvidenceJoin(capability: CapabilityContract, events: E
       && item.field.name === field.name
       && item.field.path.includes("[*]") !== field.path.includes("[*]")
     );
-    const semanticMatches = sharedBusinessValue && !sameNamedCollectionLeaf && semanticConcepts(field).size < 2
+    const semanticMatches = sharedBusinessValue && !sameNamedCollectionLeaf && concepts.size < 2
       ? []
       : [...new Map(observations
       .filter(item => sameSynonymGroup(field, item))

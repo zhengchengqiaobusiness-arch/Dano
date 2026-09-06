@@ -108,9 +108,9 @@ test("hotel room fields bind by compound semantics when every recorded value is 
     id: "ui-hotel-search", kind: "ui", sessionId: "hotel", at: "2026-09-06T00:00:00.000Z",
     pageUrl: "https://x/oa/hotelApply", eventType: "click", text: "搜索", label: "搜索",
     form: [
-      { label: "房间类型", type: "select", value: "标准间", required: false, options: [{ value: "1", label: "标准间" }, { value: "2", label: "大床房" }] },
+      { label: "房间类型", type: "select", value: "标准间", required: false },
       { label: "房间数量", type: "text", value: "1", required: false },
-      { label: "房间等级", type: "select", value: "标准", required: false, options: [{ value: "1", label: "标准" }, { value: "2", label: "豪华" }] },
+      { label: "房间等级", type: "select", value: "标准", required: false },
       { label: "入住人数", type: "text", value: "1", required: false }
     ]
   }, {
