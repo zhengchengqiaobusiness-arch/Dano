@@ -338,7 +338,7 @@ test("exported list fast path executes once and formats contract fields and enum
     requests.push(request.url || "");
     response.setHeader("content-type", "application/json");
     response.end(JSON.stringify({
-      rows: [{ searchValue: "", billCode: "Q-1", leaveType: "busy", status: 0 }],
+      rows: [{ searchValue: "", billType: "duty_leave", billCode: "Q-1", leaveType: "busy", status: 0, startTime: "2026-09-07 09:00:00", reason: "测试" }],
       total: 1
     }));
   });
@@ -357,9 +357,12 @@ test("exported list fast path executes once and formats contract fields and enum
           type: "object",
           properties: {
             searchValue: { type: "string" },
+            billType: { type: "string" },
             billCode: { type: "string" },
             leaveType: { type: "string" },
-            status: { type: "integer" }
+            status: { type: "integer" },
+            startTime: { type: "string" },
+            reason: { type: "string" }
           }
         }
       },
@@ -367,6 +370,11 @@ test("exported list fast path executes once and formats contract fields and enum
     }
   };
   query.inputForm = [
+    {
+      path: "$.billType", name: "billType", label: "业务类型", valueType: "string", source: "system",
+      required: false, requiredBasis: "not-observed", systemHandled: true, sourceDetail: "系统固定", widget: "text",
+      defaultRule: 'literal:"duty_leave"'
+    },
     {
       path: "$.billCode", name: "billCode", label: "单据编号", valueType: "string", source: "caller",
       required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "查询条件", widget: "text"
@@ -382,18 +390,32 @@ test("exported list fast path executes once and formats contract fields and enum
       candidates: { type: "static", values: [{ value: 0, label: "未提交" }] }
     }
   ];
+  const create = verifiedCapability("create-leave", "create");
+  create.inputForm = [
+    {
+      path: "$.startTime", name: "startTime", label: "开始时间", valueType: "string", source: "caller",
+      required: true, requiredBasis: "ui-required", systemHandled: false, sourceDetail: "页面字段", widget: "date"
+    },
+    {
+      path: "$.reason", name: "reason", label: "事由", valueType: "string", source: "caller",
+      required: true, requiredBasis: "ui-required", systemHandled: false, sourceDetail: "页面字段", widget: "textarea"
+    }
+  ];
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-skill-fast-list-"));
   try {
-    const exported = await exportSkill(temporary, "请假申请", [query]);
+    const exported = await exportSkill(temporary, "请假申请", [query, create]);
     const { stdout } = await execFileAsync("python", [
       path.join(exported.dir, "scripts", "format_list.py"),
       "--capability", query.id,
       "--input", "{}"
     ]);
-    assert.deepEqual(requests, ["/leave"]);
+    assert.deepEqual(requests, ["/leave?billType=duty_leave"]);
     assert.match(stdout, /\| 单据编号 \| 请假类型 \| 流程状态 \|/);
     assert.match(stdout, /\| Q-1 \| 事假 \| 未提交 \|/);
     assert.doesNotMatch(stdout, /searchValue/);
+    assert.doesNotMatch(stdout, /billType|业务类型/);
+    assert.match(stdout, /开始时间/);
+    assert.match(stdout, /事由/);
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(temporary, { recursive: true, force: true });

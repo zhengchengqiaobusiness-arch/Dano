@@ -46,25 +46,46 @@ def schema_array(schema: dict[str, Any], path: str = "$") -> tuple[str, dict[str
     return None
 
 
-def contract_capability(capability_id: str) -> dict[str, Any]:
+def contract_capability(capability_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8-sig"))
     capability = next((item for item in contract.get("capabilities", []) if item.get("id") == capability_id), None)
     if capability is None:
         raise ValueError(f"未知能力：{capability_id}")
-    return capability
+    return contract, capability
 
 
-def capability_columns(capability: dict[str, Any], item_schema: dict[str, Any]) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+def capability_columns(contract: dict[str, Any], capability: dict[str, Any], item_schema: dict[str, Any]) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
     properties = item_schema.get("properties") or {}
+    all_fields: dict[str, list[dict[str, Any]]] = {}
+    for item in contract.get("capabilities", []):
+        for field in item.get("inputForm", []):
+            if field.get("name") in properties:
+                all_fields.setdefault(field["name"], []).append(field)
     fields = {field.get("name"): field for field in capability.get("inputForm", []) if field.get("name") in properties}
-    selected = [name for name in fields if name not in {"page", "pageNo", "pageNum", "pageSize", "size", "limit"}]
+    selected = [
+        name for name, field in fields.items()
+        if field.get("source") == "caller" and name not in {"page", "pageNo", "pageNum", "pageSize", "size", "limit"}
+    ]
+    hidden = {name for name, field in fields.items() if field.get("source") != "caller"}
+    labels = {
+        name: next(iter(values))
+        for name, candidates in all_fields.items()
+        if len(values := {str(field.get("label")) for field in candidates if field.get("label") and field.get("label") != name}) == 1
+    }
+    if selected:
+        has_business_identifier = any(any(token in name.casefold() for token in ("code", "number", "name", "title")) or name.casefold().endswith("no") for name in selected)
+        remaining = [name for name in properties if name not in selected and name not in hidden and name not in TECHNICAL_FIELDS]
+        if has_business_identifier:
+            remaining = [name for name in remaining if name != "id" and not name.casefold().endswith(("id", "key"))]
+        remaining.sort(key=lambda name: (0 if name in labels else 1, list(properties).index(name)))
+        selected.extend(remaining[: max(0, 10 - len(selected))])
     if not selected:
         selected = [name for name in properties if name not in TECHNICAL_FIELDS][:8]
     columns: dict[str, str] = {}
     enums: dict[str, dict[str, str]] = {}
     for name in selected:
-        field = fields.get(name) or {}
-        label = str(field.get("label") or properties.get(name, {}).get("title") or name)
+        field = fields.get(name) or (all_fields.get(name) or [{}])[0]
+        label = str(fields.get(name, {}).get("label") or labels.get(name) or properties.get(name, {}).get("title") or name)
         if label in columns:
             label = f"{label}（{name}）"
         columns[label] = f"$.{name}"
@@ -101,7 +122,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=20, help="最多展示多少项")
     args = parser.parse_args()
     try:
-        capability = contract_capability(args.capability) if args.capability else None
+        contract, capability = contract_capability(args.capability) if args.capability else ({}, None)
         root = execute(args.capability, args.input) if args.capability else read_value(args.input)
         inferred = schema_array(capability.get("outputSchema") or {}) if capability else None
         if capability and not inferred:
@@ -116,7 +137,7 @@ def main() -> int:
         enums: dict[str, dict[str, str]] = {}
         columns = json.loads(args.columns) if args.columns else None
         if columns is None and capability and inferred:
-            columns, enums = capability_columns(capability, inferred[1])
+            columns, enums = capability_columns(contract, capability, inferred[1])
         if columns is None:
             first = items[0]
             if not isinstance(first, dict):
