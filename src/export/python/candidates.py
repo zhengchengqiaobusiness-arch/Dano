@@ -54,6 +54,22 @@ def main() -> int:
             if not response["ok"]:
                 raise ValueError("动态候选查询未满足完成条件")
             values = extract_many(response["body"], rule["valuePath"])
+            template = rule.get("valueTemplate") or {}
+            if template.get("type") == "object":
+                mapped_values: list[Any] = []
+                for candidate in values:
+                    if not isinstance(candidate, dict):
+                        mapped_values.append(candidate)
+                        continue
+                    mapped_values.append({
+                        key: (
+                            extract_many(candidate, mapping.get("sourcePath") or "$")[0]
+                            if "sourcePath" in mapping and extract_many(candidate, mapping.get("sourcePath") or "$")
+                            else mapping.get("literal")
+                        )
+                        for key, mapping in (template.get("properties") or {}).items()
+                    })
+                values = mapped_values
             labels = extract_many(response["body"], rule["labelPath"])
             result = {
                 "field": args.field,

@@ -722,15 +722,41 @@ def resolve_dynamic_candidates(
         result = execute_capability(source, prepared, False, candidate_stack)
         if not result.get("ok"):
             raise ValueError(f"动态候选查询失败：{source_id}")
-        values = extract_many(result.get("body"), rule.get("valuePath") or "")
+        raw_values = extract_many(result.get("body"), rule.get("valuePath") or "")
+        values = raw_values
+        template = rule.get("valueTemplate") or {}
+        if template.get("type") == "object":
+            mapped_values: list[Any] = []
+            for candidate in values:
+                if not isinstance(candidate, dict):
+                    mapped_values.append(candidate)
+                    continue
+                mapped_values.append({
+                    key: (
+                        get_by_path(candidate, mapping.get("sourcePath") or "")
+                        if "sourcePath" in mapping
+                        else copy.deepcopy(mapping.get("literal"))
+                    )
+                    for key, mapping in (template.get("properties") or {}).items()
+                })
+            values = mapped_values
         labels = extract_many(result.get("body"), rule.get("labelPath") or "")
-        options = [(item, str(labels[index] if index < len(labels) else item)) for index, item in enumerate(values)]
+        matches = [
+            get_by_path(item, rule.get("matchPath") or "")
+            if rule.get("matchPath") and isinstance(item, dict)
+            else item
+            for item in raw_values
+        ]
+        options = [
+            (item, str(labels[index] if index < len(labels) else item), matches[index] if index < len(matches) else item)
+            for index, item in enumerate(values)
+        ]
 
         def convert(item: Any) -> Any:
-            matches = [candidate for candidate, label in options if same_join(candidate, item) or label == str(item)]
-            if len(matches) != 1:
+            converted = [candidate for candidate, label, match in options if same_join(candidate, item) or same_join(match, item) or label == str(item)]
+            if len(converted) != 1:
                 raise ValueError(f"无法把“{item}”唯一转换为字段“{field.get('label') or field_path}”的接口值")
-            return matches[0]
+            return converted[0]
 
         converted = [convert(item) for item in value] if isinstance(value, list) else convert(value)
         if supplied_by_name:

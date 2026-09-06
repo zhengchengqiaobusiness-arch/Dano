@@ -19,6 +19,7 @@ import {
   flattenRequestValues,
   looksDirectoryPicker,
   looksPickerField,
+  objectPickerUiEvidence,
   owningFormEvent,
   pickerEntity,
   relatedUiEvents,
@@ -393,7 +394,8 @@ export function fallbackRole(capability: CapabilityContract, catalog: Capability
 export function applyExactEvidenceJoin(capability: CapabilityContract, events: EvidenceEvent[]): CapabilityContract {
   const related = relatedEvents(capability, events);
   const sample = richestRequestSample(related);
-  const observations = collectUiObservations(joinUiEvents(capability, events));
+  const joinedUi = joinUiEvents(capability, events);
+  const observations = collectUiObservations(joinedUi);
   const values = capability.inputForm.map(field => ({
     field,
     value: requestValueAt(sample, field.path)
@@ -424,7 +426,25 @@ export function applyExactEvidenceJoin(capability: CapabilityContract, events: E
     uniqueValueOwner.set(key, uniqueValueOwner.has(key) ? "" : item.field.path);
   }
 
+  const callerObjectCollections = new Set<string>();
+
   const inputForm = values.map(({ field, value }) => {
+    const objectPicker = objectPickerUiEvidence(field, value, joinedUi);
+    if (objectPicker) {
+      callerObjectCollections.add(field.path);
+      return {
+        ...field,
+        label: displayLabel(objectPicker.label, field.label) || field.label,
+        source: "caller" as const,
+        required: objectPicker.required === true,
+        requiredBasis: objectPicker.required === true ? "ui-required" as const : "not-observed" as const,
+        systemHandled: false,
+        widget: "json" as const,
+        defaultRule: undefined,
+        candidates: undefined,
+        sourceDetail: "页面通过对象列表选择器提供；调用方按成功请求中的对象数组结构提供，不沿用录制时选中的具体记录"
+      };
+    }
     if (keptJudgedRule(field)) return field;
     const sameNamedCollectionLeaf = values.some(item =>
       item.field.path !== field.path
@@ -545,7 +565,21 @@ export function applyExactEvidenceJoin(capability: CapabilityContract, events: E
     return asExactSystem(field, value, "请求中有该键，页面无同名输入；系统按录制成功请求原值补齐（系统默认）");
   });
 
-  return { ...capability, inputForm, evidence: mergeEvidence(capability, joinUiEvents(capability, events)) };
+  const compactInputForm = inputForm.filter(field => {
+    const parent = [...callerObjectCollections].find(path =>
+      field.path !== path && (field.path.startsWith(`${path}[*].`) || field.path.startsWith(`${path}[`))
+    );
+    if (!parent) return true;
+    const root = inputForm.find(item =>
+      item.path !== field.path
+      && !item.path.includes("[*]")
+      && item.name === field.name
+      && item.source !== "caller"
+      && sameValue(requestValueAt(sample, item.path), requestValueAt(sample, field.path))
+    );
+    return Boolean(root);
+  });
+  return { ...capability, inputForm: compactInputForm, evidence: mergeEvidence(capability, joinUiEvents(capability, events)) };
 }
 
 function asObjectRows(value: unknown): Record<string, unknown>[] {
@@ -573,14 +607,14 @@ function responseLists(body: unknown): Array<{ path: string; rows: Record<string
 }
 
 function rowIdentity(row: Record<string, unknown>) {
-  for (const key of ["id", "value", "code", "key", "dictValue", "dictCode"]) {
+  for (const key of ["id", "userId", "deptId", "roleId", "postId", "value", "code", "key", "dictValue", "dictCode"]) {
     if (row[key] !== undefined && row[key] !== null && row[key] !== "") return row[key];
   }
   return undefined;
 }
 
 function rowLabelPath(rows: Record<string, unknown>[]) {
-  for (const key of ["name", "label", "title", "dictLabel", "nickname", "username", "userName", "text"]) {
+  for (const key of ["name", "label", "title", "dictLabel", "nickName", "nickname", "deptName", "roleName", "postName", "username", "userName", "text"]) {
     if (rows.some(row => row[key] !== undefined && row[key] !== null && row[key] !== "")) {
       return key === "username" ? "username" : key;
     }
@@ -606,12 +640,12 @@ function identityValues(value: unknown): unknown[] {
 }
 
 function rowDisplays(row: Record<string, unknown>) {
-  const values = ["name", "label", "title", "dictLabel", "nickname", "username", "userName", "text"]
+  const values = ["name", "label", "title", "dictLabel", "nickName", "nickname", "deptName", "roleName", "postName", "username", "userName", "text"]
     .map(key => row[key])
     .filter(item => item !== undefined && item !== null && item !== "")
     .map(item => String(item));
   const username = row.username ?? row.userName;
-  const nickname = row.nickname;
+  const nickname = row.nickName ?? row.nickname;
   if (username && nickname) {
     values.push(`${username} ${nickname}`, `${nickname} ${username}`);
   }
@@ -654,13 +688,19 @@ export function exactCandidateSources(catalog: CapabilityContract[], events: Evi
   return catalog.flatMap(capability => {
     if (!usableExactCandidateSource(capability)) return [];
     const related = relatedEvents(capability, events);
-    const lists = related
+    const recorded = related
       .filter((event): event is NetworkEvidence => event.kind === "network")
-      .map(event => responseLists(event.response?.body))
-      .find(items => items.length > 0);
-    if (!lists) return [];
-    return lists.flatMap(list => {
-      const identityKey = ["id", "value", "code", "key", "dictValue", "dictCode"]
+      .map(event => ({ event, lists: responseLists(event.response?.body) }))
+      .find(item => item.lists.length > 0);
+    if (!recorded) return [];
+    return recorded.lists.flatMap(list => {
+      const entity = directoryLookupEntity(capability.transport.pathTemplate || "");
+      const entityKeys = entity === "user" ? ["userId"]
+        : entity === "dept" ? ["deptId"]
+        : entity === "role" ? ["roleId"]
+        : entity === "post" ? ["postId"]
+        : [];
+      const identityKey = [...entityKeys, "id", "value", "code", "key", "dictValue", "dictCode"]
         .find(key => list.rows.some(row => row[key] !== undefined && row[key] !== null && row[key] !== ""));
       const labelKey = rowLabelPath(list.rows);
       if (!identityKey || !labelKey) return [];
@@ -677,6 +717,7 @@ export function exactCandidateSources(catalog: CapabilityContract[], events: Evi
         : [[undefined, list.rows]];
       return groups.map(([dictionaryType, rows]) => ({
         capabilityId: capability.id,
+        eventId: recorded.event.id,
         pathTemplate: capability.transport.pathTemplate,
         valuePath: `${list.path}[*].${identityKey}`,
         labelPath: `${list.path}[*].${labelKey}`,
@@ -684,6 +725,115 @@ export function exactCandidateSources(catalog: CapabilityContract[], events: Evi
         dictionaryType
       }));
     });
+  });
+}
+
+function objectPickerTemplate(
+  capability: CapabilityContract,
+  field: InputFormField,
+  sample: unknown,
+  source: ReturnType<typeof exactCandidateSources>[number]
+) {
+  const targetRows = asObjectRows(requestValueAt(sample, field.path));
+  if (!targetRows.length || targetRows.some(row => Object.values(row).some(value => value !== null && typeof value === "object"))) {
+    return undefined;
+  }
+  const sourceRows = targetRows.map(target => {
+    const targetValues = Object.values(target).filter(value => value !== undefined && value !== null && value !== "");
+    const scored = source.rows.map(row => {
+      const values = flattenRequestValues(row)
+        .filter(item => item.path !== "$" && (item.value === null || typeof item.value !== "object"))
+        .map(item => item.value);
+      return {
+        row,
+        score: targetValues.filter(value => values.some(candidate => sameValue(candidate, value))).length,
+        identity: targetValues.some(value => sameValue(rowIdentity(row), value))
+      };
+    });
+    const best = Math.max(...scored.map(item => item.score));
+    const hits = scored.filter(item => item.score === best && (best >= 2 || item.identity));
+    return hits.length === 1 ? hits[0]!.row : undefined;
+  });
+  if (sourceRows.some(row => !row)) return undefined;
+
+  const mapped: Record<string, { sourcePath: string } | { literal: unknown }> = {};
+  for (const key of Object.keys(targetRows[0]!)) {
+    if (!targetRows.every(row => Object.prototype.hasOwnProperty.call(row, key))) return undefined;
+    const paths = targetRows.map((row, index) => {
+      const matches = flattenRequestValues(sourceRows[index]!)
+        .filter(item => item.path !== "$" && sameValue(item.value, row[key]))
+        .map(item => item.path);
+      return [...new Set(matches)].length === 1 ? matches[0] : undefined;
+    });
+    const uniquePaths = [...new Set(paths.filter((item): item is string => Boolean(item)))];
+    if (paths.every(Boolean) && uniquePaths.length === 1) {
+      mapped[key] = { sourcePath: uniquePaths[0]! };
+      continue;
+    }
+    const first = targetRows[0]![key];
+    const rootSystem = capability.inputForm.some(item =>
+      !item.path.includes("[*]")
+      && item.name === key
+      && item.source !== "caller"
+      && targetRows.every(row => sameValue(row[key], first))
+      && sameValue(requestValueAt(sample, item.path), first)
+    );
+    if (!rootSystem) return undefined;
+    mapped[key] = { literal: first };
+  }
+  const rowPath = source.valuePath.replace(/\.[^.]+$/, "");
+  const identityPath = source.valuePath.slice(rowPath.length).replace(/^\./, "");
+  if (!rowPath.endsWith("[*]") || !identityPath) return undefined;
+  return {
+    type: "capability" as const,
+    capabilityId: source.capabilityId,
+    valuePath: rowPath,
+    labelPath: source.labelPath,
+    matchPath: `$.${identityPath}`,
+    valueTemplate: { type: "object" as const, properties: mapped }
+  };
+}
+
+export function applyExactObjectPickerCandidateJoin(catalog: CapabilityContract[], events: EvidenceEvent[]) {
+  const sources = exactCandidateSources(catalog, events);
+  const eventById = new Map(events.map(event => [event.id, event]));
+  const uiById = new Map(events.filter((event): event is UiEvidence => event.kind === "ui").map(event => [event.id, event]));
+  return catalog.map(capability => {
+    const related = relatedEvents(capability, events);
+    const write = richestNetwork(related);
+    const sample = write ? requestInput(write) : undefined;
+    if (!write || !sample) return capability;
+    const writeUi = write.correlatedUiEvidenceId ? uiById.get(write.correlatedUiEvidenceId) : undefined;
+    const writePage = evidencePage(writeUi?.pageUrl || write.pageUrl);
+    const joinedUi = joinUiEvents(capability, events);
+    return {
+      ...capability,
+      inputForm: capability.inputForm.map(field => {
+        const value = requestValueAt(sample, field.path);
+        if (field.source !== "caller" || field.candidates || !objectPickerUiEvidence(field, value, joinedUi)) return field;
+        const entity = pickerEntity(field);
+        const hits = sources.flatMap(source => {
+          if (!entity || directoryLookupEntity(source.pathTemplate) !== entity) return [];
+          const sourceEvent = eventById.get(source.eventId);
+          if (!sourceEvent || sourceEvent.kind !== "network"
+            || sourceEvent.sessionId !== write.sessionId
+            || sourceEvent.at > write.at
+            || evidencePage(sourceEvent.pageUrl) !== writePage) return [];
+          const trigger = sourceEvent.correlatedUiEvidenceId ? uiById.get(sourceEvent.correlatedUiEvidenceId) : undefined;
+          if (!trigger || !objectPickerUiEvidence(field, value, [trigger])) return [];
+          const candidates = objectPickerTemplate(capability, field, sample, source);
+          return candidates ? [candidates] : [];
+        });
+        const unique = [...new Map(hits.map(item => [JSON.stringify(item), item])).values()];
+        if (unique.length !== 1) return field;
+        return {
+          ...field,
+          widget: "multiselect" as const,
+          candidates: unique[0],
+          sourceDetail: `页面对象选择器由已录制查询 ${unique[0]!.capabilityId} 提供；调用方选择显示名，系统构造成功请求中的对象数组`
+        };
+      })
+    };
   });
 }
 
@@ -915,7 +1065,8 @@ export function applyDeterministicCatalogJudgment(
     events
   );
   const withRoles = joined.map(item => ({ ...item, role: item.role || fallbackRole(item, joined) }));
-  return normalizeCandidateWidgets(applySameResourceCandidates(applyExactCandidateJoin(withRoles, events)));
+  const objectPickers = applyExactObjectPickerCandidateJoin(withRoles, events);
+  return normalizeCandidateWidgets(applySameResourceCandidates(applyExactCandidateJoin(objectPickers, events)));
 }
 
 function applyFieldPatch(

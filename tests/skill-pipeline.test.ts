@@ -674,6 +674,117 @@ test("exported executor queries dynamic options before sending a display name", 
   }
 });
 
+test("exported executor turns an object-picker display name into the recorded request object", async () => {
+  const requests: Array<{ url: string; body?: unknown }> = [];
+  const rows = [{
+    userId: 133, userName: "000021", nickName: "李娜", dept: { deptName: "项目管理部" }
+  }, {
+    userId: 132, userName: "000022", nickName: "张伟", dept: { deptName: "项目管理部" }
+  }];
+  const server = http.createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", chunk => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8");
+      requests.push({ url: request.url || "", ...(raw ? { body: JSON.parse(raw) } : {}) });
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(request.url === "/users" ? { rows } : { code: 200 }));
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const origin = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+  const source = verifiedCapability("query-users");
+  source.role = "lookup";
+  source.transport = { method: "GET", origin, pathTemplate: "/users", urlTemplate: `${origin}/users` };
+  source.outputSchema = {
+    type: "object",
+    properties: {
+      rows: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            userId: { type: "integer" },
+            userName: { type: "string" },
+            nickName: { type: "string" },
+            dept: { type: "object", properties: { deptName: { type: "string" } } }
+          }
+        }
+      }
+    }
+  };
+  const target = verifiedCapability("create-duty", "create");
+  target.role = "primary";
+  target.transport = { method: "POST", origin, pathTemplate: "/duty", urlTemplate: `${origin}/duty` };
+  target.inputSchema = {
+    type: "object",
+    properties: {
+      ccedList: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            billType: { type: "string" },
+            toUserId: { type: "integer" },
+            toNickName: { type: "string" },
+            toDeptName: { type: "string" }
+          }
+        }
+      }
+    }
+  };
+  target.inputForm = [{
+    path: "$.ccedList", name: "ccedList", label: "抄送", valueType: "array", source: "caller",
+    required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面对象选择器", widget: "multiselect",
+    candidates: {
+      type: "capability", capabilityId: source.id, valuePath: "$.rows[*]", labelPath: "$.rows[*].nickName", matchPath: "$.userId",
+      valueTemplate: {
+        type: "object",
+        properties: {
+          billType: { literal: "duty_leave" },
+          toUserId: { sourcePath: "$.userId" },
+          toNickName: { sourcePath: "$.nickName" },
+          toDeptName: { sourcePath: "$.dept.deptName" }
+        }
+      }
+    }
+  }];
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "business-skill-object-candidate-"));
+  try {
+    const exported = await exportSkill(temporary, "请假申请", [target, source]);
+    const contract = JSON.parse(await readFile(path.join(exported.dir, "references", "CONTRACT.json"), "utf8"));
+    const question = contract.capabilities.find((item: { id: string }) => item.id === target.id).inputQuestions[0];
+    assert.equal(question.inputType, "select");
+    assert.equal(question.multiple, true);
+    assert.equal(question.columns, undefined);
+    assert.equal(question.dataSource.idField, "userId");
+    assert.equal(question.dataSource.labelField, "nickName");
+    const { stdout: candidateOutput } = await execFileAsync("python", [
+      path.join(exported.dir, "scripts", "candidates.py"),
+      "--capability", target.id,
+      "--field", "$.ccedList"
+    ]);
+    const candidate = JSON.parse(candidateOutput).candidates.find((item: { label: string }) => item.label === "张伟");
+    assert.deepEqual(candidate.value, {
+      billType: "duty_leave", toUserId: 132, toNickName: "张伟", toDeptName: "项目管理部"
+    });
+    await execFileAsync("python", [
+      path.join(exported.dir, "scripts", "execute.py"),
+      "--capability", target.id,
+      "--input", JSON.stringify({ ccedList: ["张伟"] }),
+      "--confirm-write"
+    ]);
+    assert.deepEqual(requests, [{ url: "/users" }, { url: "/users" }, {
+      url: "/duty",
+      body: { ccedList: [{ billType: "duty_leave", toUserId: 132, toNickName: "张伟", toDeptName: "项目管理部" }] }
+    }]);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("exported executor runs an approved query-to-write route with one command", async () => {
   const requests: Array<{ url: string; body?: unknown }> = [];
   let queryRows = [{ id: "order-7" }];

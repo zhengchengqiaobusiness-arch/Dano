@@ -363,7 +363,7 @@ export function pickerEntity(value: { name?: string; label?: string; path?: stri
   if (/dept|department|部门|组织机构/.test(text) && !/creator|userId|userIds|人员|创建人|选人|审批人/.test(text)) return "dept";
   if (/\brole\b|角色/.test(text)) return "role";
   if (/\bpost\b|岗位|职位/.test(text)) return "post";
-  if (/人员|创建人|选人|审批人|审批(?!结果|状态)|assignee|approver|creator|Activity_|userId|userIds|UserSelect/i.test(text)) return "user";
+  if (/人员|创建人|选人|审批人|抄送|审批(?!结果|状态)|assignee|approver|creator|cced|Activity_|userId|userIds|UserSelect/i.test(text)) return "user";
   return undefined;
 }
 
@@ -533,6 +533,39 @@ export function collectUiObservations(events: UiEvidence[]): UiObservation[] {
   return items;
 }
 
+export function objectPickerUiEvidence(
+  field: Pick<InputFormField, "name" | "label" | "path" | "valueType">,
+  value: unknown,
+  events: UiEvidence[]
+) {
+  if (field.valueType !== "array" || !Array.isArray(value) || !value.length
+    || !value.every(item => item && typeof item === "object" && !Array.isArray(item))) return undefined;
+  const entity = pickerEntity(field);
+  if (!entity) return undefined;
+  const targetText = fieldText(field);
+  const matches = (item: { name?: string; label?: string }) => {
+    if (pickerEntity(item) !== entity) return false;
+    const itemText = fieldText(item);
+    if (/cced|抄送/i.test(targetText) || /cced|抄送/i.test(itemText)) {
+      return /cced|抄送/i.test(targetText) && /cced|抄送/i.test(itemText);
+    }
+    return sameSynonymGroup(field, item);
+  };
+  const observations = collectUiObservations(events).filter(matches);
+  const actions = events.filter(event => event.eventType === "click")
+    .map(event => ({
+      name: event.name,
+      label: event.label || event.text,
+      required: (event.form || []).find(control => control.label === event.label)?.required
+    }))
+    .filter(matches);
+  return [...observations, ...actions]
+    .filter(item => item.label || item.name)
+    .sort((left, right) =>
+      String(left.label || left.name || "").length - String(right.label || right.name || "").length
+    )[0];
+}
+
 function mergeObservations(items: UiObservation[]) {
   if (!items.length) return undefined;
   const texts = items.filter(looksTextObservation);
@@ -567,7 +600,7 @@ function mergeObservations(items: UiObservation[]) {
 }
 
 function rowIdentity(row: Record<string, unknown>) {
-  for (const key of ["id", "value", "code", "key", "dictValue", "dictCode"]) {
+  for (const key of ["id", "userId", "deptId", "roleId", "postId", "value", "code", "key", "dictValue", "dictCode"]) {
     const value = row[key];
     if (value !== undefined && value !== null && value !== "") return value;
   }
@@ -575,7 +608,7 @@ function rowIdentity(row: Record<string, unknown>) {
 }
 
 function rowDisplay(row: Record<string, unknown>) {
-  for (const key of ["name", "label", "title", "dictLabel", "nickname", "text", "billCode", "documentNo", "applyNo", "orderNo", "xtmc", "yymc", "bmmc", "ssbmmc", "yyxtmc", "mc", "csmc"]) {
+  for (const key of ["name", "label", "title", "dictLabel", "nickName", "nickname", "userName", "deptName", "roleName", "postName", "text", "billCode", "documentNo", "applyNo", "orderNo", "xtmc", "yymc", "bmmc", "ssbmmc", "yyxtmc", "mc", "csmc"]) {
     const value = row[key];
     if (value !== undefined && value !== null && value !== "") return value;
   }

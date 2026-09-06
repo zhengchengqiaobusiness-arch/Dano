@@ -186,16 +186,33 @@ function applyCandidate(field: InputFormField, value: unknown, options?: Materia
   const rule = field.candidates;
   if (!rule || value === undefined || value === null) return value;
   const optionsList = rule.type === "static"
-    ? rule.values
+    ? rule.values.map(option => ({ ...option, matchValue: option.value }))
     : (() => {
         const body = options?.lookupBodies?.[rule.capabilityId];
         if (body === undefined) return [];
-        const values = candidateValues(body, rule.valuePath);
+        const rawValues = candidateValues(body, rule.valuePath);
         const labels = candidateValues(body, rule.labelPath);
-        return values.map((candidate, index) => ({ value: candidate, label: String(labels[index] ?? candidate) }));
+        return rawValues.map((candidate, index) => ({
+          value: rule.valueTemplate && candidate && typeof candidate === "object" && !Array.isArray(candidate)
+            ? Object.fromEntries(Object.entries(rule.valueTemplate.properties).map(([key, mapping]) => [
+                key,
+                "sourcePath" in mapping ? getByPath(candidate, mapping.sourcePath) : structuredClone(mapping.literal)
+              ]))
+            : candidate,
+          label: String(labels[index] ?? candidate),
+          matchValue: rule.matchPath && candidate && typeof candidate === "object" && !Array.isArray(candidate)
+            ? getByPath(candidate, rule.matchPath)
+            : candidate
+        }));
       })();
   const convert = (item: unknown) => {
-    const matches = optionsList.filter(option => sameJoin(option.value, item) || String(option.label) === String(item));
+    const matches = optionsList.filter(option =>
+      (option.value && item && typeof option.value === "object" && typeof item === "object"
+        ? JSON.stringify(option.value) === JSON.stringify(item)
+        : sameJoin(option.value, item))
+      || sameJoin(option.matchValue, item)
+      || String(option.label) === String(item)
+    );
     if (matches.length === 1) return matches[0]!.value;
     return item;
   };

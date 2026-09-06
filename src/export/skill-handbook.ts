@@ -63,6 +63,19 @@ function objectArrayColumns(schema: JsonSchema | undefined) {
   }));
 }
 
+function callerObjectArrayColumns(
+  field: InputFormField,
+  owner: CapabilityContract | undefined,
+  schema: JsonSchema | undefined
+) {
+  const systemColumns = new Set((owner?.inputForm || []).flatMap(item => {
+    if (item.source === "caller") return [];
+    const match = new RegExp(`^${field.path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\[\\*\\]\\.([^.]+)$`).exec(item.path);
+    return match ? [match[1]!] : [];
+  }));
+  return objectArrayColumns(schema).filter(column => !systemColumns.has(column.id));
+}
+
 function objectArraySections(schema: JsonSchema | undefined) {
   const columns = objectArrayColumns(schema);
   const items = schema?.items;
@@ -88,6 +101,7 @@ function objectArraySections(schema: JsonSchema | undefined) {
 }
 
 export function inputType(field: InputFormField, schema?: JsonSchema) {
+  if (field.candidates?.type === "capability" && field.candidates.valueTemplate) return "select";
   if (objectArrayColumns(schema).length) return "table";
   if (field.widget === "date" || isDateField(field)) return "date";
   if (field.widget === "textarea" || field.widget === "json") return "textarea";
@@ -208,7 +222,7 @@ export function dataSourceOf(field: InputFormField, capabilities: CapabilityCont
     valuePath: candidates.valuePath,
     labelPath: candidates.labelPath,
     resultPath: resultPathOf(candidates.valuePath),
-    idField: candidates.valuePath.split(".").pop(),
+    idField: (candidates.matchPath || candidates.valuePath).split(".").pop(),
     labelField: candidates.labelPath.split(".").pop(),
     ...hints
   };
@@ -240,9 +254,9 @@ export function exportedQuestion(
     defaultStrategy: defaultStrategy(field)
   };
   if (type !== "table") question.multiple = field.valueType === "array" || field.widget === "multiselect";
-  const columns = objectArrayColumns(fieldSchema);
+  const columns = type === "table" ? callerObjectArrayColumns(field, owner, fieldSchema) : [];
   if (columns.length) question.columns = columns;
-  const sections = objectArraySections(fieldSchema);
+  const sections = type === "table" ? objectArraySections(fieldSchema) : [];
   if (sections.length) question.sections = sections;
   if (isDateField(field)) question.dateFormat = dateFormat(field);
   if (field.dateClocks?.length) question.dateClocks = field.dateClocks;
@@ -476,7 +490,7 @@ ${fields.map(field => {
     const hint = /页面未唯一对应：(.+)$/.exec(field.sourceDetail || "")?.[1];
     const label = hint && field.label === field.name ? `${field.label}（${hint}）` : field.label;
     const schema = schemaAtField(capability.inputSchema, field.path);
-    const tableColumns = objectArrayColumns(schema);
+    const tableColumns = inputType(field, schema) === "table" ? callerObjectArrayColumns(field, capability, schema) : [];
     if (tableColumns.length) candidate = `columns: ${JSON.stringify(tableColumns)}`;
     return `| \`${safeCell(questionKey(field, capability.inputForm))}\` | ${safeCell(label)} | \`${inputType(field, schema)}\` | ${field.required ? "是" : "否"} | ${safeCell(recommendedDefault(field, capability))} | ${safeCell(candidate)} |`;
   }).join("\n")}`;

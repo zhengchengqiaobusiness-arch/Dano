@@ -81,7 +81,12 @@ export interface CandidateRuleCapability {
   capabilityId: string;
   valuePath: string;
   labelPath: string;
+  matchPath?: string;
   dependsOn?: string[];
+  valueTemplate?: {
+    type: "object";
+    properties: Record<string, { sourcePath: string } | { literal: unknown }>;
+  };
 }
 
 export type CandidateRule = CandidateRuleStatic | CandidateRuleCapability;

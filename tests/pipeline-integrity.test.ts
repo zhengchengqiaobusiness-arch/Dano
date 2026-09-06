@@ -18,6 +18,8 @@ import {
 } from "../src/inference/export-scope.js";
 import { reviewCatalog, reviewSession } from "../src/review/catalog-review.js";
 import { applyPiCatalogJudgment } from "../src/inference/pi-skill-runtime.js";
+import { validateCapability } from "../src/validation/validator.js";
+import { materializeHttpRequest } from "../src/execution/http-executor.js";
 
 function field(partial: Partial<InputFormField> & Pick<InputFormField, "name">): InputFormField {
   return {
@@ -701,6 +703,151 @@ test("model judgment cannot downgrade a recorded dynamic candidate to free text"
   const leaveType = judged.find(item => item.id === query.id)?.inputForm[0];
   assert.equal(leaveType?.widget, "select");
   assert.equal(leaveType?.candidates?.type, "capability");
+});
+
+test("a recorded object-array picker stays one caller field instead of freezing the selected row", async () => {
+  const create = cap({
+    id: "create-duty",
+    operation: "create",
+    role: "primary",
+    transport: {
+      method: "POST",
+      urlTemplate: "https://x/oa/dutyApply",
+      origin: "https://x",
+      pathTemplate: "/oa/dutyApply"
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        billType: { type: "string" },
+        ccedList: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              billType: { type: "string" },
+              toUserId: { type: "integer" },
+              toNickName: { type: "string" },
+              toDeptName: { type: "string" }
+            }
+          }
+        }
+      }
+    },
+    inputForm: [
+      field({ name: "billType", source: "system", systemHandled: true, defaultRule: 'literal:"duty_leave"' }),
+      field({ name: "ccedList", valueType: "array", source: "system", systemHandled: true, widget: "json", defaultRule: 'literal:[{"billType":"duty_leave","toUserId":133,"toNickName":"李娜","toDeptName":"项目管理部"}]' }),
+      field({ name: "billType", path: "$.ccedList[*].billType", source: "system", systemHandled: true, defaultRule: 'literal:"duty_leave"' }),
+      field({ name: "toUserId", path: "$.ccedList[*].toUserId", valueType: "integer", source: "system", systemHandled: true, defaultRule: "literal:133" }),
+      field({ name: "toNickName", path: "$.ccedList[*].toNickName", source: "system", systemHandled: true, defaultRule: 'literal:"李娜"' }),
+      field({ name: "toDeptName", path: "$.ccedList[*].toDeptName", source: "system", systemHandled: true, defaultRule: 'literal:"项目管理部"' })
+    ],
+    evidence: [{ eventId: "net-create-duty", sessionId: "s", kind: "network", at: "2026-09-06T00:00:02.000Z", status: 200 }]
+  });
+  const userRows = [{
+    userId: 133, userName: "000021", nickName: "李娜", dept: { deptName: "项目管理部" }
+  }, {
+    userId: 132, userName: "000022", nickName: "张伟", dept: { deptName: "项目管理部" }
+  }];
+  const users = cap({
+    id: "query-users",
+    operation: "query",
+    role: "lookup",
+    transport: {
+      method: "GET",
+      urlTemplate: "https://x/system/user/list",
+      origin: "https://x",
+      pathTemplate: "/system/user/list"
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        rows: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              userId: { type: "integer" },
+              userName: { type: "string" },
+              nickName: { type: "string" },
+              dept: { type: "object", properties: { deptName: { type: "string" } } }
+            }
+          }
+        }
+      }
+    },
+    evidence: [{ eventId: "net-users", sessionId: "s", kind: "network", at: "2026-09-06T00:00:00.600Z", status: 200 }]
+  });
+  const selected = [{ billType: "duty_leave", toUserId: 133, toNickName: "李娜", toDeptName: "项目管理部" }];
+  const events: EvidenceEvent[] = [{
+    id: "ui-cced", kind: "ui", sessionId: "s", at: "2026-09-06T00:00:00.000Z",
+    pageUrl: "https://x/oa/duty/form/add", eventType: "click", tag: "button", label: "抄送",
+    form: [{ label: "事由", type: "textarea", value: "出差" }]
+  }, {
+    id: "ui-choose-cced", kind: "ui", sessionId: "s", at: "2026-09-06T00:00:00.500Z",
+    pageUrl: "https://x/oa/duty/form/add", eventType: "click", tag: "button", label: "选择抄送人",
+    scope: "dialog", form: []
+  }, {
+    id: "ui-submit", kind: "ui", sessionId: "s", at: "2026-09-06T00:00:01.000Z",
+    pageUrl: "https://x/oa/duty/form/add", eventType: "click", tag: "button", label: "保存",
+    form: [{ label: "事由", type: "textarea", value: "出差" }]
+  }, network("GET", "https://x/system/user/list", {
+    id: "net-users",
+    sessionId: "s",
+    at: "2026-09-06T00:00:00.600Z",
+    pageUrl: "https://x/oa/duty/form/add",
+    correlatedUiEvidenceId: "ui-choose-cced",
+    response: { status: 200, headers: {}, body: { rows: userRows } }
+  }), network("POST", "https://x/oa/dutyApply", {
+    id: "net-create-duty",
+    sessionId: "s",
+    at: "2026-09-06T00:00:02.000Z",
+    pageUrl: "https://x/oa/duty/form/add",
+    correlatedUiEvidenceId: "ui-submit",
+    request: {
+      method: "POST",
+      url: "https://x/oa/dutyApply",
+      resourceType: "xhr",
+      headers: {},
+      query: {},
+      body: { billType: "duty_leave", ccedList: selected }
+    }
+  })];
+
+  const catalog = await applyPiCatalogJudgment([create, users], events, { available: () => false } as any, process.cwd(), false);
+  const judged = catalog.find(item => item.id === create.id)!;
+  const cced = judged!.inputForm.find(item => item.path === "$.ccedList");
+  assert.equal(cced?.source, "caller");
+  assert.equal(cced?.label, "抄送");
+  assert.equal(cced?.defaultRule, undefined);
+  assert.equal(cced?.widget, "multiselect");
+  assert.deepEqual(cced?.candidates, {
+    type: "capability",
+    capabilityId: "query-users",
+    valuePath: "$.rows[*]",
+    labelPath: "$.rows[*].nickName",
+    matchPath: "$.userId",
+    valueTemplate: {
+      type: "object",
+      properties: {
+        billType: { literal: "duty_leave" },
+        toUserId: { sourcePath: "$.userId" },
+        toNickName: { sourcePath: "$.nickName" },
+        toDeptName: { sourcePath: "$.dept.deptName" }
+      }
+    }
+  });
+  assert.deepEqual(
+    judged!.inputForm.filter(item => item.path.startsWith("$.ccedList[*].")).map(item => item.path),
+    ["$.ccedList[*].billType"],
+    JSON.stringify(judged!.inputForm)
+  );
+  const prepared = materializeHttpRequest(judged!, {
+    ccedList: ["张伟"]
+  }, { lookupBodies: { "query-users": { rows: userRows } } }).body;
+  assert.deepEqual(prepared?.ccedList, [{ billType: "duty_leave", toUserId: 132, toNickName: "张伟", toDeptName: "项目管理部" }]);
+  const validated = validateCapability(judged!, events, catalog);
+  assert.equal(validated.validation.checks.find(item => item.name === "caller-fields-backed-by-ui")?.ok, true);
 });
 
 test("a post-save list refresh cannot make an optional query filter required", async () => {

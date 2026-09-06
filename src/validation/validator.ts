@@ -1,21 +1,25 @@
 import type { CapabilityContract, EvidenceEvent, NetworkEvidence, UiEvidence } from "../domain.js";
 import { getByPath } from "../utils.js";
-import { collectionRowHasUiEvidence, fieldHasUiEvidence, flattenRequestValues, requestValueAt, sameValue, staticCandidatesHaveUiEvidence } from "../inference/field-resolver.js";
+import { collectionRowHasUiEvidence, fieldHasUiEvidence, flattenRequestValues, objectPickerUiEvidence, requestValueAt, sameValue, staticCandidatesHaveUiEvidence } from "../inference/field-resolver.js";
 import { evidenceSample, isExecutableRule } from "../inference/field-derivation.js";
 import { pickerFieldsMissingQuery, uncoveredWriteLeaves, unresolvedWriteFields, unsoundFormulaFields } from "../review/catalog-review.js";
 import { businessFailureReason, hasSuccessfulOperationEvidence, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
 
-function schemaHasPath(schema: CapabilityContract["inputSchema"], jsonPath: string) {
+function schemaAtPath(schema: CapabilityContract["inputSchema"], jsonPath: string) {
   const parts = jsonPath.replace(/^\$\.?/, "").split(".").filter(Boolean);
   let current: any = schema;
   for (const rawPart of parts) {
     const wildcard = rawPart.endsWith("[*]");
     const part = wildcard ? rawPart.slice(0, -3) : rawPart;
     if (part) current = current?.properties?.[part];
-    if (!current) return false;
+    if (!current) return undefined;
     if (wildcard) current = current.items;
   }
-  return parts.length > 0 && Boolean(current);
+  return parts.length > 0 ? current : undefined;
+}
+
+function schemaHasPath(schema: CapabilityContract["inputSchema"], jsonPath: string) {
+  return Boolean(schemaAtPath(schema, jsonPath));
 }
 
 export function validateCapability(cap: CapabilityContract, events: EvidenceEvent[], catalog: CapabilityContract[] = []): CapabilityContract {
@@ -180,6 +184,7 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
       if (!sent) return true;
       return fieldHasUiEvidence(field, uiRefs)
         || collectionRowHasUiEvidence(field, cap.inputForm, uiRefs)
+        || Boolean(objectPickerUiEvidence(field, requestValueAt(sample, field.path), uiRefs))
         || field.candidates?.type === "capability"
         || field.candidates?.type === "static"
         || (() => {
@@ -244,8 +249,18 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
       return rule.values.length > 0 && staticCandidatesHaveUiEvidence(field, uiRefs);
     }
     const source = catalog.find(item => item.id === rule.capabilityId);
+    const valueSchema = source ? schemaAtPath(source.outputSchema, rule.valuePath) : undefined;
+    const mappedValueValid = !rule.valueTemplate || Boolean(
+      valueSchema
+      && rule.valueTemplate.type === "object"
+      && Object.values(rule.valueTemplate.properties).every(mapping =>
+        "literal" in mapping || schemaHasPath(valueSchema, mapping.sourcePath)
+      )
+      && (!rule.matchPath || schemaHasPath(valueSchema, rule.matchPath))
+    );
     return Boolean(source && source.operation === "query" && source.validation.status === "verified" &&
       schemaHasPath(source.outputSchema, rule.valuePath) && schemaHasPath(source.outputSchema, rule.labelPath) &&
+      mappedValueValid &&
       (rule.dependsOn || []).every(path => cap.inputForm.some(item => item.path === path || item.name === path)));
   });
   checks.push({
