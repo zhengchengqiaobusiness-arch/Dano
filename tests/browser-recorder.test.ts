@@ -4094,15 +4094,16 @@ test("exercise-form expands 添加办公用品 and picks an Ant table chooser ro
   }
 });
 
-test("exercise-form does not treat list-page 新增办公用品 as a detail add-row", async () => {
+test("exercise-form does not treat a generic list-page 新增 under an entity heading as a detail add-row", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-list-create-"));
   const server = http.createServer((_request, response) => {
     response.setHeader("content-type", "text/html; charset=utf-8");
     response.end(`<!doctype html><html><head><title>办公用品信息</title></head><body>
+      <h1>办公用品</h1>
       <form>
         <div class="ant-form-item"><label>物品名称</label><input name="name" placeholder="请输入物品名称"></div>
         <button type="button" id="search">搜 索</button>
-        <button type="button" id="create">新增办公用品</button>
+        <button type="button" id="create">新增</button>
       </form>
       <div id="dialog" hidden>
         <div class="ant-form-item"><label>参考单价</label><input type="number" name="unitPrice" value="0"></div>
@@ -4135,7 +4136,7 @@ test("exercise-form does not treat list-page 新增办公用品 as a detail add-
     assert.equal(filled.ok, true, JSON.stringify({ todo: filled.todoFields, failed: filled.failed }));
     await recorder.stop();
     const events = await readJsonl<EvidenceEvent>(session.eventsFile);
-    const createClicks = events.filter(event => event.kind === "ui" && /新增办公用品/.test(String(event.text || event.label || "")));
+    const createClicks = events.filter(event => event.kind === "ui" && /^新增$/.test(String(event.text || event.label || "")));
     assert.equal(createClicks.length, 0, JSON.stringify(createClicks));
     const unitPrice = (filled.formFields || []).find((field: any) => field.label === "参考单价");
     assert.equal(unitPrice, undefined, "list-page exercise must not open the create dialog");

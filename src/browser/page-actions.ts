@@ -1598,7 +1598,7 @@ export class PageActions {
           for (let depth = 0; node && depth < 7; depth += 1, node = node.parentElement) {
             const heading = node.querySelector("h1,h2,h3,h4,h5,h6,legend,.el-card__header,.ant-card-head-title,[class*='title'],[class*='header']");
             const context = String(heading?.textContent || node.getAttribute("aria-label") || "").replace(/\s+/g, "");
-            if (/明细|行项目|子项|条目|费用项|清单|用品|物品|领用/.test(context) && !/附件|上传/.test(context)) return true;
+            if (/明细|行项目|子项|条目|费用项|清单/.test(context) && !/附件|上传/.test(context)) return true;
           }
           return false;
         }).catch(() => false);
