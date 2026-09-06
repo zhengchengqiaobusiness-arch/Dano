@@ -565,7 +565,7 @@ ${route.steps.map(step => `${step.order}. \`${step.capabilityId}\`：${safeCell(
 ## Input and confirmation
 
 - 一次收齐各步骤尚需调用方提供的字段。只为实际缺少的步骤读取 [INPUT_FORMS.md](../INPUT_FORMS.md) 对应小节。
-- 输入可直接放公共顶层；同名字段含义不同时，按能力编号分组。结构模板：\`${JSON.stringify(inputShape)}\`。
+- 按能力编号分组输入，避免把查询条件误传给新增接口。结构模板：\`${JSON.stringify(inputShape)}\`。
 ${hasWrite ? "- 路线包含写操作：先提交分组表单，再调用 `{\"confirm\":true,\"formIds\":[\"<answered.formId>\"]}`；只有 `confirmed` 才追加 `--confirm-write`。" : "- 本路线全部为只读操作，不需要写确认。"}
 
 ## Run

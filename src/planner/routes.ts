@@ -1,4 +1,6 @@
-import type { CapabilityContract, CapabilityRoute } from "../domain.js";
+import type { CapabilityContract, CapabilityRoute, EvidenceEvent, NetworkEvidence } from "../domain.js";
+import { isPrimaryCapability, sameResource } from "../inference/export-scope.js";
+import { isSuccessfulNetworkEvidence, isTriggeredOperationEvidence } from "../inference/heuristics.js";
 import { slugify } from "../utils.js";
 
 export interface RouteBuildIssue {
@@ -74,6 +76,73 @@ export function buildRouteGraph(capabilities: CapabilityContract[]) {
 
 export function buildApprovedRoutes(capabilities: CapabilityContract[]): CapabilityRoute[] {
   return buildRouteGraph(capabilities).routes;
+}
+
+function successfulOperationEvents(
+  capability: CapabilityContract,
+  events: EvidenceEvent[],
+  evidenceById: Map<string, EvidenceEvent>
+) {
+  const ids = new Set(capability.evidence.filter(ref => ref.kind === "network").map(ref => ref.eventId));
+  return events.filter((event): event is NetworkEvidence =>
+    event.kind === "network"
+    && ids.has(event.id)
+    && isSuccessfulNetworkEvidence(event)
+    && isTriggeredOperationEvidence(event, capability.operation, evidenceById)
+  );
+}
+
+export function buildRecordedWorkflowRoutes(capabilities: CapabilityContract[], events: EvidenceEvent[]): CapabilityRoute[] {
+  if (!events.length) return [];
+  const verified = capabilities.filter(capability => capability.validation.status === "verified");
+  const evidenceById = new Map(events.map(event => [event.id, event]));
+  const queries = verified.filter(capability =>
+    capability.operation === "query" && isPrimaryCapability(capability, verified)
+  );
+  const creates = verified.filter(capability =>
+    capability.operation === "create" && isPrimaryCapability(capability, verified)
+  );
+  return creates.flatMap(create => {
+    const createEvents = successfulOperationEvents(create, events, evidenceById);
+    const matches = queries.filter(query => {
+      if (query.transport.origin !== create.transport.origin
+        || !sameResource(query.transport.pathTemplate, create.transport.pathTemplate)) return false;
+      const queryEvents = successfulOperationEvents(query, events, evidenceById);
+      return createEvents.some(created => queryEvents.some(queried =>
+        queried.sessionId === created.sessionId && Date.parse(queried.at) < Date.parse(created.at)
+      ));
+    });
+    if (matches.length !== 1) return [];
+    const query = matches[0]!;
+    return [{
+      id: slugify(`route-${create.id}`),
+      title: `${query.title} → ${create.title}`,
+      targetCapabilityId: create.id,
+      steps: [
+        { order: 1, capabilityId: query.id, bindingIds: [] },
+        { order: 2, capabilityId: create.id, bindingIds: [] }
+      ],
+      approvedBindingIds: [],
+      stopConditions: [
+        "查询失败时停止，不执行新增",
+        "查询结果不自动写入新增字段；两步分别使用调用方提供的字段",
+        "缺少调用方必填字段时只询问缺失字段",
+        "新增执行前必须单独取得明确确认",
+        "执行结果不满足合同完成条件时停止，不猜测、不重试写操作"
+      ],
+      completion: `查询 ${query.id} 与新增 ${create.id} 都必须满足各自合同中的完成条件`
+    }];
+  });
+}
+
+export function buildExportRoutes(capabilities: CapabilityContract[], events: EvidenceEvent[] = []) {
+  const approved = buildApprovedRoutes(capabilities);
+  const approvedTargets = new Set(approved.map(route => route.targetCapabilityId));
+  return [
+    ...approved,
+    ...buildRecordedWorkflowRoutes(capabilities, events)
+      .filter(route => !approvedTargets.has(route.targetCapabilityId))
+  ];
 }
 
 export function collectRouteIssues(capabilities: CapabilityContract[]): RouteBuildIssue[] {

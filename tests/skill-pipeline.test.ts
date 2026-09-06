@@ -10,7 +10,7 @@ import type { CapabilityContract, EvidenceEvent } from "../src/domain.js";
 import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
 import { finalizeCapabilities } from "../src/inference/finalize-capabilities.js";
 import { validateCapability } from "../src/validation/validator.js";
-import { buildApprovedRoutes } from "../src/planner/routes.js";
+import { buildApprovedRoutes, buildRecordedWorkflowRoutes } from "../src/planner/routes.js";
 import { exportSkill } from "../src/export/skill-exporter.js";
 import { exportedQuestion } from "../src/export/skill-handbook.js";
 import { SkillLibrary } from "../src/catalog/skill-library.js";
@@ -337,6 +337,55 @@ test("exported executor preserves a recorded date-only string", async () => {
       "--prepare-only"
     ]);
     assert.equal(JSON.parse(stdout).prepared.visitDate, "2026-09-04");
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("builds and exports a query then create workflow only from ordered successful evidence in one session", async () => {
+  const query = verifiedCapability("find-orders");
+  query.role = "primary";
+  query.transport = { method: "GET", origin: "https://example.test", pathTemplate: "/api/orders/list", urlTemplate: "https://example.test/api/orders/list" };
+  query.evidence = [{ eventId: "query-net", sessionId: "session", kind: "network", at: "2026-09-01T00:00:02.000Z", status: 200 }];
+  const create = verifiedCapability("create-order", "create");
+  create.role = "primary";
+  create.transport = { method: "POST", origin: "https://example.test", pathTemplate: "/api/orders", urlTemplate: "https://example.test/api/orders" };
+  create.evidence = [{ eventId: "create-net", sessionId: "session", kind: "network", at: "2026-09-01T00:00:04.000Z", status: 200 }];
+  const events: EvidenceEvent[] = [{
+    id: "query-ui", kind: "ui", sessionId: "session", at: "2026-09-01T00:00:01.000Z",
+    pageUrl: "https://example.test/orders", eventType: "click", text: "查询"
+  }, {
+    id: "query-net", kind: "network", sessionId: "session", at: "2026-09-01T00:00:02.000Z",
+    correlatedUiEvidenceId: "query-ui",
+    request: { method: "GET", url: "https://example.test/api/orders/list", resourceType: "xhr", headers: {}, query: {} },
+    response: { status: 200, headers: {}, body: { code: 200, rows: [] } }
+  }, {
+    id: "create-ui", kind: "ui", sessionId: "session", at: "2026-09-01T00:00:03.000Z",
+    pageUrl: "https://example.test/orders/form/add", eventType: "click", text: "提交"
+  }, {
+    id: "create-net", kind: "network", sessionId: "session", at: "2026-09-01T00:00:04.000Z",
+    correlatedUiEvidenceId: "create-ui",
+    request: { method: "POST", url: "https://example.test/api/orders", resourceType: "xhr", headers: {}, query: {}, body: { orderId: "order-7" } },
+    response: { status: 200, headers: {}, body: { code: 200, data: 1 } }
+  }];
+  const routes = buildRecordedWorkflowRoutes([query, create], events);
+  assert.equal(routes.length, 1);
+  assert.equal(routes[0]!.id, "route-create-order");
+  assert.deepEqual(routes[0]!.steps.map(step => step.capabilityId), [query.id, create.id]);
+  assert.deepEqual(routes[0]!.approvedBindingIds, []);
+  const splitSessions = events.map(event => ({
+    ...event,
+    sessionId: event.id.startsWith("query") ? "query-session" : "create-session"
+  }));
+  assert.deepEqual(buildRecordedWorkflowRoutes([query, create], splitSessions), []);
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "recorded-workflow-export-"));
+  try {
+    const exported = await exportSkill(temporary, "订单", [query, create], [], events);
+    const contract = JSON.parse(await readFile(path.join(exported.dir, "references", "CONTRACT.json"), "utf8"));
+    assert.deepEqual(contract.routes.map((route: { id: string }) => route.id), ["route-create-order"]);
+    const handbook = await readFile(path.join(exported.dir, "references", "routes", "route-create-order.md"), "utf8");
+    assert.match(handbook, /按能力编号分组输入/);
+    assert.match(handbook, /查询结果不自动写入新增字段/);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

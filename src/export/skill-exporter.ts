@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import type { CapabilityContract, DataBinding, EvidenceEvent, InputFormField } from "../domain.js";
 import { normalizeCatalog } from "../catalog/normalize.js";
-import { buildApprovedRoutes, collectRouteIssues } from "../planner/routes.js";
+import { buildApprovedRoutes, buildExportRoutes, collectRouteIssues } from "../planner/routes.js";
 import { id, writeJson } from "../utils.js";
 import { exportableCapabilities, isPrimaryCapability, pageRoleLabel } from "../inference/export-scope.js";
 import { assertExportable } from "../review/catalog-review.js";
@@ -185,7 +185,7 @@ export async function exportSkill(
   await mkdir(routesDir, { recursive: true });
   await mkdir(scriptsDir, { recursive: true });
 
-  const routes = buildApprovedRoutes(capabilities);
+  const routes = buildExportRoutes(capabilities, events);
   const routeIssues = collectRouteIssues(capabilities);
   const { primary, lookups } = classifyExported(capabilities);
   await writeFile(path.join(directory, "SKILL.md"), buildSkillMd(skillName, displayName, capabilities, routes, directory), "utf8");
