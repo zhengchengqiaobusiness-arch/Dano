@@ -260,6 +260,7 @@ export function reanalyzeIncoming(incoming: CapabilityContract[], existing: Capa
       title: old.editing?.title === "manual" || preserveVerifiedWrite ? old.title : candidate.title,
       description: old.editing?.description === "manual" || preserveVerifiedWrite ? old.description : candidate.description,
       operation,
+      role: candidate.role || old.role,
       sideEffect,
       confirmation: {
         required: sideEffect,

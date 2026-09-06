@@ -343,6 +343,39 @@ test("reanalyze replaces stale evidence bindings on a primary while preserving e
   assert.equal(next?.bindings.some(binding => binding.id === "fresh-unit"), true);
 });
 
+test("reanalyze applies corrected lookup role to an otherwise unchanged verified background request", () => {
+  const transport = {
+    method: "GET",
+    urlTemplate: "https://x/prod-api/oa/flowCced/list?billType={billType}",
+    origin: "https://x",
+    pathTemplate: "/prod-api/oa/flowCced/list"
+  };
+  const old = cap({
+    id: "query-flow-cced",
+    operation: "query",
+    role: "primary",
+    transport,
+    inputForm: [{
+      path: "$.billType", name: "billType", label: "单据类型", valueType: "string", source: "caller",
+      required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面", widget: "text"
+    }],
+    validation: { version: 2, status: "verified", checks: [] }
+  });
+  const incoming = cap({
+    id: "query-flow-cced",
+    operation: "query",
+    role: "lookup",
+    transport,
+    inputForm: [{
+      path: "$.billType", name: "billType", label: "单据类型", valueType: "string", source: "caller",
+      required: false, requiredBasis: "not-observed", systemHandled: false, sourceDetail: "页面", widget: "text"
+    }]
+  });
+
+  const [next] = reanalyzeIncoming([incoming], [old]);
+  assert.equal(next?.role, "lookup");
+});
+
 test("review follows the analyzed session instead of a newer unrelated recording", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "pipeline-review-session-"));
   const recordingsDir = path.join(temporary, "recordings");
