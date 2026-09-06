@@ -1862,6 +1862,7 @@ export function owningFormEvent(
   const correlated = event.correlatedUiEvidenceId
     ? uiEvents.find(item => item.id === event.correlatedUiEvidenceId)
     : undefined;
+  if (correlated?.form?.length) return correlated;
   const at = Date.parse(event.at);
   const candidates = uiEvents
     .filter(item => item.sessionId === event.sessionId && Date.parse(item.at) <= at && Boolean(item.form?.length))
