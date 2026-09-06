@@ -64,7 +64,10 @@ test("可见控件只投影已有字段，不判断能力", () => {
   assert.equal(snapshot.controls[1].required_mark, true);
   assert.deepEqual(snapshot.controls[3].options, ["研发部门", "测试部门"]);
   assert.equal(snapshot.controls[4].range, true);
-  assert.equal(summarizeVisibleControls(snapshot.controls), "标题、开始日期、附件、组织机构、统计周期、提交意见");
+  assert.equal(
+    summarizeVisibleControls(snapshot.controls),
+    "标题、开始日期(date)、附件(upload)、组织机构(select:研发部门/测试部门)、统计周期(date)、提交意见(textarea)",
+  );
   assert.ok(!JSON.stringify(snapshot).includes("capability"));
 });
 

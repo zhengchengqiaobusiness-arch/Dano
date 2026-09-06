@@ -512,8 +512,30 @@ def _capability_input_schema(
             if option_source.get("source_url") or option_source.get("endpoint") or option_source.get("url"):
                 props[key]["x-options-source"] = True
                 props[key]["x-options-source-meta"] = dict(option_source)
-                if option_source.get("children_key") or option_source.get("childrenField"):
+                endpoint = str(
+                    option_source.get("source_url")
+                    or option_source.get("endpoint")
+                    or option_source.get("url")
+                    or ""
+                ).strip()
+                data_source = {
+                    "type": "api",
+                    "endpoint": endpoint,
+                    "method": str(
+                        option_source.get("source_method") or option_source.get("method") or "GET"
+                    ).upper(),
+                    "params": dict(option_source.get("params") or option_source.get("source_params") or {}),
+                    "resultPath": str(
+                        option_source.get("result_path") or option_source.get("resultPath") or "data"
+                    ),
+                    "idField": option_source.get("value_key") or option_source.get("idField") or "id",
+                    "labelField": option_source.get("label_key") or option_source.get("labelField") or "name",
+                }
+                children = option_source.get("children_key") or option_source.get("childrenField")
+                if children:
                     props[key]["x-dano-tree"] = True
+                    data_source["childrenField"] = children
+                props[key]["dataSource"] = data_source
         _apply_param_schema_default(props[key], p)
         if _is_dynamic_array_input(p):
             item_params = _dynamic_array_item_params(params, p, capability_step_ids)

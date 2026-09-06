@@ -854,7 +854,7 @@ def _apply_param_options_to_field(field: dict[str, Any], param: Any) -> None:
     source_kind = str(getattr(param, "source_kind", "") or source.get("kind") or "")
     endpoint = _option_source_endpoint(source)
     live = source_kind == "api_option" or _field_choice_kind(field, param) == "api_option"
-    if endpoint and live:
+    if endpoint and (live or _looks_like_tree(field, source, param)):
         _apply_live_option_source(field, source, param)
         return
     labeled = list(getattr(param, "enum_options", None) or [])

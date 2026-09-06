@@ -2507,6 +2507,76 @@ def test_export_binds_option_source_ref_when_param_source_is_missing() -> None:
     ]
 
 
+def test_export_keeps_live_tree_when_param_source_kind_is_wrong() -> None:
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="stats",
+                name="查看报表统计",
+                title="查看报表统计",
+                kind="query",
+                step_ids=["step_stats"],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "deptId": {
+                            "type": "number",
+                            "title": "部门ID",
+                            "description": "从部门树选择节点自动带出，页面允许修改",
+                        },
+                    },
+                },
+            ),
+        ],
+        steps=[
+            FlowStep(
+                step_id="step_stats",
+                method="GET",
+                path="/oa/work-report/statistics",
+                params=[
+                    ParamField(
+                        path="query.deptId",
+                        key="deptId",
+                        label="部门ID",
+                        type="number",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                        reason="从部门树选择节点自动带出，页面允许修改",
+                        source={
+                            "source_url": "/admin-api/system/dept/simple-list",
+                            "source_method": "GET",
+                            "value_key": "id",
+                            "label_key": "name",
+                            "children_key": "children",
+                        },
+                    ),
+                ],
+            ),
+        ],
+    )
+    api_request = {
+        "capabilities": [{
+            "capability_id": "stats",
+            "name": "查看报表统计",
+            "title": "查看报表统计",
+            "kind": "query",
+            "execution_contract": {
+                "steps": [{"step_id": "step_stats", "method": "GET", "path": "/oa/work-report/statistics"}],
+            },
+            "input_schema": spec.capabilities[0].input_schema,
+        }],
+    }
+
+    plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), spec, api_request)
+    questions = {item["id"]: item for item in _form_questions(_input_forms_md(plans))}
+    public = _public_schema(plans[0]["input_schema"])["properties"]
+
+    assert questions["deptId"]["inputType"] == "treeSelect"
+    assert questions["deptId"]["dataSource"]["endpoint"] == "/admin-api/system/dept/simple-list"
+    assert questions["deptId"]["dataSource"]["childrenField"] == "children"
+    assert public["deptId"]["dataSource"]["endpoint"] == "/admin-api/system/dept/simple-list"
+
+
 def test_consume_upstream_keeps_compiled_option_contract() -> None:
     compiled = {
         "type": "object",

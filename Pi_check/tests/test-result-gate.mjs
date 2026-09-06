@@ -230,6 +230,82 @@ test("拒收 input_schema 里编造的、params 没有的调用方键", () => {
   }));
 });
 
+test("拒收把树/下拉藏进说明的数字手填字段", () => {
+  assert.throws(
+    () => assertPageDisplayContract({
+      capabilities: [{
+        capability_id: "cap_stats",
+        request_refs: [{ step_id: "step_stats", usage: "execute" }],
+        input_schema: {
+          type: "object",
+          properties: {
+            deptId: {
+              type: "number",
+              title: "部门ID",
+              description: "从部门树选择节点自动带出，运行时取选中部门ID；页面允许修改",
+            },
+          },
+        },
+      }],
+      steps: [{
+        step_id: "step_stats",
+        params: [{
+          key: "deptId",
+          path: "query.deptId",
+          label: "部门ID",
+          type: "number",
+          source_kind: "user_input",
+          exposed_to_user: true,
+          reason: "从部门树选择节点自动带出，页面允许修改",
+        }],
+      }],
+    }),
+    (error) => error instanceof SubmitRejectedError && /选项合同/.test(error.message),
+  );
+  assert.doesNotThrow(() => assertPageDisplayContract({
+    capabilities: [{
+      capability_id: "cap_stats",
+      request_refs: [{ step_id: "step_stats", usage: "execute" }],
+      input_schema: {
+        type: "object",
+        properties: {
+          deptId: {
+            type: "number",
+            title: "部门ID",
+            description: "从部门树选择节点",
+            "x-dano-business-type": "api_option",
+            "x-dano-option-source": {
+              source_method: "GET",
+              source_url: "/admin-api/system/dept/simple-list",
+              label_key: "name",
+              value_key: "id",
+              children_key: "children",
+            },
+          },
+        },
+      },
+    }],
+    steps: [{
+      step_id: "step_stats",
+      params: [{
+        key: "deptId",
+        path: "query.deptId",
+        label: "部门ID",
+        type: "number",
+        source_kind: "api_option",
+        exposed_to_user: true,
+        source: {
+          source_method: "GET",
+          source_url: "/admin-api/system/dept/simple-list",
+          label_key: "name",
+          value_key: "id",
+          children_key: "children",
+        },
+      }],
+    }],
+  }));
+});
+
 test("拒收重复 capability_id 和共用 execute", () => {
   assert.throws(
     () => assertCapabilityIdentityContract({

@@ -433,7 +433,18 @@ export function collectVisibleControlsInPage() {
 
 export function summarizeVisibleControls(controls) {
   return (Array.isArray(controls) ? controls : [])
-    .map((item) => compact(item?.label || item?.placeholder || item?.name))
+    .map((item) => {
+      const label = compact(item?.label || item?.placeholder || item?.name);
+      if (!label) return "";
+      const kind = String(item?.control_kind || "");
+      const options = (Array.isArray(item?.options) ? item.options : [])
+        .map((option) => compact(option))
+        .filter(Boolean)
+        .slice(0, 4);
+      if (kind === "select" && options.length) return `${label}(${kind}:${options.join("/")})`;
+      if (kind && kind !== "input") return `${label}(${kind})`;
+      return label;
+    })
     .filter(Boolean)
     .slice(0, 24)
     .join("、");

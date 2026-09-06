@@ -126,7 +126,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
    `{ "key", "path", "label", "type", "source_kind", "exposed_to_user", "required", "reason" }`
    `reason` 必须是一句完整处理说明，导出 Skill 只抄这里，不会替你编规则。
 2. **只有调用方字段**写进该能力的 `input_schema.properties`。`title` 用页面上的中文标签。分页字段不要放进 `input_schema`。
-   选择字段必须把**调用系统能直接用的选项合同**写进同一个 schema 字段，不能只写 `type=number` 再把接口/枚举藏在说明里：
+   选择字段必须把**调用系统能直接用的选项合同**写进同一个 schema 字段，不能只写 `type=number` 再把接口/枚举藏在说明里。只写「从部门树选择」这类说明会被拒收：
    - `api_option`：`x-dano-business-type` 写 `api_option`，并写 `x-dano-option-source`（`source_method`、`source_url`、`label_key`、`value_key`；树再加 `children_key`）。其他系统调用时按这个接口实时查询，选显示值、提交 id。
    - `page_enum`：`x-dano-business-type` 写 `single_enum`，并用 `{label,value}` 列出当场选项。不要只写裸编码 `1/2/3`。
    params 上的 `source_kind` / `source` / `enum_options` 必须和该 schema 字段一致。

@@ -115,7 +115,7 @@ test("证据索引只投影已有字段，不分类也不补能力", () => {
     url: "https://example.com/#/list",
     reason: "page_ready",
     count: 2,
-    labels: "单据编号、创建时间",
+    labels: "单据编号、创建时间(date)",
   });
   assert.ok(!index.items.some((item) => item.resource_type === "script"));
   assert.ok(!JSON.stringify(index).includes("secret"));

@@ -32,6 +32,68 @@ function isPlainObject(value) {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
+const SELECTABLE_HINT_RE = /部门树|树选择|树选|下拉|选择器|选择节点|选项接口|实时候选|tree\s*select|treeselect/i;
+
+function optionEndpoint(node) {
+  const source = isPlainObject(node)
+    ? (
+      isPlainObject(node["x-dano-option-source"]) ? node["x-dano-option-source"]
+        : isPlainObject(node["x-options-source-meta"]) ? node["x-options-source-meta"]
+          : isPlainObject(node.dataSource) ? node.dataSource
+            : isPlainObject(node.option_source) ? node.option_source
+              : node
+    )
+    : {};
+  return String(source.source_url || source.endpoint || source.url || "").trim();
+}
+
+function hasWrittenOptionContract(node, param) {
+  if (isPlainObject(node)) {
+    if (Array.isArray(node.enum) && node.enum.length) return true;
+    if (Array.isArray(node["x-enum-options"]) && node["x-enum-options"].length) return true;
+    if (Array.isArray(node["x-options"]) && node["x-options"].length) return true;
+    if (isPlainObject(node["x-enum-value-map"]) && Object.keys(node["x-enum-value-map"]).length) return true;
+    if (optionEndpoint(node)) return true;
+  }
+  if (!isPlainObject(param)) return false;
+  if (Array.isArray(param.enum_options) && param.enum_options.length) return true;
+  if (isPlainObject(param.enum_value_map) && Object.keys(param.enum_value_map).length) return true;
+  const source = isPlainObject(param.source) ? param.source : {};
+  return Boolean(optionEndpoint(source) || optionEndpoint(source.option_source));
+}
+
+function fieldLooksSelectable(node, param) {
+  const type = String(node?.type || param?.type || "").toLowerCase();
+  const format = String(node?.format || "");
+  if (type === "date" || type === "datetime" || format === "date" || format === "date-time") {
+    return false;
+  }
+  const text = [
+    node?.description,
+    node?.title,
+    node?.label,
+    param?.reason,
+    param?.description,
+    param?.label,
+  ].map((item) => String(item || "")).join(" ");
+  return SELECTABLE_HINT_RE.test(text);
+}
+
+function findParamByKey(stepsById, stepIds, key) {
+  for (const stepId of stepIds) {
+    const step = stepsById.get(stepId);
+    for (const param of Array.isArray(step?.params) ? step.params : []) {
+      if (String(param?.key || "").trim() === key) return param;
+    }
+  }
+  for (const step of stepsById.values()) {
+    for (const param of Array.isArray(step?.params) ? step.params : []) {
+      if (String(param?.key || "").trim() === key) return param;
+    }
+  }
+  return null;
+}
+
 /**
  * 只检查现有录制页能读到的信封，不推断字段、不改写 result。
  * 拒收页面会画成“调用方提供 0”的私有结构。
@@ -116,12 +178,29 @@ export function assertPageDisplayContract(result) {
         }
       }
     }
-    if (!callerKeys.size) continue;
     for (const key of Object.keys(properties)) {
-      if (!callerKeys.has(key)) {
+      if (callerKeys.size && !callerKeys.has(key)) {
         throw new SubmitRejectedError(
           "DISPLAY_CONTRACT",
           `input_schema.properties.${key} 必须对应某个 exposed_to_user=true 的 param.key，不能编造 execute 请求里没有的键`,
+        );
+      }
+      const node = properties[key];
+      if (!isPlainObject(node)) continue;
+      const param = findParamByKey(stepsById, stepIds, key);
+      const sourceKind = String(
+        node["x-dano-business-type"] || param?.source_kind || (isPlainObject(param?.source) ? param.source.kind : "") || "",
+      );
+      if (sourceKind === "api_option" && !hasWrittenOptionContract(node, param)) {
+        throw new SubmitRejectedError(
+          "DISPLAY_CONTRACT",
+          `input_schema.properties.${key} 是实时候选，必须写 x-dano-option-source.source_url，不能只写 type=number`,
+        );
+      }
+      if (fieldLooksSelectable(node, param) && !hasWrittenOptionContract(node, param)) {
+        throw new SubmitRejectedError(
+          "DISPLAY_CONTRACT",
+          `input_schema.properties.${key} 是树/下拉选择字段，必须把选项合同写进 schema，不能只写 type=number 再把接口藏在说明里`,
         );
       }
     }

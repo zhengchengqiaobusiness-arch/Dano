@@ -63,7 +63,7 @@ export function buildFinalAnalysisPrompt(latestSeq) {
     `证据已冻结，最新 seq=${Number(latestSeq) || 0}。现在必须调用 submit_recording_result。\n` +
     "先调 list_recording_index 建台账，看 interaction、xhr/fetch、network_response 和 visible_control。读关键 execute 请求正文；响应在 network_response 或读请求时附带的 response.body。\n" +
     "先读各页 visible_control，再对 execute 每个 query/body 键。树/页签/分段器/单选组/日期区间都是可改选择。可改控件一律调用方。readonly/disabled 灰框是系统，不要进 schema。每个 exposed_to_user=true 的 param 都必须出现在 schema，schema 顶层 key 必须等于这些 param.key，禁止编造写请求里没有的键。可增行只保留一个数组 key，items.properties 的 title 用表头原文，数组 title 用分区标题。确认弹层可填意见：有请求键就建模，没有就 unresolved，不要编新键。登录身份用 current_user，不要写死本场数字。label/title 用页面原文，去掉星号。\n" +
-    "api_option 把 source_url 写进 param.source 和 schema 的 x-dano-option-source；page_enum 写 {label,value}。不要读 screenshot。\n" +
+    "可改树/下拉/单选禁止只写 type=number。api_option 必须把 source_url 写进 param.source 和 schema 的 x-dano-option-source；page_enum 必须写当场全部 {label,value}。把树/下拉藏在 description 里会被拒收。不要读 screenshot。\n" +
     "read_response_blob 只接受 body.blob_id（blob_ 开头）。不要把 request_id 当 blob_id，也不要读 screenshot 去找接口正文。\n" +
     "看完关键请求立刻把完整 result 作为 submit_recording_result 的工具参数提交。不要把 JSON 写在对话里。不要写 capabilities[].fields。request_refs 必须是 {step_id, usage}。steps[].params 必须是含 key/path 的对象数组。\n" +
     "若已有 submit_recording_draft，立刻 final=true 提交。草稿不会自动变成结果。"

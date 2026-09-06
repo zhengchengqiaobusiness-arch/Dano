@@ -443,14 +443,46 @@ function paramTypeLabel(param: FlowParam) {
   return TYPE_LABELS[param.type || "string"] || param.type || TYPE_LABELS.string;
 }
 
+function liveOptionEndpoint(source: Record<string, unknown>) {
+  return safeString(source.source_url || source.endpoint || source.url);
+}
+
+function schemaLiveOptionSource(schema: Record<string, unknown>) {
+  const candidates = [
+    asRecord(schema["x-dano-option-source"]),
+    asRecord(schema["x-options-source-meta"]),
+    asRecord(schema.dataSource),
+    asRecord(asRecord(schema["x-dano-option-source"]).option_source),
+  ];
+  for (const source of candidates) {
+    if (liveOptionEndpoint(source)) return source;
+  }
+  return {};
+}
+
+function schemaChoiceOptions(schema: Record<string, unknown>) {
+  const labeled = schema["x-enum-options"];
+  if (Array.isArray(labeled) && labeled.length) return labeled;
+  const snapshot = schema["x-options-snapshot"];
+  if (Array.isArray(snapshot) && snapshot.length) return snapshot;
+  const options = schema["x-options"];
+  if (Array.isArray(options) && options.length) return options;
+  const valueMap = asRecord(schema["x-enum-value-map"]);
+  const mapped = Object.entries(valueMap)
+    .filter(([, value]) => value !== undefined && value !== "")
+    .map(([label, id]) => ({ id, label }));
+  if (mapped.length) return mapped;
+  return Array.isArray(schema.enum) ? schema.enum : [];
+}
+
 function apiOptionSourceSummary(param: FlowParam) {
   if (param.source_kind !== "api_option") return "";
   const source = asRecord(param.source);
-  const sourceUrl = safeString(source.source_url);
+  const sourceUrl = liveOptionEndpoint(source);
   if (!sourceUrl) return "实时调用取值接口，调用方选择显示值，Skill 自动提交接口值";
-  const method = safeString(source.source_method) || "GET";
-  const labelKey = safeString(source.label_key) || "显示值";
-  const valueKey = safeString(source.value_key) || "接口值";
+  const method = safeString(source.source_method || source.method) || "GET";
+  const labelKey = safeString(source.label_key || source.labelField) || "显示值";
+  const valueKey = safeString(source.value_key || source.idField) || "接口值";
   const complete = source.options_complete === false ? "本场选项未列全" : source.options_complete === true ? "本场选项已列全" : "";
   return [`取值接口：${method} ${sourceUrl}；调用方选择 ${labelKey}，Skill 自动提交 ${valueKey}`, complete].filter(Boolean).join("。");
 }
@@ -2870,13 +2902,12 @@ export default function PageRecorder({
     collectSchemaFields(inputSchema);
 
     const fromSchema = schemaFields.flatMap(({ key, path: flowPath, required, schema }) => {
-      const optionSource = asRecord(schema["x-dano-option-source"]);
+      const optionSource = schemaLiveOptionSource(schema);
       const externalSource = asRecord(schema["x-dano-external-source"]);
       const sourceCapability = safeString(schema["x-dano-source-capability"]);
       const businessType = safeString(schema["x-dano-business-type"]);
       const format = safeString(schema.format);
-      const snapshot = schema["x-options-snapshot"];
-      const enumValues = schema.enum;
+      const enumValues = schemaChoiceOptions(schema);
       let type = safeString(schema.type) || "string";
       const itemLabels = schemaItemLabels(schema);
       if (businessType === "single_enum") type = "enum";
@@ -2904,11 +2935,14 @@ export default function PageRecorder({
         })
         .filter((entry) => entry.score > 0)
         .sort((left, right) => right.score - left.score)[0];
-      const hasOptionSource = Boolean(optionSource.source_url);
+      const hasOptionSource = Boolean(liveOptionEndpoint(optionSource));
       const hasUpstreamSource = Boolean(sourceCapability || externalSource.step_id);
       const schemaSourceKind = hasOptionSource
         ? "api_option"
-        : hasUpstreamSource ? "previous_response" : Array.isArray(enumValues) ? "static_enum" : "";
+        : hasUpstreamSource ? "previous_response"
+          : Array.isArray(enumValues) && enumValues.length
+            ? (businessType === "single_enum" || businessType === "page_enum" ? "page_enum" : "static_enum")
+            : "";
       if (matched) {
         if (looksPaginationField(matched.param)) return [];
         if (matched.param.exposed_to_user === false) return [];
@@ -2916,6 +2950,9 @@ export default function PageRecorder({
           ? "api_option"
           : matched.param.source_kind || schemaSourceKind;
         const matchedSource = hasOptionSource ? optionSource : asRecord(matched.param.source);
+        const matchedOptions = Array.isArray(matched.param.enum_options) && matched.param.enum_options.length
+          ? matched.param.enum_options
+          : (enumValues.length ? enumValues : matched.param.enum_options);
         return [{
           step: matched.step,
           param: {
@@ -2930,6 +2967,7 @@ export default function PageRecorder({
             source: itemLabels.length ? { ...matchedSource, item_labels: itemLabels } : matchedSource,
             required: typeof matched.param.required === "boolean" ? matched.param.required : required,
             exposed_to_user: true,
+            enum_options: matchedOptions,
           } satisfies FlowParam,
         }];
       }
@@ -2945,9 +2983,7 @@ export default function PageRecorder({
           exposed_to_user: true,
           required,
           reason: safeString(schema.description),
-          enum_options: Array.isArray(snapshot)
-            ? snapshot
-            : Array.isArray(enumValues) ? enumValues : undefined,
+          enum_options: enumValues.length ? enumValues : undefined,
         } satisfies FlowParam,
       }];
     });

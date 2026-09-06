@@ -6,6 +6,8 @@ import asyncio
 
 import dano.execution.page.request_capture as request_capture
 from dano.catalog.manifest import _enum_facts, _field_call_metadata, _select_semantic_type
+from dano.execution.page.capability_io import _capability_input_schema
+from dano.execution.page.flow_spec_core.models import ParamField
 from dano.export.agent_skills import _question_data_source, _schema_option_fields
 
 
@@ -93,6 +95,32 @@ def test_schema_option_fields_include_datasource() -> None:
             "endDate": {"type": "string"},
         },
     }) == ["deptId"]
+
+
+def test_capability_schema_writes_public_datasource() -> None:
+    schema = _capability_input_schema(
+        [
+            ParamField(
+                path="query.deptId",
+                key="deptId",
+                type="number",
+                source_kind="api_option",
+                exposed_to_user=True,
+                source={
+                    "source_url": "/admin-api/system/dept/simple-list",
+                    "source_method": "GET",
+                    "value_key": "id",
+                    "label_key": "name",
+                    "children_key": "children",
+                },
+            ),
+        ],
+        {"step_stats"},
+    )
+    field = schema["properties"]["deptId"]
+    assert field["dataSource"]["endpoint"] == "/admin-api/system/dept/simple-list"
+    assert field["dataSource"]["childrenField"] == "children"
+    assert field["dataSource"]["labelField"] == "name"
 
 
 def test_catalog_treats_endpoint_as_live_option_source() -> None:
