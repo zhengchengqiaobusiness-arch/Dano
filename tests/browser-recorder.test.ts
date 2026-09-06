@@ -4,7 +4,7 @@ import http from "node:http";
 import path from "node:path";
 import os from "node:os";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { BrowserRecorder, dragInterpolationSteps } from "../src/browser/recorder.js";
+import { BrowserRecorder, dragInterpolationSteps, releaseChromiumDebugLog } from "../src/browser/recorder.js";
 import { SNAPSHOT_IN_PAGE } from "../src/browser/page-script.js";
 import { readJsonl } from "../src/utils.js";
 import type { EvidenceEvent } from "../src/domain.js";
@@ -2200,6 +2200,18 @@ test("exercise-form clicks the visible option node and ignores table-header filt
 test("page snapshot does not force a full-document innerText read", () => {
   const source = Function.prototype.toString.call(SNAPSHOT_IN_PAGE);
   assert.equal(/document\.body\.innerText/.test(source), false, source.slice(0, 200));
+});
+
+test("a locked Chromium debug log cannot crash session disposal", async () => {
+  await assert.doesNotReject(() => releaseChromiumDebugLog("locked-profile", 0, async () => {
+    throw Object.assign(new Error("locked"), { code: "EBUSY" });
+  }));
+  await assert.rejects(
+    () => releaseChromiumDebugLog("broken-profile", 0, async () => {
+      throw Object.assign(new Error("disk failure"), { code: "EIO" });
+    }),
+    /disk failure/
+  );
 });
 
 test("snapshot and exercise-form cover component radios backed by hidden native inputs", async () => {

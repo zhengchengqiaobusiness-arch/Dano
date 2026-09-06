@@ -148,16 +148,23 @@ export function recordingStopReadiness(
   };
 }
 
-async function releaseChromiumDebugLog(profileDir: string, timeoutMs = 2_000) {
+export async function releaseChromiumDebugLog(
+  profileDir: string,
+  timeoutMs = 2_000,
+  removeFile: (file: string) => Promise<void> = unlink
+) {
   const file = path.join(profileDir, "Default", "chrome_debug.log");
   const started = Date.now();
   while (true) {
     try {
-      await unlink(file);
+      await removeFile(file);
       return;
     } catch (error: any) {
       if (error?.code === "ENOENT") return;
-      if (!new Set(["EBUSY", "EPERM", "EACCES"]).has(error?.code) || Date.now() - started >= timeoutMs) throw error;
+      if (!new Set(["EBUSY", "EPERM", "EACCES"]).has(error?.code)) throw error;
+      // The debug log is disposable. Windows can keep its handle alive briefly
+      // after Chromium exits; that must not terminate the Studio service.
+      if (Date.now() - started >= timeoutMs) return;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
   }
