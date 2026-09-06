@@ -12,23 +12,16 @@ import { OpenAIReasoner } from "../llm/openai.js";
 import { dateDay, recordedClock } from "./date-format.js";
 import { isExecutableRule } from "./field-derivation.js";
 import { directoryLookupEntity, isLookupQueryPath, isNoiseCapability, isPageResultQuery, sameResource } from "./export-scope.js";
-import { ASK_KEY, SEARCH_KEY, isSuccessfulNetworkEvidence } from "./heuristics.js";
+import { ASK_KEY, SEARCH_KEY } from "./heuristics.js";
 import {
   collectUiObservations,
-  findObservation,
   flattenRequestValues,
   looksDirectoryPicker,
   looksPickerField,
-  nameTokens,
-  owningFormEvent,
   pickerEntity,
   relatedUiEvents,
   requestValueAt,
-  sameFormShape,
-  sameSynonymGroup,
   sameValue,
-  semanticConcepts,
-  semanticLabelScore,
   uiNameMatches,
   type UiObservation
 } from "./field-resolver.js";
@@ -84,13 +77,8 @@ function relatedEvents(capability: CapabilityContract, events: EvidenceEvent[]) 
 function richestNetwork(related: EvidenceEvent[]) {
   const networks = related.filter((event): event is NetworkEvidence => event.kind === "network");
   if (!networks.length) return undefined;
-  const successful = networks.filter(isSuccessfulNetworkEvidence);
-  const pool = successful.length ? successful : networks;
   const size = (event: NetworkEvidence) => flattenRequestValues(requestInput(event)).length;
-  return pool.reduce((best, event) => {
-    if (size(event) !== size(best)) return size(event) > size(best) ? event : best;
-    return Date.parse(event.at) > Date.parse(best.at) ? event : best;
-  });
+  return networks.reduce((best, event) => size(event) > size(best) ? event : best);
 }
 
 function richestRequestSample(related: EvidenceEvent[]) {
@@ -138,14 +126,10 @@ function mergeEvidence(capability: CapabilityContract, extras: UiEvidence[]) {
 
 function joinUiEvents(capability: CapabilityContract, events: EvidenceEvent[]) {
   const related = relatedEvents(capability, events);
-  const uiEvents = events.filter((event): event is UiEvidence => event.kind === "ui");
-  const uiById = new Map(uiEvents.map(event => [event.id, event]));
+  const uiById = new Map(events.filter((event): event is UiEvidence => event.kind === "ui").map(event => [event.id, event]));
   const richest = richestNetwork(related);
   const sample = richest ? requestInput(richest) : undefined;
   const nearby = richest ? relatedUiEvents(richest, uiById, sample) : [];
-  const owner = richest ? owningFormEvent(richest, uiEvents, sample) : undefined;
-  const ownerLabels = new Set((owner?.form || []).map(field => field.label).filter(Boolean));
-  const ownerNames = new Set((owner?.form || []).map(field => field.name).filter(Boolean));
   const names = sample ? requestNamesOf(sample) : new Set<string>();
   const slots = new Set([...names].map(rangeIndexOf).filter((item): item is number => item !== undefined));
   const at = richest ? Date.parse(richest.at) : Number.POSITIVE_INFINITY;
@@ -161,24 +145,13 @@ function joinUiEvents(capability: CapabilityContract, events: EvidenceEvent[]) {
     const extra = named.filter(item => !names.has(item) && ![...names].some(requestName => uiNameMatches(item, requestName)));
     return overlap.length > 0 && overlap.length > extra.length;
   };
-  const belongsToOwner = (event: UiEvidence) => {
-    if (!richest || event.sessionId !== richest.sessionId) return false;
-    if (event.id === richest.correlatedUiEvidenceId) return true;
-    if (event.form?.length && owner?.form?.length) return sameFormShape(owner, event);
-    if (!owner?.form?.length) return true;
-    return Boolean(
-      event.label && ownerLabels.has(event.label)
-      || event.name && ownerNames.has(event.name)
-    );
-  };
   const base = mergeUi([
-    ...related.filter((event): event is UiEvidence => event.kind === "ui" && belongsToOwner(event)),
+    ...related.filter((event): event is UiEvidence => event.kind === "ui"),
     ...nearby,
     ...events.filter((event): event is UiEvidence => {
       if (event.kind !== "ui" || !richest || event.sessionId !== richest.sessionId) return false;
       if (Date.parse(event.at) > at + 500) return false;
       if (ownerPage && evidencePage(event.pageUrl) !== ownerPage) return false;
-      if (!event.form?.length && event.label && ownerLabels.has(event.label)) return true;
       if (formMatchesRequest(event.form)) return true;
       return Boolean(slots.size && (event.form || []).some(field => field.rangeIndex !== undefined && slots.has(field.rangeIndex)));
     })
@@ -297,83 +270,6 @@ function richerNamedObservation(named: UiObservation, observations: UiObservatio
   return richer ? { ...richer, name: named.name || richer.name } : named;
 }
 
-function richerObservation(observation: UiObservation, observations: UiObservation[]) {
-  if (!observation.label) return observation;
-  const score = (item: UiObservation) =>
-    (/date|time|number|textarea|select|combobox|picker|boolean|checkbox/i.test(item.type || "") ? 4 : 0)
-    + (item.required !== undefined ? 2 : 0)
-    + (item.options?.length ? 1 : 0);
-  const compatible = observations
-    .filter(item => item.label === observation.label)
-    .filter(item => observation.value === undefined || observation.value === ""
-      || item.value === undefined || item.value === ""
-      || sameValue(item.value, observation.value)
-      || Boolean(dateDay(item.value) && dateDay(item.value) === dateDay(observation.value)))
-    .sort((left, right) => score(right) - score(left));
-  const richer = compatible[0];
-  if (!richer || score(richer) <= score(observation)) return observation;
-  return {
-    ...observation,
-    ...richer,
-    name: observation.name || richer.name,
-    value: observation.value === undefined || observation.value === "" ? richer.value : observation.value
-  };
-}
-
-function aggregateLabel(value?: string) {
-  return /(?:^|\b)(?:total|sum)(?:\b|$)|合计|总计|总数|总额/i.test(String(value || ""));
-}
-
-function semanticObservation(
-  field: InputFormField,
-  value: unknown,
-  fields: InputFormField[],
-  observations: UiObservation[],
-  sample: unknown
-) {
-  if (value === undefined || value === null || value === "") return undefined;
-  const sameNamedCollectionLeaf = fields.some(other =>
-    other.path !== field.path
-    && other.name === field.name
-    && other.path.includes("[*]") !== field.path.includes("[*]")
-  );
-  const sharedBusinessValue = fields.some(other =>
-    other.path !== field.path
-    && !PAGE_NAME.test(other.name)
-    && sameValue(requestValueAt(sample, other.path), value)
-  );
-  const matchingUiLabels = new Set(observations
-    .filter(item => item.label && item.value !== undefined && item.value !== "")
-    .filter(item => sameValue(item.value, value) || Boolean(dateDay(value) && dateDay(item.value) === dateDay(value)))
-    .map(item => item.label));
-  if (sharedBusinessValue && matchingUiLabels.size < 2 && !sameNamedCollectionLeaf && semanticConcepts(field).size < 2) {
-    return undefined;
-  }
-  const candidates = [...new Map(observations
-    .filter(item => item.label && item.value !== undefined && item.value !== "")
-    .filter(item => sameValue(item.value, value) || Boolean(dateDay(value) && dateDay(item.value) === dateDay(value)))
-    .map(item => [item.label!, item])).values()]
-    .map(item => {
-      let score = semanticLabelScore(field, item);
-      if (sameNamedCollectionLeaf && aggregateLabel(item.label)) {
-        score += field.path.includes("[*]") ? -10 : 10;
-      }
-      return { item, score };
-    })
-    .filter(hit => hit.score > 0)
-    .sort((left, right) => right.score - left.score || String(left.item.label).localeCompare(String(right.item.label)));
-  if (!candidates.length || (candidates[1] && candidates[1].score === candidates[0]!.score)) return undefined;
-  return candidates[0]!.item;
-}
-
-function optionObservation(field: InputFormField, value: unknown, observations: UiObservation[]) {
-  const hits = [...new Map(observations
-    .filter(item => item.label && item.options?.some(option => sameValue(option.value, value)))
-    .map(item => [item.label!, item])).values()];
-  const semantic = hits.filter(item => sameSynonymGroup(field, item));
-  return semantic.length === 1 ? semantic[0] : undefined;
-}
-
 function asExactCaller(field: InputFormField, observation: UiObservation | undefined, value: unknown): InputFormField {
   if (observationReadonly(observation)) {
     return asExactSystem(field, value, "页面只读展示，由选择其它字段后自动带出。调用方不要手填");
@@ -386,8 +282,8 @@ function asExactCaller(field: InputFormField, observation: UiObservation | undef
     ...field,
     label: displayLabel(observation?.label, field.label) || field.label,
     source: "caller",
-    required: observation?.required ?? field.required,
-    requiredBasis: observation?.required === true ? "ui-required" : observation?.required === false ? "not-observed" : field.requiredBasis,
+    required: observation?.required === true || field.required,
+    requiredBasis: observation?.required === true ? "ui-required" : field.requiredBasis,
     systemHandled: false,
     widget,
     defaultRule: keptJudgedRule(field) ? field.defaultRule : undefined,
@@ -431,8 +327,7 @@ export function fallbackRole(capability: CapabilityContract, catalog: Capability
 export function applyExactEvidenceJoin(capability: CapabilityContract, events: EvidenceEvent[]): CapabilityContract {
   const related = relatedEvents(capability, events);
   const sample = richestRequestSample(related);
-  const joinedUi = joinUiEvents(capability, events);
-  const observations = collectUiObservations(joinedUi);
+  const observations = collectUiObservations(joinUiEvents(capability, events));
   const values = capability.inputForm.map(field => ({
     field,
     value: requestValueAt(sample, field.path)
@@ -497,11 +392,7 @@ export function applyExactEvidenceJoin(capability: CapabilityContract, events: E
         sourceDetail: "页面只读展示，由选择其它字段后自动带出。调用方不要手填"
       };
     }
-    if (named) return asExactCaller(field, richerObservation(named, observations), value);
-    const observed = findObservation(field, value, observations, [], sample)
-      || optionObservation(field, value, observations)
-      || semanticObservation(field, value, capability.inputForm, observations, sample);
-    if (observed) return asExactCaller(field, richerObservation(observed, observations), value);
+    if (named) return asExactCaller(field, named, value);
     const slot = rangeIndexOf(field.name);
     const day = dateDay(value);
     if (slot !== undefined) {
@@ -542,7 +433,7 @@ export function applyExactEvidenceJoin(capability: CapabilityContract, events: E
     return asExactSystem(field, value, "请求中有该键，页面无同名输入；系统按录制成功请求原值补齐（系统默认）");
   });
 
-  return { ...capability, inputForm, evidence: mergeEvidence(capability, joinedUi) };
+  return { ...capability, inputForm, evidence: mergeEvidence(capability, joinUiEvents(capability, events)) };
 }
 
 function asObjectRows(value: unknown): Record<string, unknown>[] {
@@ -587,22 +478,6 @@ function rowLabelPath(rows: Record<string, unknown>[]) {
 
 function looksExactPicker(field: InputFormField) {
   return field.widget === "select" || field.widget === "multiselect" || /picker/i.test(field.widget);
-}
-
-function candidateSourceFitsField(
-  field: InputFormField,
-  source: ReturnType<typeof exactCandidateSources>[number]
-) {
-  const entity = pickerEntity(field);
-  if (entity && new RegExp(`/(?:[^/]*${entity}[^/]*)/`, "i").test(source.pathTemplate)) return true;
-  const ignored = /^(id|ids|type|types|query|get|list|all|simple|page|data|api|prod|oa|system|sys)$/i;
-  const fieldTokens = nameTokens(`${field.name} ${field.path.split(".").at(-1) || ""}`)
-    .filter(token => !ignored.test(token));
-  const sourceTokens = nameTokens(`${source.pathTemplate} ${source.dictionaryType || ""}`)
-    .filter(token => !ignored.test(token));
-  return fieldTokens.some(token => sourceTokens.some(other =>
-    token === other || token.length >= 4 && other.length >= 4 && (token.includes(other) || other.includes(token))
-  ));
 }
 
 function usableExactCandidateSource(capability: CapabilityContract) {
@@ -697,12 +572,6 @@ export function matchExactCandidateSource(
   }
   if (!looksExactPicker(field) && field.candidates?.type !== "static") return undefined;
   const ids = identityValues(value);
-  sources = sources.filter(source =>
-    candidateSourceFitsField(field, source)
-    || Boolean(observation && sameSynonymGroup(field, observation) && ids.some(item => source.rows.some(row =>
-      sameValue(rowIdentity(row), item) && observationMatchesRow(observation, row)
-    )))
-  );
   if (ids.length === 1) {
     let hits = sources.filter(source =>
       source.capabilityId !== selfId
@@ -774,7 +643,8 @@ function chooserObservations(
     if (sourceCap && sourceIds.has(sourceCap.id)) extraIds.add(event.correlatedUiEvidenceId);
   }
   const local = mergeUi([
-    ...joinUiEvents(capability, events)
+    ...joinUiEvents(capability, events),
+    ...related.filter((event): event is UiEvidence => event.kind === "ui")
   ]);
   const localObs = collectUiObservations(local);
   const claimed = new Set(localObs.flatMap(item => rowKeysForObservation(item, sources)));
@@ -806,14 +676,8 @@ export function applyExactChooserJoin(catalog: CapabilityContract[], events: Evi
         if (field.source === "caller" && field.label !== field.name) return field;
         const ids = identityValues(requestValueAt(sample, field.path));
         if (ids.length !== 1) return field;
-        const semanticLocal = localObservations.filter(observation =>
-          uiNameMatches(observation.name, field.name) || sameSynonymGroup(field, observation)
-        );
         let matchedSources = sources.filter(source =>
           source.capabilityId !== capability.id
-          && (candidateSourceFitsField(field, source) || semanticLocal.some(observation => source.rows.some(row =>
-            sameValue(rowIdentity(row), ids[0]) && observationMatchesRow(observation, row)
-          )))
           && source.rows.filter(row => sameValue(rowIdentity(row), ids[0])).length === 1
         );
         if (!isSkillDistinctive(ids[0])) {
@@ -826,11 +690,7 @@ export function applyExactChooserJoin(catalog: CapabilityContract[], events: Evi
             ).length === 1
           )
         );
-        const semanticHits = hits.filter(item =>
-          uiNameMatches(item.name, field.name) || sameSynonymGroup(field, item)
-        );
-        const preferred = semanticHits.length ? semanticHits : hits;
-        const unique = [...new Map(preferred.map(item => [item.label || item.name || "", item])).values()]
+        const unique = [...new Map(hits.map(item => [item.label || item.name || "", item])).values()]
           .filter(item => item.label || item.name);
         if (unique.length !== 1) return field;
         const matched = matchedSources.find(source =>
@@ -890,7 +750,6 @@ export function applySameResourceCandidates(catalog: CapabilityContract[]): Capa
   return catalog.map(capability => ({
     ...capability,
     inputForm: capability.inputForm.map(field => {
-      if (field.source !== "caller") return field;
       if (field.candidates) return field;
       const matches = catalog.flatMap(source => {
         if (source.id === capability.id

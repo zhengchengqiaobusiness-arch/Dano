@@ -30,8 +30,12 @@ function mergeIncrementalForm(previous: InputFormField[], incoming: InputFormFie
     const authoritative = old.source === "caller" && field.source !== "caller" && !incomingRule ? old : field;
     return {
       ...authoritative,
-      required: authoritative.required,
-      requiredBasis: authoritative.requiredBasis
+      required: old.required || field.required,
+      requiredBasis: old.required
+        ? old.requiredBasis
+        : field.required
+          ? field.requiredBasis
+          : authoritative.requiredBasis
     };
   });
 }

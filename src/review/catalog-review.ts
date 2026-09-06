@@ -1,7 +1,7 @@
 import type { CapabilityContract, EvidenceEvent, OperationKind, ReviewFinding, ReviewNext, ReviewReport, ReviewStage } from "../domain.js";
 import { evidenceSample, isAssembledCollectionField, isAssembledObjectField, isExecutableRule, parseComputedRule, unsoundComputedOperands } from "../inference/field-derivation.js";
 import { exactCandidateSources, matchExactCandidateSource } from "../inference/pi-skill-runtime.js";
-import { flattenRequestValues, isPaginationField, looksPickerField, realFieldName, requestValueAt, sameFormShape, uiNameMatches } from "../inference/field-resolver.js";
+import { flattenRequestValues, isPaginationField, looksPickerField, realFieldName, requestValueAt, uiNameMatches } from "../inference/field-resolver.js";
 import { capabilitiesForSession, isCandidateSourceCapability, isNoiseCapability, sessionCatalogSlice, summarizeCatalog } from "../inference/export-scope.js";
 import { inferUiOperationIntent, isSuccessfulNetworkEvidence } from "../inference/heuristics.js";
 import { applyReviewActionPolicy } from "./review-action.js";
@@ -38,7 +38,6 @@ const CHECK_GUIDANCE: Record<string, { stage: ReviewStage; next: ReviewNext; hin
   "known-operation": { stage: "analyze", next: "re-analyze", hint: "重新识别操作类型；对不上就停，不要猜" },
   "field-metadata-complete": { stage: "analyze", next: "re-analyze", hint: "重新分析字段名称、类型和来源" },
   "field-ownership-consistent": { stage: "analyze", next: "re-analyze", hint: "重新划分调用方字段和系统字段" },
-  "editable-ui-fields-covered": { stage: "analyze", next: "re-analyze", hint: "按成功提交的页面表单反向核对请求字段；可填写控件不能被冻结为录制样本或错绑到无关候选接口" },
   "system-required-fields-resolvable": { stage: "analyze", next: "re-analyze", hint: "按真实因果来源处理；无来源时由系统原样补齐录制成功请求值" },
   "write-field-origins-resolved": { stage: "analyze", next: "re-analyze", hint: "重新分析真实因果关系；无来源字段使用录制成功请求原值，不要制造绑定" },
   "computed-formula-operands-sound": { stage: "analyze", next: "re-analyze", hint: "公式不能用编号、枚举或时间戳当运算数；重新分析" },
@@ -134,31 +133,7 @@ function emptyChooserWithoutOptions(field: NonNullable<Extract<EvidenceEvent, { 
   const type = String(field.type || "");
   if (!/select|picker|chooser|dropdown|cascader/i.test(type)) return false;
   if ((field.options || []).length) return false;
-  if (/^(?:暂无数据|无数据|没有数据|no data)$/i.test(String(field.value || "").trim())) return true;
-  return (field.visibleOptions || []).some(item => /暂无数据|无数据|没有数据|no data/i.test(String(item)));
-}
-
-function unavailableChooserKeys(capability: CapabilityContract, events: EvidenceEvent[]) {
-  const evidenceIds = new Set(capability.evidence.map(ref => ref.eventId));
-  const uiEvents = events.filter((event): event is Extract<EvidenceEvent, { kind: "ui" }> => event.kind === "ui");
-  const uiById = new Map(uiEvents.map(event => [event.id, event]));
-  const keys = new Set<string>();
-  for (const network of events.filter((event): event is Extract<EvidenceEvent, { kind: "network" }> =>
-    event.kind === "network"
-    && evidenceIds.has(event.id)
-    && Boolean(event.correlatedUiEvidenceId)
-    && isSuccessfulNetworkEvidence(event)
-  )) {
-    const owner = uiById.get(network.correlatedUiEvidenceId!);
-    if (!owner || capability.operation === "query" && inferUiOperationIntent(owner.text || owner.label || "", owner.pageUrl) !== "query") continue;
-    for (const event of uiEvents) {
-      if (event.sessionId !== owner.sessionId || event.pageUrl !== owner.pageUrl || event.at > network.at || !sameFormShape(owner, event)) continue;
-      for (const field of event.form || []) {
-        if (emptyChooserWithoutOptions(field)) keys.add(`${String(field.label || field.name || "").trim()}:${field.rangeIndex ?? ""}`);
-      }
-    }
-  }
-  return keys;
+  return (field.visibleOptions || []).some(item => /暂无数据|无数据|no data/i.test(String(item)));
 }
 
 function queryFilterSubmittedEmpty(
@@ -177,16 +152,15 @@ function blankCompleteCoverageFields(capability: CapabilityContract, events: Evi
   type CoverageField = NonNullable<Extract<EvidenceEvent, { kind: "ui" }>["form"]>[number];
   const requestLeaves = flattenRequestValues(evidenceSample(capability, events));
   const requestNames = new Set(requestLeaves.map(item => item.name));
-  const unavailableChoosers = unavailableChooserKeys(capability, events);
   const coverage = new Map<string, { field: CoverageField; filled: boolean }>();
   for (const field of completeCoverageUiFields(capability, events)) {
     const label = String(field.label || field.name || "").trim();
     const type = String(field.type || "");
     if (!label || /upload|file|readonly|hidden/i.test(type) || /附件|上传/.test(label)) continue;
-    const key = `${label}:${field.rangeIndex ?? ""}`;
-    if (emptyChooserWithoutOptions(field) || unavailableChoosers.has(key)) continue;
+    if (emptyChooserWithoutOptions(field)) continue;
     const name = realFieldName(field.name);
     if (name && ![...requestNames].some(requestName => uiNameMatches(name, requestName))) continue;
+    const key = `${label}:${field.rangeIndex ?? ""}`;
     const previous = coverage.get(key);
     coverage.set(key, {
       field: previous?.field || field,
