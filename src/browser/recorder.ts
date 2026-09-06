@@ -113,7 +113,19 @@ export function recordingStopReadiness(
     const reason = businessFailureReason(event);
     return reason ? [{ url: event.request.url, reason }] : [];
   });
-  const contractReview = reviewCatalog(candidates, events, expected, completeFieldCoverage);
+  const contractReview = expected.length || primary.length
+    ? reviewCatalog(candidates, events, expected, completeFieldCoverage)
+    : {
+        status: "passed" as const,
+        next: "export" as const,
+        primaryCount: 0,
+        lookupCount: 0,
+        verifiedPrimaryCount: 0,
+        primaryTitles: [] as string[],
+        lookupTitles: [] as string[],
+        findings: [],
+        summary: "本次未要求业务操作；当前只审核页面与字段覆盖。"
+      };
   const coverageReady = missingOperations.length === 0 && missingPages.length === 0 && missingPageOperations.length === 0;
   return {
     ready: coverageReady && contractReview.status === "passed",
