@@ -124,6 +124,36 @@ test("studio export of the latest todo session does not pack the previous leave 
   await rm(temporary, { recursive: true, force: true });
 });
 
+test("explicit export refreshes a stale session cache instead of falling back to the previous page", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "export-fresh-session-"));
+  const recordingsDir = path.join(temporary, "recordings");
+  const catalogDir = path.join(temporary, "catalog");
+  const { catalog, leave, todo } = mixedCatalog();
+  try {
+    await writeJson(path.join(catalogDir, "capabilities.json"), catalog);
+    await writeSession(recordingsDir, { id: "leave-old", startUrl: LEAVE_PAGE, startedAt: "2026-09-03T13:00:00.000Z" }, leave);
+    const studio = new StudioService({
+      rootDir: temporary,
+      dataDir: temporary,
+      recordingsDir,
+      catalogDir,
+      profileDir: path.join(temporary, "profile"),
+      maxResponseBytes: 32_768,
+      headless: true,
+      openaiModel: "test"
+    });
+    await studio.review("leave-old");
+    await writeSession(recordingsDir, { id: "todo-now", startUrl: TODO_PAGE, startedAt: "2026-09-04T02:36:00.000Z" }, todo);
+
+    const exported = await studio.exportManaged("待办任务", true, "todo-now");
+    const contract = await readFile(path.join(exported.directory, "references", "CONTRACT.json"), "utf8");
+    assert.match(contract, /todo-page/);
+    assert.doesNotMatch(contract, /duty-leave|submit-process/);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("studio export rejects a session that is missing one of its requested operations", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "export-missing-operation-"));
   const recordingsDir = path.join(temporary, "recordings");

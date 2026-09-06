@@ -171,7 +171,10 @@ export class StudioService {
 
   private async resolveSessionId(sessionId?: string, sessions?: RecordingSession[]) {
     const list = sessions || await this.listSessions();
-    if (sessionId && list.some(item => item.id === sessionId)) return sessionId;
+    if (sessionId) {
+      if (list.some(item => item.id === sessionId)) return sessionId;
+      throw new Error(`Recording session not found: ${sessionId}`);
+    }
     if (this.lastAnalyzedSessionId && list.some(item => item.id === this.lastAnalyzedSessionId)) {
       return this.lastAnalyzedSessionId;
     }
@@ -179,6 +182,7 @@ export class StudioService {
   }
 
   private async scopedEvidence(sessionId?: string) {
+    if (sessionId) this.sessionListCache = undefined;
     const sessions = await this.listSessions();
     const current = await this.resolveSessionId(sessionId, sessions);
     const scopeEvents = current ? await this.sessionEvents(current) : [];
