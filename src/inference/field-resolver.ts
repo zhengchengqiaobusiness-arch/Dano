@@ -703,6 +703,8 @@ function requestValueIsShared(sample: unknown, fieldPath: string, value: unknown
   if (value === undefined || value === null || value === "") return false;
   return flattenRequestValues(sample).some(item =>
     item.path !== fieldPath
+    && item.path !== `${fieldPath}[*]`
+    && fieldPath !== `${item.path}[*]`
     && !PAGE_NAME.test(item.name)
     && sameValue(item.value, value)
   );

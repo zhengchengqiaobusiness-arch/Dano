@@ -622,6 +622,10 @@ function observationMatchesRow(observation: UiObservation, row: Record<string, u
   return rowDisplays(row).some(item => item === display || sameValue(item, display));
 }
 
+function sameFlattenedField(left: string, right: string) {
+  return left === right || left === `${right}[*]` || right === `${left}[*]`;
+}
+
 function exactCandidateObservations(field: InputFormField, observations: UiObservation[]) {
   const valued = observations.filter(item => item.value !== undefined && item.value !== "");
   const named = valued.filter(item => uiNameMatches(item.name, field.name));
@@ -784,7 +788,7 @@ export function applyExactChooserJoin(catalog: CapabilityContract[], events: Evi
         const ids = identityValues(requestValueAt(sample, field.path));
         if (ids.length !== 1) return field;
         const shared = flattenRequestValues(sample).some(item =>
-          item.path !== field.path
+          !sameFlattenedField(item.path, field.path)
           && !PAGE_NAME.test(item.name)
           && sameValue(item.value, ids[0])
         );
