@@ -245,32 +245,35 @@ export class StudioService {
     await this.rememberAnalyzedSession(scoped.current);
     let result = await this.reviewScopedEvidence(scoped, false);
     const state = await this.studioState();
-    const signature = reviewFindingSignature(result.review.findings);
-    const alreadySettled = Boolean(
+    const initialSignature = reviewFindingSignature(result.review.findings);
+    const wasAlreadySettled = Boolean(
       result.review.status === "blocked"
       && state.lastReview
       && state.lastReview.sessionId === scoped.session?.id
-      && state.lastReview.signature === signature
+      && state.lastReview.signature === initialSignature
     );
 
-    if (!alreadySettled && scoped.current) {
+    const hasRecordedNetwork = scoped.scopeEvents.some(event => event.kind === "network");
+    const needsEvidenceRebuild = result.review.findings.some(finding =>
+      finding.next === "re-analyze"
+      || finding.code === "no-primary-capability"
+      || finding.code === "missing-expected-operation"
+    );
+    if (scoped.current && hasRecordedNetwork && needsEvidenceRebuild) {
+      await this.analyze(scoped.current, false);
+      scoped = await this.scopedEvidence(scoped.current);
       result = await this.reviewScopedEvidence(scoped, true);
-      const seen = new Set<string>();
-      const steps = [
-        () => this.repairSessionContracts(scoped),
-        () => this.analyze(scoped.current!, false)
-      ];
-      for (const step of steps) {
-        const repairable = result.review.findings.filter(finding => finding.next === "re-analyze");
-        if (!repairable.length) break;
-        const repairSignature = reviewFindingSignature(repairable);
-        if (seen.has(repairSignature)) break;
-        seen.add(repairSignature);
-        await step();
-        scoped = await this.scopedEvidence(scoped.current);
-        result = await this.reviewScopedEvidence(scoped, true);
-      }
-    } else if (alreadySettled && result.review.next !== "re-record") {
+    }
+
+    const stillSettled = wasAlreadySettled
+      && state.lastReview?.signature === reviewFindingSignature(result.review.findings);
+    if (scoped.current && !stillSettled && result.review.findings.some(finding => finding.next === "re-analyze")) {
+      await this.repairSessionContracts(scoped);
+      scoped = await this.scopedEvidence(scoped.current);
+      result = await this.reviewScopedEvidence(scoped, true);
+    }
+
+    if (stillSettled && result.review.status === "blocked" && result.review.next !== "re-record") {
       result = {
         ...result,
         review: {

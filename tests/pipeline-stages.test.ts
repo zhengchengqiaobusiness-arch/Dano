@@ -133,3 +133,16 @@ test("produce-review-gate-repair-review-export stays on one session slice", asyn
 
   await rm(temporary, { recursive: true, force: true });
 });
+
+test("export owns analyze-review-repair-review-export for a raw recording", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bss-pipeline-export-"));
+  const recordingsDir = path.join(temporary, "recordings");
+  await writeSession(recordingsDir, "now", completeDocEvents());
+  const studio = studioOf(temporary);
+
+  const result = await studio.exportManaged("单据", true, "now");
+
+  assert.equal(result.primaryCount, 2);
+  assert.ok(result.name);
+  await rm(temporary, { recursive: true, force: true });
+});
