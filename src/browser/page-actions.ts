@@ -1177,7 +1177,7 @@ export class PageActions {
     if (field.kind === "number") return true;
     const hint = this.fieldHint(field);
     if (/编号|车牌|单号|手机号|电话|证件号|身份证/i.test(hint)) return false;
-    return /显示顺序|排序|顺序|车座|座位数|数量|天数|时长|工时|金额|价格|单价|裸车价|\bdays?\b|\bduration\b|\bhours?\b|\bsort\b|\bseat\b|\bqty\b|quantity|price|amount/i.test(hint);
+    return /显示顺序|排序|顺序|车座|座位数|数量|人数|人次|(?:件|份|台|套|次)数|天数|时长|工时|金额|价格|单价|裸车价|\bdays?\b|\bduration\b|\bhours?\b|\bsort\b|\bseat\b|\bqty\b|quantity|price|amount/i.test(hint);
   }
 
   private sampleValue(field: FormField, dateOffset = 0) {

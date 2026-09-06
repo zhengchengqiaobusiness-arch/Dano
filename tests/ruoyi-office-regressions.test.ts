@@ -1032,6 +1032,7 @@ test("exercise-form fills spinbutton and labeled sort fields with numbers not �
         <label>车座<input role="spinbutton" placeholder="请输入车座" name="seatNum"></label>
         <div class="el-input-number"><label>显示顺序<input placeholder="请输入显示顺序" name="sort"></label></div>
         <label>天数<input placeholder="请输入天数" name="days"></label>
+        <label>入住人数<input placeholder="请输入入住人数" name="userCount"></label>
         <button type="button" id="save">确认</button>
       </div>
       <script>
@@ -1072,6 +1073,7 @@ test("exercise-form fills spinbutton and labeled sort fields with numbers not �
     assert.equal(String(byLabel("车座")?.value || ""), "1", JSON.stringify(exercised.formFields));
     assert.equal(String(byLabel("显示顺序")?.value || ""), "1", JSON.stringify(exercised.formFields));
     assert.equal(String(byLabel("天数")?.value || ""), "1", JSON.stringify(exercised.formFields));
+    assert.equal(String(byLabel("入住人数")?.value || ""), "1", JSON.stringify(exercised.formFields));
   } finally {
     if (recorder.isActive()) await recorder.stop().catch(() => {});
     await new Promise<void>(resolve => server.close(() => resolve()));
