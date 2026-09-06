@@ -124,6 +124,45 @@ test("submit-style POST is a primary write even when the path is not CRUD", () =
   assert.equal(review.primaryCount, 1);
 });
 
+test("login performed before a business workflow is classified as authentication noise", () => {
+  const events: EvidenceEvent[] = [{
+    id: "ui-login",
+    kind: "ui",
+    sessionId: "seal-recording",
+    at: "2026-09-06T07:03:00.914Z",
+    pageUrl: "http://boot.test/login?redirect=%2Foa%2Fseal%2FsealApply",
+    eventType: "click",
+    text: "登录",
+    label: "登录"
+  }, network("POST", "http://boot.test/prod-api/login", {
+    id: "net-login",
+    sessionId: "seal-recording",
+    at: "2026-09-06T07:03:01.095Z",
+    pageUrl: "http://boot.test/login?redirect=%2Foa%2Fseal%2FsealApply",
+    correlatedUiEvidenceId: "ui-login",
+    request: {
+      method: "POST",
+      url: "http://boot.test/prod-api/login",
+      resourceType: "xhr",
+      headers: {},
+      query: {},
+      body: { username: "demo", password: "[REDACTED]", code: "2", uuid: "recorded" }
+    },
+    response: { status: 200, headers: {}, body: { code: 200, msg: "操作成功" } }
+  }), network("GET", "http://boot.test/prod-api/oa/sealApply/list?pageNum=1", {
+    id: "net-query",
+    sessionId: "seal-recording",
+    at: "2026-09-06T07:03:49.140Z",
+    pageUrl: "http://boot.test/oa/seal/sealApply?billType=seal_apply",
+    response: { status: 200, headers: {}, body: { code: 200, rows: [] } }
+  })];
+
+  const catalog = buildCapabilityCandidates(events);
+  const login = catalog.find(item => item.transport.pathTemplate === "/prod-api/login");
+  assert.equal(login?.operation, "authenticate");
+  assert.equal(capabilitiesForSession(catalog, events, events).some(item => item.id === login?.id), false);
+});
+
 test("a recorded download is an exportable primary page operation", () => {
   const download = cap({
     id: "download-report",

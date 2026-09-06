@@ -178,6 +178,8 @@ export function normalizeUrl(rawUrl: string) {
 
 export function inferOperation(event: NetworkEvidence, ui?: UiEvidence, activeFormIntent?: OperationKind): OperationKind {
   const method = event.request.method.toUpperCase();
+  const endpoint = new URL(event.request.url).pathname;
+  if (AUTHENTICATE.test(endpoint)) return "authenticate";
   if (method === "DELETE") return "delete";
   if (method === "GET" || method === "HEAD") return "query";
   if (method === "PATCH" || method === "PUT") return "update";
