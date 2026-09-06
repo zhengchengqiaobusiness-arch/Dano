@@ -365,6 +365,7 @@ export function fallbackRole(capability: CapabilityContract, catalog: Capability
   if (WRITE.has(capability.operation) || capability.operation === "download") return "primary";
   const path = capability.transport.pathTemplate || "";
   if (isLookupQueryPath(path) || directoryLookupEntity(path)) return "lookup";
+  if (isPageResultQuery(capability)) return "primary";
   const hasCaller = capability.inputForm.some(field => field.source === "caller" && !PAGE_NAME.test(field.name));
   if (capability.operation === "unknown") return hasCaller ? "primary" : "lookup";
   if (capability.operation !== "query") return "lookup";
