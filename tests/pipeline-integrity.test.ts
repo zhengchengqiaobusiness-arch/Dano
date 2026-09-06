@@ -524,6 +524,63 @@ test("model judgment cannot invent that an optional recorded field is required",
   assert.equal(judged!.inputForm[0]?.required, false);
 });
 
+test("model judgment cannot downgrade a recorded dynamic candidate to free text", async () => {
+  const dictionary = cap({
+    id: "query-leave-types",
+    operation: "query",
+    role: "lookup",
+    transport: {
+      method: "GET",
+      urlTemplate: "https://x/dict/type/duty_leave_type",
+      origin: "https://x",
+      pathTemplate: "/dict/type/duty_leave_type"
+    }
+  });
+  const query = cap({
+    id: "query-duty-candidates",
+    operation: "query",
+    role: "primary",
+    transport: {
+      method: "GET",
+      urlTemplate: "https://x/oa/dutyApply/list?leaveType={leaveType}",
+      origin: "https://x",
+      pathTemplate: "/oa/dutyApply/list"
+    },
+    inputForm: [field({
+      name: "leaveType",
+      label: "请假类型",
+      source: "caller",
+      systemHandled: false,
+      widget: "select",
+      candidates: {
+        type: "capability",
+        capabilityId: dictionary.id,
+        valuePath: "$.data[*].dictValue",
+        labelPath: "$.data[*].dictLabel"
+      }
+    })]
+  });
+  const reasoner = {
+    model: "test",
+    available: () => true,
+    parseStructured: async () => ({
+      capabilities: [query, dictionary].map(item => ({
+        id: item.id,
+        operation: item.operation,
+        role: item.role,
+        title: item.title,
+        description: item.description,
+        fields: item.id === query.id ? [{ path: "$.leaveType", widget: "text" }] : []
+      }))
+    })
+  };
+
+  const judged = await applyPiCatalogJudgment([query, dictionary], [], reasoner as any, process.cwd(), true);
+  const leaveType = judged.find(item => item.id === query.id)?.inputForm[0];
+  assert.equal(leaveType?.widget, "select");
+  assert.equal(leaveType?.candidates?.type, "capability");
+});
+
 test("a post-save list refresh cannot make an optional query filter required", async () => {
   const query = cap({
     id: "query-duty-list",

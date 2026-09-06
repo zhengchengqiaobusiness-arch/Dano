@@ -877,6 +877,9 @@ function applyFieldPatch(
   } else if (patch.staticCandidates?.length) {
     next = { ...next, widget: next.widget === "text" ? "select" : next.widget, candidates: { type: "static", values: patch.staticCandidates } };
   }
+  if (next.candidates) {
+    next = { ...next, widget: next.valueType === "array" ? "multiselect" : "select" };
+  }
   return next;
 }
 

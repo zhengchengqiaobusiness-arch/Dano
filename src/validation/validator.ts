@@ -224,6 +224,19 @@ export function validateCapability(cap: CapabilityContract, events: EvidenceEven
       : `选择字段缺少候选合同：${missingSelectableCandidates.map(field => field.name).join("、")}`
   });
 
+  const inconsistentCandidateWidgets = cap.inputForm.filter(field =>
+    Boolean(field.candidates)
+    && field.widget !== "select"
+    && field.widget !== "multiselect"
+  );
+  checks.push({
+    name: "candidate-widget-consistent",
+    ok: inconsistentCandidateWidgets.length === 0,
+    detail: inconsistentCandidateWidgets.length === 0
+      ? "候选字段均以选择控件暴露给调用方"
+      : `候选字段被错误标记为自由输入：${inconsistentCandidateWidgets.map(field => field.name).join("、")}`
+  });
+
   const candidateRulesValid = cap.inputForm.every(field => {
     const rule = field.candidates;
     if (!rule) return true;
