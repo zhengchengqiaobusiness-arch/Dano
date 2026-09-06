@@ -219,7 +219,7 @@ test("embedded preview stays clickable in Pi automatic click mode", async () => 
   assert.doesNotMatch(app, /setInterval\(\(\) => \{ if \(!document\.hidden\) void pollBrowser\(\); \}, 1400\)/);
 });
 
-test("workbench operations execute without a confirmation dialog", async () => {
+test("recording operations avoid generic confirmation while Skill writes require an explicit flag", async () => {
   const [extension, bridge, page, app, browserSkill] = await Promise.all([
     readFile(path.join(root, ".pi", "extensions", "business-skill-studio.ts"), "utf8"),
     readFile(path.join(root, "src", "web", "pi-rpc.ts"), "utf8"),
@@ -230,7 +230,7 @@ test("workbench operations execute without a confirmation dialog", async () => {
   const browserControl = extension.match(/name: "business_browser_control"[\s\S]*?^\s{2}\}\);/m)?.[0] || "";
 
   assert.doesNotMatch(browserControl, /ctx\.ui\.confirm|Confirm real browser write/);
-  assert.match(extension, /studio\.execute\(cap\.id, executionInput, cap\.confirmation\.required\)/);
+  assert.match(extension, /studio\.execute\(cap\.id, executionInput, params\.confirmWrite === true\)/);
   assert.doesNotMatch(extension, /Write operation cancelled by user|用户取消了 Skill 导出|Binding approval cancelled/);
   assert.match(bridge, /Execute ordinary browser actions and business operations immediately/);
   assert.match(bridge, /Login is the exception:[\s\S]*do not click or fill anything and do not retry/);
@@ -265,6 +265,9 @@ test("workbench operations execute without a confirmation dialog", async () => {
   assert.match(extension, /当前对话还没有录制证据/);
   assert.match(extension, /lastRecordingSessionId = undefined/);
   assert.match(extension, /正式闭环以录制阶段的 recordingAudit 为准/);
+  assert.match(extension, /confirmWrite: \{ type: "boolean"/);
+  assert.match(extension, /studio\.execute\(cap\.id, executionInput, params\.confirmWrite === true\)/);
+  assert.doesNotMatch(extension, /studio\.execute\(cap\.id, executionInput, cap\.confirmation\.required\)/);
   assert.doesNotMatch(extension, /停止并报告未通过原因/);
   const workflowSkill = await readFile(path.join(root, ".pi", "skills", "business-skill-studio", "SKILL.md"), "utf8");
   assert.match(workflowSkill, /Recording owns Build → Repair → Validate → Review/);

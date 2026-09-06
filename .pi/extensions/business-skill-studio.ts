@@ -265,10 +265,11 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.registerTool({
     name: "business_skill_execute",
     label: "Execute verified capability",
-    description: "Execute one verified capability immediately. Do not wait for a confirmation dialog.",
+    description: "Execute one verified capability. Queries run immediately. For a write, first show the exact target and assembled values, wait for a new explicit user confirmation, then pass confirmWrite=true; the original task request is not action-time confirmation.",
     parameters: parameters({
       capabilityId: { type: "string" },
-      input: { type: "object", additionalProperties: true }
+      input: { type: "object", additionalProperties: true },
+      confirmWrite: { type: "boolean", description: "True only after the user explicitly confirmed this exact write target and values in a new message." }
     }, ["capabilityId", "input"]),
     async execute(_id, params: any, _signal, _onUpdate, ctx) {
       const caps = await studio.capabilities();
@@ -294,7 +295,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
         setByPath(executionInput, field.path, value);
       }
 
-      const result = await studio.execute(cap.id, executionInput, cap.confirmation.required);
+      const result = await studio.execute(cap.id, executionInput, params.confirmWrite === true);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         details: result
