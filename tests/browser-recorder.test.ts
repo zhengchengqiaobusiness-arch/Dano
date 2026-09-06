@@ -2965,6 +2965,28 @@ test("successful form actions do not consume the three-failure repair budget", a
   }
 });
 
+test("cancelling an in-flight exercise-form stops before later fields are changed", async () => {
+  await withRecorderPage("cancel-exercise-form", `<!doctype html><html><head><title>终止表单</title></head><body>
+    <form class="el-form">
+      <label>状态<select name="status" onchange="const until=Date.now()+500; while(Date.now()<until){}"><option value="">请选择</option><option value="0">启用</option></select></label>
+      <label>类型<select name="kind"><option value="">请选择</option><option value="1">办公</option></select></label>
+      <label>名称<input name="name" placeholder="请输入名称"></label>
+    </form>
+  </body></html>`, async recorder => {
+    const pending = recorder.control({ action: "exercise-form" });
+    setTimeout(() => recorder.cancelPendingActions("test abort"), 50);
+    const result: any = await pending;
+    assert.equal(result.cancelled, true, JSON.stringify(result));
+    assert.equal(result.stopped, undefined, JSON.stringify(result));
+
+    const snapshot: any = await recorder.control({ action: "snapshot" });
+    const kind: any = snapshot.formFields.find((field: any) => field.name === "kind");
+    const name: any = snapshot.formFields.find((field: any) => field.name === "name");
+    assert.equal(kind?.filled, false, JSON.stringify(snapshot.formFields));
+    assert.equal(name?.value || "", "", JSON.stringify(snapshot.formFields));
+  });
+});
+
 test("manual takeover starts only after three consecutive failed clicks", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "business-noloop-"));
   const server = http.createServer((_request, response) => {

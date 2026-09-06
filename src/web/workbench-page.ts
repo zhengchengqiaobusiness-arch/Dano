@@ -320,6 +320,7 @@ export class WorkbenchPage {
     this.transcriptOpen = false;
     this.cancelCoverageContinuation();
     this.cancelManualTakeover(reason);
+    this.recorder.cancelPendingActions("用户已终止当前任务。");
     const pid = this.pi.processId();
     if (this.pi.status().running) {
       await this.pi.stop();

@@ -187,6 +187,7 @@ test("aborting a task cancels its queued recording-audit continuation", async ()
   let streaming = true;
   let aborted = 0;
   let stopped = 0;
+  let browserActionsCancelled = 0;
   const prompts: string[] = [];
   (page.recorder as any).activeSession = () => ({
     id: "rec_abortaudit",
@@ -205,6 +206,7 @@ test("aborting a task cancels its queued recording-audit continuation", async ()
   (page.pi as any).abort = async () => { aborted += 1; streaming = false; };
   (page.pi as any).stop = async () => { stopped += 1; streaming = false; };
   (page.pi as any).prompt = async (prompt: string) => { prompts.push(prompt); };
+  (page.recorder as any).cancelPendingActions = () => { browserActionsCancelled += 1; };
 
   (page as any).scheduleCoverageContinuation();
   await page.abortWork();
@@ -213,6 +215,7 @@ test("aborting a task cancels its queued recording-audit continuation", async ()
   assert.deepEqual(prompts, []);
   assert.equal(aborted, 0);
   assert.equal(stopped, 1);
+  assert.equal(browserActionsCancelled, 1);
   assert.equal(page.transcriptOpen, false);
 });
 

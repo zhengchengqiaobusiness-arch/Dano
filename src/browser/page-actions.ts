@@ -1700,7 +1700,7 @@ export class PageActions {
     return changed;
   }
 
-  async exerciseForm(allFields = false) {
+  async exerciseForm(allFields = false, isCancelled: () => boolean = () => false) {
     await this.dismissTransientOverlays();
     await this.completeChooserDialog();
     const filled: Array<Record<string, unknown>> = [];
@@ -1709,8 +1709,23 @@ export class PageActions {
     const startUrl = this.page().url();
     let dateOffset = 0;
     const fieldKey = (field: FormField) => `${field.scope || ""}|${field.label}|${field.selector || ""}|${field.groupIndex ?? field.rangeIndex ?? 0}`;
+    const cancelledResult = (snapshot?: PageSnapshot) => ({
+      ok: false,
+      cancelled: true,
+      reason: "自动浏览器操作已终止。",
+      filled,
+      failed,
+      errors: snapshot?.errors || [],
+      todoFields: snapshot?.todoFields || [],
+      todoCount: snapshot?.todoCount ?? (snapshot?.todoFields || []).length,
+      formFields: snapshot?.formFields || [],
+      recordedManualSteps: snapshot?.recordedManualSteps || [],
+      followManualSteps: false
+    });
+    if (isCancelled()) return cancelledResult();
     const run = async (fields: FormField[], force = false) => {
       for (const field of fields) {
+        if (isCancelled()) return false;
         const key = fieldKey(field);
         if (failedKeys.has(key)) continue;
         const offset = field.kind === "date" ? dateOffset++ : 0;
@@ -1721,9 +1736,12 @@ export class PageActions {
           failedKeys.add(key);
           failed.push({ label: field.label, selector: field.selector || `label=${field.label}`, kind: field.kind, requiredInteraction: force, error: String(error?.message || error) });
         }
+        if (isCancelled()) return false;
       }
+      return true;
     };
     let after = await this.captureSnapshot();
+    if (isCancelled()) return cancelledResult(after);
     let fullPassPending = allFields;
     const recent = this.host.recentUserActions() as Array<{ eventType?: string; label?: string; name?: string; selector?: string }>;
     const alreadyOperated = (field: FormField) => recent.some(action =>
@@ -1734,7 +1752,9 @@ export class PageActions {
     const expansionFailures: Array<Record<string, unknown>> = [];
     const maxPasses = Math.max(6, Math.min(32, (after.controls || []).length + 6));
     for (let pass = 0; pass < maxPasses && this.page().url() === startUrl; pass += 1) {
+      if (isCancelled()) return cancelledResult(after);
       const expansion = await this.expandRepeatableRows(attemptedRepeatables);
+      if (isCancelled()) return cancelledResult(after);
       if (expansion.attempted) {
         if (!expansion.expanded) expansionFailures.push({ label: expansion.name || "业务明细", error: "点击添加控件后没有出现可填写字段" });
         after = await this.captureFields();
@@ -1751,24 +1771,31 @@ export class PageActions {
         }
         break;
       }
-      await run(leftover.filter(field => field.kind === "select"), force);
+      if (!await run(leftover.filter(field => field.kind === "select"), force)) return cancelledResult(after);
       await this.waitForPageQuiet(800);
-      await run(leftover.filter(field => field.kind === "date"), force);
+      if (isCancelled()) return cancelledResult(after);
+      if (!await run(leftover.filter(field => field.kind === "date"), force)) return cancelledResult(after);
       await this.closeDatePanel();
-      await run(leftover.filter(field => field.kind !== "select" && field.kind !== "date" && field.kind !== "picker"), force);
-      await run(leftover.filter(field => field.kind === "picker"), force);
+      if (isCancelled()) return cancelledResult(after);
+      if (!await run(leftover.filter(field => field.kind !== "select" && field.kind !== "date" && field.kind !== "picker"), force)) return cancelledResult(after);
+      if (!await run(leftover.filter(field => field.kind === "picker"), force)) return cancelledResult(after);
       await this.completeChooserDialog();
       await this.dismissTransientOverlays();
+      if (isCancelled()) return cancelledResult(after);
       after = await this.captureFields();
     }
+    if (isCancelled()) return cancelledResult(after);
     if (!this.formReady(after, startUrl)) {
       if (await this.revealHiddenSections()) {
+        if (isCancelled()) return cancelledResult(after);
         after = await this.captureFields();
-        await run((after.todoFields || []).filter(field => !field.skip && !field.disabled && !failedKeys.has(fieldKey(field))));
+        if (!await run((after.todoFields || []).filter(field => !field.skip && !field.disabled && !failedKeys.has(fieldKey(field))))) return cancelledResult(after);
         after = await this.captureFields();
       }
     }
+    if (isCancelled()) return cancelledResult(after);
     await this.repairFormValues(startUrl);
+    if (isCancelled()) return cancelledResult(after);
     after = await this.captureSnapshot();
     const leftoverFailed = failed.filter(item => item.requiredInteraction ||
       (after.formFields || []).some(field => field.label === item.label && !field.filled && !field.skip && !field.disabled)

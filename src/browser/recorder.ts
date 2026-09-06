@@ -334,6 +334,7 @@ export class BrowserRecorder {
   private browserPid?: number;
   private browserLaunched = false;
   private actionBusy = 0;
+  private actionAbortController = new AbortController();
   private readonly networkJobs = new Set<Promise<void>>();
   private readonly pendingRequests = new Map<Request, number>();
   private previewInFlight?: Promise<Buffer>;
@@ -1482,6 +1483,11 @@ export class BrowserRecorder {
     return this.recordingAudit(300);
   }
 
+  cancelPendingActions(reason = "自动浏览器操作已终止。") {
+    if (!this.actionAbortController.signal.aborted) this.actionAbortController.abort(reason);
+    this.actionAbortController = new AbortController();
+  }
+
   private async recordingAudit(drainMs = 0, knownSnapshot?: PageSnapshot) {
     const active = this.active;
     if (!active) throw new Error("No active recording");
@@ -1599,7 +1605,8 @@ export class BrowserRecorder {
     await this.ensureFormScope();
     try {
       for (let automaticAttempts = 1; automaticAttempts <= FORM_ACTION_BUDGET; automaticAttempts += 1) {
-        const result = await work() as { ok?: boolean; retryReady?: boolean; businessFailure?: string; loginRequired?: boolean; loginReason?: string; todoFields?: Array<{ label?: string; name?: string }> };
+        const result = await work() as { ok?: boolean; cancelled?: boolean; retryReady?: boolean; businessFailure?: string; loginRequired?: boolean; loginReason?: string; todoFields?: Array<{ label?: string; name?: string }> };
+        if (result.cancelled) return { ...result, automaticAttempts, followManualSteps: false };
         if (result.loginRequired) {
           return {
             ...result,
@@ -1637,6 +1644,7 @@ export class BrowserRecorder {
     ms?: number;
   }): Promise<unknown> {
     const actionStartedAt = Date.now();
+    const actionSignal = this.actionAbortController.signal;
     if (LOGIN_BLOCKED_ACTIONS.has(command.action)) {
       const login = await this.loginPageState();
       if (login.detected) return this.loginPauseResult(login);
@@ -1805,7 +1813,15 @@ export class BrowserRecorder {
             return { ok: true };
           });
         case "wait":
-          await page.waitForTimeout(Math.max(0, Math.min(command.ms || 500, 8_000)));
+          await new Promise<void>(resolve => {
+            const timer = setTimeout(finish, Math.max(0, Math.min(command.ms || 500, 8_000)));
+            function finish() {
+              clearTimeout(timer);
+              actionSignal.removeEventListener("abort", finish);
+              resolve();
+            }
+            actionSignal.addEventListener("abort", finish, { once: true });
+          });
           return { ok: true };
         case "screenshot": {
           const dir = path.join(this.config.dataDir, "screenshots");
@@ -1817,7 +1833,7 @@ export class BrowserRecorder {
         case "snapshot":
           return this.actions.captureSnapshot();
         case "exercise-form": {
-          const exercised = await this.guardedFormAction("exercise-form", () => this.actions.exerciseForm(Boolean(this.active?.session.completeFieldCoverage)));
+          const exercised = await this.guardedFormAction("exercise-form", () => this.actions.exerciseForm(Boolean(this.active?.session.completeFieldCoverage), () => actionSignal.aborted));
           if (exercised.ok) await this.markWholeFormExercised();
           return exercised;
         }
@@ -1826,6 +1842,9 @@ export class BrowserRecorder {
         }
       }
     });
+    if (actionSignal.aborted) {
+      return { ok: false, cancelled: true, reason: "自动浏览器操作已终止。", followManualSteps: false };
+    }
     if (result && typeof result === "object" && (result as { loginRequired?: boolean }).loginRequired) return result;
     const login = await this.loginPageState();
     if (login.detected) return this.loginPauseResult(login);
@@ -1852,6 +1871,7 @@ export class BrowserRecorder {
   }
 
   disposeImmediate() {
+    this.cancelPendingActions("浏览器会话已关闭。");
     const active = this.active;
     this.active = undefined;
     this.setFocused(undefined);
@@ -1886,6 +1906,7 @@ export class BrowserRecorder {
 
   async stop(): Promise<RecordingSession> {
     if (!this.active) throw new Error("No active recording");
+    this.cancelPendingActions("录制已停止。");
     const active = this.active;
     this.active = undefined;
     this.focused = undefined;
