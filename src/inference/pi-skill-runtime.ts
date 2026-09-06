@@ -612,24 +612,21 @@ function observationMatchesRow(observation: UiObservation, row: Record<string, u
   return rowDisplays(row).some(item => item === display || sameValue(item, display));
 }
 
-function exactCandidateObservation(field: InputFormField, observations: UiObservation[]) {
+function exactCandidateObservations(field: InputFormField, observations: UiObservation[]) {
   const valued = observations.filter(item => item.value !== undefined && item.value !== "");
   const named = valued.filter(item => uiNameMatches(item.name, field.name));
-  if (named.length) return named.find(item => /select|combobox|picker/i.test(item.type || "")) || named[0];
+  if (named.length) return named;
 
   const label = displayLabel(field.label, field.name);
   const labeled = valued.filter(item => displayLabel(item.label, item.name) === label);
-  if (labeled.length) return labeled.find(item => /select|combobox|picker/i.test(item.type || "")) || labeled[0];
+  if (labeled.length) return labeled;
 
-  if (semanticConcepts(field).size < 2) return undefined;
+  if (semanticConcepts(field).size < 2) return [];
   const semantic = valued.filter(item => semanticLabelScore(field, item) > 0);
   const unique = [...new Map(semantic.map(item => [item.label || item.name || "", item])).values()]
     .filter(item => item.label || item.name);
-  if (unique.length !== 1) return undefined;
-  return semantic.find(item =>
-    (item.label || item.name) === (unique[0]!.label || unique[0]!.name)
-    && /select|combobox|picker/i.test(item.type || "")
-  ) || unique[0];
+  if (unique.length !== 1) return [];
+  return semantic.filter(item => (item.label || item.name) === (unique[0]!.label || unique[0]!.name));
 }
 
 function rangeIndexOf(name: string) {
@@ -822,8 +819,19 @@ export function applyExactCandidateJoin(catalog: CapabilityContract[], events: E
     return {
       ...capability,
       inputForm: capability.inputForm.map(field => {
-        const observation = exactCandidateObservation(field, observations);
-        const hit = matchExactCandidateSource(field, requestValueAt(sample, field.path), sources, capability.id, observation);
+        const value = requestValueAt(sample, field.path);
+        const observationHits = exactCandidateObservations(field, observations)
+          .map(observation => matchExactCandidateSource(field, value, sources, capability.id, observation))
+          .filter((item): item is NonNullable<typeof item> => Boolean(item));
+        const uniqueHits = [...new Map(observationHits.map(item => [
+          `${item.capabilityId}:${item.valuePath}:${item.labelPath}`,
+          item
+        ])).values()];
+        const hit = uniqueHits.length === 1
+          ? uniqueHits[0]
+          : uniqueHits.length === 0
+            ? matchExactCandidateSource(field, value, sources, capability.id)
+            : undefined;
         if (!hit) return field;
         return {
           ...field,

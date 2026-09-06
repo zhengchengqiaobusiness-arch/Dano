@@ -166,6 +166,13 @@ test("unnamed same-value selects use their displayed labels to choose the exact 
       { dictType: "office_hotel_room_level", dictValue: "2", dictLabel: "豪华" }
     ] } }
   }, {
+    id: "hotel-before-selection", kind: "ui", sessionId: "hotel", at: "2026-09-06T00:00:00.500Z",
+    pageUrl: "https://x/oa/hotelApply", eventType: "snapshot",
+    form: [
+      { label: "房间类型", type: "select", value: "标准间大床房" },
+      { label: "房间等级", type: "select", value: "标准豪华" }
+    ]
+  }, {
     id: "hotel-search", kind: "ui", sessionId: "hotel", at: "2026-09-06T00:00:01.000Z",
     pageUrl: "https://x/oa/hotelApply", eventType: "click", text: "搜索", label: "搜索",
     form: [
