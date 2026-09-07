@@ -6,7 +6,7 @@ import path from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { BrowserRecorder } from "../src/browser/recorder.js";
 
-async function withRecorder(html: string, run: (recorder: BrowserRecorder) => Promise<void>) {
+async function withRecorder(html: string, run: (recorder: BrowserRecorder) => Promise<void>, complete = true) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "out-apply-regression-"));
   const server = http.createServer((_request, response) => {
     response.setHeader("content-type", "text/html; charset=utf-8");
@@ -18,7 +18,7 @@ async function withRecorder(html: string, run: (recorder: BrowserRecorder) => Pr
     recordingsDir: path.join(directory, "recordings"), catalogDir: path.join(directory, "catalog"),
     profileDir: path.join(directory, "profile"), headless: true, maxResponseBytes: 32768, openaiModel: "test" });
   try {
-    await recorder.start(`http://127.0.0.1:${address.port}/`, "out-apply", undefined, ["query", "create", "delete"], true);
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "out-apply", undefined, ["query", "create", "delete"], complete);
     await run(recorder);
   } finally {
     await recorder.stop().catch(() => {});
@@ -43,6 +43,27 @@ test("a completed whole-form attempt permits correcting a failed field", async (
   });
 });
 
+test("editable date ranges commit exact times to the selected endpoint, not next month's day", async () => {
+  await withRecorder(`<!doctype html><form class="el-form"><div class="el-form-item"><label>起止时间</label>
+    <div class="el-date-editor el-range-editor el-date-editor--datetimerange">
+      <input class="el-range-input" placeholder="开始时间" value="2026-09-07 00:00:00" onfocus="document.getElementById('panel').hidden=false">
+      <input class="el-range-input" placeholder="结束时间" value="2026-10-09 23:59:59">
+    </div></div></form>
+    <div id="panel" hidden class="el-picker-panel el-date-range-picker"><header>2026 年 9 月</header>
+      <table><tbody><tr><td class="available"><span class="cell">8</span></td></tr></tbody></table>
+      <header>2026 年 10 月</header><table><tbody><tr><td class="available" onclick="document.querySelector('input').value='2026-10-08 00:00:00'"><span class="cell">8</span></td></tr></tbody></table>
+      <button onclick="this.parentElement.hidden=true">确定</button>
+    </div>
+    <script>document.querySelectorAll('input').forEach((input,index)=>input.addEventListener('change',()=>document.title=index+':'+input.value));</script>`, async recorder => {
+    await recorder.control({ action: "fill", selector: "placeholder=开始时间", value: "2026-09-08 09:00:00" });
+    await recorder.control({ action: "fill", selector: "placeholder=结束时间", value: "2026-09-08 18:00:00" });
+    const snapshot: any = await recorder.control({ action: "snapshot" });
+    assert.deepEqual(snapshot.formFields.filter((field: any) => field.kind === "date").map((field: any) => field.value),
+      ["2026-09-08 09:00:00", "2026-09-08 18:00:00"]);
+    assert.equal(snapshot.title, "1:2026-09-08 18:00:00", "component change event must receive the requested end time");
+  }, false);
+});
+
 test("nested person chooser exposes and activates its own controls, retaining the parent form", async () => {
   await withRecorder(`<!doctype html><form><label for="reason">事由</label><input id="reason" value="验收标记"></form>
     <div class="el-dialog" role="dialog" style="position:fixed;inset:0;background:white;z-index:10">
@@ -60,5 +81,17 @@ test("nested person chooser exposes and activates its own controls, retaining th
     await recorder.control({ action: "click", selector: 'role=button[name="Close"]' });
     const after: any = await recorder.control({ action: "snapshot" });
     assert.equal(after.title, "closed chooser", "click must target the top dialog, never its covered parent");
+  });
+});
+
+test("manual row selection records that row without emitting unrelated input changes", async () => {
+  await withRecorder(`<!doctype html><input id="focused" autofocus value="原字段" oninput="document.title='synthetic-input'">
+    <table style="position:fixed;left:0;top:100px"><tbody>
+      <tr><td><span class="el-checkbox" style="display:block;width:100px;height:30px">□</span></td><td>000025 甲用户</td></tr>
+      <tr><td><span class="el-checkbox" style="display:block;width:100px;height:30px" onmousedown="event.preventDefault()">□</span></td><td>000021 乙用户</td></tr>
+    </tbody></table>`, async recorder => {
+    const result: any = await recorder.manualControl({ action: "click", x: 20, y: 148 });
+    assert.match(result.observed?.label || "", /000021.*乙用户/, JSON.stringify(result.observed));
+    assert.doesNotMatch(result.title, /synthetic-input/);
   });
 });

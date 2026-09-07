@@ -887,7 +887,8 @@ export class PageActions {
     const count = await inputs.count();
     if (!count && !nativeDate) return undefined;
     const index = rangeIndex ?? 0;
-    const target = count > 1 ? inputs.nth(Math.min(index, count - 1)) : (count ? inputs.first() : locator);
+    const selectedInput = rangeIndex === undefined && await locator.evaluate(el => el instanceof HTMLInputElement);
+    const target = selectedInput ? locator : count > 1 ? inputs.nth(Math.min(index, count - 1)) : (count ? inputs.first() : locator);
     return { host, target };
   }
 
@@ -900,6 +901,17 @@ export class PageActions {
       const readonly = await dateField.target.evaluate(el => (
         el instanceof HTMLInputElement && (el.readOnly || el.hasAttribute("readonly"))
       )).catch(() => false);
+      const editableRange = !readonly && await dateField.host.locator("input").count() === 2;
+      if (editableRange) {
+        // Range inputs already implement component input/change binding. Picking a bare
+        // day from a two-month panel selects the wrong endpoint/month and loses the time.
+        await dateField.target.fill(filled, { timeout: 800 });
+        await dateField.target.dispatchEvent("change");
+        await dateField.target.press("Tab");
+        await this.closeDatePanel();
+        if ((await dateField.target.inputValue()) !== filled) throw new Error("Date range did not commit the requested date and time");
+        return;
+      }
       const managed = await dateField.host.evaluate(el => /ant-picker|el-date-editor|arco-picker|n-date-picker/i.test(String(el.className || ""))).catch(() => false);
       let current = await dateField.target.inputValue().catch(() => "");
       let usedRealPanel = false;

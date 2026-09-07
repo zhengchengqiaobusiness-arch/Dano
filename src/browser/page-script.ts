@@ -1299,7 +1299,7 @@ export const UI_RECORDER_SCRIPT = `(() => {
       tag: control.tagName.toLowerCase(),
       role: control.getAttribute("role") || undefined,
       text: clean(control.textContent || control.getAttribute("value") || ""),
-      label: actionLabel || labelOf(control) || rowLabel || undefined,
+      label: actionLabel || rowLabel || labelOf(control) || undefined,
       name: nameOf(control),
       inputType: control.getAttribute("type") || undefined,
       value: (() => {
