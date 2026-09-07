@@ -8,7 +8,7 @@ import json
 import sys
 from typing import Any
 
-from execute import execute_capability, load_contract, parse_json_argument
+from execute import execute_capability, get_by_path, load_contract, parse_json_argument
 
 
 def extract_many(root: Any, json_path: str) -> list[Any]:
@@ -45,6 +45,7 @@ def main() -> int:
         rule = field["candidates"]
         if rule["type"] == "static":
             result = {"field": args.field, "source": "static", "candidates": rule["values"]}
+            identifiers = [item["value"] for item in rule["values"]]
         else:
             source = next((item for item in contract["capabilities"] if item["id"] == rule["capabilityId"]), None)
             if source is None or source.get("operation") != "query" or source.get("validation", {}).get("status") != "verified":
@@ -54,6 +55,7 @@ def main() -> int:
             if not response["ok"]:
                 raise ValueError("动态候选查询未满足完成条件")
             values = extract_many(response["body"], rule["valuePath"])
+            identifiers = [get_by_path(item, rule["matchPath"]) if rule.get("matchPath") else item for item in values]
             template = rule.get("valueTemplate") or {}
             if template.get("type") == "object":
                 mapped_values: list[Any] = []
@@ -76,6 +78,14 @@ def main() -> int:
                 "source": source["id"],
                 "candidates": [{"value": value, "label": str(labels[index] if index < len(labels) else value)} for index, value in enumerate(values)],
             }
+        options = []
+        for identifier, candidate in zip(identifiers, result["candidates"]):
+            if type(identifier) not in (str, int, float):
+                identifier = candidate["label"]
+            if any(str(option["id"]) == str(identifier) for option in options):
+                raise ValueError("候选编号或显示名不唯一，无法生成安全的表单选项")
+            options.append({"id": identifier, "label": str(candidate["label"])})
+        result["options"] = options
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except (ValueError, OSError, json.JSONDecodeError) as exc:

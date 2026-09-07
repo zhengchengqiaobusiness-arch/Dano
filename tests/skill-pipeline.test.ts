@@ -729,12 +729,18 @@ test("exported executor converts a dynamic option inside a detail collection", a
 
 test("exported executor turns an object-picker display name into the recorded request object", async () => {
   const requests: Array<{ url: string; body?: unknown }> = [];
+  const runtime = { env: { ...process.env, SKILL_AUTH_HEADERS: JSON.stringify({ Authorization: "Bearer candidate-test" }) } };
   const rows = [{
     userId: 133, userName: "000021", nickName: "李娜", dept: { deptName: "项目管理部" }
   }, {
     userId: 132, userName: "000022", nickName: "张伟", dept: { deptName: "项目管理部" }
   }];
   const server = http.createServer((request, response) => {
+    if (request.headers.authorization !== "Bearer candidate-test") {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ code: 401 }));
+      return;
+    }
     const chunks: Buffer[] = [];
     request.on("data", chunk => chunks.push(Buffer.from(chunk)));
     request.on("end", () => {
@@ -811,25 +817,33 @@ test("exported executor turns an object-picker display name into the recorded re
     assert.equal(question.inputType, "select");
     assert.equal(question.multiple, true);
     assert.equal(question.columns, undefined);
-    assert.equal(question.defaultStrategy, "从本次有效候选中选择显示名；系统转换为接口值");
-    assert.equal(question.dataSource.idField, "userId");
-    assert.equal(question.dataSource.labelField, "nickName");
+    assert.match(question.defaultStrategy, /options.id.*原生数组/);
+    assert.equal(question.dataSource, undefined, "caller must not anonymously fetch the business endpoint");
+    assert.deepEqual(question.optionsCommand, ["python", "scripts/candidates.py", "--capability", target.id, "--field", "$.ccedList"]);
+    assert.equal((await (await fetch(`${origin}/users`)).json()).code, 401);
+    const forms = await readFile(path.join(exported.dir, "references", "INPUT_FORMS.md"), "utf8");
+    assert.match(forms, /多个动态字段先全部取好候选/);
+    assert.match(forms, /原生数组/);
     const { stdout: candidateOutput } = await execFileAsync("python", [
       path.join(exported.dir, "scripts", "candidates.py"),
       "--capability", target.id,
       "--field", "$.ccedList"
-    ]);
+    ], runtime);
     const candidate = JSON.parse(candidateOutput).candidates.find((item: { label: string }) => item.label === "张伟");
+    assert.deepEqual(JSON.parse(candidateOutput).options, [{ id: 133, label: "李娜" }, { id: 132, label: "张伟" }]);
     assert.deepEqual(candidate.value, {
       billType: "duty_leave", toUserId: 132, toNickName: "张伟", toDeptName: "项目管理部"
     });
+    rows.push({ userId: 134, userName: "000023", nickName: "新增人员", dept: { deptName: "项目管理部" } });
+    const fresh = await execFileAsync("python", [path.join(exported.dir, "scripts", "candidates.py"), "--capability", target.id, "--field", "$.ccedList"], runtime);
+    assert.deepEqual(JSON.parse(fresh.stdout).options.at(-1), { id: 134, label: "新增人员" }, "query again instead of reusing recorded candidates");
     await execFileAsync("python", [
       path.join(exported.dir, "scripts", "execute.py"),
       "--capability", target.id,
-      "--input", JSON.stringify({ ccedList: ["张伟"] }),
+      "--input", JSON.stringify({ ccedList: ["132"] }),
       "--confirm-write"
-    ]);
-    assert.deepEqual(requests, [{ url: "/users" }, { url: "/users" }, {
+    ], runtime);
+    assert.deepEqual(requests, [{ url: "/users" }, { url: "/users" }, { url: "/users" }, {
       url: "/duty",
       body: { ccedList: [{ billType: "duty_leave", toUserId: 132, toNickName: "张伟", toDeptName: "项目管理部" }] }
     }]);

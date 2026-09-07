@@ -120,6 +120,9 @@ export function classifyExported(capabilities: CapabilityContract[]) {
 }
 
 function defaultStrategy(field: InputFormField) {
+  if (field.candidates?.type === "capability") return field.valueType === "array" || field.widget === "multiselect"
+    ? "default 使用本次 options.id 组成的原生数组，保留编号类型；不得传显示名或字符串化的 JSON 数组"
+    : "default 使用本次 options.id 并保留编号类型，不传显示名";
   if (isDateField(field) && field.valueType === "array") return `按页面顺序提供日期数组，每项格式 ${dateFormat(field)}，不复制未见过的值`;
   if (isDateField(field)) return `根据当前请求和当前日期推导，格式 ${dateFormat(field)}，不复制未见过的值`;
   if (field.valueType === "number" || field.valueType === "integer") return "从当前用户意图提取可唯一转换的数字，不任意使用 0";
@@ -159,75 +162,6 @@ function exportHandling(field: InputFormField) {
     .replaceAll("不要写死录制样本", "不要编造未见过的值");
 }
 
-export function resultPathOf(valuePath: string) {
-  return valuePath.replace(/^\$\./, "").replace(/\[\*\]\.[^.]+$/, "").replace(/\[\*\]$/, "");
-}
-
-function schemaHas(schema: JsonSchema | undefined, dotted: string) {
-  let current: JsonSchema | undefined = schema;
-  for (const part of dotted.split(".").filter(Boolean)) {
-    current = current?.properties?.[part];
-    if (!current) return false;
-  }
-  return true;
-}
-
-function lookupQueryHints(source: CapabilityContract | undefined) {
-  if (!source) return {};
-  const hints: {
-    searchParam?: string;
-    pageParam?: string;
-    pageSizeParam?: string;
-    pageSize?: number;
-    totalPath?: string;
-    params?: Record<string, unknown>;
-  } = {};
-  const params: Record<string, unknown> = {};
-  for (const field of source.inputForm) {
-    if (/^(pageNo|page|pageNum|pageIndex)$/i.test(field.name)) hints.pageParam = field.name;
-    if (/^(pageSize|size|limit)$/i.test(field.name)) {
-      hints.pageSizeParam = field.name;
-      if (field.defaultRule?.startsWith("literal:")) {
-        const raw = field.defaultRule.slice("literal:".length);
-        const parsed = Number(raw.replace(/^"|"$/g, ""));
-        if (Number.isFinite(parsed) && parsed > 0) hints.pageSize = parsed;
-      }
-    }
-    if (/^(keyword|query|search|name|q)$/i.test(field.name)) hints.searchParam = field.name;
-    if (field.source === "fixed" && field.defaultRule?.startsWith("literal:")) {
-      try {
-        params[field.name] = JSON.parse(field.defaultRule.slice("literal:".length));
-      } catch {
-        params[field.name] = field.defaultRule.slice("literal:".length);
-      }
-    }
-  }
-  if (Object.keys(params).length) hints.params = params;
-  if (schemaHas(source.outputSchema, "data.total")) hints.totalPath = "data.total";
-  else if (schemaHas(source.outputSchema, "total")) hints.totalPath = "total";
-  return hints;
-}
-
-export function dataSourceOf(field: InputFormField, capabilities: CapabilityContract[]) {
-  const candidates = field.candidates;
-  if (candidates?.type !== "capability") return undefined;
-  const source = capabilities.find(capability => capability.id === candidates.capabilityId);
-  const hints = lookupQueryHints(source);
-  return {
-    type: "api" as const,
-    capabilityId: candidates.capabilityId,
-    endpoint: source ? `${source.transport.origin}${source.transport.pathTemplate}` : undefined,
-    method: source?.transport.method,
-    paramsFrom: candidates.dependsOn || [],
-    valuePath: candidates.valuePath,
-    labelPath: candidates.labelPath,
-    resultPath: resultPathOf(candidates.valuePath),
-    idField: (candidates.matchPath || candidates.valuePath).split(".").pop(),
-    labelField: candidates.labelPath.split(".").pop(),
-    ...hints
-  };
-}
-
 export function questionKey(field: InputFormField, siblings: InputFormField[] = []) {
   if (/\[[0-9]+\]/.test(field.path || "")) return field.path.replace(/^\$\./, "");
   const clashes = siblings.filter(item => item.name === field.name);
@@ -261,8 +195,9 @@ export function exportedQuestion(
   if (isDateField(field)) question.dateFormat = dateFormat(field);
   if (field.dateClocks?.length) question.dateClocks = field.dateClocks;
   if (field.candidates?.type === "static") question.options = field.candidates.values;
-  const dataSource = publishedDataSource(field, capabilities);
-  if (dataSource) question.dataSource = dataSource;
+  if (field.candidates?.type === "capability" && owner) {
+    question.optionsCommand = ["python", "scripts/candidates.py", "--capability", owner.id, "--field", field.path];
+  }
   return question;
 }
 
@@ -351,7 +286,7 @@ description: >
 
 1. 从下表选择唯一原子能力。目标不唯一时，只读 [CAPABILITIES.md](references/CAPABILITIES.md) 的相关行；仍不唯一再问用户。
 2. 调用方已给出合同字段且类型明确时直接执行。需要把业务名称映射为字段、补字段或生成写操作确认表单时，只读 [INPUT_FORMS.md](references/INPUT_FORMS.md) 的对应能力小节。
-3. 仅当当前字段需要枚举或接口候选时，运行 \`python scripts/candidates.py --capability <能力编号> --field <字段路径> --input '<JSON>'\`；处理规则见 [OPTIONS.md](references/OPTIONS.md)。显示名由脚本转换为真实接口值。
+3. 当前字段需要候选时，先运行 \`python scripts/candidates.py --capability <能力编号> --field <字段路径> --input '<JSON>'\` 实时查询，把返回的 \`options\` 原样放进对应问题并保留 \`multiple\`。不要把业务接口地址作为表单 \`dataSource\`：调用方前端没有 Skill 的认证，且可能禁止跨站请求。处理规则见 [OPTIONS.md](references/OPTIONS.md)。
 4. 每次模型响应最多原生调用一次 \`ask_user_question\`。同一阶段所有缺少的调用方字段必须合并为一次 \`title + questions[]\`；\`questions[].id\` 与对应调用方字段名一致，每项包含正确控件、\`required\` 和基于当前意图生成的非空 \`default\`。不得逐字段连续询问。
 5. 查询只传用户明确提供的筛选条件。写操作收齐字段后，再调用 \`{"confirm":true,"formIds":["<answered.formId>"]}\`；只有 \`confirmed\` 才执行。
 6. 从 Skill 根目录运行下述命令。认证由外部同名运行时凭据提供；也可显式使用 \`SKILL_AUTH_HEADERS\` 或 \`SKILL_AUTH_FILE\`。凭据不得进入 Skill、合同或对话。
@@ -444,39 +379,17 @@ ${routeIndexLines}
 `;
 }
 
-function publishedDataSource(field: InputFormField, capabilities: CapabilityContract[]) {
-  const dataSource = dataSourceOf(field, capabilities);
-  if (!dataSource) return undefined;
-  const published: Record<string, unknown> = {
-    type: "api",
-    endpoint: dataSource.endpoint,
-    method: dataSource.method,
-    params: dataSource.params || {},
-    resultPath: dataSource.resultPath,
-    idField: dataSource.idField,
-    labelField: dataSource.labelField
-  };
-  if (dataSource.searchParam) published.searchParam = dataSource.searchParam;
-  if (dataSource.pageParam) published.pageParam = dataSource.pageParam;
-  if (dataSource.pageSizeParam) published.pageSizeParam = dataSource.pageSizeParam;
-  if (dataSource.pageSize) published.pageSize = dataSource.pageSize;
-  if (dataSource.totalPath) published.totalPath = dataSource.totalPath;
-  if (dataSource.paramsFrom?.length) published.paramsFrom = dataSource.paramsFrom;
-  return published;
-}
-
-function callerFieldTable(capability: CapabilityContract, capabilities: CapabilityContract[]) {
+function callerFieldTable(capability: CapabilityContract) {
   const fields = capability.inputForm.filter(field => field.source === "caller");
   if (!fields.length) return "该能力没有需要调用方提供的字段。";
   return `| 提问编号 | 业务名称 | 控件 | 必填 | 推荐默认值 | 候选 |
 |---|---|---|---|---|---|
 ${fields.map(field => {
-    const dataSource = publishedDataSource(field, capabilities);
     let candidate = field.requestFormat === "html" ? "富文本：调用方传文本，系统按真实请求格式编码为 HTML" : "自由输入";
     if (field.candidates?.type === "static") {
       candidate = "页面固定枚举；值见 OPTIONS.md 的同能力小节";
-    } else if (dataSource) {
-      candidate = `dataSource: ${JSON.stringify(dataSource)}`;
+    } else if (field.candidates?.type === "capability") {
+      candidate = `实时接口候选：先运行 python scripts/candidates.py --capability ${capability.id} --field '${field.path}'；把返回的 options 放进问题；multiple: ${field.valueType === "array" || field.widget === "multiselect"}`;
     } else if (isDateField(field)) {
       candidate = field.dateClock
         ? `dateFormat: ${dateFormat(field)}，请求补 ${field.dateClock}`
@@ -516,13 +429,15 @@ export function buildInputForms(capabilities: CapabilityContract[]) {
 
 只读取当前能力的小节。这里是提问和系统补值的唯一说明；候选取值规则只在 [OPTIONS.md](OPTIONS.md) 定义。
 
+动态字段必须先通过 Skill 的候选脚本进行本次实时查询，再把返回的 \`options\` 原样放入问题。\`CONTRACT.json\` 中的 \`optionsCommand\` 是调用方运行命令的说明，不是提问工具参数；运行后移除它，不传 \`dataSource\`，不得让前端匿名访问业务接口，也不得把 token 填进问题。多个动态字段先全部取好候选，再与其它缺少字段一起批量提问。多选的 \`default\` 必须是本次所选 \`options.id\` 的原生数组，不能是 JSON 字符串。
+
 需要补充字段时必须原生调用 \`ask_user_question\`，不得在普通文本中模拟。每次模型响应最多原生调用一次；把同一阶段所有缺少字段合并为一次 \`title + questions[]\`，不得一个一个询问。\`questions[].id\` 使用下表提问编号并与对应调用方字段名一致。每项必须包含正确 \`inputType\`、\`required\` 和按合同 \`defaultStrategy\` 生成的本次非空 \`default\`，不能复制未见过的值。对象数组使用 \`inputType: table\` 及合同中的 \`columns\`/\`sections\`。类型或候选转换不唯一时，只重问错误字段；\`cancelled\` 后立即停止。
 
 ${primary.map(capability => `## ${capability.id}
 
 ${safeCell(capability.title)} · ${operationNames[capability.operation]}
 ${capability.confirmation.required ? "\n写操作：字段齐备后调用 `{\"confirm\":true,\"formIds\":[\"<answered.formId>\"]}`，得到 `confirmed` 再加 `--confirm-write`。\n" : "\n查询：只收集用户点名的筛选条件。\n"}
-${callerFieldTable(capability, capabilities)}${systemFieldTable(capability)}
+${callerFieldTable(capability)}${systemFieldTable(capability)}
 `).join("\n")}
 `;
 }
@@ -549,15 +464,17 @@ export function buildOptions(capabilities: CapabilityContract[]) {
   });
   return `# 候选项规则
 
-仅在当前字段具有候选规则时读取。这是候选获取与“显示名 → 接口值”转换的唯一说明；表单控件和 dataSource 在 [INPUT_FORMS.md](INPUT_FORMS.md)。
+仅在当前字段具有候选规则时读取。这是候选获取与“显示名 → 接口值”转换的唯一说明；表单控件在 [INPUT_FORMS.md](INPUT_FORMS.md)。
 
 对静态和动态候选统一运行：
 
 \`python scripts/candidates.py --capability <目标能力编号> --field <字段路径> --input '<已收集的 JSON>'\`
 
-- 向用户展示 \`label\`，向业务接口传 \`value\`；脚本会把唯一匹配的显示名转换为真实值。
+- 每次打开业务表单前实时运行候选命令；不要把录制时的人员名单当固定枚举，也不要跨调用缓存候选。
+- 返回的 \`options\` 已是提问工具需要的 \`{id,label}\`；原样放进对应问题，保留 \`multiple\`。用户选中的编号交给执行脚本，由执行脚本复查并映射成真实接口值或对象数组。\`candidates[].value\` 是业务请求值，不要把整个对象当作表单选项编号。
+- 不传 \`dataSource\` 或 \`optionsCommand\` 给提问工具；不要让浏览器直接请求业务接口，不要把认证头放进表单。实时查询统一复用 Skill 的外部运行时凭据。
 - 无匹配或多匹配时只重问当前字段，不传显示名、不猜数字。
-- 动态候选的请求参数和返回路径以 INPUT_FORMS 中的 dataSource 为准。
+- 需要筛选或分页时，只把已记录查询能力支持的参数放进 \`--input\`，不得猜搜索参数或把第一页当作全部结果。查询失败时说明失败原因，不展示录制样本冒充本次候选。
 
 ${sections.length ? sections.join("\n\n") : "当前没有记录到候选项规则。"}
 `;
