@@ -1,4 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { StudioService } from "../../src/studio-service.js";
 import { summarizeCatalog } from "../../src/inference/export-scope.js";
 import { reviewCatalog } from "../../src/review/catalog-review.js";
@@ -36,22 +38,33 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
 
   const browserRequest = async <T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> => {
     if (!browserServiceUrl || !browserServiceToken) throw new Error("Embedded browser service is unavailable");
-    const response = await fetch(`${browserServiceUrl}/internal/browser${path}`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${browserServiceToken}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(body ?? {}),
-      signal
+    const url = new URL(`${browserServiceUrl}/internal/browser${path}`);
+    // Human login/takeover can exceed fetch's five-minute header deadline.
+    // Wait on this same request until completion or explicit user cancellation.
+    return new Promise<T>((resolve, reject) => {
+      const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
+        method: "POST", signal,
+        headers: { "Authorization": `Bearer ${browserServiceToken}`, "Content-Type": "application/json" }
+      }, response => {
+        let text = "";
+        response.setEncoding("utf8");
+        response.on("data", chunk => { text += chunk; });
+        response.on("error", reject);
+        response.on("end", () => {
+          let payload: any = {};
+          try { payload = JSON.parse(text); } catch { /* Preserve the API error if the body is not JSON. */ }
+          const status = response.statusCode || 0;
+          if (status < 200 || status >= 300) reject(new Error(payload.error || `Embedded browser request failed: ${status}`));
+          else resolve(payload as T);
+        });
+      });
+      request.on("error", reject);
+      request.end(JSON.stringify(body ?? {}));
     });
-    const payload = await response.json().catch(() => ({})) as any;
-    if (!response.ok) throw new Error(payload.error || `Embedded browser request failed: ${response.status}`);
-    return payload as T;
   };
 
-  const startBrowser = (url: string, name?: string, expectedOperations: any[] = [], completeFieldCoverage = false, completePageCoverage = false) => browserServiceUrl
-    ? browserRequest<any>("/start", { url, name, expectedOperations, completeFieldCoverage, completePageCoverage })
+  const startBrowser = (url: string, name?: string, expectedOperations: any[] = [], completeFieldCoverage = false, completePageCoverage = false, signal?: AbortSignal) => browserServiceUrl
+    ? browserRequest<any>("/start", { url, name, expectedOperations, completeFieldCoverage, completePageCoverage }, signal)
     : studio.startRecording(url, name, expectedOperations, completeFieldCoverage, completePageCoverage);
   const stopBrowser = () => browserServiceUrl
     ? browserRequest<any>("/stop")
@@ -98,9 +111,9 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
         description: "True when every accessible menu page must be visited. Snapshot returns grounded navigation coverage and record_stop rejects discovered but unvisited pages."
       }
     }, ["url"]),
-    async execute(_toolCallId, params: any) {
+    async execute(_toolCallId, params: any, signal) {
       try {
-        const session = await startBrowser(params.url, params.name, params.expectedOperations || [], params.completeFieldCoverage === true, params.completePageCoverage === true);
+        const session = await startBrowser(params.url, params.name, params.expectedOperations || [], params.completeFieldCoverage === true, params.completePageCoverage === true, signal);
         if (session?.blocked) {
           return {
             content: [{ type: "text", text: session.message || "上次审核未要求补录。禁止对同一业务页重新录制。" }],
