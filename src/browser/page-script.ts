@@ -1089,7 +1089,8 @@ export const PAGE_HELPERS = String.raw`
     });
   };
 
-  const collectControls = (root) => queryDeep(root,
+  const collectControls = (root) => {
+    const controls = queryDeep(root,
     'a,button,input,select,textarea,[contenteditable="true"],[role="button"],[role="combobox"],[role="option"],[role="link"],[role="checkbox"],[role="switch"],[role="radio"],[role="tab"],[role="menuitem"]'
   ).filter(isVisible).slice(0, 250).map((el) => ({
     selector: selectorOf(el),
@@ -1106,7 +1107,20 @@ export const PAGE_HELPERS = String.raw`
     text: clean(el.textContent || el.value || "").slice(0, 300),
     scope: scopeName(el),
     chrome: Boolean(el.closest(CHROME_SEL))
-  }));
+    }));
+    // Chooser tables often render checkboxes as icons, not native inputs.
+    // Expose the actual row text to the existing label-based row activation path.
+    if (isChooserDialog(root)) {
+      for (const row of queryDeep(root, "tbody tr, .vxe-body--row").filter(isVisible)) {
+        const box = row.querySelector(".vxe-cell--checkbox, .col--checkbox .vxe-cell, input[type=checkbox], input[type=radio], [role=checkbox], [role=radio], .el-checkbox, .ant-checkbox, .arco-checkbox, .n-checkbox");
+        const label = clean(row.innerText);
+        if (!box || !label) continue;
+        controls.push({ selector: "label=" + label, tag: row.tagName.toLowerCase(), label,
+          text: label, disabled: isDisabledWidget(box), scope: scopeName(row), chrome: false });
+      }
+    }
+    return controls.slice(0, 250);
+  };
 
   const collectNavigation = () => {
     const items = [];

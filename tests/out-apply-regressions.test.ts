@@ -95,3 +95,20 @@ test("manual row selection records that row without emitting unrelated input cha
     assert.doesNotMatch(result.title, /synthetic-input/);
   });
 });
+
+test("snapshot exposes actionable labels for icon-only chooser rows", async () => {
+  await withRecorder(`<!doctype html><div role="dialog" class="el-dialog">
+    <h2>选择抄送用户</h2><input placeholder="请输入用户名称"><button>搜索</button>
+    <table><tbody>
+      <tr class="vxe-body--row"><td><span class="vxe-cell--checkbox"><span class="vxe-checkbox--icon" onclick="document.title='selected-first'">□</span></span></td><td>000025</td><td>甲用户</td></tr>
+      <tr class="vxe-body--row"><td><span class="vxe-cell--checkbox"><span class="vxe-checkbox--icon" onclick="document.title='selected-second'">□</span></span></td><td>000021</td><td>乙用户</td></tr>
+    </tbody></table><button>确认</button>
+  </div>`, async recorder => {
+    const snapshot: any = await recorder.control({ action: "snapshot" });
+    const row = snapshot.controls.find((control: any) => control.tag === "tr" && control.label?.includes("000021") && control.label.includes("乙用户"));
+    assert.ok(row, "real candidate rows must have grounded selectors without guessing from screenshots");
+    await recorder.control({ action: "click", selector: row.selector });
+    const after: any = await recorder.control({ action: "snapshot" });
+    assert.equal(after.title, "selected-second", "the supplied selector must activate this row's checkbox");
+  }, false);
+});
