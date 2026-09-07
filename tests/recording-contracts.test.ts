@@ -4,6 +4,7 @@ import type { EvidenceEvent, UiEvidence } from "../src/domain.js";
 import { buildCapabilityCandidates } from "../src/inference/build-candidates.js";
 import { finalizeCapabilities } from "../src/inference/finalize-capabilities.js";
 import { materializeHttpRequest } from "../src/execution/http-executor.js";
+import { reanalyzeIncoming } from "../src/inference/reanalyze.js";
 
 const origin = "https://oa.example.test";
 
@@ -20,6 +21,9 @@ test("a recorded delete path exposes a required target, never the recorded id as
   assert.throws(() => materializeHttpRequest(capability, {}), /id/);
   assert.equal(materializeHttpRequest(capability, { id: "selected-target" }).url, `${origin}/api/items/selected-target`);
   assert.equal(materializeHttpRequest(capability, { id: "a/b" }).url, `${origin}/api/items/a%2Fb`);
+  const reanalyzed = reanalyzeIncoming(buildCapabilityCandidates(events), [capability])[0]!;
+  assert.equal(reanalyzed.transport.urlTemplate, `${origin}/api/items/{id}`,
+    "reanalysis must preserve placeholders for the exported Python runtime");
 });
 
 function ui(id: string, second: number, text: string, form: UiEvidence["form"]): UiEvidence {

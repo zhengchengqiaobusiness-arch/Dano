@@ -102,7 +102,8 @@ function mergeUrlTemplate(previous: string, incoming: string, keepParamNames?: S
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([name, value]) => `${encodeURIComponent(name)}=${value}`)
       .join("&");
-    return `${nextUrl.origin}${nextUrl.pathname}${query ? `?${query}` : ""}${nextUrl.hash}`;
+    const pathTemplate = nextUrl.pathname.replace(/%7B([^/]+?)%7D/gi, "{$1}");
+    return `${nextUrl.origin}${pathTemplate}${query ? `?${query}` : ""}${nextUrl.hash}`;
   } catch {
     return incoming;
   }
