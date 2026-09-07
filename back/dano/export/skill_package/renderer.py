@@ -3634,6 +3634,24 @@ def option_choices(plan, field, values=None):
             for item in fixed_options
             if isinstance(item, dict) and item.get("id") not in (None, "")
         ]
+    if not matches and isinstance(schema.get("dataSource"), dict):
+        source = schema["dataSource"]
+        matches.append({
+            "param": field,
+            "endpoint": source.get("endpoint") or source.get("url"),
+            "method": source.get("method") or "GET",
+            "params": source.get("params") or {},
+            "result_path": source.get("resultPath") or source.get("result_path"),
+            "value_key": source.get("idField") or source.get("valueField") or source.get("value_key"),
+            "label_key": source.get("labelField") or source.get("label_key"),
+            "children_key": source.get("childrenField") or source.get("children_key"),
+            "extra_fields": source.get("extraFields") or source.get("extra_fields") or [],
+            "search_param": source.get("searchParam") or source.get("search_param"),
+            "page_param": source.get("pageParam") or source.get("page_param"),
+            "page_size_param": source.get("pageSizeParam") or source.get("page_size_param"),
+            "page_size": source.get("pageSize") or source.get("page_size"),
+            "total_path": source.get("totalPath") or source.get("total_path"),
+        })
     if len(matches) != 1:
         raise ValueError(f"dynamic option field {field!r} does not resolve to exactly one source")
     binding = matches[0]

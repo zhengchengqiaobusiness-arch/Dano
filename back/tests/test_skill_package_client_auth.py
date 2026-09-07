@@ -135,6 +135,55 @@ def test_exported_client_lists_fixed_enum_without_dynamic_source(tmp_path: Path)
     ]
 
 
+def test_exported_client_lists_options_from_schema_datasource(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = _load_client(_render_client(tmp_path))
+
+    def fake_http_json(method, *, url, **kwargs):  # noqa: ANN001
+        assert method == "GET"
+        assert url == "/prod-api/system/dict/data/type/duty_leave_type"
+        return {
+            "ok": True,
+            "data": {
+                "data": [
+                    {"dictValue": "1", "dictLabel": "事假"},
+                    {"dictValue": "2", "dictLabel": "病假"},
+                ],
+            },
+        }
+
+    monkeypatch.setattr(client, "http_json", fake_http_json)
+    options = client.option_choices(
+        {
+            "input_schema": {
+                "properties": {
+                    "leaveType": {
+                        "type": "string",
+                        "dataSource": {
+                            "type": "api",
+                            "endpoint": "/prod-api/system/dict/data/type/duty_leave_type",
+                            "method": "GET",
+                            "params": {},
+                            "resultPath": "data",
+                            "idField": "dictValue",
+                            "labelField": "dictLabel",
+                        },
+                    },
+                },
+            },
+            "steps": [{"selects": []}],
+        },
+        "leaveType",
+    )
+
+    assert options == [
+        {"id": "1", "label": "事假"},
+        {"id": "2", "label": "病假"},
+    ]
+
+
 def test_exported_client_uses_recording_session_token_for_live_options(
     tmp_path: Path,
     monkeypatch,
