@@ -89,9 +89,10 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 
 1. **切能力**：点过的独立业务按钮 + 随后真正改数据或查询的请求 = 一项能力。一个能力恰好一个 `execute`。打开表单、选项、提交后回读挂到该能力，不要另开能力。
 2. **摊开 execute 请求形状**：把这条请求的每个 query/body 键列出来。同一键出现几次就建几个 param，共用这个 path。一个数组只建一个数组 path；行差别写在行内字段。
-3. **摊开当前页控件**：读该动作所在页的 `visible_control` 和点过的 interaction。每个控件看 `region`（filter/form/table/dialog）、`label`/`placeholder`/`name`、`control_kind`（input/select/date/textarea/upload/button/readonly）、`required_mark`、`readonly`。`region=table` 的输入是加行后出现的行内框；`region=form` 的大段 textarea 是另一份补充说明；`region=dialog` 是确认/选择弹层。
+3. **摊开当前页控件**：读该动作所在页的**最近一次** `visible_control` 和点过的 interaction，并与当场 `snapshot` 对照。每个控件看 `region`（filter/form/table/dialog）、`label`/`placeholder`/`name`、`control_kind`（input/select/date/textarea/upload/button/readonly）、`required_mark`、`readonly`。`region=table` 的输入是加行后出现的行内框；`region=form` 的大段 textarea 是另一份补充说明；`region=dialog` 是确认/选择弹层。打开弹层、切换页签、加行后必须再 snapshot；`read_visible_controls` 不传 seq。不要带着打开弹层之前的 seq 去对字段。
+   `readonly`/`disabled` 表示**整个控件当前不能改**（宿主带 disabled / aria-disabled / is-disabled）。自定义下拉、日期、级联、单选组的内部展示框常常带原生 `readonly`，那不是灰框。只有宿主锁死才是系统字段；点一下能出选项或能改选 → 可改 → 调用方。
 4. **逐键对上控件，决定调用方还是系统**：
-   - 对得上**可改**控件（input/select/date/textarea/upload，以及树、页签、分段器、单选组，且 `readonly`/`disabled` 都不是 true）→ **调用方**。即使本场没改、这次 query/body 没带这个键，也留下可选调用方字段。`path` 用控件 `name` 或同页已发出请求里的同义键。对不上 path 就写入 `unresolved`，不要假装控件不存在。
+   - 对得上**可改**控件（input/select/date/textarea/upload，以及树、页签、分段器、单选组，且 `readonly`/`disabled` 都不是 true）→ **调用方**。即使本场没改、这次 query/body 没带这个键，也留下可选调用方字段。页面上已有默认选中（单选默认启用、下拉已有值）只要还能改，仍是调用方，禁止写成 `constant` / 「无独立来源」。`path` 用控件 `name` 或同页已发出请求里的同义键。对不上 path 就写入 `unresolved`，不要假装控件不存在。
    - 一个可见**日期区间**（`range=true` 或一个控件里两个起止输入）对上两个请求键时，两个键都是调用方，不要把起止收成系统。
    - 页面因切换类型/页签自动改了日期，只要日期控件仍能点，仍是调用方，不要当成计算公式。
    - 入口 URL / 上一页带入的默认值：本页对应控件**仍能改** → 调用方，`source_kind=page_default`。`visible_control` 上该控件 `readonly=true` 或 `disabled=true` → **系统**，按请求原值，不要进 `input_schema`。同一标签若既有只读下拉、又有一份看起来可改的空 input，认只读那条，不要把灰掉的类型收成调用方数字框。
@@ -103,7 +104,7 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
    - 确认弹层、二次确认框里的说明/意见：按下面「确认弹层」完整处理，不能因为本场 execute 没带这个键就假装控件不存在。
    - 其余对不上的 **query/body** 键 → **系统**，按请求原值提交，不做任何改动，不要猜公式。这些键必须出现在该 step 的 `params` 里，`exposed_to_user=false`。不要把 Cookie、Authorization 或其它请求头编成业务字段。
 
-禁止把 `visible_control` 里看得见**且可改**的日期、下拉、树、页签、附件、表格行输入、确认弹层可填意见写成「不可见 / 不可改 / 系统固定」。`readonly=true` 或 `disabled=true` 的灰框除外，那些是系统。  
+禁止把 `visible_control` 里看得见**且可改**的日期、下拉、树、页签、附件、表格行输入、确认弹层可填意见写成「不可见 / 不可改 / 系统固定」。`readonly=true` 或 `disabled=true` 的灰框除外，那些是系统；不要把自定义下拉内部展示框的原生 readonly 当成灰框。  
 点「添加××行」或工具栏加行产生的行类型码不是调用方控件，不要放进 `input_schema`（包括数组 `items.properties`）。  
 `input_schema`（含数组 `items.properties`）的每个 key 必须对应某个 `exposed_to_user=true` 的 param.key。params 标系统的 key 禁止再出现在 schema。  
 **每个** `exposed_to_user=true` 的 param 都必须出现在该能力 `input_schema.properties`；只写在 params 里等于调用方字段丢失。数组只出现数组自己的 key，行内调用方写在 `items.properties`。  

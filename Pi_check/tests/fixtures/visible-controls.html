@@ -35,6 +35,32 @@
       </div>
     </div>
     <div class="el-form-item">
+      <label class="el-form-item__label">使用印章</label>
+      <div class="el-select">
+        <input readonly placeholder="请选择印章" />
+        <input type="hidden" disabled name="sealId" value="x" />
+      </div>
+    </div>
+    <div class="el-form-item">
+      <label class="el-form-item__label">是否可用</label>
+      <div class="el-radio-group" role="radiogroup">
+        <label class="el-radio">启用</label>
+        <label class="el-radio">停用</label>
+      </div>
+    </div>
+    <div class="el-form-item">
+      <label class="el-form-item__label">所属部门</label>
+      <div class="ant-select">
+        <input readonly placeholder="请选择部门" />
+      </div>
+    </div>
+    <div class="el-form-item">
+      <label class="el-form-item__label">锁定部门</label>
+      <div class="ant-select ant-select-disabled">
+        <input disabled readonly placeholder="已锁定" />
+      </div>
+    </div>
+    <div class="el-form-item">
       <label class="el-form-item__label">开始日期</label>
       <div class="el-date-editor">
         <input readonly />
@@ -110,6 +136,12 @@
       <textarea placeholder="请输入补充说明"></textarea>
     </div>
   </form>
+  <div class="el-pagination">
+    <span class="el-pagination__total">共 2 条</span>
+    <select>
+      <option>20条/页</option>
+    </select>
+  </div>
   <div class="el-dialog" role="dialog" aria-modal="true">
     <div class="el-dialog__header">提交意见</div>
     <textarea placeholder="请输入提交意见"></textarea>

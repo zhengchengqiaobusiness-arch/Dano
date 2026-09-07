@@ -3,7 +3,8 @@
  *
  * 只把当前页看得见的筛选/表单/表格控件投影成事实。
  * 不判断能力、不补字段、不改名。不绑定业务页或字段名。
- * collectVisibleControlsInPage 必须自包含，供 page.evaluate 原样注入。
+ * collectPageFacts 必须自包含，供 page.evaluate 原样注入。
+ * snapshot 与 visible_control 共用同一套「整个控件能不能改」事实，不判断能力。
  */
 
 function compact(value) {
@@ -45,7 +46,36 @@ export function projectVisibleControlSnapshot(event) {
   };
 }
 
-export function collectVisibleControlsInPage() {
+export function collectPageFacts() {
+  const WIDGET_HOST_SELECTOR = [
+    ".el-select",
+    ".ant-select",
+    ".el-picker",
+    ".ant-picker",
+    ".el-date-editor",
+    ".el-range-editor",
+    ".el-cascader",
+    ".ant-cascader",
+    ".el-tree-select",
+    ".el-time-picker",
+    "[role='combobox']",
+    ".el-radio-group",
+    ".ant-radio-group",
+    "[role='radiogroup']",
+    ".el-segmented",
+    ".ant-segmented",
+    "[role='tablist']",
+    ".el-tabs",
+    ".ant-tabs",
+  ].join(", ");
+  const PAGINATION_SELECTOR = [
+    ".el-pagination",
+    ".ant-pagination",
+    ".vxe-pager",
+    ".ant-table-pagination",
+    "nav[aria-label='pagination']",
+    ".pagination",
+  ].join(", ");
   const compactText = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 80);
   const filterRoot =
     ".search-form, .ant-pro-table-search, .el-form--inline, .filter-container, .table-search, .vxe-grid--form-wrapper, [class*='search-form'], [class*='table-search'], [class*='filter-bar'], [class*='search-bar'], [class*='filter-form'], [class*='query-form']";
@@ -97,14 +127,36 @@ export function collectVisibleControlsInPage() {
     return (inFilter(node) || inSidebar(node)) ? "filter" : "form";
   };
   const firstInput = (node) => node.querySelector?.("input, textarea, select");
-  const widgetLocked = (root, input, kind) => {
-    const disabled = Boolean(
-      input?.disabled
-      || root.matches?.(".is-disabled, [disabled], .el-input.is-disabled, .el-select.is-disabled, .ant-select-disabled, .ant-picker-disabled")
-      || root.querySelector?.(".is-disabled, [disabled], .el-input.is-disabled, .el-select.is-disabled, .ant-select-disabled, .ant-picker-disabled"),
+  const inPagination = (node) => Boolean(node.closest?.(PAGINATION_SELECTOR));
+  const closestWidget = (node) => {
+    if (!node?.closest) return null;
+    if (node.matches?.(WIDGET_HOST_SELECTOR)) return node;
+    return node.closest(WIDGET_HOST_SELECTOR);
+  };
+  const hostLocked = (host) => {
+    if (!host) return false;
+    if (host.disabled) return true;
+    if (host.getAttribute?.("disabled") != null) return true;
+    if (host.getAttribute?.("aria-disabled") === "true") return true;
+    const cls = host.classList;
+    if (!cls) return false;
+    return Boolean(
+      cls.contains("is-disabled")
+      || cls.contains("el-select--disabled")
+      || cls.contains("ant-select-disabled")
+      || cls.contains("ant-picker-disabled")
+      || cls.contains("ant-input-disabled")
+      || cls.contains("ant-radio-group-disabled")
     );
-    if (kind === "date" || kind === "select" || kind === "upload") return disabled;
-    return Boolean(input?.readOnly || disabled);
+  };
+  const widgetKind = (kind) => kind === "date" || kind === "select" || kind === "upload";
+  const widgetLocked = (root, input, kind) => {
+    const host = closestWidget(root) || closestWidget(input);
+    if (host || widgetKind(kind)) return hostLocked(host || root);
+    if (input?.disabled || root?.disabled) return true;
+    if (input?.readOnly) return true;
+    const wrap = input?.closest?.(".el-input, .ant-input-affix-wrapper, .ant-input") || root;
+    return hostLocked(wrap);
   };
   const nearbyLabel = (node) => {
     const item = node.closest?.(".el-form-item, .ant-form-item, .form-item");
@@ -236,7 +288,7 @@ export function collectVisibleControlsInPage() {
       control_kind: controlKind,
       required_mark: markRequired(node.closest?.(".el-form-item, .ant-form-item, .form-item") || node, label),
       readonly: widgetLocked(node, input, controlKind),
-      disabled: Boolean(input?.disabled),
+      disabled: widgetLocked(node, input, controlKind),
       range,
       options,
     };
@@ -244,6 +296,7 @@ export function collectVisibleControlsInPage() {
 
   for (const item of document.querySelectorAll(".el-form-item, .ant-form-item, .form-item, form label")) {
     if (item.matches?.("label") && item.closest?.(".el-form-item, .ant-form-item, .form-item")) continue;
+    if (inPagination(item)) continue;
     if (!visible(item)) continue;
     const label = nearbyLabel(item)
       || textOf(item.querySelector(".el-form-item__label, .ant-form-item-label"))
@@ -259,7 +312,7 @@ export function collectVisibleControlsInPage() {
   ];
   for (const selector of widgetSelectors) {
     for (const node of document.querySelectorAll(selector)) {
-      if (!visible(node)) continue;
+      if (!visible(node) || inPagination(node)) continue;
       if (node.closest?.(".el-form-item, .ant-form-item, .form-item")) continue;
       push(describe(node));
     }
@@ -411,9 +464,6 @@ export function collectVisibleControlsInPage() {
       continue;
     }
     const keep = (rank[row.control_kind] || 0) >= (rank[prev.control_kind] || 0) ? { ...row } : { ...prev };
-    keep.readonly = Boolean(prev.readonly || row.readonly);
-    keep.disabled = Boolean(prev.disabled || row.disabled);
-    if (keep.readonly || keep.disabled) keep.readonly = true;
     keep.required_mark = Boolean(prev.required_mark || row.required_mark);
     const richer = (row.options || []).length > (prev.options || []).length ? row : prev;
     keep.options = richer.options || keep.options;
@@ -428,7 +478,102 @@ export function collectVisibleControlsInPage() {
     if (!row.name) return Boolean(row.placeholder);
     return !named.has(`${row.region}|${row.name}|${row.control_kind}`);
   });
-  return compactRows.slice(0, 120);
+
+  const snapshotControls = [];
+  const snapshotActions = [];
+  const snapshotOptions = [];
+  const seenSnap = new Set();
+  const mark = (node, ref) => {
+    try {
+      node.setAttribute("data-pi-ref", ref);
+    } catch {
+      // 只读节点跳过
+    }
+  };
+  const snapshotVisible = (node) => {
+    if (!visible(node)) return false;
+    const style = window.getComputedStyle(node);
+    return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) !== 0;
+  };
+  const pushSnapshotControl = (node, extras = {}) => {
+    if (!node || seenSnap.has(node) || inPagination(node) || !snapshotVisible(node)) return;
+    seenSnap.add(node);
+    for (const inner of node.querySelectorAll?.("input, textarea, select") || []) seenSnap.add(inner);
+    const input = firstInput(node) || (node.matches?.("input, textarea, select") ? node : null);
+    const label = extras.label || nearbyLabel(node) || nearbyHeading(node) || compactText(node.getAttribute?.("aria-label"));
+    const placeholder = compactText(
+      extras.placeholder
+      || input?.getAttribute?.("placeholder")
+      || node.getAttribute?.("placeholder"),
+    );
+    const controlKind = extras.control_kind || detectKind(node, `${label} ${placeholder}`);
+    const locked = widgetLocked(node, input, controlKind);
+    const ref = `c${snapshotControls.length + 1}`;
+    mark(node, ref);
+    snapshotControls.push({
+      ref,
+      label: cleanLabel(label) || placeholder,
+      name: compactText(input?.name || input?.id || node.getAttribute?.("name") || node.getAttribute?.("id")),
+      control_kind: controlKind,
+      placeholder,
+      readonly: locked,
+      disabled: locked,
+      options: extras.options || optionTexts(node),
+      selector: placeholder ? `placeholder=${placeholder}` : (label ? `label=${cleanLabel(label)}` : `ref=${ref}`),
+    });
+  };
+  for (const host of document.querySelectorAll(WIDGET_HOST_SELECTOR)) {
+    pushSnapshotControl(host);
+  }
+  for (const node of document.querySelectorAll("input, textarea, select, [contenteditable='true']")) {
+    if (seenSnap.has(node) || inPagination(node)) continue;
+    if (node.closest?.(WIDGET_HOST_SELECTOR)) continue;
+    if (node.matches?.("input[type='hidden']")) continue;
+    if (node.matches?.("input[type='radio'], input[type='checkbox']") && !snapshotVisible(node)) continue;
+    pushSnapshotControl(node, {
+      control_kind: detectKind(node, nearbyLabel(node) || node.getAttribute?.("placeholder") || ""),
+    });
+  }
+  for (const node of document.querySelectorAll("button, [role='button'], a.ant-btn, .el-button, input[type='button'], input[type='submit']")) {
+    if (!snapshotVisible(node) || seenSnap.has(node) || inPagination(node)) continue;
+    seenSnap.add(node);
+    const ref = `a${snapshotActions.length + 1}`;
+    mark(node, ref);
+    const label = cleanLabel(
+      node.getAttribute?.("aria-label")
+      || node.innerText
+      || node.textContent
+      || node.getAttribute?.("name")
+      || textOf(node),
+    );
+    snapshotActions.push({
+      ref,
+      label,
+      kind: "button",
+      selector: label ? `role=button[name="${label}"]` : `ref=${ref}`,
+    });
+  }
+  const seenOption = new Set();
+  for (const node of document.querySelectorAll("[role='option'], .el-select-dropdown__item, .ant-select-item-option")) {
+    if (!snapshotVisible(node)) continue;
+    const text = compactText(node.innerText || node.textContent);
+    if (!text || seenOption.has(text)) continue;
+    seenOption.add(text);
+    snapshotOptions.push(text);
+  }
+
+  return {
+    url: location.href,
+    title: document.title || "",
+    controls: snapshotControls,
+    actions: snapshotActions,
+    options: snapshotOptions,
+    visible: compactRows.slice(0, 120),
+  };
+}
+
+export function collectVisibleControlsInPage() {
+  return collectPageFacts().visible;
 }
 
 export function summarizeVisibleControls(controls) {

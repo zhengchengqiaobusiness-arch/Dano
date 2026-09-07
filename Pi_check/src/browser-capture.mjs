@@ -9,8 +9,8 @@
 
 import { randomUUID } from "node:crypto";
 import { logPiOnly } from "./policy.mjs";
-import { collectVisibleControlsInPage } from "./visible-controls.mjs";
-import { collectInteractiveSnapshot } from "./browser-snapshot.mjs";
+import { collectPageFacts } from "./visible-controls.mjs";
+import { assignSnapshotRefs } from "./browser-snapshot.mjs";
 import { parseLocator, resolveInteractionActor } from "./browser-actions.mjs";
 import {
   isLoginUrl,
@@ -322,9 +322,8 @@ function scheduleRoutedSnapshot(page, handle, append) {
   scheduleVisibleSnapshot(page, handle, append, "routed", 700);
 }
 
-function shouldResnapshotAfterClick(payload) {
-  const text = `${payload?.text || ""} ${payload?.label || ""} ${payload?.placeholder || ""}`.replace(/\s+/g, "");
-  return /添加|新增|增加|提交|确认|上传|Upload|Attach/.test(text);
+function shouldResnapshotAfterAct(kind) {
+  return /^(click|change|choose|fill|select)$/.test(String(kind || ""));
 }
 
 async function snapshotVisibleControls(page, handle, append, reason) {
@@ -334,8 +333,9 @@ async function snapshotVisibleControls(page, handle, append, reason) {
   const controls = [];
   for (const scope of actionScopes(page)) {
     try {
-      const rows = await scope.evaluate(collectVisibleControlsInPage);
-      if (Array.isArray(rows) && rows.length) controls.push(...rows);
+      const facts = await scope.evaluate(collectPageFacts);
+      const rows = Array.isArray(facts?.visible) ? facts.visible : [];
+      if (rows.length) controls.push(...rows);
     } catch {
       // iframe 未就绪时跳过，不得因此丢掉其它 frame 的控件
     }
@@ -566,23 +566,39 @@ export class PlaywrightBrowser {
       const page = this.livePage();
       if (this.closed || !page) return { available: false, error: "浏览器未打开" };
       const frames = [];
+      const visible = [];
       for (const scope of actionScopes(page)) {
         try {
-          frames.push(await scope.evaluate(collectInteractiveSnapshot));
+          const facts = await scope.evaluate(collectPageFacts);
+          frames.push({
+            url: facts?.url || "",
+            title: facts?.title || "",
+            controls: Array.isArray(facts?.controls) ? facts.controls : [],
+            actions: Array.isArray(facts?.actions) ? facts.actions : [],
+            options: Array.isArray(facts?.options) ? facts.options : [],
+          });
+          if (Array.isArray(facts?.visible) && facts.visible.length) visible.push(...facts.visible);
         } catch {
           // frame 未就绪时跳过
         }
       }
       const snapshot = {
-        available: true,
-        url: page.url(),
-        title: await page.title().catch(() => ""),
-        frames,
-        controls: frames.flatMap((item) => item.controls || []),
-        actions: frames.flatMap((item) => item.actions || []),
+        ...assignSnapshotRefs({
+          url: page.url(),
+          title: await page.title().catch(() => ""),
+          frames,
+        }),
         options: [...new Set(frames.flatMap((item) => item.options || []))],
         recentUserActions: this.recentUserActions(),
       };
+      if (visible.length && typeof this.appendEvidence === "function") {
+        await this.appendEvidence("visible_control", {
+          page_id: this.pageIds.get(page) || "",
+          url: page.url(),
+          reason: "snapshot",
+          controls: visible,
+        });
+      }
       if (includeScreenshot) {
         try {
           const bytes = await page.screenshot(frameScreenshotOptions(this.deviceScaleFactor));
@@ -648,6 +664,7 @@ export class PlaywrightBrowser {
                 chooser: true,
               });
             }
+            this.#scheduleControlResnapshot(page, kind);
             return {
               ok: true,
               chooser: true,
@@ -670,6 +687,7 @@ export class PlaywrightBrowser {
             text: String(text || "").slice(0, 80),
           });
         }
+        this.#scheduleControlResnapshot(page, kind);
         return { ok: true, url: page.url(), selector: token, ref: token, action: kind };
       } catch (error) {
         return { ok: false, error: error.message || String(error) };
@@ -850,7 +868,13 @@ export class PlaywrightBrowser {
         text: label,
       });
     }
+    this.#scheduleControlResnapshot(page, "choose");
     return { ok: true, url: page.url(), selector: token, action: "choose", text: label };
+  }
+
+  #scheduleControlResnapshot(page, kind) {
+    if (!shouldResnapshotAfterAct(kind) || typeof this.appendEvidence !== "function") return;
+    scheduleVisibleSnapshot(page, this, this.appendEvidence, "interaction", 400);
   }
 
   async fillFields(fields = []) {
@@ -1101,7 +1125,7 @@ async function installContextHooks(context, handle, append) {
     if (actor === "human") {
       handle.rememberUserAction?.(payload);
     }
-    if (String(payload?.kind || "") === "click" && shouldResnapshotAfterClick(payload)) {
+    if (shouldResnapshotAfterAct(payload?.kind)) {
       scheduleVisibleSnapshot(source.page, handle, append, "interaction", 500);
     }
   });

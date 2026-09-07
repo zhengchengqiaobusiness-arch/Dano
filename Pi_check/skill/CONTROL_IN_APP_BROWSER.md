@@ -7,8 +7,8 @@ PI 是操作者，也是唯一语义权威。人同时也可以点预览。
 ## 主力循环
 
 1. `control_in_app_browser` `action=open_page` 打开目标页。
-2. `action=snapshot` 一次，读 `controls` / `actions` 里的 **selector**（`placeholder=` / `label=` / `role=button[name=]`）。不要死盯 `c1`/`a1`。
-3. 按 selector `click` / `fill` / `choose`。下拉必须 `choose(selector, 可见选项原文)`，一次选中。不要 click 后再 snapshot 再点选项。
+2. `action=snapshot` 一次，读 `controls` / `actions` 里的 **selector**（`placeholder=` / `label=` / `role=button[name=]`）。不要死盯 `c1`/`a1`。`readonly`/`disabled` 表示整个控件不能改，不是下拉内部展示框带了原生 readonly。
+3. 按 selector `click` / `fill` / `choose`。下拉必须 `choose(selector, 可见选项原文)`，一次选中。不要 click 后再 snapshot 再点选项。打开弹层、切换页签或加行后再 snapshot 一次。
 4. 不要每个字段都 snapshot，不要 `include_screenshot`。要看画面用 `action=screenshot`。
 5. 人点过的看 `snapshot.recentUserActions`。不要停下来等人。
 6. `network_since` 或 `read_request_shape` 看真实请求。

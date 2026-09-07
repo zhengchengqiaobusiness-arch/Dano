@@ -9,7 +9,7 @@ PI 自动点页面，人同时也可以点预览。同一只浏览器、同一�
 
 主力：`control_in_app_browser` → `open_page` / `snapshot` → 按 `placeholder=` / `label=` / `role=` `click|fill|choose` → `submit_recording_capability`。
 
-下拉用 `choose(selector, 可见选项原文)` 一次选中。不要每个字段都 snapshot，不要把截图塞进 JSON。
+下拉用 `choose(selector, 可见选项原文)` 一次选中。打开弹层后再 snapshot 一次。`readonly` 表示整个控件锁死，不是下拉内部展示框。不要每个字段都 snapshot，不要把截图塞进 JSON。
 
 协助：`action=assist`。不要锁预览，不要丢弃人的点击。
 自动点击失败只停自动点，人手点预览和停录分析仍按原链路走。

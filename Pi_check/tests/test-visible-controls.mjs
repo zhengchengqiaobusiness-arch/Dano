@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { createPlaywrightBrowser } from "../src/browser-capture.mjs";
 import {
-  collectVisibleControlsInPage,
+  collectPageFacts,
   projectVisibleControlSnapshot,
   summarizeVisibleControls,
 } from "../src/visible-controls.mjs";
@@ -85,8 +85,11 @@ test("采集日期、下拉、上传和折叠筛选，日期只读输入不当�
   });
   const page = await browser.newPage();
   await page.goto(`http://127.0.0.1:${port}/`);
-  const controls = await page.evaluate(collectVisibleControlsInPage);
+  const facts = await page.evaluate(collectPageFacts);
+  const controls = facts.visible;
+  const shot = facts.controls;
   const find = (label, kind) => controls.find((item) => item.label === label && (!kind || item.control_kind === kind));
+  const findShot = (label) => shot.find((item) => item.label === label || item.placeholder === label);
   assert.equal(find("编号")?.region, "filter");
   assert.equal(find("编号")?.control_kind, "input");
   assert.equal(find("创建时间", "date")?.region, "filter");
@@ -97,6 +100,16 @@ test("采集日期、下拉、上传和折叠筛选，日期只读输入不当�
   assert.equal(reportType.readonly, true);
   assert.equal(reportType.disabled, true);
   assert.ok(!controls.some((item) => item.label === "汇报类型" && item.control_kind === "input" && !item.readonly && !item.disabled));
+  assert.equal(find("使用印章", "select")?.readonly, false, "hidden disabled descendant must not lock an openable select");
+  assert.equal(find("是否可用")?.readonly, false);
+  assert.ok((find("是否可用")?.options || []).includes("启用"));
+  assert.equal(find("所属部门", "select")?.readonly, false);
+  assert.equal(find("锁定部门", "select")?.readonly, true);
+  assert.equal(findShot("请选择印章")?.readonly, false);
+  assert.equal(findShot("请选择部门")?.readonly, false);
+  assert.equal(findShot("已锁定")?.readonly, true);
+  assert.ok(!controls.some((item) => /共\s*2\s*条|20条\/页/.test(`${item.label}${item.placeholder}`)));
+  assert.ok(!shot.some((item) => /20条\/页/.test(`${item.label}${item.placeholder}`)));
   assert.ok(!controls.some((item) => String(item.label || "").startsWith("*")));
   assert.equal(find("开始日期", "date")?.readonly, false);
   assert.ok(controls.some((item) => item.control_kind === "upload"));
@@ -215,4 +228,82 @@ test("加行或打开确认弹层后补采当前页控件", async (t) => {
     event.payload?.reason === "interaction"
     && (event.payload?.controls || []).some((item) => item.label === "工作内容" && item.region === "table")
   )), "clicking add-row should recapture the new table input");
+});
+
+test("任意点击打开弹层后补采，不依赖新增文案", async (t) => {
+  const html = `<!doctype html><html><body>
+    <form class="el-form"><div class="el-form-item"><label class="el-form-item__label">列表名</label><input name="q" /></div></form>
+    <button type="button" id="open">打开面板</button>
+    <div id="dlg" style="display:none" class="el-dialog" role="dialog" aria-modal="true">
+      <div class="el-form-item">
+        <label class="el-form-item__label">模版名称</label>
+        <input placeholder="请输入模版名称" />
+      </div>
+      <div class="el-form-item">
+        <label class="el-form-item__label">使用公章</label>
+        <div class="el-select"><input readonly placeholder="请选择使用公章" /></div>
+      </div>
+    </div>
+    <script>
+      document.getElementById("open").addEventListener("click", () => {
+        document.getElementById("dlg").style.display = "block";
+      });
+    </script>
+  </body></html>`;
+  const fixture = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  const port = await listen(fixture);
+  const events = [];
+  const appendEvidence = async (kind, payload) => {
+    events.push({ kind, payload, seq: events.length + 1 });
+    return { seq: events.length };
+  };
+  appendEvidence.saveBlob = async (bytes) => ({ blobId: "blob_test", byteLength: bytes.byteLength });
+  const handle = await createPlaywrightBrowser({
+    recording: { id: "rec_open_panel_controls", targetUrl: `http://127.0.0.1:${port}/` },
+    appendEvidence,
+  });
+  t.after(async () => {
+    await handle.close().catch(() => {});
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+  await handle.page.click("#open");
+  await handle.page.waitForTimeout(900);
+  const snapshots = events.filter((event) => event.kind === "visible_control");
+  assert.ok(snapshots.some((event) => (
+    (event.payload?.controls || []).some((item) => item.label === "模版名称" && item.region === "dialog")
+  )), "opening a dialog by a generic click should recapture dialog fields");
+  assert.ok(snapshots.some((event) => (
+    (event.payload?.controls || []).some((item) => item.label === "使用公章" && item.readonly === false)
+  )), "openable select in a dialog must not be marked readonly");
+});
+
+test("snapshot 写入当前页 visible_control", async (t) => {
+  const html = `<!doctype html><html><body>
+    <form class="el-form"><div class="el-form-item"><label class="el-form-item__label">标题</label><input placeholder="请输入标题" /></div></form>
+  </body></html>`;
+  const fixture = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  const port = await listen(fixture);
+  const events = [];
+  const appendEvidence = async (kind, payload) => {
+    events.push({ kind, payload });
+    return { seq: events.length };
+  };
+  appendEvidence.saveBlob = async (bytes) => ({ blobId: "blob_test", byteLength: bytes.byteLength });
+  const handle = await createPlaywrightBrowser({
+    recording: { id: "rec_snapshot_controls", targetUrl: `http://127.0.0.1:${port}/` },
+    appendEvidence,
+  });
+  t.after(async () => {
+    await handle.close().catch(() => {});
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+  const shot = await handle.inspect();
+  assert.ok(shot.controls.some((item) => item.placeholder === "请输入标题" || item.label === "标题"));
+  assert.ok(events.some((event) => event.kind === "visible_control" && event.payload?.reason === "snapshot"));
 });

@@ -255,12 +255,18 @@ export function createPiToolHost({
     async read_visible_controls({ seq } = {}) {
       const events = await evidence.files.readEvidence(recordingId);
       const list = Array.isArray(events) ? events : [];
+      const latest = [...list].reverse().find((item) => item.kind === "visible_control");
       const target = Number(seq) || 0;
       const event = target
         ? list.find((item) => Number(item.seq) === target && item.kind === "visible_control")
-        : [...list].reverse().find((item) => item.kind === "visible_control");
+        : latest;
       if (!event) return { found: false, seq: target || null };
-      return { found: true, ...projectVisibleControlSnapshot(event) };
+      const snapshot = { found: true, ...projectVisibleControlSnapshot(event) };
+      if (target && latest && Number(latest.seq) > Number(event.seq)) {
+        snapshot.newer_seq = Number(latest.seq);
+        snapshot.hint = "这不是最近一次可见控件。打开弹层、切换页签或加行后不要带旧 seq，不传 seq 或先 snapshot。";
+      }
+      return snapshot;
     },
     async submit_recording_capability({ capability, steps = [], links = [], unresolved = [], title = "" } = {}) {
       const current = await files.readDraft(recordingId);
@@ -299,24 +305,22 @@ export function createPiToolHost({
     } = {}) {
       const kind = String(action || "").trim();
       if (kind === "network_since") {
-        const session = evidence.snapshot(recordingId);
-        const cursor = Number(after_seq) > 0
-          ? Number(after_seq)
-          : Math.max(0, Number(session.lastSeq || 0) - 20);
-        const events = await evidence.read(recordingId, {
-          afterSeq: cursor,
-          limit: 80,
+        const all = await evidence.files.readEvidence(recordingId);
+        const list = Array.isArray(all) ? all : [];
+        const cursor = Number(after_seq) > 0 ? Number(after_seq) : 0;
+        const matched = list.filter((item) => {
+          if (cursor && Number(item.seq) <= cursor) return false;
+          if (item.kind === "network_request") {
+            const type = String(item.payload?.resource_type || "");
+            if (type && type !== "xhr" && type !== "fetch") return false;
+            return !isNoiseNetworkPath(item.payload?.url || item.payload?.path || "");
+          }
+          return item.kind === "page_navigated" || item.kind === "interaction";
         });
+        const windowed = cursor ? matched.slice(-80) : matched.slice(-40);
         return {
-          after_seq: cursor,
-          events: events.filter((item) => {
-            if (item.kind === "network_request") {
-              const type = String(item.payload?.resource_type || "");
-              if (type && type !== "xhr" && type !== "fetch") return false;
-              return !isNoiseNetworkPath(item.payload?.url || item.payload?.path || "");
-            }
-            return item.kind === "page_navigated" || item.kind === "interaction";
-          }).map((item) => ({
+          after_seq: cursor || (windowed[0] ? Number(windowed[0].seq) - 1 : 0),
+          events: windowed.map((item) => ({
             seq: item.seq,
             kind: item.kind,
             actor: item.payload?.actor || "",
@@ -512,7 +516,7 @@ export function describePiTools() {
     {
       name: "read_visible_controls",
       label: "可见控件",
-      description: "读取一场 visible_control 快照。不传 seq 则取最近一次。",
+      description: "读取一场 visible_control 快照。不传 seq 则取最近一次。打开弹层后不要带旧 seq。readonly/disabled 表示整个控件不能改，不是下拉内部展示框带了原生 readonly。",
       parameters: {
         type: "object",
         properties: { seq: { type: "integer" } },

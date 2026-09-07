@@ -61,6 +61,9 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(skill, /会被拒收/);
   assert.match(skill, /x-dano-option-source/);
   assert.match(skill, /readonly=true|disabled=true/);
+  assert.match(skill, /整个控件当前不能改/);
+  assert.match(skill, /不要带着打开弹层之前的 seq/);
+  assert.match(skill, /默认选中/);
   assert.match(skill, /去掉星号|不要把星号写进/);
   assert.match(skill, /表头原文/);
   assert.match(skill, /x-dano-section-titles/);
@@ -89,6 +92,7 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(instructions, /list_action_timeline/);
   const prompt = buildFinalAnalysisPrompt(3);
   assert.match(prompt, /readonly\/disabled|readonly=true/);
+  assert.match(prompt, /默认已选/);
   assert.match(prompt, /表头原文/);
   assert.match(prompt, /x-dano-section-titles/);
   assert.match(prompt, /不要编新键|不要编造写请求里没有的键/);

@@ -65,7 +65,7 @@ ${browserSkill ? `## Control In App Browser\n\n${browserSkill}\n` : ""}
 
 规则：
 1. 浏览器一开就开始 control_in_app_browser。用 snapshot 里的 selector（placeholder= / label= / role=button[name=]），不要死盯 c1/a1。
-2. 下拉必须 choose(selector, 可见选项原文)，一次选中。不要 click 后再 snapshot 再点选项，不要每个字段都 snapshot，不要 include_screenshot。
+2. 下拉必须 choose(selector, 可见选项原文)，一次选中。不要 click 后再 snapshot 再点选项，不要每个字段都 snapshot，不要 include_screenshot。打开弹层、切换页签或加行后再 snapshot 一次。snapshot / visible_control 的 readonly/disabled 表示整个控件不能改，不是下拉内部展示框带了原生 readonly。默认已选、本场没改，只要还能改，仍是调用方。
 3. 每完成一个独立动作（你点的或人点的）立刻 submit_recording_capability。不要在脑子里组完整 JSON。
 4. 目标做完即可 submit_recording_result；系统会冻结。也可用 use_draft=true 定稿。
 5. submit_recording_result 必须包含 recording_id、final=true；完整 result 或 use_draft=true。
@@ -102,7 +102,8 @@ export function buildLiveDrivePrompt({ targetUrl = "", goal = "" } = {}) {
     `目标：${String(goal || "").trim() || "把该页独立业务动作做成可调用能力"}\n` +
     `入口：${String(targetUrl || "").trim()}\n` +
     `立刻 control_in_app_browser：open_page → snapshot → 按 selector click/fill/choose。\n` +
-    `下拉用 choose(placeholder=或label=, 可见选项)。不要每个字段都 snapshot，不要 include_screenshot。人点过的看 recentUserActions。\n` +
+    `下拉用 choose(placeholder=或label=, 可见选项)。打开弹层后再 snapshot 一次。不要每个字段都 snapshot，不要 include_screenshot。人点过的看 recentUserActions。\n` +
+    `readonly/disabled 只表示整个控件不能改。默认已选仍是调用方，不要写成无独立来源。\n` +
     `每做完一个动作，network_since 或 read_request_shape 看真实请求，再 submit_recording_capability。人点出的动作也要交。\n` +
     `登录、验证码、确认写入：action=assist，预览不要锁。写入真实数据前若目标没授权，先 assist。\n` +
     `目标做完后 submit_recording_result({final:true, use_draft:true})。不要把 JSON 写在对话里。不要写 capabilities[].fields。`
@@ -113,7 +114,7 @@ export function buildFinalAnalysisPrompt(latestSeq) {
   return (
     `证据已冻结，最新 seq=${Number(latestSeq) || 0}。现在必须产出能力。\n` +
     "先调 list_action_timeline 建台账，再用 list_recording_index 核对 interaction、xhr/fetch、network_response 和 visible_control。对候选 execute 调 read_request_shape；正文不够再 read_evidence_item。响应在 network_response 或读请求时附带的 response.body。\n" +
-    "先读各页 visible_control，再对 execute 每个 query/body 键。树/页签/分段器/单选组/日期区间都是可改选择。可改控件一律调用方；页面自动计算但仍可手工修改的输入也属于调用方。readonly/disabled 灰框是系统，不要进 schema。每个 exposed_to_user=true 的 param 都必须出现在 schema，schema 顶层 key、param.key、param.path 的末级键必须逐字对应 execute 的真实 query/body 键，禁止相近拼写和别名。禁止编造写请求里没有的键。可增行只保留一个对象数组 key，禁止收成 string；items.properties title 用各分区表头原文，同键不同表头写 x-dano-section-titles。form textarea 不要用表格分区标题。确认弹层可填意见：有请求键就建模，没有就 unresolved，不要编新键。登录身份用 current_user，不要写死本场数字。label/title 用页面原文，去掉星号。\n" +
+    "先读各页最近一次 visible_control（不要带弹层前旧 seq），再对 execute 每个 query/body 键。树/页签/分段器/单选组/日期区间都是可改选择。可改控件一律调用方；页面自动计算但仍可手工修改的输入也属于调用方。readonly/disabled 只表示整个控件不能改。默认已选仍是调用方。灰框才是系统，不要进 schema。每个 exposed_to_user=true 的 param 都必须出现在 schema，schema 顶层 key、param.key、param.path 的末级键必须逐字对应 execute 的真实 query/body 键，禁止相近拼写和别名。禁止编造写请求里没有的键。可增行只保留一个对象数组 key，禁止收成 string；items.properties title 用各分区表头原文，同键不同表头写 x-dano-section-titles。form textarea 不要用表格分区标题。确认弹层可填意见：有请求键就建模，没有就 unresolved，不要编新键。登录身份用 current_user，不要写死本场数字。label/title 用页面原文，去掉星号。\n" +
     "可改树/下拉/单选禁止只写 type=number。api_option 必须把 source_url 写进 param.source 和 schema 的 x-dano-option-source；page_enum 必须写当场全部 {label,value}。对象数组选择器的绑定只能写在对应 execute step.selects，禁止写到 result 顶层；必须包含 multi、label_subkey 和覆盖真实对象键的 element_template。把树/下拉藏在 description 里会被拒收。不要读 screenshot。\n" +
     "read_response_blob 只接受 body.blob_id（blob_ 开头）。不要把 request_id 当 blob_id。\n" +
     "每看完一个独立动作立刻 submit_recording_capability。不要把 JSON 写在对话里。不要写 capabilities[].fields。request_refs 必须是 {step_id, usage}。steps[].params 必须是含 key/path 的对象数组。全部交完后 submit_recording_result({final:true, use_draft:true})。\n" +
