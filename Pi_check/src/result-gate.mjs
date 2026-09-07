@@ -343,6 +343,7 @@ export class ResultGate {
     expectedSessionId,
     final,
     result,
+    use_draft = false,
     frozen,
   }) {
     assertNeverStartLegacy();
@@ -355,14 +356,19 @@ export class ResultGate {
     if (final !== true) {
       throw new SubmitRejectedError("NOT_FINAL", "PI 提交非最终结果");
     }
-    if (!isNonEmptyPlainObject(result)) {
+    let payload = result;
+    if (use_draft) {
+      const saved = await this.files.readDraft(expectedRecordingId);
+      payload = saved?.draft;
+    }
+    if (!isNonEmptyPlainObject(payload)) {
       throw new SubmitRejectedError("EMPTY_RESULT", "PI 提交空结果");
     }
-    if (!piSubmittedCapabilities(result)) {
+    if (!piSubmittedCapabilities(payload)) {
       throw new SubmitRejectedError("EMPTY_CAPABILITIES", "PI 未提交任何能力，没有产出");
     }
-    assertPageDisplayContract(result);
-    assertCapabilityIdentityContract(result);
+    assertPageDisplayContract(payload);
+    assertCapabilityIdentityContract(payload);
     if (!frozen) {
       throw new SubmitRejectedError("NOT_FROZEN", "证据尚未冻结时禁止提交最终结果");
     }
@@ -370,7 +376,7 @@ export class ResultGate {
       throw new SubmitRejectedError("ALREADY_ACCEPTED", "同一录制不得接收第二个最终结果");
     }
 
-    const verbatim = structuredClone(result);
+    const verbatim = structuredClone(payload);
     await this.files.writePiResult(expectedRecordingId, verbatim);
     const stored = await this.files.readPiResult(expectedRecordingId);
     const resultSha256 = createHash("sha256").update(JSON.stringify(stored)).digest("hex");

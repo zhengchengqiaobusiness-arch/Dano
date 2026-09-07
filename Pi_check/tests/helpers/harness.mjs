@@ -72,8 +72,11 @@ export class ScriptedPiSession {
     this.delayMs = Number(delayMs) || 250;
     this.alive = true;
     this.started = true;
+    this.status = "ready";
     this.unfrozenRejected = false;
     this.secondSubmitError = "";
+    this.humanActs = 0;
+    this.driveStarted = false;
     this.exitListeners = new Set();
   }
 
@@ -102,6 +105,29 @@ export class ScriptedPiSession {
     if (this.behavior === "die_on_notify") {
       this.kill();
     }
+  }
+
+  async notifyHumanAct() {
+    this.humanActs += 1;
+  }
+
+  async beginLiveDrive() {
+    this.driveStarted = true;
+    this.status = "driving";
+    if (this.behavior === "drive_fail") {
+      throw new Error("PI 连续空转未自动操作");
+    }
+    if (this.behavior === "submit_on_drive") {
+      await this.tools.submit_recording_result({
+        recording_id: this.recordingId,
+        final: true,
+        result: this.result,
+      });
+    }
+  }
+
+  async stopLiveDrive() {
+    this.status = this.status === "driving" ? "ready" : this.status;
   }
 
   async requestFinalAnalysis() {
@@ -169,6 +195,9 @@ export class FakeBrowser {
     this.started = true;
     this.closed = false;
     this.appendEvidence = appendEvidence;
+    this.inputs = [];
+    this.acts = [];
+    this.lastHumanActAt = 0;
     this.ready = emitOnStart
       ? Promise.resolve(appendEvidence?.("network_request", {
         method: "GET",
@@ -178,10 +207,87 @@ export class FakeBrowser {
       : Promise.resolve();
   }
 
+  recentlyHuman(ms = 800) {
+    return Date.now() - Number(this.lastHumanActAt || 0) < ms;
+  }
+
+  async applyInput(event) {
+    this.inputs.push(event || {});
+    const kind = String(event?.kind || "click");
+    if (!/pointer_move|mousemove/i.test(kind)) {
+      this.lastHumanActAt = Date.now();
+    }
+    if (typeof this.appendEvidence === "function" && !/pointer_move|mousemove/i.test(kind)) {
+      await this.appendEvidence("interaction", {
+        actor: "human",
+        kind,
+      });
+    }
+  }
+
+  async inspect() {
+    return {
+      available: true,
+      url: "http://fixture.local/demo",
+      controls: [{ ref: "c1", label: "关键字" }],
+      actions: [{ ref: "a1", label: "查询" }],
+    };
+  }
+
+  async actByRef({ ref = "", action = "click", text = "" } = {}) {
+    this.acts.push({ ref, action, text });
+    if (typeof this.appendEvidence === "function") {
+      await this.appendEvidence("interaction", {
+        actor: "pi",
+        kind: action || "click",
+        ref,
+        text,
+      });
+    }
+    return { ok: true, url: "http://fixture.local/demo", ref, action };
+  }
+
+  async openPage(url) {
+    return { available: true, url: String(url || "http://fixture.local/demo") };
+  }
+
+  async listPages() {
+    return { pages: [{ url: "http://fixture.local/demo", current: true }] };
+  }
+
+  async fillFields(fields = []) {
+    const results = [];
+    for (const field of fields) {
+      results.push(await this.actByRef({
+        ref: field?.ref,
+        action: "fill",
+        text: field?.value ?? field?.text ?? "",
+      }));
+    }
+    return { ok: results.every((item) => item.ok), filled: results.filter((item) => item.ok).length, results };
+  }
+
   async close() {
     this.closed = true;
     this.started = false;
   }
+}
+
+async function rmRetry(dir) {
+  let lastError;
+  for (let i = 0; i < 6; i += 1) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (error?.code !== "ENOTEMPTY" && error?.code !== "EBUSY" && error?.code !== "EPERM") {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 40 * (i + 1)));
+    }
+  }
+  if (lastError) throw lastError;
 }
 
 export async function createHarness(options = {}) {
@@ -198,6 +304,7 @@ export async function createHarness(options = {}) {
     evidence,
     gate,
     finalTimeoutMs: options.finalTimeoutMs || 2000,
+    driveTimeoutMs: options.driveTimeoutMs || 2000,
     createPi: options.createPi || (async ({ recording, tools }) => {
       if (options.piFailStart) {
         throw new Error("PI 初始化失败");
@@ -229,7 +336,12 @@ export async function createHarness(options = {}) {
     browserCalls,
     getPi: () => piRef,
     async cleanup() {
-      await rm(dir, { recursive: true, force: true });
+      try {
+        await controller.browserOf?.(evidence.list()?.[0]?.id)?.close?.();
+      } catch {
+        // ignore
+      }
+      await rmRetry(dir);
     },
   };
 }

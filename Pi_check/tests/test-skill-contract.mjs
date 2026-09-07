@@ -74,6 +74,9 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(skill, /option_source.*execute/);
   assert.match(skill, /禁止把一个数组拆成多个调用方数组/);
   assert.match(skill, /写请求里不存在的.*键|不要编造写请求里没有的键/);
+  assert.match(skill, /list_action_timeline/);
+  assert.match(skill, /control_in_app_browser|Control In App Browser/);
+  assert.match(skill, /submit_recording_capability/);
   assert.doesNotMatch(skill, /登录态、Cookie、分页、流程定义 Key、单据类型/);
   assert.doesNotMatch(skill, /workItems|planItems|createTime=/);
   assert.doesNotMatch(skill, /to_flow_spec|compile_capabilities|inferCapability/);
@@ -82,6 +85,8 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   const instructions = buildPiInstructions(skill);
   assert.match(instructions, /不要写 capabilities\[\]\.fields/);
   assert.match(instructions, /input_schema\.properties/);
+  assert.match(instructions, /control_in_app_browser/);
+  assert.match(instructions, /list_action_timeline/);
   const prompt = buildFinalAnalysisPrompt(3);
   assert.match(prompt, /readonly\/disabled|readonly=true/);
   assert.match(prompt, /表头原文/);

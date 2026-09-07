@@ -4,14 +4,44 @@
  * 这些工具只提供事实读取和结果保存，不分析、不归类、不改写。
  */
 
-import { SUBMIT_RECORDING_RESULT } from "./result-gate.mjs";
+import { SUBMIT_RECORDING_RESULT, assertCapabilityIdentityContract, assertPageDisplayContract } from "./result-gate.mjs";
 import { logPiOnly } from "./policy.mjs";
 import { summarizeToolArgs, summarizeToolResult } from "./pi-trace.mjs";
+import { buildActionTimeline, requestShapeFromEvents } from "./evidence-facts.mjs";
+import { projectVisibleControlSnapshot } from "./visible-controls.mjs";
+import { mergeCapabilityIntoDraft } from "./result-merge.mjs";
 
 function toolText(payload) {
   return {
     content: [{ type: "text", text: JSON.stringify(payload) }],
     details: payload,
+  };
+}
+
+function toolImage(payload) {
+  const caption = payload.caption || JSON.stringify({
+    found: true,
+    stored: "image",
+    url: payload.url || "",
+    total_bytes: payload.total_bytes || 0,
+  });
+  return {
+    content: [
+      { type: "text", text: caption },
+      {
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: payload.mimeType || "image/jpeg",
+          data: payload.data,
+        },
+      },
+    ],
+    details: {
+      stored: "image",
+      url: payload.url || "",
+      total_bytes: payload.total_bytes || 0,
+    },
   };
 }
 
@@ -67,6 +97,9 @@ export function createPiToolHost({
   files,
   gate,
   getPiSessionId,
+  getBrowser = null,
+  freezeEvidence = null,
+  onAssist = null,
 }) {
   return {
     async list_recording_manifest() {
@@ -176,6 +209,139 @@ export function createPiToolHost({
           : "这场录制没有截图。不要编造 blob_id，用 visible_control、interaction 和请求正文即可。",
       };
     },
+    async list_action_timeline() {
+      const events = await evidence.files.readEvidence(recordingId);
+      const timeline = buildActionTimeline(events);
+      return {
+        recording_id: recordingId,
+        ...timeline,
+      };
+    },
+    async read_request_shape({ seq }) {
+      const events = await evidence.files.readEvidence(recordingId);
+      return requestShapeFromEvents(events, seq);
+    },
+    async read_visible_controls({ seq } = {}) {
+      const events = await evidence.files.readEvidence(recordingId);
+      const list = Array.isArray(events) ? events : [];
+      const target = Number(seq) || 0;
+      const event = target
+        ? list.find((item) => Number(item.seq) === target && item.kind === "visible_control")
+        : [...list].reverse().find((item) => item.kind === "visible_control");
+      if (!event) return { found: false, seq: target || null };
+      return { found: true, ...projectVisibleControlSnapshot(event) };
+    },
+    async submit_recording_capability({ capability, steps = [], links = [], unresolved = [], title = "" } = {}) {
+      const current = await files.readDraft(recordingId);
+      const merged = mergeCapabilityIntoDraft(current?.draft || {}, {
+        capability,
+        steps,
+        links,
+        unresolved,
+        title,
+      });
+      assertPageDisplayContract(merged);
+      assertCapabilityIdentityContract(merged);
+      await files.writeDraft(recordingId, {
+        recording_id: recordingId,
+        saved_at: new Date().toISOString(),
+        draft: merged,
+      });
+      return {
+        saved: true,
+        final: false,
+        capability_count: merged.capabilities.length,
+        capability_ids: merged.capabilities.map((item) => item.capability_id),
+        next_action: "继续 submit_recording_capability 交下一项；全部交完后 submit_recording_result({final:true, use_draft:true})。",
+      };
+    },
+    async control_in_app_browser({
+      action = "",
+      url = "",
+      ref = "",
+      text = "",
+      include_screenshot = false,
+      after_seq = 0,
+      fields = [],
+      reason = "",
+    } = {}) {
+      const kind = String(action || "").trim();
+      if (kind === "network_since") {
+        const events = await evidence.read(recordingId, {
+          afterSeq: Number(after_seq) || 0,
+          limit: 80,
+        });
+        return {
+          after_seq: Number(after_seq) || 0,
+          events: events.filter((item) => {
+            if (item.kind === "network_request") {
+              const type = String(item.payload?.resource_type || "");
+              return !type || type === "xhr" || type === "fetch";
+            }
+            return item.kind === "page_navigated" || item.kind === "visible_control" || item.kind === "interaction";
+          }).map((item) => ({
+            seq: item.seq,
+            kind: item.kind,
+            actor: item.payload?.actor || "",
+            method: item.payload?.method || "",
+            path: item.payload?.url || item.payload?.path || "",
+            label: item.payload?.label || item.payload?.text || "",
+            status: item.payload?.status,
+          })),
+        };
+      }
+      if (kind === "assist") {
+        const message = String(reason || "请在预览页帮忙：登录、验证码或确认写入。预览始终可以点。");
+        try {
+          onAssist?.({ reason: message });
+        } catch {
+          // 协助通知失败不得假装已经送达
+        }
+        return { assist: true, message, human_can_click: true };
+      }
+      const browser = typeof getBrowser === "function" ? getBrowser() : null;
+      if (!browser) {
+        return {
+          available: false,
+          error: "浏览器未打开。用 list_action_timeline / read_request_shape / read_evidence_item 读已有证据。",
+        };
+      }
+      if (kind === "open_page") return browser.openPage?.(url) ?? { available: false, error: "当前浏览器不能打开页面" };
+      if (kind === "list_pages") return browser.listPages?.() ?? { pages: [] };
+      if (kind === "snapshot") return browser.inspect?.({ includeScreenshot: Boolean(include_screenshot) });
+      if (kind === "screenshot") {
+        const shot = await browser.inspect?.({ includeScreenshot: true });
+        if (shot?.screenshot?.data) {
+          return {
+            __image: true,
+            data: shot.screenshot.data,
+            mimeType: "image/jpeg",
+            url: shot.url,
+            total_bytes: Math.round((shot.screenshot.data.length * 3) / 4),
+            caption: JSON.stringify({
+              url: shot.url,
+              width: shot.screenshot.width,
+              height: shot.screenshot.height,
+              controls: shot.controls?.length || 0,
+              actions: shot.actions?.length || 0,
+            }),
+          };
+        }
+        return { available: false, error: shot?.error || shot?.screenshot?.error || "无法截图" };
+      }
+      if (kind === "click" || kind === "fill" || kind === "select" || kind === "press") {
+        if (browser.recentlyHuman?.()) {
+          await browser.inspect?.();
+        }
+        return browser.actByRef?.({ ref, action: kind, text });
+      }
+      if (kind === "fill_fields") {
+        return browser.fillFields?.(fields);
+      }
+      return {
+        error: `不支持的 action: ${kind || "(empty)"}。可用：open_page, list_pages, snapshot, screenshot, click, fill, select, press, fill_fields, network_since, assist。`,
+      };
+    },
     async get_recording_freeze_state() {
       const session = evidence.snapshot(recordingId);
       return {
@@ -199,8 +365,12 @@ export function createPiToolHost({
       await files.writeDraft(recordingId, payload);
       return { saved: true, final: false };
     },
-    async [SUBMIT_RECORDING_RESULT]({ recording_id, final, result }) {
-      const session = evidence.snapshot(recordingId);
+    async [SUBMIT_RECORDING_RESULT]({ recording_id, final, result, use_draft = false }) {
+      let session = evidence.snapshot(recordingId);
+      if (!session.frozen && typeof freezeEvidence === "function") {
+        await freezeEvidence();
+        session = evidence.snapshot(recordingId);
+      }
       return gate.submitRecordingResult({
         recordingId: recording_id,
         expectedRecordingId: recordingId,
@@ -208,6 +378,7 @@ export function createPiToolHost({
         expectedSessionId: session.piSessionId,
         final,
         result,
+        use_draft,
         frozen: Boolean(session.frozen),
       });
     },
@@ -283,6 +454,70 @@ export function describePiTools() {
       },
     },
     {
+      name: "list_action_timeline",
+      label: "动作台账",
+      description: "按时间列出人与 PI 点过的业务交互，以及随后出现的 xhr/fetch。带 actor=human|pi。时间接近只是候选，不划分能力。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
+      name: "read_request_shape",
+      label: "请求形状",
+      description: "摊开指定 seq 请求的 query/body 键。不判断来源，不补字段。",
+      parameters: {
+        type: "object",
+        properties: { seq: { type: "integer" } },
+        required: ["seq"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "read_visible_controls",
+      label: "可见控件",
+      description: "读取一场 visible_control 快照。不传 seq 则取最近一次。",
+      parameters: {
+        type: "object",
+        properties: { seq: { type: "integer" } },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "submit_recording_capability",
+      label: "提交一项能力",
+      description: "把一项完整能力及其 steps 写入草稿。同一 capability_id 会替换旧项。人点的和你点的都要交。不要在对话里写 JSON。交完后用 submit_recording_result({final:true, use_draft:true}) 定稿。",
+      parameters: {
+        type: "object",
+        properties: {
+          capability: { type: "object" },
+          steps: { type: "array" },
+          links: { type: "array" },
+          unresolved: { type: "array" },
+          title: { type: "string" },
+        },
+        required: ["capability"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "control_in_app_browser",
+      label: "Control In App Browser",
+      description: "自动点应用内浏览器。人同时也可以点预览，两条通道共用同一页。action=open_page|list_pages|snapshot|screenshot|click|fill|select|press|fill_fields|network_since|assist。先 snapshot 再按 ref 操作。screenshot 以图像返回。登录或确认写入用 assist，不要锁死预览。人刚点过就先重新 snapshot。",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string" },
+          url: { type: "string" },
+          ref: { type: "string" },
+          text: { type: "string" },
+          include_screenshot: { type: "boolean" },
+          after_seq: { type: "integer" },
+          fields: { type: "array" },
+          reason: { type: "string" },
+        },
+        required: ["action"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "get_recording_freeze_state",
       label: "冻结状态",
       description: "查看当前录制是否已经冻结。",
@@ -302,15 +537,16 @@ export function describePiTools() {
     {
       name: SUBMIT_RECORDING_RESULT,
       label: "最终结果",
-      description: "唯一最终提交入口。只允许在证据冻结后提交完整 result。系统原样保存，不会补齐或修改。result 必须是现有录制页能直接渲染的 draft：每个独立动作一项能力；capability_id 不重复；每个能力恰好一个不共用的 execute；request_refs 为 {step_id,usage} 对象；steps[].params 为含 key/path 的数组；调用方字段写在 capability.input_schema.properties；可改树/下拉必须写 x-dano-option-source 或完整 {label,value}，禁止只写 type=number；禁止只写 capabilities[].fields。",
+      description: "唯一最终提交入口。可提交完整 result，或 use_draft=true 把已用 submit_recording_capability 写入的草稿定稿。程序会先冻结再交给闸门。系统原样保存，不会补齐或修改。信封必须是现有录制页能直接渲染的 draft：每个独立动作一项能力；capability_id 不重复；每个能力恰好一个不共用的 execute；request_refs 为 {step_id,usage} 对象；steps[].params 为含 key/path 的数组；调用方字段写在 capability.input_schema.properties；可改树/下拉必须写 x-dano-option-source 或完整 {label,value}，禁止只写 type=number；禁止只写 capabilities[].fields。",
       parameters: {
         type: "object",
         properties: {
           recording_id: { type: "string" },
           final: { type: "boolean" },
           result: { type: "object" },
+          use_draft: { type: "boolean" },
         },
-        required: ["recording_id", "final", "result"],
+        required: ["recording_id", "final"],
         additionalProperties: false,
       },
     },
@@ -335,6 +571,7 @@ export function wrapPiToolsForSdk(host, defineTool, Type, trace = null) {
         const summary = summarizeToolResult(spec.name, result);
         if (trace) trace.recordTool(spec.name, args, summary, true);
         else logPiOnly(`[PI分析] 工具完成 ${spec.name} ${Date.now() - started}ms → ${summary}`);
+        if (result?.__image && result.data) return toolImage(result);
         return toolText(result);
       } catch (error) {
         const message = error?.message || String(error);
@@ -360,6 +597,7 @@ function toTypeBox(schema, Type) {
     if (value.type === "integer") shape[key] = Type.Integer();
     else if (value.type === "boolean") shape[key] = Type.Boolean();
     else if (value.type === "object") shape[key] = Type.Object({}, { additionalProperties: true });
+    else if (value.type === "array") shape[key] = Type.Array(Type.Object({}, { additionalProperties: true }));
     else shape[key] = Type.String();
   }
   return Type.Object(shape, {

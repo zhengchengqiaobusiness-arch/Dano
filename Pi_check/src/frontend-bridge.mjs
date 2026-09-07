@@ -2,6 +2,7 @@
  * PI 是唯一语义决策者；旧录制逻辑绝不启动。
  *
  * 对接现有 PageRecorder：预览尺寸由页面送来，采集按该视口截帧，避免拉伸。
+ * 人点预览始终落到同一只浏览器；PI 自动点也走同一路画面。
  * draft 只来自 PI 最终提交；没有能力就不能成功。
  */
 
@@ -47,6 +48,7 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
       title: "",
       finalizing: false,
       closed: false,
+      published: false,
       started: Promise.resolve(),
       frameSeq: 0,
       frames: null,
@@ -54,6 +56,19 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
       frameWanted: false,
       flushTimer: null,
       inputChain: Promise.resolve(),
+    };
+
+    const viewExtra = () => {
+      if (!session.recordingId) return {};
+      try {
+        const view = controller.view(session.recordingId);
+        return {
+          assist: view.assist || { reason: "" },
+          human_can_click: view.human_can_click !== false,
+        };
+      } catch {
+        return {};
+      }
     };
 
     const snapshot = (status, extra = {}) => {
@@ -72,6 +87,8 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
           draft_fingerprint: extra.draft_fingerprint,
           error: extra.error || "",
           notice: PI_ONLY_NOTICE,
+          assist: extra.assist ?? viewExtra().assist ?? { reason: "" },
+          human_can_click: extra.human_can_click ?? viewExtra().human_can_click ?? true,
         },
       };
     };
@@ -138,6 +155,46 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
       }, 400);
     };
 
+    const publishResult = async (stopped, { subsystem } = {}) => {
+      if (session.published) return;
+      session.published = true;
+      session.finalizing = true;
+      stopFrames();
+      const draft = structuredClone(stopped.result);
+      const capabilityCount = capabilityCountFromPiResult(draft);
+      const summary = await catalog.remember({
+        recordingId: session.recordingId,
+        action: session.action,
+        title: session.title,
+        goal: controller.view(session.recordingId).goal,
+        result: draft,
+        evidenceCount: stopped.session.evidenceCount,
+        subsystem,
+      });
+      logPiOnly(`PI 已提交 ${capabilityCount} 项能力`);
+      send(ws, { type: "recording_result_saved", result: summary });
+      send(ws, snapshot("editable", {
+        label: `PI 已提交 ${capabilityCount} 项能力`,
+        progress: { step: "ready", label: `第 1～6 阶段已完成，PI 已产出 ${capabilityCount} 项能力` },
+        capture_frozen: true,
+        draft,
+        draft_fingerprint: session.recordingId,
+        assist: { reason: "" },
+        human_can_click: false,
+      }));
+    };
+
+    const failOpen = () => {
+      stopFrames();
+      send(ws, snapshot("failed", {
+        label: publicFailureMessage(),
+        error: publicFailureMessage(),
+        draft: null,
+        assist: { reason: "" },
+        human_can_click: false,
+      }));
+    };
+
     ws.on("message", async (raw) => {
       let message;
       try {
@@ -158,6 +215,8 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
           });
           session.action = String(message.resume_action || newAction());
           session.title = String(message.title || "").trim();
+          session.published = false;
+          session.finalizing = false;
           logPiOnly("正在启动 PI；旧录制逻辑绝不启动");
           think("PI 是唯一语义决策者；旧录制逻辑绝不启动。正在启动 PI。");
           send(ws, snapshot("recording", {
@@ -174,10 +233,33 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
               storageState: message.storage_state || null,
               viewport: message.viewport || null,
               onThought: think,
+              onComplete: async (payload) => {
+                try {
+                  await publishResult(payload, { subsystem: message.subsystem });
+                } catch (error) {
+                  logPiOnly(`自动定稿推送失败：${error?.message || error}`);
+                }
+              },
+              onAssist: () => {
+                send(ws, snapshot("recording", {
+                  label: "PI 正在自动操作，预览你也可以点",
+                  progress: {
+                    step: "capturing",
+                    label: "请协助：预览始终可以点",
+                    request_count: controller.view(session.recordingId).evidenceCount,
+                  },
+                  ...viewExtra(),
+                }));
+              },
+              onFailed: () => {
+                if (session.published) return;
+                failOpen();
+                send(ws, { type: "error", detail: publicFailureMessage() });
+              },
             });
             session.recordingId = started.id;
             resolveStarted();
-            if (session.closed && !session.finalizing) {
+            if (session.closed && !session.finalizing && !session.published) {
               await controller.cancel(started.id).catch(() => {});
               return;
             }
@@ -191,14 +273,15 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
           }
           startFrames(browser);
           logPiOnly(`PI 已启动 recording=${started.id}`);
-          think("PI 已启动，开始原样采集。能力由 PI 在停止后提交。");
+          think("PI 开始自动操作，你也可以点预览。能力边做边交。");
           send(ws, snapshot("recording", {
-            label: "正在录制",
+            label: "PI 正在自动操作，预览你也可以点",
             progress: {
               step: "capturing",
-              label: "正在录制",
+              label: "PI 正在自动操作，预览你也可以点",
               request_count: started.evidenceCount,
             },
+            ...viewExtra(),
           }));
           return;
         }
@@ -218,7 +301,7 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
             .catch(() => {})
             .then(async () => {
               await browser?.applyInput?.(message.event || {});
-              if (shouldFlushFrame(message.event || {})) scheduleFlush(browser);
+              scheduleFlush(browser);
             })
             .catch((error) => {
               send(ws, { type: "input_error", detail: error.message || "页面操作没有执行" });
@@ -227,36 +310,28 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
         }
         if (type === "finish") {
           await session.started;
+          if (session.published) return;
           session.finalizing = true;
-          stopFrames();
-          logPiOnly("证据已冻结，等待 PI 调用 submit_recording_result");
-          think("证据冻结，等待 PI 提交完整能力。");
+          const current = session.recordingId ? controller.view(session.recordingId) : null;
+          if (current?.status === "succeeded" && current.hasFinalResult) {
+            const payload = await controller.result(session.recordingId);
+            await publishResult({
+              session: payload.session,
+              result: payload.result,
+              receipt: payload.receipt,
+            }, { subsystem: message.subsystem });
+            return;
+          }
+          logPiOnly("自动操作结束，浏览器保持打开，等待 PI 提交已完成的能力");
+          think("自动操作结束，等待 PI 提交已完成的能力。预览画面继续更新。");
           send(ws, snapshot("processing", {
             label: "等待 PI 提交能力",
-            progress: { step: "freezing", label: "等待 PI 提交完整能力" },
+            progress: { step: "freezing", label: "等待 PI 提交已完成的能力" },
             capture_frozen: true,
+            ...viewExtra(),
           }));
           const stopped = await controller.stop(session.recordingId);
-          const draft = structuredClone(stopped.result);
-          const capabilityCount = capabilityCountFromPiResult(draft);
-          const summary = await catalog.remember({
-            recordingId: session.recordingId,
-            action: session.action,
-            title: session.title,
-            goal: controller.view(session.recordingId).goal,
-            result: draft,
-            evidenceCount: stopped.session.evidenceCount,
-            subsystem: message.subsystem,
-          });
-          logPiOnly(`PI 已提交 ${capabilityCount} 项能力`);
-          send(ws, { type: "recording_result_saved", result: summary });
-          send(ws, snapshot("editable", {
-            label: `PI 已提交 ${capabilityCount} 项能力`,
-            progress: { step: "ready", label: `第 1～6 阶段已完成，PI 已产出 ${capabilityCount} 项能力` },
-            capture_frozen: true,
-            draft,
-            draft_fingerprint: session.recordingId,
-          }));
+          await publishResult(stopped, { subsystem: message.subsystem });
           return;
         }
         if (type === "cancel") {
@@ -271,6 +346,8 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
             label: publicFailureMessage(),
             error: publicFailureMessage(),
             draft: null,
+            assist: { reason: "" },
+            human_can_click: false,
           }));
         }
       } catch (error) {
@@ -281,6 +358,8 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
           label: publicFailureMessage(),
           error: publicFailureMessage(),
           draft: null,
+          assist: { reason: "" },
+          human_can_click: false,
         }));
         send(ws, { type: "error", detail: publicFailureMessage() });
       }

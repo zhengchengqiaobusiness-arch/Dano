@@ -21,6 +21,72 @@ function busySession() {
   };
 }
 
+test("beginLiveDrive 立即发出操作者提示，notifyEvidence 仍不打断", async () => {
+  const prompts = [];
+  let releasePrompt;
+  const session = {
+    prompts,
+    async prompt(text, options = {}) {
+      prompts.push({ text, options });
+      if (options.streamingBehavior === "steer") return;
+      await new Promise((resolve) => {
+        releasePrompt = resolve;
+      });
+    },
+  };
+  const pi = new LivePiSession({
+    session,
+    sessionId: "pi_drive",
+    dispose: () => {},
+  });
+  const drive = pi.beginLiveDrive({
+    targetUrl: "http://example.com",
+    goal: "做成能力",
+    timeoutMs: 5000,
+    idleSubmitMs: 4000,
+    hasResult: async () => false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(prompts.length >= 1);
+  assert.match(prompts[0].text, /你是操作者|control_in_app_browser/);
+  const before = prompts.length;
+  pi.notifyEvidence({ seq: 11 });
+  pi.notifyEvidence({ seq: 12 });
+  assert.equal(prompts.length, before);
+  pi.notifyHumanAct({ seq: 13 });
+  assert.ok(prompts.some((item) => item.options.streamingBehavior === "steer" && /用户刚在预览/.test(item.text)));
+  await pi.stopLiveDrive();
+  releasePrompt?.();
+  await drive;
+  assert.equal(pi.status, "ready");
+});
+
+test("自动点击空转时只停自动点，不把会话打成失败", async () => {
+  const prompts = [];
+  const session = {
+    prompts,
+    async prompt(text, options = {}) {
+      prompts.push({ text, options });
+    },
+  };
+  const pi = new LivePiSession({
+    session,
+    sessionId: "pi_drive_idle",
+    dispose: () => {},
+  });
+  await pi.beginLiveDrive({
+    targetUrl: "http://example.com",
+    goal: "做成能力",
+    timeoutMs: 80,
+    idleSubmitMs: 20,
+    maxEmptySettles: 1,
+    hasResult: async () => false,
+  });
+  assert.equal(pi.alive, true);
+  assert.notEqual(pi.status, "failed");
+  assert.equal(pi.status, "ready");
+});
+
 test("录制中不打断 PI，冻结后只发一次最终提示，忙时改用 followUp", async () => {
   const session = busySession();
   const pi = new LivePiSession({
@@ -83,7 +149,7 @@ test("分析停住时催促提交，但不中止当前轮", async () => {
     trace,
   });
   await assert.rejects(
-    () => pi.requestFinalAnalysis({ timeoutMs: 70, idleSubmitMs: 40 }),
+    () => pi.requestFinalAnalysis({ timeoutMs: 90, idleSubmitMs: 50 }),
     /超时/,
   );
   const steers = prompts.filter((item) => item.options.streamingBehavior === "steer" && /submit_recording_result/.test(item.text));

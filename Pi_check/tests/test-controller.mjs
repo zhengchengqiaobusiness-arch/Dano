@@ -75,14 +75,48 @@ test("5. PI 提交错误录制编号时必须失败", async () => {
   }
 });
 
-test("6. 证据未冻结时提交最终结果必须失败", async () => {
+test("6. PI 可通过工具自行冻结并定稿", async () => {
   const harness = await createHarness({ piBehavior: "submit_unfrozen" });
   try {
     const started = await harness.controller.start({ targetUrl: "http://example.com", goal: "目标" });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(harness.getPi().unfrozenRejected, true);
-    assert.equal(await harness.files.hasPiResult(started.id), false);
-    await assert.rejects(() => harness.controller.stop(started.id), /失败/);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(harness.getPi().unfrozenRejected, false);
+    assert.equal(await harness.files.hasPiResult(started.id), true);
+    const stopped = await harness.controller.stop(started.id);
+    assert.equal(stopped.session.status, "succeeded");
+    assert.equal(stopped.session.hasFinalResult, true);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("6c. 自动点击失败不得结束录制，人手点预览和停录分析仍可用", async () => {
+  const harness = await createHarness({ piBehavior: "drive_fail" });
+  try {
+    const started = await harness.controller.start({ targetUrl: "http://example.com", goal: "目标" });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(harness.controller.view(started.id).status, "recording");
+    assert.equal(harness.controller.acceptHumanInput(started.id), true);
+    const browser = harness.controller.browserOf(started.id);
+    await browser.applyInput({ kind: "pointer_down", nx: 0.3, ny: 0.4 });
+    const events = await harness.files.readEvidence(started.id);
+    assert.ok(events.some((item) => item.kind === "interaction" && item.payload?.actor === "human"));
+    const stopped = await harness.controller.stop(started.id);
+    assert.equal(stopped.session.status, "succeeded");
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("6b. 录制中人始终可以点预览", async () => {
+  const harness = await createHarness();
+  try {
+    const started = await harness.controller.start({ targetUrl: "http://example.com", goal: "目标" });
+    assert.equal(harness.controller.acceptHumanInput(started.id), true);
+    assert.equal(harness.controller.view(started.id).human_can_click, true);
+    harness.controller.requestAssist(started.id, "请登录");
+    assert.equal(harness.controller.acceptHumanInput(started.id), true);
+    assert.match(harness.controller.view(started.id).assist.reason, /请登录/);
   } finally {
     await harness.cleanup();
   }

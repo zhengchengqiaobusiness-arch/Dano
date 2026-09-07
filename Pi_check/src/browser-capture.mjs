@@ -10,6 +10,7 @@
 import { randomUUID } from "node:crypto";
 import { logPiOnly } from "./policy.mjs";
 import { collectVisibleControlsInPage } from "./visible-controls.mjs";
+import { collectInteractiveSnapshot } from "./browser-snapshot.mjs";
 import {
   isLoginUrl,
   looksLoggedIn,
@@ -314,6 +315,8 @@ async function snapshotVisibleControls(page, handle, append, reason) {
 }
 
 export class PlaywrightBrowser {
+  #actionQueue = Promise.resolve();
+
   constructor({ browser, context, page, recordingId, targetUrl = "" }) {
     this.browser = browser;
     this.context = context;
@@ -328,6 +331,9 @@ export class PlaywrightBrowser {
     this.requestIds = new WeakMap();
     this.sealed = {};
     this.lastPointerMoveAt = 0;
+    this.lastHumanActAt = 0;
+    this.lastActAt = 0;
+    this.appendEvidence = null;
     this.sawLoginPage = false;
     this.snapshotVisibleControls = async () => {};
     this.viewport = DEFAULT_VIEWPORT;
@@ -457,7 +463,137 @@ export class PlaywrightBrowser {
     return { url: this.livePage()?.url() || "" };
   }
 
+  enqueue(task) {
+    const run = this.#actionQueue.then(task, task);
+    this.#actionQueue = run.then(() => {}, () => {});
+    return run;
+  }
+
+  recentlyHuman(ms = 800) {
+    return Date.now() - Number(this.lastHumanActAt || 0) < ms;
+  }
+
+  listPages() {
+    const current = this.livePage();
+    return {
+      pages: this.pages.filter((item) => !item.isClosed()).map((item) => ({
+        url: item.url(),
+        current: item === current,
+      })),
+    };
+  }
+
+  async openPage(url) {
+    return this.enqueue(async () => {
+      const page = this.livePage();
+      if (this.closed || !page) return { available: false, error: "浏览器未打开" };
+      const next = String(url || "").trim();
+      if (next) {
+        await page.goto(next, { waitUntil: "domcontentloaded" });
+        await waitForPageReady(page);
+      }
+      this.lastActAt = Date.now();
+      return { available: true, url: page.url() };
+    });
+  }
+
+  async inspect({ includeScreenshot = false } = {}) {
+    return this.enqueue(async () => {
+      const page = this.livePage();
+      if (this.closed || !page) return { available: false, error: "浏览器未打开" };
+      const frames = [];
+      for (const scope of actionScopes(page)) {
+        try {
+          frames.push(await scope.evaluate(collectInteractiveSnapshot));
+        } catch {
+          // frame 未就绪时跳过
+        }
+      }
+      const snapshot = {
+        available: true,
+        url: page.url(),
+        title: await page.title().catch(() => ""),
+        frames,
+        controls: frames.flatMap((item) => item.controls || []),
+        actions: frames.flatMap((item) => item.actions || []),
+      };
+      if (includeScreenshot) {
+        try {
+          const bytes = await page.screenshot(frameScreenshotOptions(this.deviceScaleFactor));
+          const size = page.viewportSize() || this.viewport || DEFAULT_VIEWPORT;
+          snapshot.screenshot = {
+            data: Buffer.from(bytes).toString("base64"),
+            width: size.width,
+            height: size.height,
+          };
+        } catch (error) {
+          snapshot.screenshot = { error: error.message || String(error) };
+        }
+      }
+      return snapshot;
+    });
+  }
+
+  async actByRef({ ref = "", action = "click", text = "" } = {}) {
+    return this.enqueue(async () => {
+      const page = this.livePage();
+      if (this.closed || !page) return { ok: false, error: "浏览器未打开" };
+      const token = String(ref || "").trim();
+      if (!token) return { ok: false, error: "缺少 ref。先 snapshot。" };
+      if (this.recentlyHuman()) {
+        await page.waitForTimeout(120);
+      }
+      let handle = null;
+      for (const scope of actionScopes(page)) {
+        const locator = scope.locator(`[data-pi-ref="${token}"]`);
+        if (await locator.count()) {
+          handle = locator.first();
+          break;
+        }
+      }
+      if (!handle) {
+        return { ok: false, error: `找不到 ref=${token}。重新 snapshot，不要默认点第一个重名控件。` };
+      }
+      const kind = String(action || "click");
+      try {
+        if (kind === "fill") await handle.fill(String(text ?? ""));
+        else if (kind === "select") await handle.selectOption(String(text ?? "")).catch(async () => handle.click());
+        else if (kind === "press") await handle.press(String(text || "Enter"));
+        else await handle.click();
+      } catch (error) {
+        return { ok: false, error: error.message || String(error) };
+      }
+      this.lastActAt = Date.now();
+      if (typeof this.appendEvidence === "function") {
+        await this.appendEvidence("interaction", {
+          actor: "pi",
+          kind,
+          ref: token,
+          text: String(text || "").slice(0, 80),
+        });
+      }
+      return { ok: true, url: page.url(), ref: token, action: kind };
+    });
+  }
+
+  async fillFields(fields = []) {
+    const rows = Array.isArray(fields) ? fields : [];
+    const results = [];
+    for (const field of rows) {
+      results.push(await this.actByRef({
+        ref: field?.ref,
+        action: "fill",
+        text: field?.value ?? field?.text ?? "",
+      }));
+    }
+    return { ok: results.every((item) => item.ok), filled: results.filter((item) => item.ok).length, results };
+  }
+
   async applyInput(event) {
+    return this.#applyInputNow(event);
+  }
+
+  async #applyInputNow(event) {
     const page = this.livePage();
     if (this.closed || !page) return;
     const viewport = page.viewportSize() || this.viewport || DEFAULT_VIEWPORT;
@@ -481,24 +617,34 @@ export class PlaywrightBrowser {
       return;
     }
     if (kind === "pointer_down") {
+      this.lastHumanActAt = Date.now();
+      this.lastActAt = Date.now();
       await page.mouse.move(x, y);
       await page.mouse.down({ button: event.button || "left" });
       return;
     }
     if (kind === "pointer_up") {
+      this.lastHumanActAt = Date.now();
+      this.lastActAt = Date.now();
       await page.mouse.move(x, y);
       await page.mouse.up({ button: event.button || "left" });
       return;
     }
     if (kind === "scroll") {
+      this.lastHumanActAt = Date.now();
+      this.lastActAt = Date.now();
       await page.mouse.wheel(Number(event.dx || 0), Number(event.dy || 0));
       return;
     }
     if (kind === "text" && event.text) {
+      this.lastHumanActAt = Date.now();
+      this.lastActAt = Date.now();
       await page.keyboard.type(String(event.text));
       return;
     }
     if (kind === "key" && event.key) {
+      this.lastHumanActAt = Date.now();
+      this.lastActAt = Date.now();
       await page.keyboard.press(String(event.key));
     }
   }
@@ -584,6 +730,7 @@ export async function createPlaywrightBrowser({ recording, appendEvidence }) {
   });
   handle.viewport = viewport;
   handle.deviceScaleFactor = deviceScaleFactor;
+  handle.appendEvidence = appendEvidence;
   if (storage && looksLoggedIn(storage)) {
     logPiOnly("已恢复上次登录态");
   }
@@ -669,6 +816,7 @@ async function installContextHooks(context, handle, append) {
     const pageId = handle.pageIds.get(source.page) || "";
     await append("interaction", {
       page_id: pageId,
+      actor: payload?.actor || "human",
       ...payload,
     });
     if (String(payload?.kind || "") === "click" && shouldResnapshotAfterClick(payload)) {

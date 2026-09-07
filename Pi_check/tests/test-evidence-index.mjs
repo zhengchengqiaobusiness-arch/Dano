@@ -84,6 +84,7 @@ test("证据索引只投影已有字段，不分类也不补能力", () => {
     href: "https://example.com/#/list",
     placeholder: "请输入单据编号",
     label: "单据编号",
+    actor: "human",
   });
   assert.deepEqual(index.items[1], {
     seq: 2,

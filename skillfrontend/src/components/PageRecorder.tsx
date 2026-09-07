@@ -151,6 +151,8 @@ interface WorkflowSnapshot {
   error?: string;
   stage_seven_attempt_id?: string;
   machine_verification_status?: string;
+  assist?: { reason?: string };
+  human_can_click?: boolean;
 }
 
 interface FlowParam {
@@ -555,12 +557,18 @@ function fmtHistoryTime(value?: string) {
 const RESULT_STATUS_BOX_STYLE = { width: "100%", height: 420, boxSizing: "border-box" as const };
 const REPLAY_SKIP_HINTS = ["跳过回放取证", "仍无法登录", "录制会话登录态已过期", "请刷新凭证后重新点"];
 
-const DEFAULT_RECORDING_GOAL_TEMPLATE = "请将我接下来在页面中实际完成的每项业务操作分别生成一个可调用能力。";
+const LEGACY_RECORDING_GOAL_TEMPLATES = [
+  "请将我接下来在页面中实际完成的每项业务操作分别生成一个可调用能力。",
+  "请自动操作该页，把每项独立业务动作做成可调用能力。",
+];
+const DEFAULT_RECORDING_GOAL_TEMPLATE = "PI 自动操作页面，你也可以随时点预览。把该页独立业务动作做成可调用能力。";
 
 function looksLikeRecordingGoal(text: string) {
   const value = String(text || "").trim();
   if (!value || value === DEFAULT_RECORDING_GOAL_TEMPLATE) return true;
+  if (LEGACY_RECORDING_GOAL_TEMPLATES.includes(value)) return true;
   if (/^请将我接下来|^请把我接下来|^请根据我接下来|^请将接下来|^请把接下来/.test(value)) return true;
+  if (/PI 自动操作页面|你也可以随时点预览|双通道|请自动操作该页/.test(value)) return true;
   return /生成一个可调用能力|分别生成一个|每项业务操作|接下来在页面中实际完成/.test(value);
 }
 
@@ -684,7 +692,6 @@ function recorderWebSocketUrl() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   if (
     import.meta.env.DEV
-    && location.port === "5173"
     && ["localhost", "127.0.0.1", "::1"].includes(location.hostname)
   ) {
     return "ws://127.0.0.1:8077/onboarding/page/record";
@@ -705,7 +712,9 @@ function readSetupDraft() {
     return {
       startUrl: typeof parsed.startUrl === "string" ? parsed.startUrl : "",
       goalText: typeof parsed.goalText === "string" && parsed.goalText.trim()
-        ? parsed.goalText
+        ? (LEGACY_RECORDING_GOAL_TEMPLATES.includes(parsed.goalText.trim())
+          ? DEFAULT_RECORDING_GOAL_TEMPLATE
+          : parsed.goalText)
         : DEFAULT_RECORDING_GOAL_TEMPLATE,
       title: typeof parsed.title === "string" ? parsed.title : "",
       machineVerification: parsed.machineVerification === true,
@@ -2593,7 +2602,7 @@ export default function PageRecorder({
                 style={{ width: "100%" }}
               />
               <div style={{ marginTop: 4 }}>
-                <Text type="secondary">系统只根据实际录制且有完整证据的业务操作生成能力。</Text>
+                <Text type="secondary">PI 会自动点页面，你也可以随时点预览。系统只根据实际发生且有完整证据的业务操作生成能力。</Text>
               </div>
             </div>
           </div>
@@ -2694,6 +2703,7 @@ export default function PageRecorder({
                 ? snapshot.progress.label
                 : STATUS_LABELS[status]}
             </Tag>
+            {status === "recording" ? <Tag color="geekblue">双通道操作</Tag> : null}
             <Space size={6} style={{ whiteSpace: "nowrap" }}>
               <Switch
                 size="small"
@@ -2716,7 +2726,7 @@ export default function PageRecorder({
                 disabled={processing || (status !== "recording" && !canRetryPublish)}
                 onClick={requestPublish}
               >
-                结束录制并分析
+                结束并产出能力
               </Button>
             ) : (
               <Button
@@ -2764,8 +2774,36 @@ export default function PageRecorder({
               height: "100%",
               touchAction: "none",
               cursor: status === "recording" ? "default" : "not-allowed",
+              pointerEvents: status === "recording" ? "auto" : "none",
             }}
           />
+          {status === "recording" && snapshot?.assist?.reason ? (
+            <Alert
+              type="warning"
+              showIcon
+              banner
+              message={snapshot.assist.reason}
+              style={{ position: "absolute", top: 0, left: 0, right: 0, zIndex: 3 }}
+            />
+          ) : null}
+          {status === "recording" && hasFrame ? (
+            <div
+              style={{
+                position: "absolute",
+                left: 10,
+                bottom: 10,
+                zIndex: 2,
+                pointerEvents: "none",
+                padding: "4px 8px",
+                borderRadius: 6,
+                background: "rgba(0,0,0,0.55)",
+                color: "#fff",
+                fontSize: 12,
+              }}
+            >
+              PI 正在自动操作，你也可以直接点预览
+            </div>
+          ) : null}
           {!hasFrame ? (
             <Empty
               description={

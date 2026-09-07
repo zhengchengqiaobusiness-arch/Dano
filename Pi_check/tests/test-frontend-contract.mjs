@@ -139,6 +139,28 @@ test("点完停止后前台断开，PI 仍能提交并写入历史", async () =>
   }
 });
 
+test("非协助时人点预览不会被丢弃，并与 PI 点进同一证据", async () => {
+  const harness = await createHarness({ result: sampleResult() });
+  try {
+    const started = await harness.controller.start({
+      targetUrl: "http://example.com",
+      goal: "产出能力",
+    });
+    const browser = harness.controller.browserOf(started.id);
+    assert.equal(harness.controller.acceptHumanInput(started.id), true);
+    await browser.applyInput({ kind: "pointer_down", nx: 0.2, ny: 0.3 });
+    await browser.actByRef({ ref: "a1", action: "click" });
+    const events = await harness.files.readEvidence(started.id);
+    const human = events.find((item) => item.kind === "interaction" && item.payload?.actor === "human");
+    const pi = events.find((item) => item.kind === "interaction" && item.payload?.actor === "pi");
+    assert.ok(human, "应留下人的交互");
+    assert.ok(pi, "应留下 PI 的交互");
+    assert.equal(harness.controller.view(started.id).human_can_click, true);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test("采集中前台断开仍会取消且没有能力", async () => {
   const harness = await createHarness({
     result: sampleResult(),

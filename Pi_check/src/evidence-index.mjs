@@ -38,6 +38,7 @@ export function buildEvidenceIndex(events) {
         href: String(payload.href || ""),
         placeholder: String(payload.placeholder || ""),
         label: String(payload.label || ""),
+        actor: String(payload.actor || "human"),
       });
       continue;
     }
