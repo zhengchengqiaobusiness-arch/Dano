@@ -5,7 +5,34 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHarness, sampleResult } from "./helpers/harness.mjs";
-import { createPiToolHost } from "../src/pi-tools.mjs";
+import { createPiToolHost, wrapPiToolsForSdk } from "../src/pi-tools.mjs";
+
+const FakeType = {
+  String: () => ({}),
+  Integer: () => ({}),
+  Boolean: () => ({}),
+  Object: () => ({}),
+  Array: () => ({}),
+  Optional: (value) => value,
+};
+
+test("最终结果校验失败时把具体原因返回给 PI 继续修正", async () => {
+  const tools = wrapPiToolsForSdk({
+    async submit_recording_result() {
+      throw new Error("input_schema.properties.businessId 必须对应 exposed_to_user=true 的 param.key");
+    },
+  }, (spec) => spec, FakeType);
+  const submit = tools.find((item) => item.name === "submit_recording_result");
+  const response = await submit.execute("call_1", {
+    recording_id: "rec_test",
+    final: true,
+    result: { capabilities: [{}] },
+  });
+  const payload = JSON.parse(response.content[0].text);
+  assert.equal(payload.accepted, false);
+  assert.match(payload.error, /businessId/);
+  assert.match(payload.next_action, /修正.*重新调用 submit_recording_result/);
+});
 
 test("14. 完成一次真实 PI 最终提交", async () => {
   const result = sampleResult({

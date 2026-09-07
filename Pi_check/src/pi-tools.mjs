@@ -340,6 +340,13 @@ export function wrapPiToolsForSdk(host, defineTool, Type, trace = null) {
         const message = error?.message || String(error);
         if (trace) trace.recordTool(spec.name, args, message, false);
         else logPiOnly(`[PI分析] 工具失败 ${spec.name} ${Date.now() - started}ms → ${message}`);
+        if (spec.name === SUBMIT_RECORDING_RESULT) {
+          return toolText({
+            accepted: false,
+            error: message,
+            next_action: "按 error 精确修正 result，保留其它已完成能力，不要重读证据，然后重新调用 submit_recording_result。",
+          });
+        }
         throw error;
       }
     },
