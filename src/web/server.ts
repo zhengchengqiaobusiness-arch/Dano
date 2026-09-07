@@ -388,7 +388,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, pat
     if (!messageText) throw new Error("A message is required");
     const userEvent = page.acceptUserMessage(messageText);
     sendJson(response, 202, { accepted: true, item: userEvent.item, epoch: page.epoch });
-    void page.runPrompt(messageText);
+    void page.runPrompt(messageText, body.browserUrl ? parseBrowserUrl(body.browserUrl) : undefined);
     return;
   }
 

@@ -17,6 +17,7 @@ export class PiRpcBridge {
   private readonly listeners = new Set<EventListener>();
   private readonly pendingUiRequests = new Set<string>();
   private suppressEvents = false;
+  private interrupting?: Promise<void>;
 
   constructor(
     private readonly cwd: string,
@@ -150,6 +151,20 @@ export class PiRpcBridge {
 
   async abort() {
     return this.request({ type: "abort" });
+  }
+
+  interrupt(): Promise<void> {
+    if (this.interrupting) return this.interrupting;
+    if (!this.ready || !this.streaming) return Promise.resolve();
+    this.suppressEvents = true;
+    this.cancelPendingUi();
+    const pending = Promise.all([this.request({ type: "clear_queue" }), this.abort()]);
+    this.interrupting = pending.then(() => {}).finally(() => {
+      this.streaming = false;
+      this.suppressEvents = false;
+      this.interrupting = undefined;
+    });
+    return this.interrupting;
   }
 
   async newSession() {

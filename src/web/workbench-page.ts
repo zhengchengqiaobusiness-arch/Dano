@@ -64,6 +64,7 @@ export class WorkbenchPage {
   private coverageContinuationTimer?: ReturnType<typeof setTimeout>;
   private coverageContinuations = 0;
   private promptGeneration = 0;
+  private interruption = Promise.resolve();
   private completeFieldCoverageRequested = false;
 
   constructor(
@@ -289,6 +290,8 @@ export class WorkbenchPage {
   }
 
   async stopRecording() {
+    this.promptGeneration += 1;
+    this.cancelCoverageContinuation();
     this.cancelManualTakeover("recording-stopped");
     const pid = this.recorder.browserProcessId();
     const session = await this.recorder.stop();
@@ -300,6 +303,11 @@ export class WorkbenchPage {
 
   acceptUserMessage(text: string) {
     this.promptGeneration += 1;
+    this.cancelCoverageContinuation();
+    this.cancelManualTakeover("user-message");
+    this.recorder.cancelPendingActions("用户发送了新指令。");
+    this.interruption = this.pi.interrupt();
+    void this.interruption.catch(() => {}); // runPrompt reports the failure to this user turn.
     this.transcriptOpen = true;
     this.completeFieldCoverageRequested = requiresCompleteFieldCoverage(text);
     const userEvent = this.transcript.addUser(text);
@@ -307,13 +315,15 @@ export class WorkbenchPage {
     return userEvent;
   }
 
-  async runPrompt(message: string) {
+  async runPrompt(message: string, browserUrl?: string) {
     const generation = this.promptGeneration;
     try {
+      await this.interruption;
       await this.ensureStarted();
       if (generation !== this.promptGeneration || this.disposing) return;
       this.transcriptOpen = true;
-      await this.pi.prompt(message);
+      await this.pi.prompt(browserUrl && !/https?:\/\//.test(message)
+        ? `当前内置浏览器页面上下文：${browserUrl}\n用户原文：${message}` : message);
     } catch (error) {
       if (generation !== this.promptGeneration || this.disposing) return;
       const text = error instanceof Error ? error.message : String(error);

@@ -112,6 +112,26 @@ test("Pi RPC exposes processId so workbench abort/dispose does not throw", () =>
   assert.equal(bridge.processId(), undefined);
 });
 
+test("human interruption immediately aborts and clears queued work without killing the session", async () => {
+  const bridge = new PiRpcBridge(".", "http://127.0.0.1:4310", "test-token");
+  (bridge as any).ready = true;
+  (bridge as any).streaming = true;
+  const calls: string[] = [];
+  let finish!: () => void;
+  (bridge as any).request = (command: { type: string }) => {
+    calls.push(command.type);
+    return command.type === "abort" ? new Promise<void>(resolve => { finish = resolve; }) : Promise.resolve();
+  };
+  const first = bridge.interrupt();
+  const second = bridge.interrupt();
+  assert.deepEqual(calls, ["clear_queue", "abort"]);
+  assert.equal(first, second, "rapid human messages share the same in-flight abort");
+  finish();
+  await first;
+  assert.equal(bridge.status().ready, true);
+  assert.equal(bridge.status().streaming, false);
+});
+
 test("a settled agent is resumed to stop and export after the live recording audit passes", async () => {
   const page = new WorkbenchPage("page_finalizeaudit", {
     rootDir: ".",

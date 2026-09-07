@@ -34,7 +34,7 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   const browserServiceUrl = process.env.BSS_BROWSER_SERVICE_URL?.replace(/\/+$/, "");
   const browserServiceToken = process.env.BSS_BROWSER_SERVICE_TOKEN;
 
-  const browserRequest = async <T>(path: string, body?: unknown): Promise<T> => {
+  const browserRequest = async <T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> => {
     if (!browserServiceUrl || !browserServiceToken) throw new Error("Embedded browser service is unavailable");
     const response = await fetch(`${browserServiceUrl}/internal/browser${path}`, {
       method: "POST",
@@ -42,7 +42,8 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
         "Authorization": `Bearer ${browserServiceToken}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(body ?? {})
+      body: JSON.stringify(body ?? {}),
+      signal
     });
     const payload = await response.json().catch(() => ({})) as any;
     if (!response.ok) throw new Error(payload.error || `Embedded browser request failed: ${response.status}`);
@@ -58,8 +59,8 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   const stopReadiness = () => browserServiceUrl
     ? browserRequest<any>("/stop-readiness")
     : studio.recorder.stopReadiness();
-  const controlBrowser = (command: any) => browserServiceUrl
-    ? browserRequest<any>("/control", command)
+  const controlBrowser = (command: any, signal?: AbortSignal) => browserServiceUrl
+    ? browserRequest<any>("/control", command, signal)
     : studio.recorder.control(command);
   const exportSkillPackage = (name: string, sessionId: string) => browserServiceUrl
     ? browserRequest<any>("/export", { name, sessionId })
@@ -68,6 +69,12 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     lastRecordingSessionId = undefined;
     if (!browserServiceUrl && studio.recorder.isActive()) await studio.stopRecording().catch(() => {});
+  });
+
+  pi.on("turn_end", (event, ctx) => {
+    // The successful export result is already stored. End this turn before Pi
+    // launches another model/tool cycle; a later real user message remains possible.
+    if (event.toolResults.some(result => result.toolName === "business_skill_export" && !result.isError)) ctx.abort();
   });
 
   pi.registerTool({
@@ -154,8 +161,8 @@ export default function businessSkillStudio(pi: ExtensionAPI) {
       key: { type: "string" },
       ms: { type: "number" }
     }, ["action"]),
-    async execute(_id, params: any) {
-      const result = await controlBrowser(params);
+    async execute(_id, params: any, signal) {
+      const result = await controlBrowser(params, signal);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         details: result
