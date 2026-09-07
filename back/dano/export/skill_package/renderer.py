@@ -2273,6 +2273,13 @@ def _script_invocation_for(plans: list[dict], cap_id: str) -> str:
     return _script_invocation(item) if item else ""
 
 
+def _optional_query_fast_command(plan: dict | None) -> str:
+    if not plan or plan.get("is_write") or plan.get("requires_confirmation") or _required_fields(plan):
+        return ""
+    script = str(plan.get("script") or "").strip()
+    return f"python scripts/{script}.py --input-json '{{}}'" if script else ""
+
+
 def _cross_step_label(route: dict) -> str:
     bindings = [item for item in (route.get("bindings") or []) if isinstance(item, dict) and item.get("from_output")]
     if bindings:
@@ -2295,6 +2302,10 @@ def _ask_when_label(route: dict, plans: list[dict] | None = None) -> str:
     checks = [item for item in (route.get("checkpoints") or []) if isinstance(item, dict)]
     if checks:
         return "；".join(_handbook_text(item.get("prompt") or "上一步完成后请用户选定目标") for item in checks)
+    sequence = [str(item) for item in (route.get("capability_sequence") or []) if str(item)]
+    item = _plan_by_ref(plans or []).get(sequence[0]) if len(sequence) == 1 else None
+    if _optional_query_fast_command(item):
+        return "无筛选条件时直接执行；需要筛选时只加载用户明确要求的筛选字段候选"
     names: list[str] = []
     seen: set[str] = set()
     for cap_id in route.get("capability_sequence") or []:
@@ -2367,6 +2378,9 @@ def _public_route_id(route: dict, plans: list[dict]) -> str:
 def _route_detail_link(route: dict, plans: list[dict]) -> str:
     sequence = [str(item) for item in (route.get("capability_sequence") or []) if str(item)]
     if len(sequence) <= 1:
+        item = _plan_by_ref(plans).get(sequence[0]) if sequence else None
+        if command := _optional_query_fast_command(item):
+            return f"无筛选条件时直接运行 `{command}`；需要筛选时读取 `references/CAPABILITIES.md` 对应行"
         return "需要调用时读取 `references/CAPABILITIES.md` 对应行"
     route_id = _public_route_id(route, plans)
     return f"[`references/routes/{route_id}.md`](references/routes/{route_id}.md)"
@@ -2458,7 +2472,7 @@ def _caller_display_rules() -> list[str]:
         "向用户收集或核对时，展示必须与能力契约完全一致，不要另做一套界面，也不要从原页补契约没有的项。",
         "",
         "- 标签只用 `input_schema` 的 title/label，以及对象数组 `items.properties` 的 title。禁止在问句、确认框或表头里附加「JSON 数组」「JSON 对象」或类型名。",
-        "- 表单以 `references/INPUT_FORMS.md` 里该能力的 `questions[]` 为准。字段、options 和条数必须与能力 `input_schema` 完全一致；枚举只显示契约 options 的 label，纠错仍用同一组 options。禁止增加、删除、改写 options，禁止少问能力里已有的字段。可选字段展示后未选则不传该字段。",
+        "- 需要收集输入时，表单以 `references/INPUT_FORMS.md` 里该能力的 `questions[]` 为准，字段、options 和条数必须与能力 `input_schema` 完全一致。变更操作必须展示完整表单，禁止少问能力里已有的字段；禁止增加、删除、改写 options。只读操作所有字段均可选且用户未指定筛选时，不展示表单，直接执行；用户指定筛选时只收集对应字段。枚举只显示契约 options 的 label，可选字段未选则不传。",
         "- 对象数组按 `questions[]` 的 `columns`/`sections` 画成 Markdown 表。列名用各分区表头原文。空表写「暂无数据」。",
         "- 线格式只在调用脚本前组装；用户眼前始终是页面字段，不是请求 JSON。",
         "",
@@ -2474,8 +2488,8 @@ def _execution_protocol() -> list[str]:
         "   Done when: 选出恰好一条路线，或已提出一个可回答的澄清问题。",
         "2. 组合路线按详情指针读取对应路线文件；原子路线只在需要调用时读取 `references/CAPABILITIES.md` 对应行。缺少输入时再读取当前能力的输入表单。",
         "   Done when: 只打开当前路线和当前步骤真正需要的资源。",
-        "3. 按当前能力输入表单原样展示全部调用方字段。只有本轮已校验的回答、固定值、系统值和已确认绑定不重复询问。",
-        "   Done when: 表单已覆盖该能力全部调用方字段，或用户取消。",
+        "3. 变更操作按当前能力输入表单原样展示全部调用方字段。只读操作所有字段均可选且用户未指定筛选时，不展示表单并走工作流表中的直接命令；用户指定筛选时只加载用户明确要求的筛选字段候选。",
+        "   Done when: 变更操作表单已覆盖该能力全部调用方字段，或只读查询已直接执行/仅收集明确筛选字段，或用户取消。",
         "4. 按合同处理绑定或人工交接；没有已确认绑定时先完成前一步，再请用户选择，不猜测跨步字段，不默认第一条候选。",
         "   Done when: 下一步输入已确认，或已停止并说明原因。",
         "5. 所有变更操作先按「展示与确认」核对页面字段，获得确认后再执行带 `--confirm` 的脚本；只读操作收集齐输入后直接执行。",
@@ -2516,8 +2530,8 @@ def _on_demand_resources(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
     lines = [
         "## 按需读取资源",
         "",
-        "- 当前操作缺少输入时，读取 `references/INPUT_FORMS.md` 中对应能力的章节，按其中完整 `questions[]` 提问，不得少问。",
-        "- 字段需要动态候选时，读取 `references/OPTIONS.md`，并按输入表单中的命令先实时拉取 `options`；不得让表单前端匿名请求业务接口。",
+        "- 变更操作缺少输入时，读取 `references/INPUT_FORMS.md` 中对应能力的章节，按其中完整 `questions[]` 提问。只读操作没有必填字段且用户未指定筛选时不要读取表单。",
+        "- 用户明确要求某个动态筛选字段时，才读取 `references/OPTIONS.md` 并只拉取该字段的 `options`；不得预加载未使用字段，也不得让表单前端匿名请求业务接口。",
         "- 原子路线需要调用命令，或需要判断能力输入输出边界时，读取 `references/CAPABILITIES.md` 对应行。",
         "- 不要在开始前读取 references 下的全部文件。",
         "- 组合路线只在工作流表「详情」列指向该文件时读取；不要为单次原子操作加载组合文件。",

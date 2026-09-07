@@ -1469,6 +1469,49 @@ def test_numeric_display_title_keeps_string_name_and_lists_original_operations()
     assert "新增并提交工作日报" in md
 
 
+def test_read_only_route_with_only_optional_filters_has_a_direct_fast_path() -> None:
+    plans = [{
+        "capability_id": "cap_search_leave",
+        "name": "搜索请假列表",
+        "title": "搜索请假列表",
+        "kind": "query",
+        "script": "cap_search_leave_list",
+        "is_write": False,
+        "requires_confirmation": False,
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "title": "流程状态"},
+                "leaveType": {"type": "string", "title": "请假类型"},
+            },
+            "required": [],
+        },
+    }]
+    skill = type("Skill", (), {
+        "call_metadata": {
+            "skill_plan": {
+                "routes": [{
+                    "route_id": "search_leave",
+                    "name": "搜索请假列表",
+                    "when_to_use": "只查询请假列表",
+                    "capability_sequence": ["cap_search_leave"],
+                }],
+            },
+        },
+        "api_request": {},
+    })()
+
+    handbook = "\n".join([
+        *_workflow_table(skill, plans),
+        *_execution_protocol(),
+    ])
+
+    assert "无筛选条件时直接运行" in handbook
+    assert "python scripts/cap_search_leave_list.py --input-json '{}'" in handbook
+    assert "只加载用户明确要求的筛选字段候选" in handbook
+    assert "所有字段均可选且用户未指定筛选时，不展示表单" in handbook
+
+
 def test_numeric_display_title_does_not_block_export(tmp_path: Path) -> None:
     capabilities = [
         {
