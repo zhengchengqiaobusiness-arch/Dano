@@ -816,6 +816,8 @@ export default function PageRecorder({
   const verificationLogRef = useRef<HTMLDivElement | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
+  const connectedRef = useRef(false);
+  const disconnectNoticeRef = useRef(false);
   const snapshotRef = useRef<WorkflowSnapshot | null>(null);
   const actionRef = useRef("");
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1212,6 +1214,7 @@ export default function PageRecorder({
       if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
       const socket = wsRef.current;
       wsRef.current = null;
+      connectedRef.current = false;
       if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "page closed");
     };
   }, []);
@@ -1223,11 +1226,32 @@ export default function PageRecorder({
     }
   }
 
+  function clearInputTimers() {
+    if (pointerTimerRef.current !== null) {
+      window.clearTimeout(pointerTimerRef.current);
+      pointerTimerRef.current = null;
+    }
+    pointerMoveRef.current = null;
+    pointerRef.current = null;
+    if (wheelTimerRef.current !== null) {
+      window.clearTimeout(wheelTimerRef.current);
+      wheelTimerRef.current = null;
+    }
+    wheelRef.current = null;
+  }
+
+  function setLive(value: boolean) {
+    connectedRef.current = value;
+    setConnected(value);
+  }
+
   function closeRecordingSocket() {
     stopReconnect();
+    clearInputTimers();
+    startHostGenRef.current += 1;
     const socket = wsRef.current;
     wsRef.current = null;
-    setConnected(false);
+    setLive(false);
     setConnecting(false);
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "client stop");
   }
@@ -1255,12 +1279,19 @@ export default function PageRecorder({
   }
 
   function markRecordingDisconnected(reason: string) {
+    stopReconnect();
+    clearInputTimers();
+    setLive(false);
     const current = snapshotRef.current;
     const detail = reason || "后台录制进程已断开";
     finishRequestedRef.current = false;
     setFinishRequested(false);
     setConnecting(false);
-    if (!current || ["failed", "cancelled", "published", "editable"].includes(current.status)) {
+    if (disconnectNoticeRef.current || ["failed", "cancelled", "published", "editable"].includes(current?.status || "")) {
+      return;
+    }
+    disconnectNoticeRef.current = true;
+    if (!current) {
       message.error(detail);
       return;
     }
@@ -1286,12 +1317,15 @@ export default function PageRecorder({
 
   function send(payload: Record<string, unknown>) {
     const socket = wsRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      message.error("录制连接不可用");
+    if (!connectedRef.current || !socket || socket.readyState !== WebSocket.OPEN) {
       return false;
     }
-    socket.send(JSON.stringify(payload));
-    return true;
+    try {
+      socket.send(JSON.stringify(payload));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function previewDeviceScale() {
@@ -1555,7 +1589,8 @@ export default function PageRecorder({
     wsRef.current = socket;
     socket.onopen = () => {
       reconnectAttemptRef.current = 0;
-      setConnected(true);
+      disconnectNoticeRef.current = false;
+      setLive(true);
       const init = socketInitRef.current;
       if (!init) {
         setConnecting(false);
@@ -1663,9 +1698,10 @@ export default function PageRecorder({
     socket.onclose = () => {
       if (wsRef.current !== socket) return;
       wsRef.current = null;
-      setConnected(false);
+      setLive(false);
       setConnecting(false);
       stopReconnect();
+      clearInputTimers();
       if (cancellingRef.current) {
         applyCancelledSnapshot();
         return;
@@ -1706,6 +1742,7 @@ export default function PageRecorder({
     }
     cancellingRef.current = false;
     setCancelling(false);
+    disconnectNoticeRef.current = false;
     closeRecordingSocket();
     forgetRecordingResultId(sessionStorage);
     const action = newActionName();
@@ -1891,6 +1928,7 @@ export default function PageRecorder({
       message.error("加载最新录制结果失败");
       return;
     }
+    disconnectNoticeRef.current = false;
     closeRecordingSocket();
     acceptNextSnapshotRef.current = true;
     setStageSevenOpen(true);
@@ -2161,6 +2199,7 @@ export default function PageRecorder({
     })) {
       finishRequestedRef.current = false;
       setFinishRequested(false);
+      markRecordingDisconnected("录制连接不可用");
     }
   }
 
@@ -2196,7 +2235,9 @@ export default function PageRecorder({
       return;
     }
     if (!canSteerPi()) {
-      message.warning(connected ? "当前不能发给 PI" : "录制连接不可用");
+      if (!disconnectNoticeRef.current) {
+        message.warning(connectedRef.current ? "当前不能发给 PI" : "录制连接不可用");
+      }
       return;
     }
     if (!send({ type: "steer", text })) return;
@@ -2534,7 +2575,7 @@ export default function PageRecorder({
   }
 
   function onPointerDown(event: PointerEvent<HTMLCanvasElement>) {
-    if (!connected || status !== "recording") return;
+    if (!connectedRef.current || status !== "recording") return;
     const point = normalizedPoint(event.clientX, event.clientY);
     if (!point) return;
     event.preventDefault();
@@ -2546,7 +2587,7 @@ export default function PageRecorder({
   }
 
   function onPointerMove(event: PointerEvent<HTMLCanvasElement>) {
-    if (!connected || status !== "recording") return;
+    if (!connectedRef.current || status !== "recording") return;
     const point = normalizedPoint(event.clientX, event.clientY);
     if (!point) return;
     pointerMoveRef.current = { kind: "pointer_move", ...point, buttons: event.buttons };
@@ -2555,13 +2596,13 @@ export default function PageRecorder({
       pointerTimerRef.current = null;
       const move = pointerMoveRef.current;
       pointerMoveRef.current = null;
-      if (move) send({ type: "input", event: move });
+      if (move && connectedRef.current) send({ type: "input", event: move });
     }, 50);
   }
 
   function onPointerUp(event: PointerEvent<HTMLCanvasElement>) {
     const pointer = pointerRef.current;
-    if (!pointer || pointer.pointerId !== event.pointerId) return;
+    if (!connectedRef.current || !pointer || pointer.pointerId !== event.pointerId) return;
     pointerRef.current = null;
     const point = normalizedPoint(event.clientX, event.clientY);
     if (!point) return;
@@ -2573,7 +2614,7 @@ export default function PageRecorder({
   }
 
   function onWheel(event: WheelEvent<HTMLCanvasElement>) {
-    if (!connected || status !== "recording") return;
+    if (!connectedRef.current || status !== "recording") return;
     event.preventDefault();
     const point = normalizedPoint(event.clientX, event.clientY) || {};
     const current = wheelRef.current || { dx: 0, dy: 0 };
@@ -2587,12 +2628,12 @@ export default function PageRecorder({
       wheelTimerRef.current = null;
       const wheel = wheelRef.current;
       wheelRef.current = null;
-      if (wheel) send({ type: "input", event: { kind: "scroll", ...wheel } });
+      if (wheel && connectedRef.current) send({ type: "input", event: { kind: "scroll", ...wheel } });
     }, 50);
   }
 
   function relayText(element: HTMLInputElement) {
-    if (!element.value) return;
+    if (!connectedRef.current || !element.value) return;
     send({ type: "input", event: { kind: "text", text: element.value } });
     element.value = "";
   }
@@ -2610,7 +2651,7 @@ export default function PageRecorder({
       PageUp: "PageUp", PageDown: "PageDown",
     };
     const key = simpleKeys[event.key];
-    if (!key) return;
+    if (!key || !connectedRef.current) return;
     if (key === "Backspace") lastBackspaceRef.current = performance.now();
     send({ type: "input", event: { kind: "key", key } });
     event.preventDefault();
@@ -2619,6 +2660,7 @@ export default function PageRecorder({
   function onBeforeInput(event: FormEvent<HTMLInputElement>) {
     const inputEvent = event.nativeEvent as InputEvent;
     if (inputEvent.inputType !== "deleteContentBackward") return;
+    if (!connectedRef.current) return;
     if (performance.now() - lastBackspaceRef.current > 80) {
       send({ type: "input", event: { kind: "key", key: "Backspace" } });
     }
@@ -2891,7 +2933,7 @@ export default function PageRecorder({
             }}
             onPaste={(event) => {
               const text = event.clipboardData.getData("text");
-              if (text) send({ type: "input", event: { kind: "text", text } });
+              if (text && connectedRef.current) send({ type: "input", event: { kind: "text", text } });
               event.preventDefault();
             }}
             aria-label="录制页面键盘输入"
