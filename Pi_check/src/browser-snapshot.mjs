@@ -1,6 +1,8 @@
 /**
- * 把当前页/弹层/frame 收成带 ref 的快照。不分类、不判断能力。
+ * 把当前页/弹层/frame 收成带 ref 和语义 selector 的快照。不分类、不判断能力。
  */
+
+import { snapshotSelector } from "./browser-actions.mjs";
 
 function asRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -23,19 +25,23 @@ export function assignSnapshotRefs(raw = {}) {
     const row = asRecord(frame);
     for (const item of Array.isArray(row.controls) ? row.controls : []) {
       controlNo += 1;
-      controls.push({
+      const control = {
         ...asRecord(item),
         ref: `c${controlNo}`,
         frame_url: String(row.url || ""),
-      });
+      };
+      control.selector = snapshotSelector(control, "control");
+      controls.push(control);
     }
     for (const item of Array.isArray(row.actions) ? row.actions : []) {
       actionNo += 1;
-      actions.push({
+      const action = {
         ...asRecord(item),
         ref: `a${actionNo}`,
         frame_url: String(row.url || ""),
-      });
+      };
+      action.selector = snapshotSelector(action, "action");
+      actions.push(action);
     }
   }
   return {
@@ -80,23 +86,37 @@ export function collectInteractiveSnapshot() {
       // 只读节点跳过
     }
   };
-  const inputs = document.querySelectorAll("input, textarea, select, [contenteditable='true'], .el-select, .ant-select, .el-picker, .ant-picker, .el-tree, .ant-tree");
+  const hosts = document.querySelectorAll(".el-select, .ant-select, .el-picker, .ant-picker, [role='combobox']");
+  for (const host of hosts) {
+    if (!visible(host) || seen.has(host)) continue;
+    for (const inner of host.querySelectorAll("input, textarea, select")) seen.add(inner);
+    seen.add(host);
+  }
+  const inputs = document.querySelectorAll("input, textarea, select, [contenteditable='true'], .el-select, .ant-select, .el-picker, .ant-picker, .el-tree, .ant-tree, [role='combobox']");
   let controlNo = 0;
   for (const node of inputs) {
-    if (!visible(node) || seen.has(node)) continue;
+    if (!visible(node) || seen.has(node) && !node.matches?.(".el-select, .ant-select, .el-picker, .ant-picker, [role='combobox']")) continue;
+    if (node.matches?.("input, textarea") && node.closest?.(".el-select, .ant-select, .el-picker, .ant-picker, [role='combobox']")) continue;
     seen.add(node);
     controlNo += 1;
     const ref = `c${controlNo}`;
     mark(node, ref);
-    controls.push({
+    const inner = node.querySelector?.("input, textarea, select") || node;
+    const placeholder = compact(inner.getAttribute?.("placeholder") || node.getAttribute?.("placeholder"));
+    const label = labelOf(inner) || labelOf(node);
+    const row = {
       ref,
-      label: labelOf(node),
-      name: compact(node.getAttribute?.("name") || node.getAttribute?.("id")),
-      control_kind: compact(node.tagName || node.getAttribute?.("role") || "input"),
-      placeholder: compact(node.getAttribute?.("placeholder")),
-      readonly: Boolean(node.readOnly || node.getAttribute?.("aria-readonly") === "true"),
-      disabled: Boolean(node.disabled),
-    });
+      label,
+      name: compact(inner.getAttribute?.("name") || inner.getAttribute?.("id") || node.getAttribute?.("id")),
+      control_kind: compact(node.getAttribute?.("role") || node.tagName || "input"),
+      placeholder,
+      readonly: Boolean(inner.readOnly || inner.getAttribute?.("aria-readonly") === "true"),
+      disabled: Boolean(inner.disabled),
+    };
+    row.selector = placeholder
+      ? `placeholder=${placeholder}`
+      : (label ? `label=${label}` : `ref=${ref}`);
+    controls.push(row);
   }
   const buttons = document.querySelectorAll("button, [role='button'], a.ant-btn, .el-button, input[type='button'], input[type='submit']");
   let actionNo = 0;
@@ -106,16 +126,28 @@ export function collectInteractiveSnapshot() {
     actionNo += 1;
     const ref = `a${actionNo}`;
     mark(node, ref);
+    const label = labelOf(node);
     actions.push({
       ref,
-      label: labelOf(node),
+      label,
       kind: "button",
+      selector: label ? `role=button[name="${label}"]` : `ref=${ref}`,
     });
+  }
+  const options = [];
+  const seenOption = new Set();
+  for (const node of document.querySelectorAll("[role='option'], .el-select-dropdown__item, .ant-select-item-option")) {
+    if (!visible(node)) continue;
+    const text = compact(node.innerText || node.textContent);
+    if (!text || seenOption.has(text)) continue;
+    seenOption.add(text);
+    options.push(text);
   }
   return {
     url: location.href,
     title: document.title || "",
     controls,
     actions,
+    options,
   };
 }

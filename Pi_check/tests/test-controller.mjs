@@ -108,6 +108,23 @@ test("6c. 自动点击失败不得结束录制，人手点预览和停录分析�
   }
 });
 
+test("人在录制页发话会交给 PI，终止后能再继续", async () => {
+  const harness = await createHarness();
+  try {
+    const started = await harness.controller.start({ targetUrl: "http://example.com", goal: "目标" });
+    const sent = await harness.controller.steer(started.id, "继续搜请假");
+    assert.equal(sent.ok, true);
+    assert.ok(harness.getPi().userMessages.includes("继续搜请假"));
+    await harness.controller.stopPiWork(started.id);
+    assert.equal(harness.getPi().aborted, true);
+    await harness.controller.steer(started.id, "去点新增");
+    assert.ok(harness.getPi().userMessages.includes("去点新增"));
+    assert.equal(harness.controller.view(started.id).status, "recording");
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test("6b. 录制中人始终可以点预览", async () => {
   const harness = await createHarness();
   try {

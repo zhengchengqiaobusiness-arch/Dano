@@ -7,13 +7,13 @@ PI 是操作者，也是唯一语义权威。人同时也可以点预览。
 ## 主力循环
 
 1. `control_in_app_browser` `action=open_page` 打开目标页。
-2. `action=snapshot` 给控件打 `ref`。人刚点过就先重新 snapshot。
-3. 按当前 `ref` `click` / `fill` / `select` / `press` / `fill_fields`。
-4. `network_since` 或 `read_request_shape` 看真实请求。
-5. 立刻 `submit_recording_capability` 交这一项。人点出的动作也要交。
-6. 目标做完 `submit_recording_result({final:true, use_draft:true})`。
-
-需要看画面时用 `action=screenshot`，它以图像返回。不要用 `read_screenshot` 找字段。
+2. `action=snapshot` 一次，读 `controls` / `actions` 里的 **selector**（`placeholder=` / `label=` / `role=button[name=]`）。不要死盯 `c1`/`a1`。
+3. 按 selector `click` / `fill` / `choose`。下拉必须 `choose(selector, 可见选项原文)`，一次选中。不要 click 后再 snapshot 再点选项。
+4. 不要每个字段都 snapshot，不要 `include_screenshot`。要看画面用 `action=screenshot`。
+5. 人点过的看 `snapshot.recentUserActions`。不要停下来等人。
+6. `network_since` 或 `read_request_shape` 看真实请求。
+7. 立刻 `submit_recording_capability` 交这一项。人点出的动作也要交。
+8. 目标做完 `submit_recording_result({final:true, use_draft:true})`。
 
 ## 协助不是排他接管
 

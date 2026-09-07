@@ -63,6 +63,7 @@ export class ScriptedPiSession {
     behavior = "submit_on_final",
     result,
     delayMs = 250,
+    onThought = null,
   }) {
     this.tools = tools;
     this.recordingId = recordingId;
@@ -76,7 +77,11 @@ export class ScriptedPiSession {
     this.unfrozenRejected = false;
     this.secondSubmitError = "";
     this.humanActs = 0;
+    this.userMessages = [];
     this.driveStarted = false;
+    this.driveStopped = false;
+    this.aborted = false;
+    this.onThought = typeof onThought === "function" ? onThought : null;
     this.exitListeners = new Set();
   }
 
@@ -111,9 +116,33 @@ export class ScriptedPiSession {
     this.humanActs += 1;
   }
 
-  async beginLiveDrive() {
-    this.driveStarted = true;
+  async notifyUserMessage(text = "") {
+    const message = String(text || "").trim();
+    if (!message) return { ok: false, error: "请输入要发给 PI 的话" };
+    this.userMessages.push(message);
+    try {
+      this.onThought?.({ kind: "user", text: message });
+    } catch {
+      // 助手输出失败不得挡住发给 PI
+    }
+    const resumeDrive = this.driveStopped || this.status !== "driving";
+    this.driveStopped = false;
     this.status = "driving";
+    return { ok: true, resumeDrive, text: message };
+  }
+
+  async abortLiveWork() {
+    this.aborted = true;
+    this.driveStopped = true;
+    if (this.status === "driving") this.status = "ready";
+    return { ok: true };
+  }
+
+  async beginLiveDrive({ resumeHint = "" } = {}) {
+    this.driveStarted = true;
+    this.driveStopped = false;
+    this.status = "driving";
+    if (resumeHint) this.userMessages.push(String(resumeHint));
     if (this.behavior === "drive_fail") {
       throw new Error("PI 连续空转未自动操作");
     }
@@ -127,6 +156,7 @@ export class ScriptedPiSession {
   }
 
   async stopLiveDrive() {
+    this.driveStopped = true;
     this.status = this.status === "driving" ? "ready" : this.status;
   }
 
@@ -198,6 +228,9 @@ export class FakeBrowser {
     this.inputs = [];
     this.acts = [];
     this.lastHumanActAt = 0;
+    this.piActDepth = 0;
+    this.piActUntil = 0;
+    this.userActions = [];
     this.ready = emitOnStart
       ? Promise.resolve(appendEvidence?.("network_request", {
         method: "GET",
@@ -211,11 +244,29 @@ export class FakeBrowser {
     return Date.now() - Number(this.lastHumanActAt || 0) < ms;
   }
 
+  beginPiAct() {
+    this.piActDepth += 1;
+  }
+
+  endPiAct() {
+    this.piActDepth = Math.max(0, this.piActDepth - 1);
+    this.piActUntil = Date.now() + 400;
+  }
+
+  isPiActing() {
+    return this.piActDepth > 0 || Date.now() < this.piActUntil;
+  }
+
+  recentUserActions() {
+    return this.userActions || [];
+  }
+
   async applyInput(event) {
     this.inputs.push(event || {});
     const kind = String(event?.kind || "click");
     if (!/pointer_move|mousemove/i.test(kind)) {
       this.lastHumanActAt = Date.now();
+      this.userActions = [...(this.userActions || []), { kind, at: Date.now() }].slice(-12);
     }
     if (typeof this.appendEvidence === "function" && !/pointer_move|mousemove/i.test(kind)) {
       await this.appendEvidence("interaction", {
@@ -225,26 +276,39 @@ export class FakeBrowser {
     }
   }
 
-  async inspect() {
+  async inspect({ includeScreenshot = false } = {}) {
     return {
       available: true,
       url: "http://fixture.local/demo",
-      controls: [{ ref: "c1", label: "关键字" }],
-      actions: [{ ref: "a1", label: "查询" }],
+      controls: [{ ref: "c1", label: "关键字", selector: "placeholder=请输入单据编号", placeholder: "请输入单据编号" }],
+      actions: [{ ref: "a1", label: "查询", selector: 'role=button[name="查询"]' }],
+      recentUserActions: this.userActions || [],
+      ...(includeScreenshot ? { screenshot: { data: "AAAA", width: 10, height: 10 } } : {}),
     };
   }
 
-  async actByRef({ ref = "", action = "click", text = "" } = {}) {
-    this.acts.push({ ref, action, text });
-    if (typeof this.appendEvidence === "function") {
-      await this.appendEvidence("interaction", {
-        actor: "pi",
-        kind: action || "click",
-        ref,
-        text,
-      });
+  async actByRef({ ref = "", action = "click", text = "", selector = "" } = {}) {
+    return this.actBySelector({ selector: selector || ref, ref: ref || selector, action, text });
+  }
+
+  async actBySelector({ selector = "", ref = "", action = "click", text = "" } = {}) {
+    const token = selector || ref;
+    this.beginPiAct();
+    try {
+      this.acts.push({ ref: token, selector: token, action, text });
+      if (typeof this.appendEvidence === "function") {
+        await this.appendEvidence("interaction", {
+          actor: "pi",
+          kind: action || "click",
+          ref: token,
+          selector: token,
+          text,
+        });
+      }
+      return { ok: true, url: "http://fixture.local/demo", ref: token, selector: token, action };
+    } finally {
+      this.endPiAct();
     }
-    return { ok: true, url: "http://fixture.local/demo", ref, action };
   }
 
   async openPage(url) {
@@ -305,7 +369,7 @@ export async function createHarness(options = {}) {
     gate,
     finalTimeoutMs: options.finalTimeoutMs || 2000,
     driveTimeoutMs: options.driveTimeoutMs || 2000,
-    createPi: options.createPi || (async ({ recording, tools }) => {
+    createPi: options.createPi || (async ({ recording, tools, onThought }) => {
       if (options.piFailStart) {
         throw new Error("PI 初始化失败");
       }
@@ -316,6 +380,7 @@ export async function createHarness(options = {}) {
         result,
         sessionId: options.piSessionId || "scripted-pi",
         delayMs: options.piDelayMs,
+        onThought,
       });
       return piRef;
     }),

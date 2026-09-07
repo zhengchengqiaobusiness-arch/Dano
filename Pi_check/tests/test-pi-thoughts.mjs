@@ -11,17 +11,25 @@ import {
 } from "../src/pi-trace.mjs";
 import { LivePiSession } from "../src/pi-session.mjs";
 
-test("模型事件和证据会变成助手 thought，指针移动不发", () => {
-  assert.deepEqual(thoughtFromAgentEvent({ type: "turn_start" }), {
-    kind: "text",
-    text: "开始新一轮模型分析",
-  });
+test("模型事件和证据会变成助手 thought，指针移动和轮询不发", () => {
+  assert.equal(thoughtFromAgentEvent({ type: "turn_start" }), null);
+  assert.equal(thoughtFromAgentEvent({
+    type: "message_end",
+    message: { role: "user", content: "用户刚在预览里操作了页面。先 snapshot" },
+  }), null);
   assert.deepEqual(thoughtFromAgentEvent({ delta_type: "thinking_delta", delta: "在对请求" }), {
     kind: "thinking",
     text: "在对请求",
   });
   assert.equal(thoughtFromEvidence("interaction", { kind: "mousemove" }), null);
+  assert.equal(thoughtFromEvidence("interaction", { kind: "input", text: "请输入单据编号" }), null);
   assert.equal(thoughtFromEvidence("network_request", { resource_type: "script", url: "/app.js" }), null);
+  assert.equal(thoughtFromEvidence("network_request", {
+    resource_type: "xhr",
+    method: "GET",
+    path: "/prod-api/im/chatMessage/getChatNotReadMessageCount",
+  }), null);
+  assert.equal(thoughtFromEvidence("visible_control", { count: 10, reason: "interaction" }), null);
   assert.match(thoughtFromEvidence("network_request", { resource_type: "xhr", method: "GET", path: "/api/page" }).text, /GET \/api\/page/);
   assert.match(thoughtFromEvidence("interaction", { kind: "click", text: "提交" }).text, /提交/);
 });

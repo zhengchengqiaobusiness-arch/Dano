@@ -18,6 +18,7 @@ import { createPiToolHost } from "./pi-tools.mjs";
 import { attachBlobSaver } from "./browser-capture.mjs";
 import { capabilityCountFromPiResult } from "./capability-presence.mjs";
 import { thoughtFromEvidence } from "./pi-trace.mjs";
+import { resolveInteractionActor, shouldSteerHumanAct } from "./browser-actions.mjs";
 
 export class RecordingController {
   constructor({
@@ -78,6 +79,69 @@ export class RecordingController {
       // ignore
     }
     return slot.assist;
+  }
+
+  async steer(recordingId, text = "") {
+    const slot = this.#active.get(recordingId);
+    if (!slot?.pi?.alive) throw new Error("PI 会话未打开");
+    const session = this.evidence.snapshot(recordingId);
+    if (session.status === "failed" || session.status === "succeeded") {
+      throw new Error("录制已结束，不能再发给 PI");
+    }
+    const sent = await slot.pi.notifyUserMessage(text);
+    if (!sent?.ok) throw new Error(sent?.error || "没有发给 PI");
+    if (sent.resumeDrive) {
+      this.#launchDrive(recordingId, { resumeHint: sent.text || text });
+      await this.evidence.setStatus(recordingId, {
+        status: "recording",
+        browserStatus: "recording",
+        publicMessage: "PI 按你的话继续自动操作，预览你也可以点",
+      }).catch(() => {});
+    }
+    return { ok: true, ...this.view(recordingId) };
+  }
+
+  async stopPiWork(recordingId) {
+    const slot = this.#active.get(recordingId);
+    if (!slot?.pi?.alive) throw new Error("PI 会话未打开");
+    const session = this.evidence.snapshot(recordingId);
+    if (session.status === "failed" || session.status === "succeeded") {
+      throw new Error("录制已结束，没有可终止的任务");
+    }
+    if (typeof slot.pi.abortLiveWork === "function") {
+      await slot.pi.abortLiveWork();
+    } else if (typeof slot.pi.stopLiveDrive === "function") {
+      await slot.pi.stopLiveDrive();
+    }
+    return { ok: true, ...this.view(recordingId) };
+  }
+
+  #launchDrive(recordingId, { resumeHint = "" } = {}) {
+    const slot = this.#active.get(recordingId);
+    const session = this.evidence.snapshot(recordingId);
+    if (!slot?.pi || typeof slot.pi.beginLiveDrive !== "function") return;
+    slot.drive = Promise.resolve(slot.pi.beginLiveDrive({
+      targetUrl: session.targetUrl,
+      goal: session.goal,
+      resumeHint,
+      timeoutMs: this.driveTimeoutMs,
+      hasResult: () => this.files.hasPiResult(recordingId),
+    })).then(async () => {
+      if (slot.failed || slot.completing) return;
+      if (!await this.files.hasPiResult(recordingId)) return;
+      await this.#succeed(recordingId);
+    }).catch(async (error) => {
+      if (slot.failed || slot.completing) return;
+      logPiOnly(`自动点击不可用，人手点预览继续 recording=${recordingId} ${error?.message || error}`);
+      try {
+        slot.onThought?.({
+          kind: "text",
+          text: "自动点击不可用，预览你继续点，或在窗口里告诉 PI 接着做。结束后仍由 PI 根据证据产出能力。",
+        });
+      } catch {
+        // 自动点击失败不得结束录制
+      }
+    });
   }
 
   async applySession(recordingId, session) {
@@ -222,29 +286,7 @@ export class RecordingController {
         browserStatus: "recording",
         publicMessage: "PI 正在自动操作，预览你也可以点",
       });
-      if (typeof pi.beginLiveDrive === "function") {
-        slot.drive = Promise.resolve(pi.beginLiveDrive({
-          targetUrl: session.targetUrl,
-          goal: session.goal,
-          timeoutMs: this.driveTimeoutMs,
-          hasResult: () => this.files.hasPiResult(session.id),
-        })).then(async () => {
-          if (slot.failed || slot.completing) return;
-          if (!await this.files.hasPiResult(session.id)) return;
-          await this.#succeed(session.id);
-        }).catch(async (error) => {
-          if (slot.failed || slot.completing) return;
-          logPiOnly(`自动点击不可用，人手点预览继续 recording=${session.id} ${error?.message || error}`);
-          try {
-            slot.onThought?.({
-              kind: "text",
-              text: "自动点击不可用，预览你继续点。结束后仍由 PI 根据证据产出能力。",
-            });
-          } catch {
-            // 自动点击失败不得结束录制
-          }
-        });
-      }
+      this.#launchDrive(session.id);
       return this.view(session.id);
     } catch (error) {
       await this.#fail(session.id, error.message || String(error));
@@ -295,6 +337,10 @@ export class RecordingController {
       await slot.pi.requestFinalAnalysis({
         timeoutMs: this.finalTimeoutMs,
         hasResult: () => this.files.hasPiResult(recordingId),
+        hasDraft: async () => {
+          const saved = await this.files.readDraft(recordingId).catch(() => null);
+          return Array.isArray(saved?.draft?.capabilities) && saved.draft.capabilities.length > 0;
+        },
       });
     } catch (error) {
       const message = String(error.message || error);
@@ -391,8 +437,11 @@ export class RecordingController {
       await this.#fail(recordingId, "PI 在录制期间退出");
       return null;
     }
-    const event = await this.evidence.append(recordingId, kind, payload);
-    const thought = thoughtFromEvidence(kind, payload);
+    const nextPayload = kind === "interaction"
+      ? { ...payload, actor: resolveInteractionActor(slot.browser, payload) }
+      : payload;
+    const event = await this.evidence.append(recordingId, kind, nextPayload);
+    const thought = thoughtFromEvidence(kind, nextPayload);
     if (thought) {
       try {
         slot.onThought?.(thought);
@@ -400,7 +449,7 @@ export class RecordingController {
         // 助手输出失败不得中断采集
       }
     }
-    if (kind === "interaction" && payload?.actor !== "pi" && !/pointer|mousemove|mouseover/i.test(String(payload?.kind || ""))) {
+    if (shouldSteerHumanAct(kind, nextPayload)) {
       Promise.resolve(slot.pi.notifyHumanAct?.({ seq: event.seq })).catch(() => {});
     }
     if (shouldNotifyPi(kind, payload)) {

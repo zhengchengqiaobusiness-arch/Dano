@@ -10,6 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHarness, sampleResult } from "./helpers/harness.mjs";
 import { createPlaywrightBrowser } from "../src/browser-capture.mjs";
+import { createPiToolHost } from "../src/pi-tools.mjs";
 import { playwrightStateFromTokens, saveStorageState } from "../src/session-store.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -215,4 +216,133 @@ test("录制动作和可见控件都进入 iframe 业务页", async (t) => {
   assert.ok(frame);
   assert.equal(await frame.locator("body").getAttribute("data-searched"), "SQ-1");
   assert.equal(await frame.locator("body").getAttribute("data-confirmed"), "1");
+});
+
+test("真实鼠标点到 iframe 里可见的 .el-button，不点外壳隐藏同名按钮", async (t) => {
+  process.env.PI_CHECK_AUTO_LOGIN = "0";
+  const shell = await readFile(path.join(ROOT, "tests", "fixtures", "iframe-hidden-search.html"));
+  const inner = await readFile(path.join(ROOT, "tests", "fixtures", "iframe-el-button.html"));
+  const fixture = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(req.url?.includes("inner-el-button") ? inner : shell);
+  });
+  const port = await listen(fixture);
+  const events = [];
+  const appendEvidence = async (kind, payload) => {
+    events.push({ kind, payload });
+    return { seq: events.length };
+  };
+  appendEvidence.saveBlob = async (bytes) => ({ blobId: "blob_hidden", byteLength: bytes.byteLength });
+  const handle = await createPlaywrightBrowser({
+    recording: { id: "rec_hidden_search", targetUrl: `http://127.0.0.1:${port}/` },
+    appendEvidence,
+  });
+  t.after(async () => {
+    try {
+      await handle.close();
+    } catch {
+      // ignore
+    }
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+
+  const shot = await handle.inspect();
+  assert.ok(shot.actions?.some((item) => item.label === "搜索"), JSON.stringify(shot.actions));
+  const filled = await handle.actBySelector({
+    selector: "placeholder=请输入单据编号",
+    action: "fill",
+    text: "RQ-9",
+  });
+  assert.equal(filled.ok, true, JSON.stringify(filled));
+  const searched = await handle.actBySelector({
+    selector: 'role=button[name="搜索"]',
+    action: "click",
+  });
+  assert.equal(searched.ok, true, JSON.stringify(searched));
+  const created = await handle.actBySelector({
+    selector: 'role=button[name="新增"]',
+    action: "click",
+  });
+  assert.equal(created.ok, true, JSON.stringify(created));
+  const frame = handle.page.frames().find((item) => item.url().includes("inner-el-button"));
+  assert.ok(frame);
+  assert.equal(await frame.locator("body").getAttribute("data-searched"), "RQ-9");
+  assert.equal(await frame.locator("body").getAttribute("data-created"), "1");
+});
+
+test("choose 一次选中下拉，不必再 snapshot 点选项", async (t) => {
+  const html = await readFile(path.join(ROOT, "tests", "fixtures", "leave-select.html"));
+  const fixture = createServer((req, res) => {
+    if (req.url.startsWith("/api/")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, path: req.url }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  const port = await listen(fixture);
+  const targetUrl = `http://127.0.0.1:${port}/`;
+  let browserRef = null;
+  const harness = await createHarness({
+    emitOnStart: false,
+    result: sampleResult({ e2e: "choose" }),
+    createBrowser: async ({ recording, appendEvidence }) => {
+      browserRef = await createPlaywrightBrowser({ recording, appendEvidence });
+      return browserRef;
+    },
+  });
+  t.after(async () => {
+    try {
+      await browserRef?.close();
+    } catch {
+      // ignore
+    }
+    await harness.cleanup();
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+
+  const started = await harness.controller.start({
+    targetUrl,
+    goal: "选请假类型并搜索",
+  });
+  const tools = createPiToolHost({
+    recordingId: started.id,
+    evidence: harness.evidence,
+    files: harness.files,
+    gate: harness.gate,
+    getPiSessionId: () => harness.evidence.snapshot(started.id).piSessionId,
+    getBrowser: () => browserRef,
+  });
+  const shot = await tools.control_in_app_browser({ action: "snapshot" });
+  assert.ok(shot.controls?.some((item) => String(item.selector || "").includes("请选择请假类型")), JSON.stringify(shot.controls));
+  assert.ok(shot.actions?.some((item) => item.selector === 'role=button[name="搜索"]'), JSON.stringify(shot.actions));
+  const opened = await tools.control_in_app_browser({
+    action: "click",
+    selector: "placeholder=请选择请假类型",
+  });
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+  assert.equal(opened.chooser, true);
+  assert.ok((opened.options || []).includes("事假"), JSON.stringify(opened));
+  const chosen = await tools.control_in_app_browser({
+    action: "choose",
+    selector: "placeholder=请选择请假类型",
+    text: "事假",
+  });
+  assert.equal(chosen.ok, true, JSON.stringify(chosen));
+  assert.equal(await browserRef.page.locator("#leave-type").inputValue(), "事假");
+  const searched = await tools.control_in_app_browser({
+    action: "click",
+    selector: 'role=button[name="搜索"]',
+  });
+  assert.equal(searched.ok, true, JSON.stringify(searched));
+  const events = await harness.files.readEvidence(started.id);
+  const piChoose = events.filter((item) => item.kind === "interaction" && item.payload?.actor === "pi");
+  assert.ok(piChoose.some((item) => item.payload?.kind === "choose" && item.payload?.text === "事假"));
+  const hookAsHuman = events.filter((item) => (
+    item.kind === "interaction"
+    && item.payload?.actor === "human"
+    && /事假|请假类型/.test(`${item.payload?.text || ""} ${item.payload?.label || ""}`)
+  ));
+  assert.equal(hookAsHuman.length, 0, "PI 点下拉不得再记成人手");
 });

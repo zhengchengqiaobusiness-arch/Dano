@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { logPiOnly } from "./policy.mjs";
 import { collectVisibleControlsInPage } from "./visible-controls.mjs";
 import { collectInteractiveSnapshot } from "./browser-snapshot.mjs";
+import { parseLocator, resolveInteractionActor } from "./browser-actions.mjs";
 import {
   isLoginUrl,
   looksLoggedIn,
@@ -77,15 +78,49 @@ export function shouldFlushFrame(event) {
 }
 
 function actionScopes(page) {
-  const scopes = [];
-  const seen = new Set();
-  const frames = typeof page?.frames === "function" ? page.frames() : [];
-  for (const scope of [page, ...frames]) {
-    if (!scope || seen.has(scope)) continue;
-    seen.add(scope);
-    scopes.push(scope);
+  if (!page) return [];
+  const frames = typeof page.frames === "function" ? page.frames() : [];
+  return frames.length ? frames : [page];
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function locatorBuilders(parsed) {
+  const name = parsed.name || parsed.value || "";
+  const exactText = new RegExp(`^\\s*${escapeRegExp(name)}\\s*$`);
+  if (parsed.kind === "ref") {
+    return [(scope) => scope.locator(`[data-pi-ref="${parsed.value}"]`)];
   }
-  return scopes;
+  if (parsed.kind === "placeholder") {
+    return [
+      (scope) => scope.getByPlaceholder(parsed.value, { exact: true }),
+      (scope) => scope.getByPlaceholder(parsed.value, { exact: false }),
+      (scope) => scope.locator(`[placeholder="${parsed.value}"]`),
+    ];
+  }
+  if (parsed.kind === "label") {
+    return [
+      (scope) => scope.getByLabel(parsed.value, { exact: false }),
+      (scope) => scope.locator(".el-form-item, .ant-form-item").filter({ hasText: parsed.value })
+        .locator("input, textarea, select, .el-select, .ant-select, .el-select__wrapper, [role='combobox']"),
+    ];
+  }
+  if (parsed.kind === "role") {
+    if (!parsed.name) return [(scope) => scope.getByRole(parsed.role)];
+    return [
+      (scope) => scope.getByRole(parsed.role, { name: parsed.name, exact: true }),
+      (scope) => scope.getByRole(parsed.role, { name: parsed.name, exact: false }),
+      (scope) => scope.locator("button, [role='button'], .el-button, .ant-btn, a.ant-btn, input[type='button'], input[type='submit']")
+        .filter({ hasText: exactText }),
+      (scope) => scope.getByText(parsed.name, { exact: true }),
+    ];
+  }
+  return [
+    (scope) => scope.getByText(parsed.value, { exact: true }),
+    (scope) => scope.getByRole("button", { name: parsed.value, exact: false }),
+  ];
 }
 
 async function firstVisibleInFrames(page, build, { exactFirst = false, limit = 12 } = {}) {
@@ -333,6 +368,9 @@ export class PlaywrightBrowser {
     this.lastPointerMoveAt = 0;
     this.lastHumanActAt = 0;
     this.lastActAt = 0;
+    this.piActDepth = 0;
+    this.piActUntil = 0;
+    this.userActions = [];
     this.appendEvidence = null;
     this.sawLoginPage = false;
     this.snapshotVisibleControls = async () => {};
@@ -473,6 +511,32 @@ export class PlaywrightBrowser {
     return Date.now() - Number(this.lastHumanActAt || 0) < ms;
   }
 
+  beginPiAct() {
+    this.piActDepth = Number(this.piActDepth || 0) + 1;
+  }
+
+  endPiAct() {
+    this.piActDepth = Math.max(0, Number(this.piActDepth || 0) - 1);
+    this.piActUntil = Date.now() + 400;
+  }
+
+  isPiActing() {
+    return Number(this.piActDepth || 0) > 0 || Date.now() < Number(this.piActUntil || 0);
+  }
+
+  rememberUserAction(payload = {}) {
+    this.userActions = [...(this.userActions || []), {
+      kind: payload.kind || "click",
+      label: payload.label || payload.text || payload.placeholder || "",
+      selector: payload.selector || "",
+      at: Date.now(),
+    }].slice(-12);
+  }
+
+  recentUserActions() {
+    return this.userActions || [];
+  }
+
   listPages() {
     const current = this.livePage();
     return {
@@ -516,6 +580,8 @@ export class PlaywrightBrowser {
         frames,
         controls: frames.flatMap((item) => item.controls || []),
         actions: frames.flatMap((item) => item.actions || []),
+        options: [...new Set(frames.flatMap((item) => item.options || []))],
+        recentUserActions: this.recentUserActions(),
       };
       if (includeScreenshot) {
         try {
@@ -534,46 +600,257 @@ export class PlaywrightBrowser {
     });
   }
 
-  async actByRef({ ref = "", action = "click", text = "" } = {}) {
+  async actByRef({ ref = "", action = "click", text = "", selector = "" } = {}) {
+    return this.actBySelector({ selector: selector || ref, ref: ref || selector, action, text });
+  }
+
+  async actBySelector({ selector = "", ref = "", action = "click", text = "" } = {}) {
     return this.enqueue(async () => {
       const page = this.livePage();
       if (this.closed || !page) return { ok: false, error: "浏览器未打开" };
-      const token = String(ref || "").trim();
-      if (!token) return { ok: false, error: "缺少 ref。先 snapshot。" };
-      if (this.recentlyHuman()) {
-        await page.waitForTimeout(120);
+      const token = String(selector || ref || "").trim();
+      if (!token) return { ok: false, error: "缺少 selector。先 snapshot，用 placeholder= / label= / role=。" };
+      this.beginPiAct();
+      try {
+        const kind = String(action || "click");
+        if (kind === "choose") {
+          return await this.#chooseNow(page, token, text);
+        }
+        const handle = await this.#locateNow(page, token);
+        if (!handle) {
+          return { ok: false, error: `找不到 ${token}。重新 snapshot，用 placeholder= / label= / role=，不要点第一个重名控件。` };
+        }
+        if (kind === "fill") {
+          if (await this.#isChooser(handle)) {
+            return { ok: false, error: "这是下拉。用 choose，不要往里面打字。" };
+          }
+          const input = handle.locator("input, textarea").first();
+          const target = (await input.count()) ? input : handle;
+          await target.fill(String(text ?? ""));
+        } else if (kind === "select") {
+          await handle.selectOption(String(text ?? "")).catch(async () => this.#clickChooserAware(handle));
+        } else if (kind === "press") {
+          await handle.press(String(text || "Enter"));
+        } else {
+          const chooser = await this.#isChooser(handle);
+          await this.#clickChooserAware(handle);
+          if (chooser) {
+            await page.waitForTimeout(120);
+            const options = await this.#listOpenOptions(page);
+            this.lastActAt = Date.now();
+            if (typeof this.appendEvidence === "function") {
+              await this.appendEvidence("interaction", {
+                actor: "pi",
+                kind,
+                ref: token,
+                selector: token,
+                text: String(text || "").slice(0, 80),
+                chooser: true,
+              });
+            }
+            return {
+              ok: true,
+              chooser: true,
+              hint: "这是下拉。用 choose(selector, 可见选项原文) 一次选中，不要再 click。",
+              options,
+              url: page.url(),
+              selector: token,
+              ref: token,
+              action: kind,
+            };
+          }
+        }
+        this.lastActAt = Date.now();
+        if (typeof this.appendEvidence === "function") {
+          await this.appendEvidence("interaction", {
+            actor: "pi",
+            kind,
+            ref: token,
+            selector: token,
+            text: String(text || "").slice(0, 80),
+          });
+        }
+        return { ok: true, url: page.url(), selector: token, ref: token, action: kind };
+      } catch (error) {
+        return { ok: false, error: error.message || String(error) };
+      } finally {
+        this.endPiAct();
       }
-      let handle = null;
-      for (const scope of actionScopes(page)) {
-        const locator = scope.locator(`[data-pi-ref="${token}"]`);
-        if (await locator.count()) {
-          handle = locator.first();
+    });
+  }
+
+  async #locateNow(page, token) {
+    const parsed = parseLocator(token);
+    for (const build of locatorBuilders(parsed)) {
+      const found = await firstVisibleInFrames(page, (scope) => build(scope), { limit: 16 });
+      if (found) {
+        const host = await this.#chooserHost(found);
+        return host || found;
+      }
+    }
+    return null;
+  }
+
+  async #withElement(locator, timeout, work) {
+    const handle = await locator.elementHandle({ timeout }).catch(() => null);
+    if (!handle) return null;
+    try {
+      return await work(handle);
+    } finally {
+      await handle.dispose().catch(() => {});
+    }
+  }
+
+  async #chooserHost(locator) {
+    const mark = `pi-host-${Date.now().toString(36)}`;
+    const marked = await this.#withElement(locator, 600, (handle) => handle.evaluate((el, token) => {
+      const isHost = (node) => {
+        const cls = String(node.className || "");
+        if (node.getAttribute("role") === "combobox" && !node.matches("input, textarea")) return true;
+        return /(?:^|\s)(el-select|ant-select|el-picker|ant-picker|el-select__wrapper|ant-select-selector)(?:\s|$)/.test(cls);
+      };
+      let best = el;
+      let node = el instanceof Element ? el : el.parentElement;
+      for (let i = 0; i < 6 && node && node !== document.body; i += 1, node = node.parentElement) {
+        if (isHost(node)) {
+          best = node;
           break;
         }
       }
-      if (!handle) {
-        return { ok: false, error: `找不到 ref=${token}。重新 snapshot，不要默认点第一个重名控件。` };
+      if (best instanceof Element) {
+        best.setAttribute("data-pi-host", token);
+        return true;
       }
-      const kind = String(action || "click");
-      try {
-        if (kind === "fill") await handle.fill(String(text ?? ""));
-        else if (kind === "select") await handle.selectOption(String(text ?? "")).catch(async () => handle.click());
-        else if (kind === "press") await handle.press(String(text || "Enter"));
-        else await handle.click();
-      } catch (error) {
-        return { ok: false, error: error.message || String(error) };
+      return false;
+    }, mark)).catch(() => false);
+    if (!marked) return null;
+    const page = this.livePage();
+    for (const scope of actionScopes(page)) {
+      const host = scope.locator(`[data-pi-host="${mark}"]`).first();
+      if (host && await host.count()) return host;
+    }
+    return null;
+  }
+
+  async #isChooser(locator) {
+    return Boolean(await this.#withElement(locator, 600, (handle) => handle.evaluate((el) => {
+      const text = String(el.getAttribute("placeholder") || el.querySelector?.("input")?.getAttribute("placeholder") || "");
+      if (/^(请选择|请挑选|please select)/i.test(text.trim())) return true;
+      return Boolean(el.closest?.(".el-select, .ant-select, .el-picker, .ant-picker, [role='combobox']"));
+    })).catch(() => false));
+  }
+
+  async #visibleBox(locator, timeout = 400) {
+    await locator.scrollIntoViewIfNeeded({ timeout }).catch(() => {});
+    return locator.boundingBox({ timeout }).catch(() => null);
+  }
+
+  async #mouseClick(locator) {
+    const page = this.livePage();
+    const box = await this.#visibleBox(locator);
+    if (!page || !box || box.width < 1 || box.height < 1) {
+      await locator.click({ timeout: 800, force: true });
+      return { via: "locator", x: 0, y: 0 };
+    }
+    const x = box.x + Math.min(Math.max(box.width / 2, 8), 24);
+    const y = box.y + box.height / 2;
+    await page.mouse.click(x, y);
+    return { via: "mouse", x, y };
+  }
+
+  async #listOpenOptions(page) {
+    const labels = [];
+    const seen = new Set();
+    for (const scope of actionScopes(page)) {
+      const nodes = scope.locator("[role='option'], .el-select-dropdown__item, .ant-select-item-option");
+      const count = await nodes.count().catch(() => 0);
+      for (let index = 0; index < Math.min(count, 40); index += 1) {
+        const item = nodes.nth(index);
+        if (!(await item.isVisible().catch(() => false))) continue;
+        const text = String(await item.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+        if (!text || seen.has(text)) continue;
+        seen.add(text);
+        labels.push(text);
       }
-      this.lastActAt = Date.now();
-      if (typeof this.appendEvidence === "function") {
-        await this.appendEvidence("interaction", {
-          actor: "pi",
-          kind,
-          ref: token,
-          text: String(text || "").slice(0, 80),
-        });
+    }
+    return labels;
+  }
+
+  async #dismissOpenChooser(page) {
+    await page.waitForTimeout(80);
+    const panel = await firstVisibleInFrames(
+      page,
+      (scope) => scope.locator(".el-select-dropdown, .ant-select-dropdown, .el-popper.el-select__popper"),
+      { limit: 2 },
+    );
+    if (panel) await page.keyboard.press("Escape").catch(() => {});
+  }
+
+  async #clickChooserAware(locator) {
+    const host = await this.#chooserHost(locator);
+    return this.#mouseClick(host || locator);
+  }
+
+  async #dispatchActivate(locator) {
+    return this.#mouseClick(locator);
+  }
+
+  async #waitOption(page, label, timeoutMs = 1600) {
+    const deadline = Date.now() + Math.max(80, Number(timeoutMs) || 1600);
+    const exact = new RegExp(`^\\s*${String(label).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`);
+    while (Date.now() < deadline) {
+      for (const scope of actionScopes(page)) {
+        const option = scope.locator("[role='option'], .el-select-dropdown__item, .ant-select-item-option")
+          .filter({ hasText: exact })
+          .filter({ visible: true })
+          .first();
+        if (!(await option.count().catch(() => 0))) continue;
+        const box = await this.#visibleBox(option, 200);
+        if (box && box.width > 1 && box.height > 1) return option;
       }
-      return { ok: true, url: page.url(), ref: token, action: kind };
-    });
+      await page.waitForTimeout(40);
+    }
+    return null;
+  }
+
+  async #chooseNow(page, token, text) {
+    const label = String(text || "").trim();
+    if (!label) return { ok: false, error: "choose 需要可见选项原文" };
+    const field = await this.#locateNow(page, token);
+    if (!field) return { ok: false, error: `找不到 ${token}` };
+    const native = field.locator("select").first();
+    if (await native.count()) {
+      await native.selectOption({ label }).catch(() => native.selectOption(label));
+    } else if (await field.evaluate((el) => el.tagName === "SELECT").catch(() => false)) {
+      await field.selectOption({ label }).catch(() => field.selectOption(label));
+    } else {
+      const open = await this.#listOpenOptions(page);
+      let option = open.includes(label) ? await this.#waitOption(page, label, 400) : null;
+      if (!option) {
+        await this.#clickChooserAware(field);
+        option = await this.#waitOption(page, label);
+      }
+      if (!option) {
+        const open = await this.#listOpenOptions(page);
+        return {
+          ok: false,
+          error: open.length ? `下拉没有选项：${label}。可见：${open.slice(0, 12).join("、")}` : `下拉没有选项：${label}`,
+          options: open,
+        };
+      }
+      await this.#dispatchActivate(option);
+      await this.#dismissOpenChooser(page);
+    }
+    this.lastActAt = Date.now();
+    if (typeof this.appendEvidence === "function") {
+      await this.appendEvidence("interaction", {
+        actor: "pi",
+        kind: "choose",
+        selector: token,
+        text: label,
+      });
+    }
+    return { ok: true, url: page.url(), selector: token, action: "choose", text: label };
   }
 
   async fillFields(fields = []) {
@@ -619,6 +896,7 @@ export class PlaywrightBrowser {
     if (kind === "pointer_down") {
       this.lastHumanActAt = Date.now();
       this.lastActAt = Date.now();
+      this.rememberUserAction({ kind: "click" });
       await page.mouse.move(x, y);
       await page.mouse.down({ button: event.button || "left" });
       return;
@@ -814,11 +1092,15 @@ async function installContextHooks(context, handle, append) {
       return;
     }
     const pageId = handle.pageIds.get(source.page) || "";
+    const actor = resolveInteractionActor(handle, payload);
     await append("interaction", {
       page_id: pageId,
-      actor: payload?.actor || "human",
       ...payload,
+      actor,
     });
+    if (actor === "human") {
+      handle.rememberUserAction?.(payload);
+    }
     if (String(payload?.kind || "") === "click" && shouldResnapshotAfterClick(payload)) {
       scheduleVisibleSnapshot(source.page, handle, append, "interaction", 500);
     }

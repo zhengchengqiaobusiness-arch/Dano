@@ -35,8 +35,10 @@ import {
   MessageOutlined,
   PlayCircleOutlined,
   RobotOutlined,
+  SendOutlined,
   StopOutlined,
   ThunderboltOutlined,
+  UserOutlined,
 } from "@ant-design/icons";
 import {
   useEffect,
@@ -796,6 +798,7 @@ export default function PageRecorder({
   const [keepResult, setKeepResult] = useState(false);
   const [resumeOnly, setResumeOnly] = useState(false);
   const [thoughts, setThoughts] = useState<ThoughtChunk[]>([]);
+  const [piMessage, setPiMessage] = useState("");
   const assistantLogRef = useRef<HTMLDivElement | null>(null);
   const [expandedTools, setExpandedTools] = useState<Record<number, boolean>>({});
   const [cancelling, setCancelling] = useState(false);
@@ -1001,9 +1004,30 @@ export default function PageRecorder({
     return () => observer.disconnect();
   }, [viewStage]);
 
+  function isUsefulRecorderThought(chunk: ThoughtChunk) {
+    if (chunk.kind === "tool") return true;
+    if (chunk.kind === "user") return Boolean(String(chunk.text || "").trim());
+    const text = String(chunk.text || "").trim();
+    if (!text) return false;
+    if (/^正在自动操作 \d+s/.test(text)) return false;
+    if (/^开始新一轮模型分析/.test(text)) return false;
+    if (/^模型user[：:]/.test(text)) return false;
+    if (/^本轮结束 toolResults=/.test(text)) return false;
+    if (/getChatNotReadMessageCount|queryTopBarMessageCount|queryTodoTaskCount|\/prod-api\/getInfo|\/prod-api\/getRouters/.test(text)) return false;
+    if (/采集可见控件 \d+ 个/.test(text)) return false;
+    return true;
+  }
+
   function appendThought(chunk: ThoughtChunk) {
+    if (!isUsefulRecorderThought(chunk)) return;
     setThoughts((current) => {
       const last = current[current.length - 1];
+      if (chunk.kind === "user") {
+        const text = String(chunk.text || "").trim();
+        if (!text) return current;
+        if (last?.kind === "user" && last.text === text) return current;
+        return [...current, chunk];
+      }
       if (last && last.kind === chunk.kind && (chunk.kind === "text" || chunk.kind === "thinking")) {
         const text = String(chunk.text || "");
         if (!text) return current;
@@ -2149,6 +2173,37 @@ export default function PageRecorder({
       snapshotRef.current = cancelled;
       setSnapshot(cancelled);
     }
+  }
+
+  function canSteerPi() {
+    return connected && (status === "recording" || processing);
+  }
+
+  function sendPiMessage() {
+    const text = piMessage.trim();
+    if (!text) {
+      message.warning("请输入要发给 PI 的话");
+      return;
+    }
+    if (!canSteerPi()) {
+      message.warning(connected ? "当前不能发给 PI" : "录制连接不可用");
+      return;
+    }
+    if (!send({ type: "steer", text })) return;
+    appendThought({ kind: "user", text });
+    setPiMessage("");
+  }
+
+  function terminateAssistantWork() {
+    if (processing || cancelling) {
+      cancelProcessing();
+      return;
+    }
+    if (status === "recording" && connected) {
+      send({ type: "abort" });
+      return;
+    }
+    message.warning("当前没有可终止的任务");
   }
 
   function cancelProcessing() {
@@ -3513,6 +3568,20 @@ export default function PageRecorder({
       );
     }
 
+    if (item.kind === "user") {
+      return (
+        <div key={`thought-${index}`} style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+          <UserOutlined style={{ color: "#1677ff", fontSize: 12, marginTop: 3, flexShrink: 0 }} />
+          <div>
+            <Text type="secondary" style={{ fontSize: 11, display: "block" }}>你</Text>
+            <Text style={{ fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+              {item.text}
+            </Text>
+          </div>
+        </div>
+      );
+    }
+
     // ── thinking ──────────────────────────────────────────────────────────────
     if (item.kind === "thinking") {
       return (
@@ -4215,6 +4284,40 @@ export default function PageRecorder({
         open={viewStage === 1 && assistantOpen}
         onClose={() => setAssistantOpen(false)}
         destroyOnClose={false}
+        footer={(
+          <div
+            onPointerDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+          >
+            <Input.TextArea
+              value={piMessage}
+              onChange={(event) => setPiMessage(event.target.value)}
+              placeholder={canSteerPi() ? "给 PI 发指示，例如：继续搜、去点新增" : "未连接或录制已结束，无法发给 PI"}
+              autoSize={{ minRows: 2, maxRows: 5 }}
+              disabled={!canSteerPi()}
+              onPressEnter={(event) => {
+                if (event.shiftKey) return;
+                event.preventDefault();
+                sendPiMessage();
+              }}
+            />
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
+              <Button
+                danger
+                icon={<StopOutlined />}
+                loading={cancelling}
+                disabled={!(status === "recording" && connected) && !processing && !cancelling}
+                onClick={terminateAssistantWork}
+              >终止</Button>
+              <Button
+                type="primary"
+                icon={<SendOutlined />}
+                disabled={!canSteerPi() || !piMessage.trim()}
+                onClick={sendPiMessage}
+              >发送</Button>
+            </div>
+          </div>
+        )}
       >
         {assistantBody}
       </Drawer>

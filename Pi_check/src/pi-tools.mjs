@@ -10,6 +10,37 @@ import { summarizeToolArgs, summarizeToolResult } from "./pi-trace.mjs";
 import { buildActionTimeline, requestShapeFromEvents } from "./evidence-facts.mjs";
 import { projectVisibleControlSnapshot } from "./visible-controls.mjs";
 import { mergeCapabilityIntoDraft } from "./result-merge.mjs";
+import { isNoiseNetworkPath } from "./browser-actions.mjs";
+
+function compactInspect(shot, includeScreenshot = false) {
+  if (!shot || typeof shot !== "object") return shot;
+  const { screenshot, frames, ...rest } = shot;
+  const compact = {
+    ...rest,
+    controls: Array.isArray(rest.controls) ? rest.controls : [],
+    actions: Array.isArray(rest.actions) ? rest.actions : [],
+    options: Array.isArray(rest.options) ? rest.options : [],
+    recentUserActions: Array.isArray(rest.recentUserActions) ? rest.recentUserActions : [],
+  };
+  if (includeScreenshot && screenshot?.data) {
+    return {
+      __image: true,
+      data: screenshot.data,
+      mimeType: "image/jpeg",
+      url: compact.url || "",
+      total_bytes: Math.round((screenshot.data.length * 3) / 4),
+      caption: JSON.stringify({
+        url: compact.url || "",
+        title: compact.title || "",
+        controls: compact.controls,
+        actions: compact.actions,
+        options: compact.options,
+        recentUserActions: compact.recentUserActions,
+      }),
+    };
+  }
+  return compact;
+}
 
 function toolText(payload) {
   return {
@@ -259,6 +290,7 @@ export function createPiToolHost({
       action = "",
       url = "",
       ref = "",
+      selector = "",
       text = "",
       include_screenshot = false,
       after_seq = 0,
@@ -267,25 +299,30 @@ export function createPiToolHost({
     } = {}) {
       const kind = String(action || "").trim();
       if (kind === "network_since") {
+        const session = evidence.snapshot(recordingId);
+        const cursor = Number(after_seq) > 0
+          ? Number(after_seq)
+          : Math.max(0, Number(session.lastSeq || 0) - 20);
         const events = await evidence.read(recordingId, {
-          afterSeq: Number(after_seq) || 0,
+          afterSeq: cursor,
           limit: 80,
         });
         return {
-          after_seq: Number(after_seq) || 0,
+          after_seq: cursor,
           events: events.filter((item) => {
             if (item.kind === "network_request") {
               const type = String(item.payload?.resource_type || "");
-              return !type || type === "xhr" || type === "fetch";
+              if (type && type !== "xhr" && type !== "fetch") return false;
+              return !isNoiseNetworkPath(item.payload?.url || item.payload?.path || "");
             }
-            return item.kind === "page_navigated" || item.kind === "visible_control" || item.kind === "interaction";
+            return item.kind === "page_navigated" || item.kind === "interaction";
           }).map((item) => ({
             seq: item.seq,
             kind: item.kind,
             actor: item.payload?.actor || "",
             method: item.payload?.method || "",
             path: item.payload?.url || item.payload?.path || "",
-            label: item.payload?.label || item.payload?.text || "",
+            label: item.payload?.label || item.payload?.text || item.payload?.selector || "",
             status: item.payload?.status,
           })),
         };
@@ -308,7 +345,10 @@ export function createPiToolHost({
       }
       if (kind === "open_page") return browser.openPage?.(url) ?? { available: false, error: "当前浏览器不能打开页面" };
       if (kind === "list_pages") return browser.listPages?.() ?? { pages: [] };
-      if (kind === "snapshot") return browser.inspect?.({ includeScreenshot: Boolean(include_screenshot) });
+      if (kind === "snapshot") {
+        const shot = await browser.inspect?.({ includeScreenshot: Boolean(include_screenshot) });
+        return compactInspect(shot, include_screenshot);
+      }
       if (kind === "screenshot") {
         const shot = await browser.inspect?.({ includeScreenshot: true });
         if (shot?.screenshot?.data) {
@@ -329,17 +369,16 @@ export function createPiToolHost({
         }
         return { available: false, error: shot?.error || shot?.screenshot?.error || "无法截图" };
       }
-      if (kind === "click" || kind === "fill" || kind === "select" || kind === "press") {
-        if (browser.recentlyHuman?.()) {
-          await browser.inspect?.();
-        }
-        return browser.actByRef?.({ ref, action: kind, text });
+      if (kind === "click" || kind === "fill" || kind === "select" || kind === "press" || kind === "choose") {
+        const target = String(selector || ref || "").trim();
+        return browser.actBySelector?.({ selector: target, ref: target, action: kind, text })
+          ?? browser.actByRef?.({ ref: target, selector: target, action: kind, text });
       }
       if (kind === "fill_fields") {
         return browser.fillFields?.(fields);
       }
       return {
-        error: `不支持的 action: ${kind || "(empty)"}。可用：open_page, list_pages, snapshot, screenshot, click, fill, select, press, fill_fields, network_since, assist。`,
+        error: `不支持的 action: ${kind || "(empty)"}。可用：open_page, list_pages, snapshot, screenshot, click, fill, select, choose, press, fill_fields, network_since, assist。`,
       };
     },
     async get_recording_freeze_state() {
@@ -500,13 +539,14 @@ export function describePiTools() {
     {
       name: "control_in_app_browser",
       label: "Control In App Browser",
-      description: "自动点应用内浏览器。人同时也可以点预览，两条通道共用同一页。action=open_page|list_pages|snapshot|screenshot|click|fill|select|press|fill_fields|network_since|assist。先 snapshot 再按 ref 操作。screenshot 以图像返回。登录或确认写入用 assist，不要锁死预览。人刚点过就先重新 snapshot。",
+      description: "自动点应用内浏览器。人同时也可以点预览。action=open_page|list_pages|snapshot|screenshot|click|fill|select|choose|press|fill_fields|network_since|assist。先 snapshot，再用 selector（placeholder= / label= / role=button[name=]）操作。下拉用 choose(selector, 可见选项原文) 一次选中。不要每个字段都 snapshot，不要 include_screenshot。要看画面用 action=screenshot。登录或确认写入用 assist，不要锁预览。",
       parameters: {
         type: "object",
         properties: {
           action: { type: "string" },
           url: { type: "string" },
           ref: { type: "string" },
+          selector: { type: "string" },
           text: { type: "string" },
           include_screenshot: { type: "boolean" },
           after_seq: { type: "integer" },

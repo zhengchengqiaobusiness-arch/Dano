@@ -295,6 +295,50 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
           }
           return;
         }
+        if (type === "steer" || type === "pi_message") {
+          if (!session.recordingId) return;
+          const text = String(message.text || message.message || "").trim();
+          if (!text) {
+            send(ws, { type: "input_error", detail: "请输入要发给 PI 的话" });
+            return;
+          }
+          try {
+            const steered = await controller.steer(session.recordingId, text);
+            const uiStatus = session.finalizing ? "processing" : "recording";
+            send(ws, snapshot(uiStatus, {
+              label: steered.publicMessage || "已发给 PI，正在继续",
+              progress: {
+                step: session.finalizing ? "analyzing" : "capturing",
+                label: steered.publicMessage || "已发给 PI，正在继续",
+                request_count: steered.evidenceCount,
+              },
+              capture_frozen: session.finalizing,
+              ...viewExtra(),
+            }));
+          } catch (error) {
+            send(ws, { type: "input_error", detail: error.message || "没有发给 PI" });
+          }
+          return;
+        }
+        if (type === "abort" || type === "stop_pi") {
+          if (!session.recordingId) return;
+          try {
+            await controller.stopPiWork(session.recordingId);
+            send(ws, snapshot(session.finalizing ? "processing" : "recording", {
+              label: "已终止当前自动操作",
+              progress: {
+                step: session.finalizing ? "analyzing" : "capturing",
+                label: "已终止当前自动操作，预览你继续点，或再发一句话继续",
+                request_count: controller.view(session.recordingId).evidenceCount,
+              },
+              capture_frozen: session.finalizing,
+              ...viewExtra(),
+            }));
+          } catch (error) {
+            send(ws, { type: "input_error", detail: error.message || "无法终止" });
+          }
+          return;
+        }
         if (type === "input") {
           const browser = controller.browserOf?.(session.recordingId);
           session.inputChain = (session.inputChain || Promise.resolve())

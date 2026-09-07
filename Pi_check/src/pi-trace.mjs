@@ -3,6 +3,7 @@
  */
 
 import { logPiOnly } from "./policy.mjs";
+import { isUsefulAssistantThought, isUsefulEvidenceThought } from "./browser-actions.mjs";
 
 const TEXT_LIMIT = 360;
 
@@ -27,6 +28,9 @@ export function summarizeToolArgs(name, args = {}) {
     const caps = Array.isArray(payload.result?.capabilities) ? payload.result.capabilities.length : 0;
     const unresolved = Array.isArray(payload.result?.unresolved) ? payload.result.unresolved.length : 0;
     return `final=${payload.final} capabilities=${caps} unresolved=${unresolved}`;
+  }
+  if (name === "control_in_app_browser") {
+    return `${payload.action || ""} ${payload.selector || payload.ref || ""} ${payload.text || ""}`.replace(/\s+/g, " ").trim();
   }
   const keys = Object.keys(payload);
   return keys.length ? compactText(JSON.stringify(payload), 160) : "无参数";
@@ -59,6 +63,13 @@ export function summarizeToolResult(name, result) {
     const caps = result.result?.capabilities?.length ?? result.capability_count ?? result.capabilityCount;
     return `accepted=${result.accepted ?? true} capabilities=${caps ?? "?"}`;
   }
+  if (name === "control_in_app_browser") {
+    if (result?.error || result?.ok === false) return `失败 ${compactText(result.error || result.message || "error", 160)}`;
+    if (Array.isArray(result?.controls) || Array.isArray(result?.actions)) {
+      return `controls=${result.controls?.length ?? 0} actions=${result.actions?.length ?? 0}`;
+    }
+    return compactText(`${result.action || ""} ${result.selector || result.ref || ""} ${result.text || result.url || ""}`, 120);
+  }
   return compactText(JSON.stringify(result), 160);
 }
 
@@ -78,17 +89,17 @@ function messageText(message) {
 
 export function formatAgentEvent(event) {
   const type = String(event?.type || "");
-  if (type === "turn_start") return "开始新一轮模型分析";
+  if (type === "turn_start") return "";
   if (type === "turn_end") {
     const tools = Array.isArray(event.toolResults) ? event.toolResults.length : 0;
-    return `本轮结束 toolResults=${tools} ${compactText(messageText(event.message), 200)}`;
+    return tools ? `本轮结束 tools=${tools}` : "";
   }
   if (type === "message_end") {
     const role = String(event.message?.role || "assistant");
-    if (/tool/i.test(role)) return "";
+    if (/tool|user/i.test(role)) return "";
     const text = compactText(messageText(event.message), 280);
     if (!text) return "";
-    return `模型${role === "assistant" ? "分析" : role}：${text}`;
+    return `模型分析：${text}`;
   }
   if (type === "auto_retry_start") {
     return `模型重试 ${event.attempt}/${event.maxAttempts} ${compactText(event.errorMessage, 160)}`;
@@ -117,24 +128,24 @@ export function thoughtFromAgentEvent(event) {
     return null;
   }
   const line = formatAgentEvent(event);
-  return line ? { kind: "text", text: line } : null;
+  const thought = line ? { kind: "text", text: line } : null;
+  return thought && isUsefulAssistantThought(thought) ? thought : null;
 }
 
 export function thoughtFromEvidence(kind, payload = {}) {
   const body = payload && typeof payload === "object" ? payload : {};
+  if (!isUsefulEvidenceThought(kind, body)) return null;
   if (kind === "page_navigated") {
     const url = compactText(body.url || body.frame_id || "", 160);
     return url ? { kind: "text", text: `打开页面 ${url}` } : null;
   }
   if (kind === "interaction") {
     const action = String(body.kind || "click");
-    if (/pointer|mousemove|mouseover|mouseenter/i.test(action)) return null;
-    const label = compactText(body.label || body.text || body.placeholder || body.name || body.tag || "", 80);
-    return { kind: "text", text: label ? `操作 ${action} ${label}` : `操作 ${action}` };
+    const who = body.actor === "pi" ? "PI" : "人";
+    const label = compactText(body.label || body.text || body.placeholder || body.selector || body.name || body.tag || "", 80);
+    return { kind: "text", text: label ? `${who} ${action} ${label}` : `${who} ${action}` };
   }
   if (kind === "network_request") {
-    const type = String(body.resource_type || "");
-    if (type && type !== "xhr" && type !== "fetch") return null;
     const path = compactText(body.path || body.url || "", 160);
     if (!path) return null;
     return { kind: "text", text: `请求 ${String(body.method || "").toUpperCase()} ${path}`.trim() };
@@ -154,6 +165,7 @@ export function createPiTrace({ onThought } = {}) {
   const emit = (payload) => {
     if (!payload || typeof onThought !== "function") return;
     if (!payload.text && payload.kind !== "tool") return;
+    if (!isUsefulAssistantThought(payload)) return;
     try {
       onThought(payload);
     } catch {

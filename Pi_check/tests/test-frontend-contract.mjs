@@ -161,6 +161,48 @@ test("非协助时人点预览不会被丢弃，并与 PI 点进同一证据", a
   }
 });
 
+test("录制助手发话后能看到用户消息并交给 PI", async () => {
+  const harness = await createHarness({ result: sampleResult() });
+  const catalog = new ResultsCatalog(harness.files);
+  const httpServer = createServer();
+  const wss = attachFrontendBridge(httpServer, { controller: harness.controller, catalog });
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const { port } = httpServer.address();
+  let ws;
+  try {
+    ws = await openRecorderSocket(port);
+    const snapshots = listenSnapshots(ws);
+    const thoughts = [];
+    ws.on("message", (raw) => {
+      let message;
+      try {
+        message = JSON.parse(String(raw));
+      } catch {
+        return;
+      }
+      if (message.type === "thought") thoughts.push(message);
+    });
+    ws.send(JSON.stringify({
+      type: "start",
+      start_url: "http://example.com",
+      goal_text: "产出能力",
+      title: "助手发话",
+    }));
+    await waitFor(() => snapshots.some((item) => String(item.run_id || "").startsWith("rec_")));
+    ws.send(JSON.stringify({ type: "steer", text: "继续搜请假" }));
+    await waitFor(() => harness.getPi()?.userMessages.includes("继续搜请假"));
+    await waitFor(() => thoughts.some((item) => item.kind === "user" && item.text === "继续搜请假"));
+    ws.send(JSON.stringify({ type: "abort" }));
+    await waitFor(() => harness.getPi()?.aborted === true);
+    assert.equal(harness.controller.view(snapshots.findLast((item) => String(item.run_id || "").startsWith("rec_")).run_id).status, "recording");
+  } finally {
+    ws?.terminate();
+    wss.close();
+    await new Promise((resolve) => httpServer.close(resolve));
+    await harness.cleanup();
+  }
+});
+
 test("采集中前台断开仍会取消且没有能力", async () => {
   const harness = await createHarness({
     result: sampleResult(),

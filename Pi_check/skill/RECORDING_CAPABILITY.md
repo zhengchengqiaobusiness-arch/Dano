@@ -68,7 +68,7 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 
 `list_recording_manifest` 只有计数。必须先调 `list_recording_index`，看完全场 interaction 文案、xhr/fetch 的 METHOD+path、network_response、`visible_control`、截图和页面跳转，再按需 `read_evidence_item` 读正文。请求/响应正文在 `payload.body.text` 或 `body.blob_id`。`read_response_blob` 只接受 `blob_` 开头的 id，不要把 `request_id` 当 blob，也不要编造截图 blob_id。看完关键请求就 `submit_recording_result`，禁止把完整 result 写在对话里。不要只读前半场。也可用 `list_action_timeline` 按时间看人与 PI 点过的交互（带 `actor`），对候选 execute 调 `read_request_shape`。
 
-浏览器一开你就用 `control_in_app_browser` 自动点；人同时也可以点预览。共用同一页、同一路画面、同一条证据。登录、验证码、确认写入用 `assist`，不要锁预览。每完成一个独立动作立刻 `submit_recording_capability`，全部交完后 `submit_recording_result({final:true, use_draft:true})`。
+浏览器一开你就用 `control_in_app_browser` 自动点；人同时也可以点预览。共用同一页、同一路画面、同一条证据。用 snapshot 的 `placeholder=` / `label=` / `role=` 选择器；下拉用 `choose` 一次选中。登录、验证码、确认写入用 `assist`，不要锁预览。每完成一个独立动作立刻 `submit_recording_capability`，全部交完后 `submit_recording_result({final:true, use_draft:true})`。
 
 索引对齐方法（换任何页面都这样做）：
 

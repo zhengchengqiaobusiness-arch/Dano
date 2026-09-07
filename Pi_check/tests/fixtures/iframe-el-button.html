@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>业务页</title>
+</head>
+<body>
+  <form id="filter">
+    <label>单据编号 <input name="no" placeholder="请输入单据编号" /></label>
+    <a class="el-button" id="search" href="javascript:void(0)">搜索</a>
+    <div class="el-button" id="add" role="presentation">新增</div>
+  </form>
+  <script>
+    document.getElementById("search").addEventListener("click", () => {
+      document.body.dataset.searched = document.querySelector("[name=no]").value || "1";
+    });
+    document.getElementById("add").addEventListener("click", () => {
+      document.body.dataset.created = "1";
+    });
+  </script>
+</body>
+</html>

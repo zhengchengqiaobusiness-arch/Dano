@@ -54,11 +54,55 @@ test("beginLiveDrive 立即发出操作者提示，notifyEvidence 仍不打断",
   pi.notifyEvidence({ seq: 12 });
   assert.equal(prompts.length, before);
   pi.notifyHumanAct({ seq: 13 });
-  assert.ok(prompts.some((item) => item.options.streamingBehavior === "steer" && /用户刚在预览/.test(item.text)));
+  pi.notifyHumanAct({ seq: 14 });
+  pi.notifyHumanAct({ seq: 15 });
+  assert.equal(prompts.filter((item) => item.options.streamingBehavior === "steer" && /用户刚在预览/.test(item.text)).length, 1);
   await pi.stopLiveDrive();
   releasePrompt?.();
   await drive;
   assert.equal(pi.status, "ready");
+});
+
+test("用户发话在自动点击中走 steer，停掉后要求重新开车", async () => {
+  const prompts = [];
+  const thoughts = [];
+  let releasePrompt;
+  const pending = new Promise((resolve) => {
+    releasePrompt = resolve;
+  });
+  const session = {
+    prompts,
+    async prompt(text, options = {}) {
+      prompts.push({ text, options });
+      if (options.streamingBehavior === "steer") return;
+      await pending;
+    },
+  };
+  const pi = new LivePiSession({
+    session,
+    sessionId: "pi_user_steer",
+    dispose: () => {},
+    onThought: (item) => thoughts.push(item),
+  });
+  const drive = pi.beginLiveDrive({
+    targetUrl: "http://example.com",
+    goal: "目标",
+    timeoutMs: 5000,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const during = await pi.notifyUserMessage("继续搜请假");
+  assert.equal(during.ok, true);
+  assert.equal(during.resumeDrive, false);
+  assert.ok(thoughts.some((item) => item.kind === "user" && item.text === "继续搜请假"));
+  assert.equal(prompts.filter((item) => item.options.streamingBehavior === "steer" && /继续搜请假/.test(item.text)).length, 1);
+  const aborted = await pi.abortLiveWork();
+  assert.equal(aborted.ok, true);
+  releasePrompt?.();
+  await drive;
+  assert.equal(pi.status, "ready");
+  const after = await pi.notifyUserMessage("去点新增");
+  assert.equal(after.ok, true);
+  assert.equal(after.resumeDrive, true);
 });
 
 test("自动点击空转时只停自动点，不把会话打成失败", async () => {
@@ -471,4 +515,26 @@ test("PI prompt 抛错后停止分析，不再立刻重开一轮", async () => {
   assert.match(outcome.message, /model request failed/);
   assert.ok(session.prompts.length <= 2, `异常后仍在重试: ${session.prompts.length}`);
   assert.equal(pi.status, "failed");
+});
+
+test("已有草稿时最终分析先催 use_draft，不重读证据", async () => {
+  const prompts = [];
+  const session = {
+    async prompt(text, options = {}) {
+      prompts.push({ text, options });
+    },
+    dispose() {},
+  };
+  const pi = new LivePiSession({
+    session,
+    sessionId: "pi_draft",
+    dispose: () => {},
+  });
+  await pi.requestFinalAnalysis({
+    timeoutMs: 400,
+    hasResult: async () => true,
+    hasDraft: async () => true,
+  });
+  assert.match(prompts[0].text, /use_draft:true/);
+  assert.doesNotMatch(prompts[0].text, /证据已冻结/);
 });

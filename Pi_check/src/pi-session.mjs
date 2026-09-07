@@ -12,6 +12,7 @@ import { wrapPiToolsForSdk } from "./pi-tools.mjs";
 import { applyPiModelConfig } from "./pi-model.mjs";
 import { installOpenAIToolCallStreamCompatibility } from "./openai-stream-compat.mjs";
 import { createPiTrace } from "./pi-trace.mjs";
+import { HUMAN_STEER_MS, isUsefulAssistantThought } from "./browser-actions.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SKILL_PATH = path.join(ROOT, "skill", "RECORDING_CAPABILITY.md");
@@ -63,14 +64,16 @@ ${browserSkill ? `## Control In App Browser\n\n${browserSkill}\n` : ""}
 - submit_recording_result
 
 规则：
-1. 浏览器一开就开始 control_in_app_browser。人也可能同时在点，先 snapshot 再按当前 ref 操作。
-2. 每完成一个独立动作（你点的或人点的）立刻 submit_recording_capability。不要在脑子里组完整 JSON。
-3. 目标做完即可 submit_recording_result；系统会冻结。也可用 use_draft=true 定稿。
-4. submit_recording_result 必须包含 recording_id、final=true；完整 result 或 use_draft=true。
-5. result.capabilities 必须是非空数组，并且包含现有录制页能直接渲染的字段合同与请求编排。
-6. 不要写 capabilities[].fields。request_refs 必须是 {step_id, usage} 对象。steps[].params 必须是含 key/path 的对象数组。调用方字段必须出现在 input_schema.properties 或这些 params 里。
-7. 先自己操作，再用 list_action_timeline 建台账。每个独立业务动作都要有能力或 unresolved。capability_id 不得重复。每个能力恰好一个不共用的 execute。
-8. 系统会原样保存 result，不会补齐、改写或生成替代能力。
+1. 浏览器一开就开始 control_in_app_browser。用 snapshot 里的 selector（placeholder= / label= / role=button[name=]），不要死盯 c1/a1。
+2. 下拉必须 choose(selector, 可见选项原文)，一次选中。不要 click 后再 snapshot 再点选项，不要每个字段都 snapshot，不要 include_screenshot。
+3. 每完成一个独立动作（你点的或人点的）立刻 submit_recording_capability。不要在脑子里组完整 JSON。
+4. 目标做完即可 submit_recording_result；系统会冻结。也可用 use_draft=true 定稿。
+5. submit_recording_result 必须包含 recording_id、final=true；完整 result 或 use_draft=true。
+6. result.capabilities 必须是非空数组，并且包含现有录制页能直接渲染的字段合同与请求编排。
+7. 不要写 capabilities[].fields。request_refs 必须是 {step_id, usage} 对象。steps[].params 必须是含 key/path 的对象数组。调用方字段必须出现在 input_schema.properties 或这些 params 里。
+8. 先自己操作，再用 list_action_timeline 建台账。每个独立业务动作都要有能力或 unresolved。capability_id 不得重复。每个能力恰好一个不共用的 execute。
+9. 系统会原样保存 result，不会补齐、改写或生成替代能力。
+10. 人点过的看 snapshot.recentUserActions。不要停下来等人，不要锁预览。
 `;
 }
 
@@ -79,13 +82,28 @@ export const PI_INSTRUCTIONS = buildPiInstructions(
   await readControlInAppBrowserSkill(),
 );
 
+export function buildUserSteerPrompt(text, { finalizing = false } = {}) {
+  const body = String(text || "").trim();
+  if (finalizing) {
+    return (
+      `用户补充：${body}\n` +
+      `不要再 click。已有草稿就立刻 submit_recording_result({final:true, use_draft:true})。没有就先 submit_recording_capability。`
+    );
+  }
+  return (
+    `用户在录制页发来指示：${body}\n` +
+    `立刻 control_in_app_browser 继续操作。人也可以点预览。不要锁预览。该交的立刻 submit_recording_capability。`
+  );
+}
+
 export function buildLiveDrivePrompt({ targetUrl = "", goal = "" } = {}) {
   return (
     `你是操作者。人也同时可以点预览，共用这一页。\n` +
     `目标：${String(goal || "").trim() || "把该页独立业务动作做成可调用能力"}\n` +
     `入口：${String(targetUrl || "").trim()}\n` +
-    `立刻 control_in_app_browser：open_page → snapshot → click/fill/select/fill_fields。\n` +
-    `人刚点过就先 snapshot。每做完一个动作，network_since 或 read_request_shape 看真实请求，再 submit_recording_capability。人点出的动作也要交。\n` +
+    `立刻 control_in_app_browser：open_page → snapshot → 按 selector click/fill/choose。\n` +
+    `下拉用 choose(placeholder=或label=, 可见选项)。不要每个字段都 snapshot，不要 include_screenshot。人点过的看 recentUserActions。\n` +
+    `每做完一个动作，network_since 或 read_request_shape 看真实请求，再 submit_recording_capability。人点出的动作也要交。\n` +
     `登录、验证码、确认写入：action=assist，预览不要锁。写入真实数据前若目标没授权，先 assist。\n` +
     `目标做完后 submit_recording_result({final:true, use_draft:true})。不要把 JSON 写在对话里。不要写 capabilities[].fields。`
   );
@@ -142,6 +160,7 @@ export class LivePiSession {
     this.#notifyDebounceMs = Number(notifyDebounceMs) || 8000;
     this.#driveStopped = false;
     this.#driveSettleOk = null;
+    this.#lastHumanSteerAt = 0;
     this.#unsub = typeof session?.subscribe === "function"
       ? session.subscribe((event) => this.#trace.handleEvent(event))
       : null;
@@ -160,9 +179,11 @@ export class LivePiSession {
   #analysisSettleErr;
   #driveStopped;
   #driveSettleOk;
+  #lastHumanSteerAt;
 
   #emitThought(payload) {
     if (!payload) return;
+    if (!isUsefulAssistantThought(payload)) return;
     try {
       this.#onThought?.(payload);
     } catch {
@@ -209,16 +230,60 @@ export class LivePiSession {
   notifyHumanAct({ seq } = {}) {
     this.#latestSeq = Number(seq) || this.#latestSeq;
     if (!this.alive || this.status !== "driving" || this.#driveStopped) return this.#notifyChain;
+    const now = Date.now();
+    if (now - this.#lastHumanSteerAt < HUMAN_STEER_MS) return this.#notifyChain;
+    this.#lastHumanSteerAt = now;
     this.session.prompt(
-      "用户刚在预览里操作了页面。先 snapshot，再按新 ref 继续。不要停下来等人，也不要锁预览。",
+      "用户刚在预览里操作了页面。看 snapshot.recentUserActions，用 choose/click 继续。不要每点一次就截图，也不要锁预览。",
       { streamingBehavior: "steer" },
     ).catch(() => {});
     return this.#notifyChain;
   }
 
+  async notifyUserMessage(text = "") {
+    const message = String(text || "").trim().slice(0, 2000);
+    if (!message) return { ok: false, error: "请输入要发给 PI 的话" };
+    if (!this.alive) return { ok: false, error: "PI 会话已关闭" };
+    this.#emitThought({ kind: "user", text: message });
+    const finalizing = this.status === "finalizing";
+    const resumeDrive = this.#driveStopped && !finalizing && this.status !== "submitted";
+    const prompt = buildUserSteerPrompt(message, { finalizing });
+    if (resumeDrive) {
+      return { ok: true, resumeDrive: true, text: message };
+    }
+    try {
+      if (this.status === "driving") {
+        this.session.prompt(prompt, { streamingBehavior: "steer" }).catch(() => {});
+      } else {
+        await this.#promptNow(prompt);
+      }
+      return { ok: true, resumeDrive: false, text: message };
+    } catch (error) {
+      return { ok: false, error: error.message || String(error) };
+    }
+  }
+
+  async abortLiveWork() {
+    if (!this.alive) return { ok: false, error: "PI 会话已关闭" };
+    this.#emitThought({
+      kind: "text",
+      text: "用户终止了当前自动操作。预览你继续点，或再发一句话让我继续。",
+    });
+    this.#driveStopped = true;
+    try {
+      await this.session.abort?.();
+    } catch {
+      // 中止失败仍要停自动点
+    }
+    this.#driveSettleOk?.();
+    if (this.status === "driving") this.status = "ready";
+    return { ok: true };
+  }
+
   async beginLiveDrive({
     targetUrl = "",
     goal = "",
+    resumeHint = "",
     timeoutMs = 600000,
     idleSubmitMs = 90000,
     hasResult,
@@ -384,16 +449,15 @@ export class LivePiSession {
     };
     logPiOnly(`[PI操作] 开始自动操作 timeout=${timeoutMs}ms`);
     this.#emitThought({ kind: "text", text: "PI 开始自动操作；预览你也可以点" });
-    startPrompt(buildLiveDrivePrompt({ targetUrl, goal }));
+    startPrompt(resumeHint
+      ? buildUserSteerPrompt(resumeHint)
+      : buildLiveDrivePrompt({ targetUrl, goal }));
     const heartbeat = setInterval(() => {
       if (!this.alive) {
         settleErr(new Error("PI 会话已关闭"));
         return;
       }
-      this.#emitThought({
-        kind: "text",
-        text: `正在自动操作 ${Math.round((Date.now() - started) / 1000)}s ${this.#trace.summary()}`,
-      });
+      logPiOnly(`[PI操作] ${Math.round((Date.now() - started) / 1000)}s ${this.#trace.summary()}`);
     }, 15000);
     const resultWatch = checkResult
       ? setInterval(async () => {
@@ -474,6 +538,7 @@ export class LivePiSession {
     timeoutMs = 600000,
     idleSubmitMs = 90000,
     hasResult,
+    hasDraft,
     maxEmptySettles = MAX_EMPTY_FINAL_SETTLES,
   } = {}) {
     if (!this.alive) {
@@ -641,7 +706,8 @@ export class LivePiSession {
     };
     logPiOnly(`[PI分析] 开始最终分析 timeout=${timeoutMs}ms seq=${this.#latestSeq}`);
     this.#emitThought({ kind: "text", text: `开始最终分析，最新证据 seq=${this.#latestSeq}` });
-    startPrompt(buildFinalAnalysisPrompt(this.#latestSeq));
+    const draftReady = typeof hasDraft === "function" && await hasDraft().catch(() => false);
+    startPrompt(draftReady ? submitNow : buildFinalAnalysisPrompt(this.#latestSeq));
     const heartbeat = setInterval(() => {
       if (!this.alive) {
         settleErr(new Error("PI 会话已关闭"));

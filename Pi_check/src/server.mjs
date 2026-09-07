@@ -169,6 +169,13 @@ const server = createServer(async (req, res) => {
       json(res, 200, { ok: true, session: view, notice: PI_ONLY_NOTICE });
       return;
     }
+    const steer = url.pathname.match(/^\/api\/recordings\/([^/]+)\/steer$/);
+    if (req.method === "POST" && steer) {
+      const body = await readBody(req);
+      const view = await controller.steer(steer[1], body.text || body.message || "");
+      json(res, 200, { ok: true, session: view, notice: PI_ONLY_NOTICE });
+      return;
+    }
     const act = url.pathname.match(/^\/api\/recordings\/([^/]+)\/act$/);
     if (req.method === "POST" && act) {
       const body = await readBody(req);
