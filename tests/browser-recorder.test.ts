@@ -419,8 +419,10 @@ test("dialog clicks stay on the form and dates do not hit the page background", 
     assert.equal(snapshot.text.includes("closed"), false);
     await assert.rejects(
       () => recorder.control({ action: "click", selector: "#mask" }),
-      /modal mask|behind an open dialog/
+      /modal mask|behind an open dialog|Selector not found/
     );
+    const afterRejectedClick: any = await recorder.control({ action: "snapshot" });
+    assert.equal(afterRejectedClick.scope, "dialog", "rejected backdrop click must keep the dialog open");
     await recorder.stop();
   } finally {
     if (recorder.isActive()) await recorder.stop().catch(() => {});

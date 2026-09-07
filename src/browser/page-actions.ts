@@ -374,7 +374,13 @@ export class PageActions {
           continue;
         }
         const visibleDialogs = frame.locator(DIALOGS);
-        const dialog = await visibleDialogs.count() ? visibleDialogs.last() : undefined;
+        let dialog: Locator | undefined;
+        for (let index = await visibleDialogs.count() - 1; index >= 0; index--) {
+          const candidate = visibleDialogs.nth(index);
+          if (PICKER_DIALOG.test(await candidate.getAttribute("class") || "")) continue;
+          dialog = candidate;
+          break;
+        }
         const dropdown = frame.locator(DROPDOWNS).last();
         const scopes: Array<Frame | Locator> = [];
         if (textOnly && await dropdown.count()) scopes.push(dropdown);
