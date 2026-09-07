@@ -132,7 +132,7 @@ test("human interruption immediately aborts and clears queued work without killi
   assert.equal(bridge.status().streaming, false);
 });
 
-test("a settled agent is resumed to stop and export after the live recording audit passes", async () => {
+test("a settled agent never fabricates a continuation after a successful export", async () => {
   const page = new WorkbenchPage("page_finalizeaudit", {
     rootDir: ".",
     dataDir: ".business-skill-studio",
@@ -160,12 +160,10 @@ test("a settled agent is resumed to stop and export after the live recording aud
   (page.pi as any).status = () => ({ streaming: false });
   (page.pi as any).prompt = async (prompt: string) => { prompts.push(prompt); };
 
-  (page as any).scheduleCoverageContinuation();
+  for (const listener of (page.pi as any).listeners) listener({ type: "agent_settled" });
   await new Promise(resolve => setTimeout(resolve, 260));
 
-  assert.equal(prompts.length, 1);
-  assert.match(prompts[0]!, /business_skill_record_stop/);
-  assert.match(prompts[0]!, /business_skill_export/);
+  assert.deepEqual(prompts, [], "only an actual user message may start a new task");
 });
 
 test("live audit never resumes a missing write operation without a new user confirmation", async () => {
@@ -201,51 +199,11 @@ test("live audit never resumes a missing write operation without a new user conf
   (page.pi as any).status = () => ({ streaming: false });
   (page.pi as any).prompt = async (prompt: string) => { prompts.push(prompt); };
 
-  (page as any).scheduleCoverageContinuation();
+  for (const listener of (page.pi as any).listeners) listener({ type: "agent_settled" });
   await new Promise(resolve => setTimeout(resolve, 260));
 
   assert.deepEqual(prompts, []);
-  assert.equal(logs.some(item => item.level === "WAIT" && /明确确认/.test(item.message)), true);
-});
-
-test("a queued audit continuation does not send another prompt after the recording stops", async () => {
-  const page = new WorkbenchPage("page_stoprace", {
-    rootDir: ".",
-    dataDir: ".business-skill-studio",
-    recordingsDir: ".business-skill-studio/recordings",
-    catalogDir: ".business-skill-studio/catalog",
-    profileDir: ".business-skill-studio/browser-profile",
-    maxResponseBytes: 32_768,
-    headless: true,
-    openaiModel: "test"
-  }, "http://127.0.0.1:4310", value => value, () => {});
-  let active = true;
-  let finishReadiness!: (value: any) => void;
-  const prompts: string[] = [];
-  (page.recorder as any).activeSession = () => active ? ({
-    id: "rec_stoprace",
-    completeFieldCoverage: true,
-    completePageCoverage: false,
-    expectedOperations: ["query"]
-  }) : undefined;
-  (page.recorder as any).stopReadiness = () => new Promise(resolve => { finishReadiness = resolve; });
-  (page.pi as any).status = () => ({ streaming: false });
-  (page.pi as any).prompt = async (prompt: string) => { prompts.push(prompt); };
-
-  (page as any).scheduleCoverageContinuation();
-  await new Promise(resolve => setTimeout(resolve, 230));
-  active = false;
-  finishReadiness({
-    ready: false,
-    missingPageOperations: [],
-    missingOperations: [],
-    missingFields: [{ label: "请假类型", name: "leaveType" }],
-    contractReview: { findings: [] },
-    nextAction: { action: "exercise-form" }
-  });
-  await new Promise(resolve => setTimeout(resolve, 30));
-
-  assert.deepEqual(prompts, []);
+  assert.equal(logs.some(item => /Continuing recording|resuming the same task/.test(item.message)), false);
 });
 
 test("aborting a task cancels its queued recording-audit continuation", async () => {
@@ -283,7 +241,7 @@ test("aborting a task cancels its queued recording-audit continuation", async ()
   (page.pi as any).prompt = async (prompt: string) => { prompts.push(prompt); };
   (page.recorder as any).cancelPendingActions = () => { browserActionsCancelled += 1; };
 
-  (page as any).scheduleCoverageContinuation();
+  for (const listener of (page.pi as any).listeners) listener({ type: "agent_settled" });
   await page.abortWork();
   await new Promise(resolve => setTimeout(resolve, 260));
 
@@ -325,7 +283,7 @@ test("reset prevents an old recording-audit continuation from entering the next 
   (page.pi as any).stop = () => {};
   (page.pi as any).prompt = async (prompt: string) => { prompts.push(prompt); };
 
-  (page as any).scheduleCoverageContinuation();
+  for (const listener of (page.pi as any).listeners) listener({ type: "agent_settled" });
   await page.reset();
   await new Promise(resolve => setTimeout(resolve, 260));
 

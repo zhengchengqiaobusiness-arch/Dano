@@ -23,7 +23,6 @@ interface ManualTakeover {
 }
 
 const PAGE_SESSION_PATTERN = /^page_[A-Za-z0-9_-]{8,80}$/;
-const WRITE_EVIDENCE_OPERATIONS = new Set<OperationKind>(["create", "update", "review", "delete", "upload", "action"]);
 
 function requiresCompleteFieldCoverage(text: string) {
   const request = text.replace(/\s+/g, "");
@@ -60,9 +59,6 @@ export class WorkbenchPage {
   private abandonTimer?: ReturnType<typeof setTimeout>;
   private disposing?: Promise<void>;
   private manualTakeover?: ManualTakeover;
-  private coverageContinuationPending = false;
-  private coverageContinuationTimer?: ReturnType<typeof setTimeout>;
-  private coverageContinuations = 0;
   private promptGeneration = 0;
   private interruption = Promise.resolve();
   private completeFieldCoverageRequested = false;
@@ -206,8 +202,6 @@ export class WorkbenchPage {
     completeFieldCoverage = false,
     completePageCoverage = false
   ) {
-    this.cancelCoverageContinuation();
-    this.coverageContinuations = 0;
     this.cancelManualTakeover("new-recording");
     if (this.recorder.isActive()) {
       const oldPid = this.recorder.browserProcessId();
@@ -226,62 +220,6 @@ export class WorkbenchPage {
     return session;
   }
 
-  private cancelCoverageContinuation() {
-    if (this.coverageContinuationTimer) clearTimeout(this.coverageContinuationTimer);
-    this.coverageContinuationTimer = undefined;
-    this.coverageContinuationPending = false;
-  }
-
-  private scheduleCoverageContinuation() {
-    if (!this.transcriptOpen || this.coverageContinuationPending || this.manualTakeover || this.mode !== "automatic") return;
-    const session = this.recorder.activeSession();
-    if (!session || (!session.completePageCoverage && !session.completeFieldCoverage && !(session.expectedOperations || []).length)) return;
-    const generation = this.promptGeneration;
-    this.coverageContinuationPending = true;
-    this.coverageContinuationTimer = setTimeout(() => {
-      this.coverageContinuationTimer = undefined;
-      void (async () => {
-        try {
-          if (!this.transcriptOpen || generation !== this.promptGeneration || this.pi.status().streaming || this.manualTakeover || !this.recorder.activeSession()) return;
-          const readiness = await this.recorder.stopReadiness();
-          if (!this.transcriptOpen || generation !== this.promptGeneration || !this.recorder.activeSession()) return;
-          const remaining = readiness.pageCoverage?.remaining || 0;
-          const missingPageOperations = readiness.missingPageOperations || [];
-          const missingOperations = readiness.missingOperations || [];
-          const missingFields = readiness.missingFields || [];
-          const pendingWrite = [...missingOperations, ...missingPageOperations.flatMap(item => item.operations || [])]
-            .find(operation => WRITE_EVIDENCE_OPERATIONS.has(operation));
-          if (pendingWrite) {
-            this.onLog("WAIT", `实时审核仍缺少写操作 ${pendingWrite}；等待用户对当前表单和目标做本次明确确认，不自动续跑写请求。`);
-            return;
-          }
-          const continuationLimit = Math.max(24, (readiness.pageCoverage?.discovered || 0) * 2);
-          if (this.coverageContinuations >= continuationLimit) {
-            this.onLog("ERROR", `Live recording audit did not finish after ${continuationLimit} automatic continuations.`);
-            this.broadcast({ type: "agent_error", message: `实时审核闭环在 ${continuationLimit} 次自动续跑后仍未完成。` });
-            return;
-          }
-          this.coverageContinuations += 1;
-          if (readiness.ready) {
-            this.onLog("PI", "Live recording evidence and contract audit passed; resuming the same task to stop and export.");
-            await this.pi.prompt("当前同一录制已在录制阶段完成能力构建、请求合同修复、验证和审核，recordingAudit.ready=true。不要继续点击页面；立即调用 business_skill_record_stop，再调用 business_skill_export 写出已通过的合同。导出只做最终一致性复核，不得把首次审核或修复推迟到导出。不要只总结结果。");
-            return;
-          }
-          this.onLog("PI", `Continuing recording from live audit; ${remaining} pages, ${missingPageOperations.length} page operations, ${missingOperations.length} global operations, and ${missingFields.length} fields remain.`);
-          const missing = missingPageOperations.slice(0, 8).map(item => `${item.label}（${item.operations.join("、")}）`).join("、");
-          const operations = missingOperations.slice(0, 8).join("、");
-          const fields = missingFields.slice(0, 8).map(field => field.label || field.name).filter(Boolean).join("、");
-          const contractFindings = readiness.contractReview?.findings || [];
-          await this.pi.prompt(`继续当前同一录制，不要总结、不要重启录制。实时审核 nextAction=${readiness.nextAction.action}；还有 ${remaining} 个页面未访问、${missingPageOperations.length} 个页面能力缺少成功证据${missing ? `：${missing}` : ""}、${missingOperations.length} 个总体操作缺口${operations ? `：${operations}` : ""}、${missingFields.length} 个字段未完成${fields ? `：${fields}` : ""}、${contractFindings.length} 个请求合同缺口${contractFindings.length ? `：${contractFindings.slice(0, 3).map(item => item.message).join("；")}` : ""}。只处理 recordingAudit 指向的当前缺口；每次 business_browser_control 后立即读取新的 recordingAudit，直到页面、字段、操作、成功响应和请求合同同时通过，再结束录制并导出。`);
-        } catch (error) {
-          this.onLog("WARN", `Automatic full-page continuation failed: ${error instanceof Error ? error.message : String(error)}`);
-        } finally {
-          if (generation === this.promptGeneration) this.coverageContinuationPending = false;
-        }
-      })();
-    }, 200);
-  }
-
   async rememberViewport(viewport?: { width?: number; height?: number; scale?: number }) {
     const size = normalizePreviewViewport(viewport);
     this.preferredViewport = size;
@@ -291,7 +229,6 @@ export class WorkbenchPage {
 
   async stopRecording() {
     this.promptGeneration += 1;
-    this.cancelCoverageContinuation();
     this.cancelManualTakeover("recording-stopped");
     const pid = this.recorder.browserProcessId();
     const session = await this.recorder.stop();
@@ -303,7 +240,6 @@ export class WorkbenchPage {
 
   acceptUserMessage(text: string) {
     this.promptGeneration += 1;
-    this.cancelCoverageContinuation();
     this.cancelManualTakeover("user-message");
     this.recorder.cancelPendingActions("用户发送了新指令。");
     this.interruption = this.pi.interrupt();
@@ -336,7 +272,6 @@ export class WorkbenchPage {
   async abortWork(reason = "abort") {
     this.promptGeneration += 1;
     this.transcriptOpen = false;
-    this.cancelCoverageContinuation();
     this.cancelManualTakeover(reason);
     this.recorder.cancelPendingActions("用户已终止当前任务。");
     const pid = this.pi.processId();
@@ -352,7 +287,6 @@ export class WorkbenchPage {
     this.transcriptOpen = false;
     this.lastRecordingSessionId = undefined;
     this.completeFieldCoverageRequested = false;
-    this.coverageContinuations = 0;
     await this.abortWork("clear");
     if (this.recorder.isActive() || this.recorder.browserProcessId()) {
       const pid = this.recorder.browserProcessId();
@@ -423,7 +357,6 @@ export class WorkbenchPage {
       if (event.type === "agent_settled") {
         this.broadcast({ type: "agent_status", ready: true, streaming: false });
         this.onLog("PI", `Natural-language task completed on page ${this.id}.`);
-        this.scheduleCoverageContinuation();
       }
       if (event.type === "extension_ui_request") {
         if (!this.transcriptOpen) {
