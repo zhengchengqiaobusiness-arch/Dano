@@ -373,12 +373,13 @@ export class PageActions {
           }
           continue;
         }
-        const dialog = await this.lastFormDialog(frame);
+        const visibleDialogs = frame.locator(DIALOGS);
+        const dialog = await visibleDialogs.count() ? visibleDialogs.last() : undefined;
         const dropdown = frame.locator(DROPDOWNS).last();
         const scopes: Array<Frame | Locator> = [];
         if (textOnly && await dropdown.count()) scopes.push(dropdown);
         if (dialog) scopes.push(dialog);
-        scopes.push(frame);
+        if (!dialog) scopes.push(frame);
         for (const scope of scopes) {
           if (fieldOnly && /^column=/i.test(selector)) {
             const table = await this.tableControl(scope, selector.replace(/^column=/i, ""));

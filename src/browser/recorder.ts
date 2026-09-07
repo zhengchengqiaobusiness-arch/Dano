@@ -1842,7 +1842,10 @@ export class BrowserRecorder {
           return this.actions.captureSnapshot();
         case "exercise-form": {
           const exercised = await this.guardedFormAction("exercise-form", () => this.actions.exerciseForm(Boolean(this.active?.session.completeFieldCoverage), () => actionSignal.aborted));
-          if (exercised.ok) await this.markWholeFormExercised();
+          // A completed pass may leave fields needing repair; do not prohibit that repair.
+          if ("filled" in exercised
+            && !("cancelled" in exercised && exercised.cancelled)
+            && !("loginRequired" in exercised && exercised.loginRequired)) await this.markWholeFormExercised();
           return exercised;
         }
         case "submit-form": {

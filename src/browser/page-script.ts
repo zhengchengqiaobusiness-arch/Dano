@@ -1180,15 +1180,17 @@ export const PAGE_HELPERS = String.raw`
 
   const buildSnapshot = () => {
     const scope = activeScope();
+    const interactionScope = [...document.querySelectorAll(DIALOG_SEL)]
+      .filter((el) => isVisible(el) && !isPickerHost(el)).at(-1) || scope;
     const formFields = collectFormFields(scope);
     const todoFields = formFields.filter((field) => !field.skip && !field.disabled && !field.filled);
     return {
       title: document.title,
       pageHeading: collectPageHeading(),
       url: location.href,
-      text: pageText(scope, formFields),
+      text: pageText(interactionScope, formFields),
       scope: scopeName(scope),
-      controls: collectControls(scope),
+      controls: collectControls(interactionScope),
       navigationInventory: collectNavigation(),
       formFields,
       todoFields,
