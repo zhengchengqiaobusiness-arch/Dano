@@ -112,3 +112,20 @@ test("snapshot exposes actionable labels for icon-only chooser rows", async () =
     assert.equal(after.title, "selected-second", "the supplied selector must activate this row's checkbox");
   }, false);
 });
+
+test("repeated row actions carry record identity and click only the intended row", async () => {
+  await withRecorder(`<!doctype html><table><tbody>
+    <tr><td>KEEP-001</td><td>保留记录</td><td><button onclick="document.title='wrong-record'">删除</button></td></tr>
+    <tr><td>TEST-002</td><td>本次测试</td><td><button onclick="document.title='test-record'">删除</button></td></tr>
+  </tbody></table>`, async recorder => {
+    const snapshot: any = await recorder.control({ action: "snapshot" });
+    const deletes = snapshot.controls.filter((control: any) => control.text === "删除");
+    assert.equal(new Set(deletes.map((control: any) => control.selector)).size, 2,
+      "same-named actions on different records must not share a selector");
+    const target = deletes.find((control: any) => control.rowText?.includes("TEST-002"));
+    assert.ok(target, "Pi must receive the owning record, not just a repeated action name");
+    await recorder.control({ action: "click", selector: target.selector });
+    const after: any = await recorder.control({ action: "snapshot" });
+    assert.equal(after.title, "test-record");
+  }, false);
+});

@@ -219,6 +219,13 @@ export const PAGE_HELPERS = String.raw`
   };
 
   const selectorOf = (el) => {
+    const row = el.closest("tbody tr, .vxe-body--row, .el-table__row, .ant-table-row");
+    const rowText = row && clean(row.textContent);
+    const actionText = clean(el.textContent);
+    if (rowText && actionText && el.matches("button, a, [role=button], [role=link]")) {
+      return row.tagName.toLowerCase() + ":has-text(" + JSON.stringify(rowText) + ") "
+        + el.tagName.toLowerCase() + ":has-text(" + JSON.stringify(actionText) + ")";
+    }
     const actionRole = el.getAttribute("role") || "";
     if (el.matches("button, [type='submit'], [type='button']") || actionRole === "button" || actionRole === "tab") {
       const name = clean(el.getAttribute("aria-label") || el.textContent || "");
@@ -1105,6 +1112,7 @@ export const PAGE_HELPERS = String.raw`
     value: el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement ? String(el.value || "") : undefined,
     filled: !isEmptyValue(displayValue(el)),
     text: clean(el.textContent || el.value || "").slice(0, 300),
+    rowText: clean(el.closest("tbody tr, .vxe-body--row, .el-table__row, .ant-table-row")?.innerText) || undefined,
     scope: scopeName(el),
     chrome: Boolean(el.closest(CHROME_SEL))
     }));
