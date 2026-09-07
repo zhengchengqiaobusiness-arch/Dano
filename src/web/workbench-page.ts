@@ -11,7 +11,7 @@ import { PiTranscript } from "./transcript.js";
 
 export type BrowserMode = "manual" | "automatic";
 export type PageLogLevel = "PLAIN" | "CHECK" | "START" | "INFO" | "READY" | "BROWSER" | "PI" | "TOOL" | "WAIT" | "WARN" | "ERROR" | "PROCESS";
-export const PAGE_LEAVE_GRACE_MS = 3_000;
+export const PAGE_LEAVE_GRACE_MS = 30 * 60_000;
 
 interface ManualTakeover {
   id: string;
@@ -133,7 +133,8 @@ export class WorkbenchPage {
     this.cancelAbandon();
     this.abandonTimer = setTimeout(() => {
       this.abandonTimer = undefined;
-      if (this.clients.size > 0) return;
+      // A hidden tab or lost SSE connection does not end an in-progress task.
+      if (this.clients.size > 0 || this.recorder.isActive() || this.pi.status().streaming || this.manualTakeover) return;
       void this.dispose(reason);
     }, delayMs);
   }

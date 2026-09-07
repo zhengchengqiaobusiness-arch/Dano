@@ -15,6 +15,21 @@ test("page session ids are accepted only in the workbench format", () => {
   assert.equal(isPageSessionId("page_***"), false);
 });
 
+test("a detached event stream never disposes an active recording", async () => {
+  const page = new WorkbenchPage("page_disconnect", {
+    rootDir: ".", dataDir: ".business-skill-studio", recordingsDir: ".business-skill-studio/recordings",
+    catalogDir: ".business-skill-studio/catalog", profileDir: ".business-skill-studio/browser-profile",
+    maxResponseBytes: 32768, headless: true, openaiModel: "test"
+  }, "http://127.0.0.1:4310", value => value, () => {});
+  let disposed = false;
+  page.dispose = async () => { disposed = true; };
+  page.recorder.isActive = () => true;
+  page.scheduleAbandon("sse-disconnected", 1);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(disposed, false);
+  page.cancelAbandon();
+});
+
 test("acceptUserMessage records the user turn without starting Pi", () => {
   const events: any[] = [];
   const page = new WorkbenchPage("page_acceptuser", {
