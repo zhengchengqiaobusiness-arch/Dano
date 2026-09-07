@@ -20,6 +20,7 @@ test("模型事件和证据会变成助手 thought，指针移动和轮询不发
   assert.deepEqual(thoughtFromAgentEvent({ delta_type: "thinking_delta", delta: "在对请求" }), {
     kind: "thinking",
     text: "在对请求",
+    stream: true,
   });
   assert.equal(thoughtFromEvidence("interaction", { kind: "mousemove" }), null);
   assert.equal(thoughtFromEvidence("interaction", { kind: "input", text: "请输入单据编号" }), null);

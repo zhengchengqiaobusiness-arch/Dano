@@ -75,7 +75,9 @@ export function isUsefulAssistantThought(thought) {
   if (/^正在自动操作 \d+s/.test(text)) return false;
   if (/^开始新一轮模型分析/.test(text)) return false;
   if (/^模型user[：:]/.test(text)) return false;
-  if (/^本轮结束 toolResults=/.test(text)) return false;
+  if (/^本轮结束 tools?=/.test(text)) return false;
+  if (/^继续用 Control In App Browser/.test(text)) return false;
+  if (/^继续用 control_in_app_browser/.test(text)) return false;
   if (isNoiseNetworkPath(text)) return false;
   if (/采集可见控件 \d+ 个/.test(text)) return false;
   return true;

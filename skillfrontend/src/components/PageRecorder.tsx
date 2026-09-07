@@ -116,6 +116,7 @@ interface ThoughtChunk {
   args?: string;
   result?: string;
   ok?: boolean;
+  stream?: boolean;
 }
 
 interface WorkflowActivity {
@@ -1012,7 +1013,9 @@ export default function PageRecorder({
     if (/^正在自动操作 \d+s/.test(text)) return false;
     if (/^开始新一轮模型分析/.test(text)) return false;
     if (/^模型user[：:]/.test(text)) return false;
-    if (/^本轮结束 toolResults=/.test(text)) return false;
+    if (/^本轮结束 tools?=/.test(text)) return false;
+    if (/^继续用 Control In App Browser/.test(text)) return false;
+    if (/^继续用 control_in_app_browser/.test(text)) return false;
     if (/getChatNotReadMessageCount|queryTopBarMessageCount|queryTodoTaskCount|\/prod-api\/getInfo|\/prod-api\/getRouters/.test(text)) return false;
     if (/采集可见控件 \d+ 个/.test(text)) return false;
     return true;
@@ -1028,10 +1031,16 @@ export default function PageRecorder({
         if (last?.kind === "user" && last.text === text) return current;
         return [...current, chunk];
       }
-      if (last && last.kind === chunk.kind && (chunk.kind === "text" || chunk.kind === "thinking")) {
+      if (
+        last
+        && last.kind === chunk.kind
+        && (chunk.kind === "text" || chunk.kind === "thinking")
+        && last.stream
+        && chunk.stream
+      ) {
         const text = String(chunk.text || "");
         if (!text) return current;
-        return [...current.slice(0, -1), { ...last, text: last.text + text }];
+        return [...current.slice(0, -1), { ...last, text: last.text + text, stream: true }];
       }
       if (chunk.kind === "tool" && last?.kind === "tool" && last.tool && last.tool === chunk.tool) {
         return [...current.slice(0, -1), {
@@ -1591,6 +1600,7 @@ export default function PageRecorder({
           args: incoming.args ? String(incoming.args) : undefined,
           result: incoming.result ? String(incoming.result) : undefined,
           ok: typeof incoming.ok === "boolean" ? incoming.ok : undefined,
+          stream: incoming.stream === true,
         });
       } else if (incoming.type === "recording_result_saved" && incoming.result) {
         const row = incoming.result as RecordingResultSummary;

@@ -105,6 +105,62 @@ test("用户发话在自动点击中走 steer，停掉后要求重新开车", as
   assert.equal(after.resumeDrive, true);
 });
 
+test("空转停掉后发话会中止残留轮，再开新对话而不是 followUp 假死", async () => {
+  const prompts = [];
+  let busy = false;
+  const session = {
+    prompts,
+    aborted: 0,
+    async prompt(text, options = {}) {
+      prompts.push({ text, options });
+      if (busy && options.streamingBehavior !== "steer" && options.streamingBehavior !== "followUp") {
+        throw new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
+      }
+      if (options.streamingBehavior === "followUp") return { queued: true };
+      if (options.streamingBehavior === "steer") return;
+    },
+    async abort() {
+      this.aborted += 1;
+      busy = false;
+    },
+  };
+  const thoughts = [];
+  const pi = new LivePiSession({
+    session,
+    sessionId: "pi_resume_talk",
+    dispose: () => {},
+    onThought: (item) => thoughts.push(item),
+  });
+  await pi.beginLiveDrive({
+    targetUrl: "http://example.com",
+    goal: "目标",
+    timeoutMs: 80,
+    idleSubmitMs: 20,
+    maxEmptySettles: 1,
+    hasResult: async () => false,
+  });
+  assert.equal(pi.status, "ready");
+  busy = true;
+  const sent = await pi.notifyUserMessage("继续");
+  assert.equal(sent.ok, true);
+  assert.equal(sent.resumeDrive, true);
+  assert.ok(session.aborted >= 1);
+  assert.ok(thoughts.some((item) => item.kind === "user" && item.text === "继续"));
+  assert.ok(thoughts.some((item) => item.text === "已收到，正在按你的话继续"));
+  const before = prompts.length;
+  await pi.beginLiveDrive({
+    resumeHint: "继续",
+    targetUrl: "http://example.com",
+    goal: "目标",
+    timeoutMs: 200,
+    maxEmptySettles: 1,
+    hasResult: async () => false,
+  });
+  const resumed = prompts.slice(before);
+  assert.ok(resumed.some((item) => /用户说：继续/.test(item.text) && item.options.streamingBehavior !== "followUp"));
+  assert.equal(resumed.some((item) => item.options.streamingBehavior === "followUp"), false);
+});
+
 test("自动点击空转时只停自动点，不把会话打成失败", async () => {
   const prompts = [];
   const session = {

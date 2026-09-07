@@ -119,10 +119,10 @@ export function thoughtFromAgentEvent(event) {
   const deltaType = String(event.delta_type || event.deltaType || "");
   const delta = String(event.delta || "");
   if (deltaType === "thinking_delta" || type === "thinking_delta") {
-    return delta ? { kind: "thinking", text: delta } : null;
+    return delta ? { kind: "thinking", text: delta, stream: true } : null;
   }
   if (deltaType === "text_delta" || type === "text_delta") {
-    return delta ? { kind: "text", text: delta } : null;
+    return delta ? { kind: "text", text: delta, stream: true } : null;
   }
   if (String(type).startsWith("tool_execution") || type === "tool_start" || type === "tool_end") {
     return null;

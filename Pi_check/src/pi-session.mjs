@@ -86,13 +86,13 @@ export function buildUserSteerPrompt(text, { finalizing = false } = {}) {
   const body = String(text || "").trim();
   if (finalizing) {
     return (
-      `用户补充：${body}\n` +
-      `不要再 click。已有草稿就立刻 submit_recording_result({final:true, use_draft:true})。没有就先 submit_recording_capability。`
+      `用户说：${body}\n` +
+      `先用一两句话回答用户。不要再 click。已有草稿就立刻 submit_recording_result({final:true, use_draft:true})。没有就先 submit_recording_capability。`
     );
   }
   return (
-    `用户在录制页发来指示：${body}\n` +
-    `立刻 control_in_app_browser 继续操作。人也可以点预览。不要锁预览。该交的立刻 submit_recording_capability。`
+    `用户说：${body}\n` +
+    `这是对话。先用一两句话回答这句话，然后立刻 control_in_app_browser 按这句话操作。不要只复述规则，不要空转。人也可以点预览。不要锁预览。该交的立刻 submit_recording_capability。`
   );
 }
 
@@ -124,6 +124,7 @@ export function buildFinalAnalysisPrompt(latestSeq) {
 export const MAX_EMPTY_FINAL_SETTLES = 3;
 const ABORT_RESIDUE_MS = 150;
 const RETRY_AFTER_ABORT_MS = 80;
+const RETRY_AFTER_EMPTY_MS = 1200;
 
 export function isAbortLikeError(error) {
   return /abort/i.test(String(error?.message || error || ""));
@@ -160,6 +161,7 @@ export class LivePiSession {
     this.#notifyDebounceMs = Number(notifyDebounceMs) || 8000;
     this.#driveStopped = false;
     this.#driveSettleOk = null;
+    this.#driveEmptySettles = 0;
     this.#lastHumanSteerAt = 0;
     this.#unsub = typeof session?.subscribe === "function"
       ? session.subscribe((event) => this.#trace.handleEvent(event))
@@ -179,7 +181,16 @@ export class LivePiSession {
   #analysisSettleErr;
   #driveStopped;
   #driveSettleOk;
+  #driveEmptySettles;
   #lastHumanSteerAt;
+
+  get driveStopped() {
+    return this.#driveStopped;
+  }
+
+  get isDriving() {
+    return this.status === "driving" && !this.#driveStopped;
+  }
 
   #emitThought(payload) {
     if (!payload) return;
@@ -222,6 +233,33 @@ export class LivePiSession {
     }
   }
 
+  async #promptFresh(text) {
+    if (!this.alive) {
+      throw new Error("PI 会话已关闭");
+    }
+    try {
+      await this.session.prompt(text);
+      return { queued: false };
+    } catch (error) {
+      if (!isBusyPromptError(error)) throw error;
+      try {
+        await this.session.abort?.();
+      } catch {
+        // 中止残留轮失败仍要再开一轮对话
+      }
+      await this.session.prompt(text);
+      return { queued: false };
+    }
+  }
+
+  async #abortLeftoverTurn() {
+    try {
+      await this.session.abort?.();
+    } catch {
+      // 没有残留轮也不挡用户发话
+    }
+  }
+
   notifyEvidence({ seq }) {
     this.#latestSeq = Number(seq) || this.#latestSeq;
     return this.#notifyChain;
@@ -244,23 +282,33 @@ export class LivePiSession {
     const message = String(text || "").trim().slice(0, 2000);
     if (!message) return { ok: false, error: "请输入要发给 PI 的话" };
     if (!this.alive) return { ok: false, error: "PI 会话已关闭" };
+    this.#driveEmptySettles = 0;
     this.#emitThought({ kind: "user", text: message });
     const finalizing = this.status === "finalizing";
-    const resumeDrive = this.#driveStopped && !finalizing && this.status !== "submitted";
     const prompt = buildUserSteerPrompt(message, { finalizing });
-    if (resumeDrive) {
-      return { ok: true, resumeDrive: true, text: message };
-    }
-    try {
-      if (this.status === "driving") {
-        this.session.prompt(prompt, { streamingBehavior: "steer" }).catch(() => {});
-      } else {
+    if (finalizing) {
+      try {
         await this.#promptNow(prompt);
+        return { ok: true, resumeDrive: false, text: message };
+      } catch (error) {
+        return { ok: false, error: error.message || String(error) };
       }
-      return { ok: true, resumeDrive: false, text: message };
-    } catch (error) {
-      return { ok: false, error: error.message || String(error) };
     }
+    if (this.status === "submitted") {
+      return { ok: false, error: "录制已结束，不能再发给 PI" };
+    }
+    if (this.status === "driving" && !this.#driveStopped) {
+      try {
+        this.session.prompt(prompt, { streamingBehavior: "steer" }).catch(() => {});
+        this.#emitThought({ kind: "text", text: "已收到，正在按你的话继续" });
+        return { ok: true, resumeDrive: false, text: message };
+      } catch (error) {
+        return { ok: false, error: error.message || String(error) };
+      }
+    }
+    await this.#abortLeftoverTurn();
+    this.#emitThought({ kind: "text", text: "已收到，正在按你的话继续" });
+    return { ok: true, resumeDrive: true, text: message };
   }
 
   async abortLiveWork() {
@@ -292,8 +340,16 @@ export class LivePiSession {
     if (!this.alive) {
       throw new PiRequiredError("PI 会话已关闭");
     }
+    if (this.isDriving) {
+      if (resumeHint) {
+        this.#driveEmptySettles = 0;
+        this.session.prompt(buildUserSteerPrompt(resumeHint), { streamingBehavior: "steer" }).catch(() => {});
+      }
+      return;
+    }
     this.status = "driving";
     this.#driveStopped = false;
+    this.#driveEmptySettles = 0;
     const started = Date.now();
     const deadline = started + timeoutMs;
     const idleMs = Math.max(20, Number(idleSubmitMs) || 90000);
@@ -306,7 +362,6 @@ export class LivePiSession {
     let lastToolAt = Date.now();
     let lastPromptAt = Date.now();
     let lastSeenTools = this.#trace.toolCount;
-    let emptySettles = 0;
     let retryTimer = null;
     let steered = false;
     let interrupted = false;
@@ -355,27 +410,27 @@ export class LivePiSession {
       const abortResidue = interrupted && Date.now() - lastPromptAt < ABORT_RESIDUE_MS;
       if (toolsNow > lastSeenTools) {
         lastSeenTools = toolsNow;
-        emptySettles = 0;
+        this.#driveEmptySettles = 0;
       } else if (abortResidue) {
         logPiOnly("[PI操作] 中止后的空轮不算空转，继续自动操作");
       } else {
-        emptySettles += 1;
+        this.#driveEmptySettles += 1;
       }
-      if (emptySettles >= emptyBudget) {
-        logPiOnly(`[PI操作] 连续 ${emptySettles} 轮空转，停止自动点击，人手通道继续`);
-        this.#emitThought({ kind: "text", text: "自动点击不可用，预览你继续点" });
+      if (this.#driveEmptySettles >= emptyBudget) {
+        logPiOnly(`[PI操作] 连续 ${this.#driveEmptySettles} 轮空转，停止自动点击，人手通道继续`);
+        this.#emitThought({ kind: "text", text: "自动点击不可用，预览你继续点，或再发一句话让我继续" });
         this.#driveStopped = true;
+        this.#abortLeftoverTurn();
         settleOk();
         return;
       }
       logPiOnly("[PI操作] 本轮结束，继续自动点击");
-      this.#emitThought({ kind: "text", text: "继续用 Control In App Browser 自动操作；人也可以点预览" });
       clearRetry();
       retryTimer = setTimeout(() => {
         retryTimer = null;
         if (settled || !this.alive) return;
         startPrompt(text);
-      }, abortResidue ? RETRY_AFTER_ABORT_MS : 0);
+      }, abortResidue ? RETRY_AFTER_ABORT_MS : RETRY_AFTER_EMPTY_MS);
     };
     const interruptHungTurn = () => {
       if (settled || !this.alive || interrupted) return;
@@ -385,7 +440,7 @@ export class LivePiSession {
         return;
       }
       restartAfterAbort = true;
-      emptySettles = 0;
+      this.#driveEmptySettles = 0;
       logPiOnly("[PI操作] 自动操作卡住，中止当前轮并继续");
       this.#emitThought({ kind: "text", text: "自动操作卡住，中止后继续点击" });
       Promise.resolve(this.session.abort())
@@ -434,7 +489,7 @@ export class LivePiSession {
       lastPromptAt = Date.now();
       let task;
       try {
-        task = options ? this.session.prompt(text, options) : this.#promptNow(text);
+        task = options ? this.session.prompt(text, options) : this.#promptFresh(text);
       } catch (error) {
         onPromptSettled(error);
         return;
@@ -448,7 +503,9 @@ export class LivePiSession {
       );
     };
     logPiOnly(`[PI操作] 开始自动操作 timeout=${timeoutMs}ms`);
-    this.#emitThought({ kind: "text", text: "PI 开始自动操作；预览你也可以点" });
+    if (!resumeHint) {
+      this.#emitThought({ kind: "text", text: "PI 开始自动操作；预览你也可以点" });
+    }
     startPrompt(resumeHint
       ? buildUserSteerPrompt(resumeHint)
       : buildLiveDrivePrompt({ targetUrl, goal }));

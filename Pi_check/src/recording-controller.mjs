@@ -120,6 +120,7 @@ export class RecordingController {
     const slot = this.#active.get(recordingId);
     const session = this.evidence.snapshot(recordingId);
     if (!slot?.pi || typeof slot.pi.beginLiveDrive !== "function") return;
+    if (slot.pi.isDriving) return;
     slot.drive = Promise.resolve(slot.pi.beginLiveDrive({
       targetUrl: session.targetUrl,
       goal: session.goal,
