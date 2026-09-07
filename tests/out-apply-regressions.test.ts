@@ -5,10 +5,16 @@ import os from "node:os";
 import path from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { BrowserRecorder } from "../src/browser/recorder.js";
+import type { OperationKind } from "../src/domain.js";
 
-async function withRecorder(html: string, run: (recorder: BrowserRecorder) => Promise<void>, complete = true) {
+async function withRecorder(html: string, run: (recorder: BrowserRecorder) => Promise<void>, complete = true, operations: OperationKind[] = ["query", "create", "delete"]) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "out-apply-regression-"));
   const server = http.createServer((_request, response) => {
+    if (_request.url?.startsWith("/api/items")) {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ code: _request.url.includes("billCode=fail") ? 500 : 200, data: [{ id: "test-only" }] }));
+      return;
+    }
     response.setHeader("content-type", "text/html; charset=utf-8");
     response.end(html);
   });
@@ -18,7 +24,7 @@ async function withRecorder(html: string, run: (recorder: BrowserRecorder) => Pr
     recordingsDir: path.join(directory, "recordings"), catalogDir: path.join(directory, "catalog"),
     profileDir: path.join(directory, "profile"), headless: true, maxResponseBytes: 32768, openaiModel: "test" });
   try {
-    await recorder.start(`http://127.0.0.1:${address.port}/`, "out-apply", undefined, ["query", "create", "delete"], complete);
+    await recorder.start(`http://127.0.0.1:${address.port}/`, "out-apply", undefined, operations, complete);
     await run(recorder);
   } finally {
     await recorder.stop().catch(() => {});
@@ -26,6 +32,36 @@ async function withRecorder(html: string, run: (recorder: BrowserRecorder) => Pr
     await rm(directory, { recursive: true, force: true });
   }
 }
+
+test("successful recorded query fields stay covered after the page resets its form", async () => {
+  await withRecorder(`<!doctype html><form><label for="billCode">单据编号</label><input id="billCode" name="billCode">
+    <button type="button" onclick="fetch('/api/items?billCode='+document.getElementById('billCode').value).then(()=>document.querySelector('form').reset())">搜索</button>
+    <button type="button" onclick="this.insertAdjacentHTML('beforebegin','<label for=extra>新字段</label><input id=extra name=extra>')">展开字段</button></form>`, async recorder => {
+    assert.equal((await recorder.stopReadiness()).ready, false);
+    await recorder.control({ action: "exercise-form" });
+    await recorder.control({ action: "click", selector: 'role=button[name="搜索"]' });
+    const audit = await recorder.stopReadiness();
+    assert.deepEqual(audit.successfulOperations, ["query"]);
+    assert.deepEqual(audit.missingFields, [], "reset must not erase successful field evidence");
+    assert.equal(audit.ready, true, audit.message);
+    await recorder.control({ action: "click", selector: 'role=button[name="展开字段"]' });
+    const expanded = await recorder.stopReadiness();
+    assert.equal(expanded.ready, false, "new fields have no prior successful evidence");
+    assert.ok(expanded.missingFields.some(field => field.name === "extra"));
+  }, true, ["query"]);
+});
+
+test("failed submissions never credit cleared fields as completed", async () => {
+  await withRecorder(`<!doctype html><form><label for="billCode">单据编号</label><input id="billCode" name="billCode">
+    <button type="button" onclick="fetch('/api/items?billCode='+document.getElementById('billCode').value).then(()=>document.querySelector('form').reset())">搜索</button></form>`, async recorder => {
+    await recorder.control({ action: "exercise-form" });
+    await recorder.control({ action: "fill", selector: "#billCode", value: "fail" });
+    await recorder.control({ action: "click", selector: 'role=button[name="搜索"]' });
+    const audit = await recorder.stopReadiness();
+    assert.equal(audit.ready, false);
+    assert.ok(audit.missingFields.some(field => field.name === "billCode"));
+  }, true, ["query"]);
+});
 
 test("a completed whole-form attempt permits correcting a failed field", async () => {
   await withRecorder(`<!doctype html><form class="el-form"><div class="el-form-item">

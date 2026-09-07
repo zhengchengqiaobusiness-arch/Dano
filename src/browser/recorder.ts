@@ -1516,9 +1516,28 @@ export class BrowserRecorder {
       : knownSnapshot;
     const eligibleFields = (snapshot?.formFields || []).filter(field => !field.skip && !field.disabled);
     const needsWholeFormPass = active.session.completeFieldCoverage && eligibleFields.length > 0 && !active.guard.wholeFormExercised;
-    const missingFields = active.session.completeFieldCoverage
+    const currentMissingFields = active.session.completeFieldCoverage
       ? needsWholeFormPass ? eligibleFields : (snapshot?.todoFields || []).filter(field => !field.skip && !field.disabled)
       : [];
+    // A successful submitted form remains evidence even when navigation resets its controls.
+    // Credit only the same page/scope and exact field, never an unsubmitted snapshot.
+    const byId = new Map(events.map(event => [event.id, event]));
+    const submittedFields = events.flatMap(event => {
+      if (event.kind !== "network" || !isSuccessfulNetworkEvidence(event) || !event.correlatedUiEvidenceId) return [];
+      const ui = byId.get(event.correlatedUiEvidenceId);
+      if (ui?.kind !== "ui" || normalizeNavigationUrl(ui.pageUrl) !== normalizeNavigationUrl(snapshot?.url || this.currentPage().url())
+        || (ui.scope || "page") !== (snapshot?.scope || "page")) return [];
+      const operation = inferUiOperationIntent(ui.text || ui.label || "", ui.pageUrl);
+      if (!operation || !EXPECTABLE_OPERATIONS.has(operation) || !isTriggeredOperationEvidence(event, operation, byId)) return [];
+      return ui.form || [];
+    });
+    const missingFields = currentMissingFields.filter(field => !submittedFields.some(recorded =>
+      (field.name ? recorded.name === field.name : recorded.label === field.label)
+      && recorded.rangeIndex === (field as { rangeIndex?: number }).rangeIndex
+      && recorded.value !== undefined && recorded.value !== null
+      && String(recorded.value).trim() !== ""
+      && !/^(请选择|请输入|请填写)/.test(String(recorded.value))
+    ));
     const currentPageKey = this.navigationKey(String(snapshot?.url || this.currentPage().url()), this.currentPage().url());
     const currentPageOperations = base.missingPageOperations.find(item => this.navigationKey(item.url) === currentPageKey)?.operations || [];
     const ready = base.ready && missingFields.length === 0;
