@@ -402,6 +402,8 @@ export function createComposerBarState(
           ? {
               ...item,
               status: "uploaded",
+              size: uploaded.size,
+              mimeType: uploaded.mimeType,
               file: { ...uploaded, name: item.name },
               previewUrl:
                 item.type === "image"
