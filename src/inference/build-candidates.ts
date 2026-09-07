@@ -435,6 +435,17 @@ export function buildCapabilityCandidates(events: EvidenceEvent[]): CapabilityCo
           if (byPath.has(fieldPath)) continue;
           if (normalized.urlTemplate.includes(`{${field.name}}`)) byPath.set(fieldPath, field);
         }
+        for (const match of normalized.pathTemplate.matchAll(/\{([^}]+)\}/g)) {
+          const name = match[1]!;
+          const fieldPath = jsonPathForName(name);
+          if (byPath.has(fieldPath)) continue;
+          byPath.set(fieldPath, {
+            path: fieldPath, name, label: `目标标识（${name}）`, valueType: "string",
+            source: "caller", required: true, requiredBasis: "observed-always",
+            systemHandled: false, widget: "text",
+            sourceDetail: "真实请求地址中的目标参数；必须使用本次用户明确选择的记录标识，不得默认复用录制目标。"
+          });
+        }
         return splitSectionedCollectionFields(
           applyNamedObservations([...byPath.values()], observations),
           observations,

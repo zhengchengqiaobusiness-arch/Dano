@@ -64,7 +64,7 @@ function expandUrl(cap: CapabilityContract, input: Record<string, unknown>) {
   const url = new URL(template);
   const consumed = new Set<string>();
 
-  url.pathname = url.pathname.replace(/\{([^}]+)\}/g, (_, key) => {
+  url.pathname = url.pathname.replace(/%7B([^/]+?)%7D/gi, (_, key) => {
     const resolved = fieldValue(cap, input, key);
     const value = resolved.value;
     if (value === undefined) throw new Error(`Missing URL parameter: ${key}`);

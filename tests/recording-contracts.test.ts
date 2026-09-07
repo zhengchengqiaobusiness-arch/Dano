@@ -7,6 +7,21 @@ import { materializeHttpRequest } from "../src/execution/http-executor.js";
 
 const origin = "https://oa.example.test";
 
+test("a recorded delete path exposes a required target, never the recorded id as a default", () => {
+  const events: EvidenceEvent[] = [ui("delete-click", 1, "删除", []),
+    network("delete-request", 2, "DELETE", "/api/items/25d32add500448d88391d9c2624d90f4", {}, undefined, "delete-click")];
+  const capability = finalizeCapabilities(buildCapabilityCandidates(events), events).find(item => item.operation === "delete")!;
+  assert.equal(capability.validation.status, "verified");
+  const target = capability.inputForm.find(field => field.name === "id");
+  assert.ok(target, "URL placeholders must be represented in the caller contract");
+  assert.equal(target.source, "caller");
+  assert.equal(target.required, true);
+  assert.equal(target.defaultRule, undefined, "never silently reuse a recorded deletion target");
+  assert.throws(() => materializeHttpRequest(capability, {}), /id/);
+  assert.equal(materializeHttpRequest(capability, { id: "selected-target" }).url, `${origin}/api/items/selected-target`);
+  assert.equal(materializeHttpRequest(capability, { id: "a/b" }).url, `${origin}/api/items/a%2Fb`);
+});
+
 function ui(id: string, second: number, text: string, form: UiEvidence["form"]): UiEvidence {
   return {
     id,
