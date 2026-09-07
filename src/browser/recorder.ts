@@ -197,8 +197,9 @@ export function normalizePreviewViewport(input?: { width?: number; height?: numb
   let width = Number.isFinite(rawWidth) && rawWidth >= 80 ? rawWidth : DEFAULT_VIEWPORT.width;
   let height = Number.isFinite(rawHeight) && rawHeight >= 80 ? rawHeight : DEFAULT_VIEWPORT.height;
   if (width < MIN_PAGE_VIEWPORT.width || height < MIN_PAGE_VIEWPORT.height) {
-    width = DEFAULT_VIEWPORT.width;
-    height = DEFAULT_VIEWPORT.height;
+    const up = Math.max(MIN_PAGE_VIEWPORT.width / width, MIN_PAGE_VIEWPORT.height / height);
+    width = Math.round(width * up);
+    height = Math.round(height * up);
   }
   if (width > MAX_PREVIEW_VIEWPORT.width || height > MAX_PREVIEW_VIEWPORT.height) {
     const down = Math.min(MAX_PREVIEW_VIEWPORT.width / width, MAX_PREVIEW_VIEWPORT.height / height);
@@ -1046,7 +1047,7 @@ export class BrowserRecorder {
       const el = document.activeElement;
       if (!(el instanceof HTMLElement) || el === document.body) return;
       const editable = el.matches('input:not([type="button"]):not([type="submit"]):not([type="reset"]),select,textarea,[contenteditable="true"],[role="combobox"]');
-      if (editable) {
+      if (editable && ${JSON.stringify(eventType)} !== "click") {
         el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
         el.dispatchEvent(new Event("change", { bubbles: true }));
       }

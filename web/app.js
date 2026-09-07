@@ -476,9 +476,15 @@ function previewPaneSize() {
   return { width, height, scale: 1 };
 }
 
-function rememberPaneViewport() {
-  if (!previewPaneSize()) return;
-  if (state.browserActive) void refreshBrowserFrame(true);
+async function rememberPaneViewport() {
+  const viewport = previewPaneSize();
+  if (!viewport || state.previewDrag) return;
+  if (Math.abs(state.viewport.width / state.viewport.height - viewport.width / viewport.height) < .002) return;
+  try {
+    const result = await api("api/browser/viewport", { method: "POST", body: JSON.stringify(viewport) });
+    state.viewport = result.viewport;
+    if (state.browserActive) void refreshBrowserFrame(true);
+  } catch (error) { showToast(error.message); }
 }
 
 function syncPreviewViewport() {
@@ -624,8 +630,6 @@ function browserCoordinates(event, clamp = false) {
 function composePrompt(raw) {
   const text = String(raw || "").replace(/(https?:\/\/[^\s\u4e00-\u9fff]+)(?=[\u4e00-\u9fff])/g, "$1\n").trim();
   if (!text) return "";
-  const url = (elements.browserUrl?.value || "").trim();
-  if (url && !/https?:\/\/|当前业务系统地址/.test(text)) return `当前业务系统地址：${url}\n${text}`;
   return text;
 }
 
@@ -640,7 +644,7 @@ async function submitPrompt(message) {
   followSessionIfWanted();
   updateAgentStatus(true, true);
   try {
-    const result = await api("api/chat", { method: "POST", body: JSON.stringify({ message: text }) });
+    const result = await api("api/chat", { method: "POST", body: JSON.stringify({ message: text, browserUrl: elements.browserUrl?.value || "" }) });
     if (result?.epoch != null) state.sessionEpoch = result.epoch;
     adoptLocalUser(localId, result?.item);
     followSessionIfWanted();

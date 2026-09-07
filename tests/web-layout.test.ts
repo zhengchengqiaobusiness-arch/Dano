@@ -5,6 +5,15 @@ import { readFile } from "node:fs/promises";
 
 const root = path.resolve(import.meta.dirname, "..");
 
+test("follow-up messages remain the user's text, with URL sent separately", async () => {
+  const app = await readFile(path.join(root, "web/app.js"), "utf8");
+  const source = app.match(/function composePrompt\(raw\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(source);
+  const compose = new Function("elements", `${source}; return composePrompt;`)({ browserUrl: { value: "https://example.test/form" } });
+  assert.equal(compose("手动录制完毕 开始产出skill"), "手动录制完毕 开始产出skill");
+  assert.match(app, /message: text, browserUrl:/);
+});
+
 test("static assets stay under the Studio mount path", async () => {
   const [html, app, workflow] = await Promise.all([
     readFile(path.join(root, "web", "index.html"), "utf8"),
