@@ -98,13 +98,18 @@ export function collectPageFacts() {
     const box = node.getBoundingClientRect();
     return box.width >= 2 && box.height >= 2;
   };
+  const dialogRoot = (node) => node.closest?.(
+    'dialog,[role="dialog"],[role="alertdialog"],[aria-modal="true"],.el-dialog,.ant-modal,.van-dialog',
+  );
   const inFilter = (node) => {
+    if (dialogRoot(node)) return false;
     if (node.closest?.(filterRoot)) return true;
     const form = node.closest?.("form, .el-form, .ant-form");
-    if (!form) return false;
+    if (!form || dialogRoot(form)) return false;
     if (form.classList?.contains("el-form--inline")) return true;
     let sibling = form.nextElementSibling;
     for (let index = 0; index < 3 && sibling; index += 1, sibling = sibling.nextElementSibling) {
+      if (dialogRoot(sibling)) continue;
       if (
         sibling.matches?.("table, .el-table, .ant-table, .vxe-table")
         || sibling.querySelector?.("table, .el-table, .ant-table, .vxe-table")
@@ -116,9 +121,6 @@ export function collectPageFacts() {
   };
   const inSidebar = (node) => Boolean(
     node.closest?.("aside, .el-aside, .ant-layout-sider, [class*='sidebar'], [class*='sider']"),
-  );
-  const dialogRoot = (node) => node.closest?.(
-    'dialog,[role="dialog"],[role="alertdialog"],[aria-modal="true"],.el-dialog,.ant-modal,.van-dialog',
   );
   const tableRoot = (node) => node.closest?.("table, .el-table, .ant-table, .vxe-table, tbody, thead");
   const regionOf = (node) => {
@@ -413,9 +415,35 @@ export function collectPageFacts() {
   }
 
   for (const node of document.querySelectorAll(
+    ".el-dialog .el-checkbox, .ant-modal .el-checkbox, [role='dialog'] .el-checkbox, [role='dialog'] .ant-checkbox-wrapper, [role='dialog'] input[type='checkbox']",
+  )) {
+    const host = node.closest?.(".el-checkbox, .ant-checkbox-wrapper, label, tr, .el-table__row") || node;
+    if (!visible(host) && !visible(node)) continue;
+    const row = host.closest?.("tr, .el-table__row, .ant-table-row");
+    const label = compactText(row ? textOf(row) : textOf(host)) || "勾选";
+    const name = (label.split(" ").find((part) => /[\u4e00-\u9fff]{2,8}/.test(part) && !/部门|公司|操作/.test(part))
+      || label.split(" ").find((part) => part.length >= 2 && !/^\d+$/.test(part))
+      || "勾选");
+    push({
+      region: "dialog",
+      name: "",
+      label: name,
+      placeholder: "",
+      section: nearbyHeading(host) || nearbyHeading(row) || "选择用户",
+      control_kind: "checkbox",
+      required_mark: false,
+      readonly: false,
+      disabled: Boolean(node.disabled),
+      range: false,
+      options: [],
+    });
+  }
+
+  for (const node of document.querySelectorAll(
     'dialog input, dialog textarea, [role="dialog"] input, [role="dialog"] textarea, [role="alertdialog"] input, [role="alertdialog"] textarea, .el-dialog input, .el-dialog textarea, .ant-modal input, .ant-modal textarea, .van-dialog input, .van-dialog textarea',
   )) {
     if (!visible(node)) continue;
+    if (node.matches?.("input[type='checkbox'], input[type='radio']")) continue;
     if (node.closest?.(".el-form-item, .ant-form-item, .form-item")) continue;
     const wrap = node.closest(".el-date-editor, .el-select, .ant-picker, .ant-select") || node;
     push(describe(wrap, {
@@ -449,7 +477,7 @@ export function collectPageFacts() {
     });
   }
 
-  const rank = { button: 0, readonly: 1, input: 2, textarea: 3, upload: 4, date: 5, select: 6 };
+  const rank = { button: 0, readonly: 1, input: 2, checkbox: 3, textarea: 3, upload: 4, date: 5, select: 6 };
   const merged = [];
   const groups = new Map();
   for (const row of out) {
@@ -552,6 +580,51 @@ export function collectPageFacts() {
       kind: "button",
       selector: label ? `role=button[name="${label}"]` : `ref=${ref}`,
     });
+  }
+  const pickRowName = (text) => {
+    const parts = compactText(text).split(" ").filter(Boolean);
+    const named = parts.find((part) => /[\u4e00-\u9fff]{2,8}/.test(part) && !/部门|公司|未知|操作/.test(part));
+    return named || parts.find((part) => part.length >= 2 && !/^\d+$/.test(part)) || "";
+  };
+  const pushSelectable = (node, label, kind) => {
+    const text = cleanLabel(label);
+    if (!text || seenSnap.has(node) || inPagination(node) || snapshotActions.length >= 80) return;
+    seenSnap.add(node);
+    const ref = `a${snapshotActions.length + 1}`;
+    mark(node, ref);
+    snapshotActions.push({
+      ref,
+      label: text,
+      kind,
+      selector: kind === "checkbox" ? `role=checkbox[name="${text}"]` : `text=${text}`,
+    });
+  };
+  for (const node of document.querySelectorAll(
+    "[role='checkbox'], .el-checkbox, .ant-checkbox-wrapper, label.el-checkbox, input[type='checkbox']",
+  )) {
+    const host = node.closest?.(".el-checkbox, .ant-checkbox-wrapper, label, tr, .el-table__row, .ant-table-row") || node;
+    if (seenSnap.has(host) || seenSnap.has(node) || inPagination(host)) continue;
+    const box = host.getBoundingClientRect?.();
+    if (!box || box.width < 2 || box.height < 2) continue;
+    const row = host.closest?.("tr, .el-table__row, .ant-table-row");
+    const name = pickRowName(textOf(row))
+      || compactText(node.getAttribute?.("aria-label") || host.getAttribute?.("aria-label") || (!row ? textOf(host) : ""))
+      || "勾选";
+    pushSelectable(host, name, "checkbox");
+    if (row) {
+      const rowName = pickRowName(textOf(row));
+      if (rowName) pushSelectable(row, rowName, "row");
+    }
+  }
+  for (const cell of document.querySelectorAll(
+    "[role='dialog'] td, .el-dialog td, .ant-modal td, [aria-modal='true'] td",
+  )) {
+    if (!snapshotVisible(cell) || seenSnap.has(cell) || inPagination(cell)) continue;
+    if (cell.querySelector?.("input, textarea, button, .el-checkbox, .ant-checkbox")) continue;
+    const text = compactText(cell.innerText || cell.textContent);
+    if (!text || text.length > 24 || /^\d+$/.test(text)) continue;
+    if (/^(操作|姓名|用户名称|所属部门|手机号码|序号|部门名称)$/.test(text)) continue;
+    pushSelectable(cell, text, "row");
   }
   const seenOption = new Set();
   for (const node of document.querySelectorAll("[role='option'], .el-select-dropdown__item, .ant-select-item-option")) {

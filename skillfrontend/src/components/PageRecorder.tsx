@@ -1278,6 +1278,33 @@ export default function PageRecorder({
     }
   }
 
+  function scheduleRecordingReconnect() {
+    if (closingRef.current || cancellingRef.current || finishRequestedRef.current) return;
+    const recordingId = String(snapshotRef.current?.run_id || activeResultIdRef.current || "");
+    if (!recordingId.startsWith("rec_")) {
+      markRecordingDisconnected("后台录制进程已断开，本次录制已中断");
+      return;
+    }
+    if (reconnectAttemptRef.current >= 3) {
+      markRecordingDisconnected("后台录制进程已断开，本次录制已中断");
+      return;
+    }
+    const attempt = reconnectAttemptRef.current;
+    reconnectAttemptRef.current += 1;
+    const delay = Math.min(800 * (attempt + 1), 2400);
+    appendThought({ kind: "text", text: "前台连接已断开，正在重连，后台录制继续" });
+    reconnectTimerRef.current = window.setTimeout(() => {
+      socketInitRef.current = {
+        type: "attach",
+        recording_id: recordingId,
+        tenant,
+        subsystem,
+        viewport: readPreviewViewport(),
+      };
+      openRecordingSocket(actionRef.current || "");
+    }, delay);
+  }
+
   function markRecordingDisconnected(reason: string) {
     stopReconnect();
     clearInputTimers();
@@ -1718,7 +1745,7 @@ export default function PageRecorder({
         return;
       }
       if (["recording", "waiting_operator"].includes(status || "")) {
-        markRecordingDisconnected("后台录制进程已断开，本次录制已中断");
+        scheduleRecordingReconnect();
       }
     };
   }

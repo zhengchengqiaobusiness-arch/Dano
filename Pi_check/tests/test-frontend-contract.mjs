@@ -8,7 +8,12 @@ import { createServer } from "node:http";
 import { WebSocket } from "ws";
 import { createHarness, sampleResult } from "./helpers/harness.mjs";
 import { ResultsCatalog } from "../src/results-catalog.mjs";
-import { attachFrontendBridge, shouldCancelOnFrontendDisconnect } from "../src/frontend-bridge.mjs";
+import {
+  attachFrontendBridge,
+  clearDisconnectCancel,
+  scheduleDisconnectCancel,
+  shouldCancelOnFrontendDisconnect,
+} from "../src/frontend-bridge.mjs";
 
 function waitFor(predicate, timeoutMs = 3000) {
   return new Promise((resolve, reject) => {
@@ -98,6 +103,30 @@ test("证据冻结或正在最终分析时，前台断开不得取消", () => {
   assert.equal(shouldCancelOnFrontendDisconnect(null), false);
 });
 
+test("录制中前台断开先宽限，接回后不得取消", async () => {
+  const harness = await createHarness({ result: sampleResult() });
+  try {
+    const started = await harness.controller.start({
+      targetUrl: "http://example.com",
+      goal: "产出能力",
+    });
+    scheduleDisconnectCancel(harness.controller, started.id, 40);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(harness.controller.view(started.id).status, "recording");
+    const thoughts = [];
+    harness.controller.reattach(started.id, {
+      onThought: (item) => thoughts.push(item),
+    });
+    clearDisconnectCancel(started.id);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.notEqual(harness.controller.view(started.id).status, "failed");
+    assert.equal(harness.controller.view(started.id).status, "recording");
+  } finally {
+    clearDisconnectCancel("rec_missing");
+    await harness.cleanup();
+  }
+});
+
 test("点完停止后前台断开，PI 仍能提交并写入历史", async () => {
   const result = sampleResult();
   const harness = await createHarness({
@@ -107,7 +136,7 @@ test("点完停止后前台断开，PI 仍能提交并写入历史", async () =>
   });
   const catalog = new ResultsCatalog(harness.files);
   const httpServer = createServer();
-  const wss = attachFrontendBridge(httpServer, { controller: harness.controller, catalog });
+  const wss = attachFrontendBridge(httpServer, { controller: harness.controller, catalog, disconnectGraceMs: 40 });
   await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
   const { port } = httpServer.address();
   let ws;
@@ -165,7 +194,7 @@ test("录制助手发话后能看到用户消息并交给 PI", async () => {
   const harness = await createHarness({ result: sampleResult() });
   const catalog = new ResultsCatalog(harness.files);
   const httpServer = createServer();
-  const wss = attachFrontendBridge(httpServer, { controller: harness.controller, catalog });
+  const wss = attachFrontendBridge(httpServer, { controller: harness.controller, catalog, disconnectGraceMs: 40 });
   await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
   const { port } = httpServer.address();
   let ws;
@@ -211,7 +240,7 @@ test("采集中前台断开仍会取消且没有能力", async () => {
   });
   const catalog = new ResultsCatalog(harness.files);
   const httpServer = createServer();
-  const wss = attachFrontendBridge(httpServer, { controller: harness.controller, catalog });
+  const wss = attachFrontendBridge(httpServer, { controller: harness.controller, catalog, disconnectGraceMs: 80 });
   await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
   const { port } = httpServer.address();
   let ws;
@@ -227,6 +256,8 @@ test("采集中前台断开仍会取消且没有能力", async () => {
     await waitFor(() => snapshots.some((item) => String(item.run_id || "").startsWith("rec_")));
     const recordingId = snapshots.findLast((item) => String(item.run_id || "").startsWith("rec_")).run_id;
     ws.close();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(harness.controller.view(recordingId).status, "recording", "宽限内不得立刻取消");
     await waitFor(() => harness.controller.view(recordingId).status === "failed");
     assert.equal(await harness.files.hasPiResult(recordingId), false);
     assert.equal(catalog.list().length, 0);

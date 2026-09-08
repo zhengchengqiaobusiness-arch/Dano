@@ -108,6 +108,42 @@ test("6c. 自动点击失败不得结束录制，人手点预览和停录分析�
   }
 });
 
+test("瞬间空转后发话会新开 PI 再继续，不复用失效会话", async () => {
+  const harness = await createHarness();
+  try {
+    const started = await harness.controller.start({ targetUrl: "http://example.com", goal: "目标" });
+    const firstId = harness.getPi().sessionId;
+    assert.equal(harness.getPiCreateCount(), 1);
+    harness.getPi().lastStopReason = "instant_empty";
+    harness.getPi().driveStopped = true;
+    harness.getPi().status = "ready";
+    const sent = await harness.controller.steer(started.id, "继续");
+    assert.equal(sent.ok, true);
+    assert.equal(harness.getPiCreateCount(), 2);
+    assert.notEqual(harness.getPi().sessionId, firstId);
+    assert.equal(harness.controller.view(started.id).status, "recording");
+    assert.ok(harness.getPi().userMessages.includes("继续"));
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("最终分析空转时重建 PI 再提交，不直接关会话", async () => {
+  const harness = await createHarness({
+    piBehaviorForCreate: (count) => (count === 1 ? "empty_spin" : "submit_on_final"),
+  });
+  try {
+    const started = await harness.controller.start({ targetUrl: "http://example.com", goal: "目标" });
+    assert.equal(harness.getPiCreateCount(), 1);
+    const stopped = await harness.controller.stop(started.id);
+    assert.equal(stopped.session.status, "succeeded");
+    assert.equal(harness.getPiCreateCount(), 2);
+    assert.equal(await harness.files.hasPiResult(started.id), true);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test("人在录制页发话会交给 PI，终止后能再继续", async () => {
   const harness = await createHarness();
   try {

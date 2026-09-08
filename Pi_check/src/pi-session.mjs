@@ -65,7 +65,7 @@ ${browserSkill ? `## Control In App Browser\n\n${browserSkill}\n` : ""}
 
 规则：
 1. 浏览器一开就开始 control_in_app_browser。用 snapshot 里的 selector（placeholder= / label= / role=button[name=]），不要死盯 c1/a1。
-2. 下拉必须 choose(selector, 可见选项原文)，一次选中。不要 click 后再 snapshot 再点选项，不要每个字段都 snapshot，不要 include_screenshot。打开弹层、切换页签或加行后再 snapshot 一次。snapshot / visible_control 的 readonly/disabled 表示整个控件不能改，不是下拉内部展示框带了原生 readonly。默认已选、本场没改，只要还能改，仍是调用方。
+2. 下拉必须 choose(selector, 可见选项原文)，一次选中。不要 click 后再 snapshot 再点选项，不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回页面摘要，禁止把图片写进对话。打开弹层、切换页签或加行后再 snapshot 一次。snapshot / visible_control 的 readonly/disabled 表示整个控件不能改，不是下拉内部展示框带了原生 readonly。默认已选、本场没改，只要还能改，仍是调用方。
 3. 每完成一个独立动作（你点的或人点的）立刻 submit_recording_capability。不要在脑子里组完整 JSON。
 4. 目标做完即可 submit_recording_result；系统会冻结。也可用 use_draft=true 定稿。
 5. submit_recording_result 必须包含 recording_id、final=true；完整 result 或 use_draft=true。
@@ -102,7 +102,7 @@ export function buildLiveDrivePrompt({ targetUrl = "", goal = "" } = {}) {
     `目标：${String(goal || "").trim() || "把该页独立业务动作做成可调用能力"}\n` +
     `入口：${String(targetUrl || "").trim()}\n` +
     `立刻 control_in_app_browser：open_page → snapshot → 按 selector click/fill/choose。\n` +
-    `下拉用 choose(placeholder=或label=, 可见选项)。打开弹层后再 snapshot 一次。不要每个字段都 snapshot，不要 include_screenshot。人点过的看 recentUserActions。\n` +
+    `下拉用 choose(placeholder=或label=, 可见选项)。打开弹层后再 snapshot 一次。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回摘要，不要把图片写进对话。人点过的看 recentUserActions。\n` +
     `readonly/disabled 只表示整个控件不能改。默认已选仍是调用方，不要写成无独立来源。\n` +
     `每做完一个动作，network_since 或 read_request_shape 看真实请求，再 submit_recording_capability。人点出的动作也要交。\n` +
     `登录、验证码、确认写入：action=assist，预览不要锁。写入真实数据前若目标没授权，先 assist。\n` +
@@ -123,12 +123,30 @@ export function buildFinalAnalysisPrompt(latestSeq) {
 }
 
 export const MAX_EMPTY_FINAL_SETTLES = 3;
-const ABORT_RESIDUE_MS = 150;
-const RETRY_AFTER_ABORT_MS = 80;
+export const INSTANT_EMPTY_MS = 300;
+export const INSTANT_EMPTY_BUDGET = 2;
 const RETRY_AFTER_EMPTY_MS = 1200;
+const RETRY_AFTER_INSTANT_MS = 80;
+const RETRY_AFTER_ABORT_MS = 80;
 
 export function isAbortLikeError(error) {
   return /abort/i.test(String(error?.message || error || ""));
+}
+
+export function isEmptySpinError(error) {
+  return /连续空转未调用工具且未提交/.test(String(error?.message || error || ""));
+}
+
+export function isInstantEmptyTurn({ elapsedMs = 0, hadNewTools = false, abortResidue = false } = {}) {
+  return !hadNewTools && !abortResidue && Number(elapsedMs) < INSTANT_EMPTY_MS;
+}
+
+export function isAbortResidueTurn({
+  interrupted = false,
+  hadNewTools = false,
+  hadModelText = false,
+} = {}) {
+  return Boolean(interrupted) && !hadNewTools && !hadModelText;
 }
 
 export function isBusyPromptError(error) {
@@ -151,6 +169,7 @@ export class LivePiSession {
     this.alive = true;
     this.status = "ready";
     this.lastError = "";
+    this.lastStopReason = "";
     this.#instructions = instructions;
     this.#dispose = dispose;
     this.#onThought = typeof onThought === "function" ? onThought : null;
@@ -163,6 +182,7 @@ export class LivePiSession {
     this.#driveStopped = false;
     this.#driveSettleOk = null;
     this.#driveEmptySettles = 0;
+    this.#instantEmptySettles = 0;
     this.#lastHumanSteerAt = 0;
     this.#unsub = typeof session?.subscribe === "function"
       ? session.subscribe((event) => this.#trace.handleEvent(event))
@@ -183,6 +203,7 @@ export class LivePiSession {
   #driveStopped;
   #driveSettleOk;
   #driveEmptySettles;
+  #instantEmptySettles;
   #lastHumanSteerAt;
 
   get driveStopped() {
@@ -191,6 +212,10 @@ export class LivePiSession {
 
   get isDriving() {
     return this.status === "driving" && !this.#driveStopped;
+  }
+
+  get needsFreshSession() {
+    return this.lastStopReason === "instant_empty";
   }
 
   #emitThought(payload) {
@@ -284,6 +309,7 @@ export class LivePiSession {
     if (!message) return { ok: false, error: "请输入要发给 PI 的话" };
     if (!this.alive) return { ok: false, error: "PI 会话已关闭" };
     this.#driveEmptySettles = 0;
+    this.#instantEmptySettles = 0;
     this.#emitThought({ kind: "user", text: message });
     const finalizing = this.status === "finalizing";
     const prompt = buildUserSteerPrompt(message, { finalizing });
@@ -318,6 +344,7 @@ export class LivePiSession {
       kind: "text",
       text: "用户终止了当前自动操作。预览你继续点，或再发一句话让我继续。",
     });
+    this.lastStopReason = "user";
     this.#driveStopped = true;
     try {
       await this.session.abort?.();
@@ -350,7 +377,9 @@ export class LivePiSession {
     }
     this.status = "driving";
     this.#driveStopped = false;
+    this.lastStopReason = "";
     this.#driveEmptySettles = 0;
+    this.#instantEmptySettles = 0;
     const started = Date.now();
     const deadline = started + timeoutMs;
     const idleMs = Math.max(20, Number(idleSubmitMs) || 90000);
@@ -363,6 +392,8 @@ export class LivePiSession {
     let lastToolAt = Date.now();
     let lastPromptAt = Date.now();
     let lastSeenTools = this.#trace.toolCount;
+    let lastSeenTexts = Number(this.#trace.assistantTextCount) || 0;
+    let abortResidueTurns = 0;
     let retryTimer = null;
     let steered = false;
     let interrupted = false;
@@ -408,16 +439,40 @@ export class LivePiSession {
         return;
       }
       const toolsNow = this.#trace.toolCount;
-      const abortResidue = interrupted && Date.now() - lastPromptAt < ABORT_RESIDUE_MS;
-      if (toolsNow > lastSeenTools) {
+      const textsNow = Number(this.#trace.assistantTextCount) || 0;
+      const elapsedMs = Date.now() - lastPromptAt;
+      const hadNewTools = toolsNow > lastSeenTools;
+      const hadModelText = textsNow > lastSeenTexts;
+      const abortResidue = isAbortResidueTurn({ interrupted, hadNewTools, hadModelText });
+      const instant = isInstantEmptyTurn({ elapsedMs, hadNewTools, abortResidue });
+      if (hadNewTools || hadModelText) {
         lastSeenTools = toolsNow;
+        lastSeenTexts = textsNow;
+        interrupted = false;
+        abortResidueTurns = 0;
         this.#driveEmptySettles = 0;
+        this.#instantEmptySettles = 0;
       } else if (abortResidue) {
+        abortResidueTurns += 1;
+        if (abortResidueTurns > 4) {
+          this.lastStopReason = "instant_empty";
+          logPiOnly("[PI操作] 中止后连续空轮，会话已失效，停止自动点击，人手通道继续");
+          this.#emitThought({ kind: "text", text: "自动点击不可用，预览你继续点，或再发一句话让我继续" });
+          this.#driveStopped = true;
+          this.#abortLeftoverTurn();
+          settleOk();
+          return;
+        }
         logPiOnly("[PI操作] 中止后的空轮不算空转，继续自动操作");
+      } else if (instant) {
+        this.#instantEmptySettles += 1;
+        this.#driveEmptySettles += 1;
       } else {
+        this.#instantEmptySettles = 0;
         this.#driveEmptySettles += 1;
       }
-      if (this.#driveEmptySettles >= emptyBudget) {
+      if (this.#instantEmptySettles >= INSTANT_EMPTY_BUDGET || this.#driveEmptySettles >= emptyBudget) {
+        this.lastStopReason = this.#instantEmptySettles >= INSTANT_EMPTY_BUDGET ? "instant_empty" : "empty";
         logPiOnly(`[PI操作] 连续 ${this.#driveEmptySettles} 轮空转，停止自动点击，人手通道继续`);
         this.#emitThought({ kind: "text", text: "自动点击不可用，预览你继续点，或再发一句话让我继续" });
         this.#driveStopped = true;
@@ -431,7 +486,7 @@ export class LivePiSession {
         retryTimer = null;
         if (settled || !this.alive) return;
         startPrompt(text);
-      }, abortResidue ? RETRY_AFTER_ABORT_MS : RETRY_AFTER_EMPTY_MS);
+      }, abortResidue ? RETRY_AFTER_ABORT_MS : instant ? RETRY_AFTER_INSTANT_MS : RETRY_AFTER_EMPTY_MS);
     };
     const interruptHungTurn = () => {
       if (settled || !this.alive || interrupted) return;
@@ -479,6 +534,7 @@ export class LivePiSession {
       }
       if (Date.now() >= deadline) {
         this.#emitThought({ kind: "text", text: "自动点击超时，预览你继续点" });
+        this.lastStopReason = "timeout";
         this.#driveStopped = true;
         settleOk();
         return;
@@ -529,14 +585,12 @@ export class LivePiSession {
         lastToolCount = this.#trace.toolCount;
         lastToolAt = Date.now();
         steered = false;
-        interrupted = false;
         return;
       }
       const lastEventAt = Number(this.#trace.lastEventAt) || 0;
       if (lastEventAt > lastToolAt) {
         lastToolAt = lastEventAt;
         steered = false;
-        interrupted = false;
         return;
       }
       if (this.#trace.toolCount <= 0) return;
@@ -558,6 +612,7 @@ export class LivePiSession {
       await Promise.race([done, timeoutTask]);
     } catch (error) {
       this.lastError = error.message || String(error);
+      this.lastStopReason = "timeout";
       this.#driveStopped = true;
       this.status = this.alive ? "ready" : "closed";
       this.#emitThought({ kind: "text", text: `自动点击不可用，预览你继续点：${this.lastError}` });
@@ -580,6 +635,7 @@ export class LivePiSession {
 
   async stopLiveDrive() {
     this.#driveStopped = true;
+    this.lastStopReason = this.lastStopReason || "finish";
     this.#emitThought({ kind: "text", text: "用户结束自动操作，准备提交已完成的能力" });
     try {
       await this.session.prompt(
@@ -615,7 +671,10 @@ export class LivePiSession {
     let lastToolAt = Date.now();
     let lastPromptAt = Date.now();
     let lastSeenTools = this.#trace.toolCount;
+    let lastSeenTexts = Number(this.#trace.assistantTextCount) || 0;
+    let abortResidueTurns = 0;
     let emptySettles = 0;
+    let instantEmptySettles = 0;
     let retryTimer = null;
     let steered = false;
     let interrupted = false;
@@ -659,16 +718,38 @@ export class LivePiSession {
     };
     const scheduleRetry = (text) => {
       const toolsNow = this.#trace.toolCount;
-      const abortResidue = interrupted && Date.now() - lastPromptAt < ABORT_RESIDUE_MS;
-      if (toolsNow > lastSeenTools) {
+      const textsNow = Number(this.#trace.assistantTextCount) || 0;
+      const elapsedMs = Date.now() - lastPromptAt;
+      const hadNewTools = toolsNow > lastSeenTools;
+      const hadModelText = textsNow > lastSeenTexts;
+      const abortResidue = isAbortResidueTurn({ interrupted, hadNewTools, hadModelText });
+      const instant = isInstantEmptyTurn({ elapsedMs, hadNewTools, abortResidue });
+      if (hadNewTools || hadModelText) {
         lastSeenTools = toolsNow;
+        lastSeenTexts = textsNow;
+        interrupted = false;
+        abortResidueTurns = 0;
         emptySettles = 0;
+        instantEmptySettles = 0;
       } else if (abortResidue) {
+        abortResidueTurns += 1;
+        if (abortResidueTurns > 4) {
+          this.lastStopReason = "instant_empty";
+          logPiOnly("[PI分析] 中止后连续空轮未提交，停止重试");
+          this.#emitThought({ kind: "text", text: "连续空转未提交，停止分析" });
+          settleErr(new Error("PI 连续空转未调用工具且未提交"));
+          return;
+        }
         logPiOnly("[PI分析] 中止后的空轮不算空转，继续等待提交");
+      } else if (instant) {
+        instantEmptySettles += 1;
+        emptySettles += 1;
       } else {
+        instantEmptySettles = 0;
         emptySettles += 1;
       }
-      if (emptySettles >= emptyBudget) {
+      if (instantEmptySettles >= INSTANT_EMPTY_BUDGET || emptySettles >= emptyBudget) {
+        this.lastStopReason = instantEmptySettles >= INSTANT_EMPTY_BUDGET ? "instant_empty" : "empty";
         logPiOnly(`[PI分析] 连续 ${emptySettles} 轮空转未提交，停止重试`);
         this.#emitThought({ kind: "text", text: "连续空转未提交，停止分析" });
         settleErr(new Error("PI 连续空转未调用工具且未提交"));
@@ -681,7 +762,7 @@ export class LivePiSession {
         retryTimer = null;
         if (settled || !this.alive) return;
         startPrompt(text);
-      }, abortResidue ? RETRY_AFTER_ABORT_MS : 0);
+      }, abortResidue ? RETRY_AFTER_ABORT_MS : instant ? RETRY_AFTER_INSTANT_MS : 0);
     };
     const interruptHungTurn = () => {
       if (settled || !this.alive || interrupted) return;
@@ -795,14 +876,12 @@ export class LivePiSession {
         lastToolCount = this.#trace.toolCount;
         lastToolAt = Date.now();
         steered = false;
-        interrupted = false;
         return;
       }
       const lastEventAt = Number(this.#trace.lastEventAt) || 0;
       if (lastEventAt > lastToolAt) {
         lastToolAt = lastEventAt;
         steered = false;
-        interrupted = false;
         return;
       }
       if (this.#trace.toolCount <= 0) return;

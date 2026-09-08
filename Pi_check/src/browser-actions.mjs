@@ -14,6 +14,8 @@ export function parseLocator(raw) {
   if (refBare) return { kind: "ref", value: refBare[1] };
   const keyed = text.match(/^(placeholder|label|text|ref)=(.*)$/i);
   if (keyed) return { kind: keyed[1].toLowerCase(), value: keyed[2] };
+  const typed = text.match(/^type=(checkbox|radio)$/i);
+  if (typed) return { kind: "role", role: typed[1].toLowerCase(), name: "", value: typed[1].toLowerCase() };
   const role = text.match(/^role=([a-z0-9-]+)(?:\[name=["']?([^"'\]]+)["']?\])?$/i);
   if (role) return { kind: "role", role: role[1], name: role[2] || "", value: role[2] || role[1] };
   return { kind: "text", value: text };
@@ -22,7 +24,10 @@ export function parseLocator(raw) {
 export function snapshotSelector(item = {}, role = "control") {
   const placeholder = String(item.placeholder || "").trim();
   const label = String(item.label || item.text || "").trim();
+  const kind = String(item.kind || item.control_kind || "");
   if (placeholder) return `placeholder=${placeholder}`;
+  if (role === "action" && kind === "checkbox" && label) return `role=checkbox[name="${label}"]`;
+  if (role === "action" && (kind === "row" || kind === "text") && label) return `text=${label}`;
   if (role === "action" && label) return `role=button[name="${label}"]`;
   if (label) return `label=${label}`;
   if (item.ref) return `ref=${item.ref}`;

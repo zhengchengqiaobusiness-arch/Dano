@@ -19,6 +19,7 @@ import { attachBlobSaver } from "./browser-capture.mjs";
 import { capabilityCountFromPiResult } from "./capability-presence.mjs";
 import { thoughtFromEvidence } from "./pi-trace.mjs";
 import { resolveInteractionActor, shouldSteerHumanAct } from "./browser-actions.mjs";
+import { isEmptySpinError } from "./pi-session.mjs";
 
 export class RecordingController {
   constructor({
@@ -88,9 +89,17 @@ export class RecordingController {
     if (session.status === "failed" || session.status === "succeeded") {
       throw new Error("录制已结束，不能再发给 PI");
     }
+    const needsFresh = slot.pi.needsFreshSession || slot.pi.lastStopReason === "instant_empty";
     const sent = await slot.pi.notifyUserMessage(text);
     if (!sent?.ok) throw new Error(sent?.error || "没有发给 PI");
     if (sent.resumeDrive) {
+      if (needsFresh) {
+        try {
+          await this.#replacePiSession(recordingId, "上一轮会话已失效，已新开 PI 按你的话继续");
+        } catch (error) {
+          logPiOnly(`重建 PI 失败，仍用原会话续跑 recording=${recordingId} ${error?.message || error}`);
+        }
+      }
       this.#launchDrive(recordingId, { resumeHint: sent.text || text });
       await this.evidence.setStatus(recordingId, {
         status: "recording",
@@ -145,6 +154,82 @@ export class RecordingController {
     });
   }
 
+  #buildPiTools(recordingId) {
+    return createPiToolHost({
+      recordingId,
+      evidence: this.evidence,
+      files: this.files,
+      gate: this.gate,
+      getPiSessionId: () => this.evidence.snapshot(recordingId).piSessionId,
+      getBrowser: () => this.#active.get(recordingId)?.browser || null,
+      freezeEvidence: async () => {
+        if (!this.evidence.snapshot(recordingId).frozen) {
+          await this.evidence.freeze(recordingId);
+        }
+      },
+      onAssist: (payload) => this.requestAssist(recordingId, payload?.reason || ""),
+    });
+  }
+
+  #attachPiExit(recordingId, pi) {
+    pi.onExit?.(() => {
+      const slot = this.#active.get(recordingId);
+      if (slot?.replacingPi || slot?.pi !== pi) return;
+      const current = this.evidence.snapshot(recordingId);
+      if (current.status === "succeeded" || current.hasFinalResult) return;
+      this.#fail(recordingId, "PI 在录制期间退出").catch(() => {});
+    });
+  }
+
+  #finalAnalysisOpts(recordingId) {
+    return {
+      timeoutMs: this.finalTimeoutMs,
+      hasResult: () => this.files.hasPiResult(recordingId),
+      hasDraft: async () => {
+        const saved = await this.files.readDraft(recordingId).catch(() => null);
+        return Array.isArray(saved?.draft?.capabilities) && saved.draft.capabilities.length > 0;
+      },
+    };
+  }
+
+  async #replacePiSession(recordingId, reason = "") {
+    const slot = this.#active.get(recordingId);
+    if (!slot) throw new Error("录制不存在");
+    const session = this.evidence.snapshot(recordingId);
+    if (session.status === "failed" || session.status === "succeeded") {
+      throw new Error("录制已结束");
+    }
+    const tools = this.#buildPiTools(recordingId);
+    logPiOnly(`重建 PI 会话 recording=${recordingId} ${reason}`);
+    const next = await this.createPi({
+      recording: session,
+      tools,
+      onThought: slot.onThought,
+    });
+    if (!next?.alive) throw new PiRequiredError("PI 无法重建");
+    slot.replacingPi = true;
+    const previous = slot.pi;
+    slot.pi = next;
+    this.#attachPiExit(recordingId, next);
+    try {
+      await previous?.close?.();
+    } catch {
+      // 旧会话关掉失败不得挡住新会话
+    }
+    slot.replacingPi = false;
+    await this.evidence.setStatus(recordingId, {
+      piStatus: "ready",
+      piSessionId: next.sessionId,
+      publicMessage: reason || "已新开 PI 会话继续",
+    }).catch(() => {});
+    try {
+      slot.onThought?.({ kind: "text", text: reason || "已新开 PI 会话继续" });
+    } catch {
+      // 助手输出失败不得挡住新会话
+    }
+    return next;
+  }
+
   async applySession(recordingId, session) {
     const browser = this.browserOf(recordingId);
     if (!browser) throw new Error("录制浏览器未启动");
@@ -181,6 +266,20 @@ export class RecordingController {
     };
   }
 
+  reattach(recordingId, hooks = {}) {
+    const slot = this.#active.get(recordingId);
+    if (!slot) throw new Error("录制不存在");
+    const session = this.evidence.snapshot(recordingId);
+    if (session.status === "failed" || session.status === "succeeded") {
+      throw new Error("录制已结束");
+    }
+    if (typeof hooks.onThought === "function") slot.onThought = hooks.onThought;
+    if (typeof hooks.onAssist === "function") slot.onAssist = hooks.onAssist;
+    if (typeof hooks.onFailed === "function") slot.onFailed = hooks.onFailed;
+    if (typeof hooks.onComplete === "function") slot.onComplete = hooks.onComplete;
+    return this.view(recordingId);
+  }
+
   #capabilityCountFromPiResultOnly(recordingId) {
     if (!this.gate.accepted.has(recordingId)) return 0;
     return this.#lastCapabilityCount.get(recordingId) ?? 0;
@@ -214,6 +313,8 @@ export class RecordingController {
       browser: null,
       failed: false,
       completing: false,
+      replacingPi: false,
+      analysisRetried: false,
       browserStartAttempted: false,
       assist: { reason: "" },
       drive: null,
@@ -232,20 +333,7 @@ export class RecordingController {
         browserStatus: "idle",
         publicMessage: "正在启动 PI 会话",
       });
-      const tools = createPiToolHost({
-        recordingId: session.id,
-        evidence: this.evidence,
-        files: this.files,
-        gate: this.gate,
-        getPiSessionId: () => this.evidence.snapshot(session.id).piSessionId,
-        getBrowser: () => this.#active.get(session.id)?.browser || null,
-        freezeEvidence: async () => {
-          if (!this.evidence.snapshot(session.id).frozen) {
-            await this.evidence.freeze(session.id);
-          }
-        },
-        onAssist: (payload) => this.requestAssist(session.id, payload?.reason || ""),
-      });
+      const tools = this.#buildPiTools(session.id);
       const pi = await this.createPi({ recording: session, tools, onThought: slot.onThought });
       if (!pi || !pi.alive) {
         throw new PiRequiredError("PI 无法启动");
@@ -257,11 +345,7 @@ export class RecordingController {
         piSessionId: pi.sessionId,
         publicMessage: "PI 已启动，正在打开浏览器",
       });
-      pi.onExit?.(() => {
-        const current = this.evidence.snapshot(session.id);
-        if (current.status === "succeeded" || current.hasFinalResult) return;
-        this.#fail(session.id, "PI 在录制期间退出").catch(() => {});
-      });
+      this.#attachPiExit(session.id, pi);
 
       slot.browserStartAttempted = true;
       await this.evidence.setStatus(session.id, {
@@ -334,20 +418,28 @@ export class RecordingController {
       piStatus: "finalizing",
       publicMessage: "自动操作已结束，等待 PI 提交能力",
     });
+    const analysisOpts = this.#finalAnalysisOpts(recordingId);
     try {
-      await slot.pi.requestFinalAnalysis({
-        timeoutMs: this.finalTimeoutMs,
-        hasResult: () => this.files.hasPiResult(recordingId),
-        hasDraft: async () => {
-          const saved = await this.files.readDraft(recordingId).catch(() => null);
-          return Array.isArray(saved?.draft?.capabilities) && saved.draft.capabilities.length > 0;
-        },
-      });
+      await slot.pi.requestFinalAnalysis(analysisOpts);
     } catch (error) {
       const message = String(error.message || error);
-      logPiOnly(`最终分析失败 recording=${recordingId} ${message}`);
-      await this.#fail(recordingId, message);
-      throw new RecordingFailedError(publicFailureMessage());
+      if (isEmptySpinError(error) && !slot.analysisRetried) {
+        slot.analysisRetried = true;
+        logPiOnly(`最终分析空转，重建 PI 再试一次 recording=${recordingId}`);
+        try {
+          await this.#replacePiSession(recordingId, "最终分析空转，已新开 PI 继续提交");
+          await slot.pi.requestFinalAnalysis(analysisOpts);
+        } catch (retryError) {
+          const retryMessage = String(retryError.message || retryError);
+          logPiOnly(`最终分析重试失败 recording=${recordingId} ${retryMessage}`);
+          await this.#fail(recordingId, retryMessage);
+          throw new RecordingFailedError(publicFailureMessage());
+        }
+      } else {
+        logPiOnly(`最终分析失败 recording=${recordingId} ${message}`);
+        await this.#fail(recordingId, message);
+        throw new RecordingFailedError(publicFailureMessage());
+      }
     }
     if (!await this.files.hasPiResult(recordingId)) {
       await this.#fail(recordingId, "停止录制后 PI 未提交最终结果");

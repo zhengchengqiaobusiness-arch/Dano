@@ -162,6 +162,7 @@ export function createPiTrace({ onThought } = {}) {
   let turns = 0;
   let lastTool = "";
   let lastEventAt = Date.now();
+  let assistantTextCount = 0;
   const emit = (payload) => {
     if (!payload || typeof onThought !== "function") return;
     if (!payload.text && payload.kind !== "tool") return;
@@ -184,6 +185,9 @@ export function createPiTrace({ onThought } = {}) {
     },
     get lastEventAt() {
       return lastEventAt;
+    },
+    get assistantTextCount() {
+      return assistantTextCount;
     },
     summary() {
       return `turns=${turns} tools=${tools.length} last=${lastTool || "-"}`;
@@ -224,6 +228,9 @@ export function createPiTrace({ onThought } = {}) {
       const thought = thoughtFromAgentEvent(event);
       if (thought) {
         emit(thought);
+        if (thought.kind === "text" && /^模型分析：/.test(String(thought.text || ""))) {
+          assistantTextCount += 1;
+        }
         if (thought.kind === "text" || thought.kind === "thinking") {
           logPiOnly(`[PI分析] ${thought.text}`);
         }

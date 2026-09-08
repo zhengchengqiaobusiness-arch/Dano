@@ -21,6 +21,9 @@ function newAction() {
   return `action_${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
+export const FRONTEND_DISCONNECT_GRACE_MS = 20000;
+const pendingDisconnectCancels = new Map();
+
 export function shouldCancelOnFrontendDisconnect(view, { finalizing = false } = {}) {
   if (finalizing) return false;
   if (!view) return false;
@@ -29,7 +32,27 @@ export function shouldCancelOnFrontendDisconnect(view, { finalizing = false } = 
   return true;
 }
 
-export function attachFrontendBridge(httpServer, { controller, catalog }) {
+export function clearDisconnectCancel(recordingId) {
+  const key = String(recordingId || "");
+  const timer = pendingDisconnectCancels.get(key);
+  if (!timer) return;
+  clearTimeout(timer);
+  pendingDisconnectCancels.delete(key);
+}
+
+export function scheduleDisconnectCancel(controller, recordingId, ms = FRONTEND_DISCONNECT_GRACE_MS) {
+  const key = String(recordingId || "");
+  if (!key) return;
+  clearDisconnectCancel(key);
+  const timer = setTimeout(() => {
+    pendingDisconnectCancels.delete(key);
+    logPiOnly(`前台断开超时，结束这场录制 recording=${key}`);
+    controller.cancel(key).catch(() => {});
+  }, Math.max(20, Number(ms) || FRONTEND_DISCONNECT_GRACE_MS));
+  pendingDisconnectCancels.set(key, timer);
+}
+
+export function attachFrontendBridge(httpServer, { controller, catalog, disconnectGraceMs = FRONTEND_DISCONNECT_GRACE_MS } = {}) {
   const wss = new WebSocketServer({ noServer: true });
   httpServer.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url || "/", "http://127.0.0.1");
@@ -206,6 +229,63 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
       try {
         if (type === "ping") {
           send(ws, { type: "pong" });
+          return;
+        }
+        if (type === "attach") {
+          const recordingId = String(message.recording_id || message.run_id || "").trim();
+          if (!recordingId) {
+            send(ws, { type: "error", detail: "缺少 recording_id，无法接回这场录制" });
+            return;
+          }
+          let view;
+          try {
+            view = controller.reattach(recordingId, {
+              onThought: think,
+              onComplete: async (payload) => {
+                try {
+                  await publishResult(payload, { subsystem: message.subsystem });
+                } catch (error) {
+                  logPiOnly(`自动定稿推送失败：${error?.message || error}`);
+                }
+              },
+              onAssist: () => {
+                send(ws, snapshot("recording", {
+                  label: "PI 正在自动操作，预览你也可以点",
+                  progress: {
+                    step: "capturing",
+                    label: "请协助：预览始终可以点",
+                    request_count: controller.view(recordingId).evidenceCount,
+                  },
+                  ...viewExtra(),
+                }));
+              },
+              onFailed: () => {
+                if (session.published) return;
+                failOpen();
+                send(ws, { type: "error", detail: publicFailureMessage() });
+              },
+            });
+          } catch (error) {
+            send(ws, { type: "error", detail: error.message || "无法接回这场录制" });
+            return;
+          }
+          clearDisconnectCancel(recordingId);
+          session.recordingId = recordingId;
+          session.action = String(view.action || session.action || "");
+          session.title = String(view.title || session.title || "");
+          session.closed = false;
+          startFrames(controller.browserOf?.(recordingId));
+          logPiOnly(`前台已接回录制 recording=${recordingId}`);
+          think("前台已重新接上，PI 继续这场录制，预览你也可以点");
+          send(ws, snapshot("recording", {
+            label: view.publicMessage || "PI 正在自动操作，预览你也可以点",
+            progress: {
+              step: "capturing",
+              label: view.publicMessage || "PI 正在自动操作，预览你也可以点",
+              request_count: view.evidenceCount,
+            },
+            ...viewExtra(),
+          }));
           return;
         }
         if (type === "start") {
@@ -424,7 +504,9 @@ export function attachFrontendBridge(httpServer, { controller, catalog }) {
         logPiOnly(`前台断开，证据已冻结或正在最终分析，继续等 PI recording=${recordingId}`);
         return;
       }
-      controller.cancel(recordingId).catch(() => {});
+      const graceMs = Math.max(20, Number(disconnectGraceMs) || FRONTEND_DISCONNECT_GRACE_MS);
+      logPiOnly(`前台断开，${Math.round(graceMs / 1000)}s 内重连则继续这场录制 recording=${recordingId}`);
+      scheduleDisconnectCancel(controller, recordingId, graceMs);
     });
   });
 

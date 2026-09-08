@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { LivePiSession } from "../src/pi-session.mjs";
+import { isAbortResidueTurn, isEmptySpinError, isInstantEmptyTurn, LivePiSession } from "../src/pi-session.mjs";
 
 function busySession() {
   let busy = true;
@@ -159,6 +159,89 @@ test("空转停掉后发话会中止残留轮，再开新对话而不是 followU
   const resumed = prompts.slice(before);
   assert.ok(resumed.some((item) => /用户说：继续/.test(item.text) && item.options.streamingBehavior !== "followUp"));
   assert.equal(resumed.some((item) => item.options.streamingBehavior === "followUp"), false);
+});
+
+test("瞬间空轮会标记会话失效，停自动点但不关会话", async () => {
+  const session = {
+    async prompt() {},
+  };
+  const pi = new LivePiSession({
+    session,
+    sessionId: "pi_instant",
+    dispose: () => {},
+  });
+  await pi.beginLiveDrive({
+    targetUrl: "http://example.com",
+    goal: "做成能力",
+    timeoutMs: 2000,
+    idleSubmitMs: 1000,
+    maxEmptySettles: 5,
+    hasResult: async () => false,
+  });
+  assert.equal(pi.alive, true);
+  assert.equal(pi.status, "ready");
+  assert.equal(pi.lastStopReason, "instant_empty");
+  assert.equal(pi.needsFreshSession, true);
+  assert.equal(isInstantEmptyTurn({ elapsedMs: 80, hadNewTools: false, abortResidue: false }), true);
+  assert.equal(isInstantEmptyTurn({ elapsedMs: 80, hadNewTools: true, abortResidue: false }), false);
+  assert.equal(isAbortResidueTurn({ interrupted: true, hadNewTools: false, hadModelText: false }), true);
+  assert.equal(isAbortResidueTurn({ interrupted: true, hadNewTools: false, hadModelText: true }), false);
+  assert.equal(isEmptySpinError(new Error("PI 连续空转未调用工具且未提交")), true);
+});
+
+test("卡住中止后的空轮不得因 agent_end 被算成瞬间空转", async () => {
+  const prompts = [];
+  let rejectPending;
+  let pending = new Promise((_, reject) => {
+    rejectPending = reject;
+  });
+  const session = {
+    prompts,
+    aborted: 0,
+    async prompt(text, options = {}) {
+      prompts.push({ text, options });
+      if (options.streamingBehavior === "steer") return;
+      if (this.aborted === 0) {
+        await pending;
+        return;
+      }
+    },
+    async abort() {
+      this.aborted += 1;
+      rejectPending?.(new Error("aborted"));
+    },
+  };
+  const { createPiTrace } = await import("../src/pi-trace.mjs");
+  const trace = createPiTrace();
+  trace.recordTool("control_in_app_browser", { action: "click", selector: "type=checkbox" }, "失败", false);
+  const thoughts = [];
+  const pi = new LivePiSession({
+    session,
+    sessionId: "pi_abort_drive",
+    dispose: () => {},
+    trace,
+    onThought: (item) => thoughts.push(item),
+  });
+  const drive = pi.beginLiveDrive({
+    targetUrl: "http://example.com",
+    goal: "目标",
+    timeoutMs: 2500,
+    idleSubmitMs: 40,
+    maxEmptySettles: 5,
+    hasResult: async () => false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 160));
+  for (let index = 0; index < 8; index += 1) {
+    trace.handleEvent({ type: "agent_end" });
+    await new Promise((resolve) => setTimeout(resolve, 15));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.notEqual(pi.lastStopReason, "instant_empty");
+  assert.equal(pi.driveStopped, false);
+  assert.ok(session.aborted >= 1);
+  assert.ok(thoughts.some((item) => /中止后继续点击/.test(item.text || "")));
+  await pi.stopLiveDrive();
+  await drive;
 });
 
 test("自动点击空转时只停自动点，不把会话打成失败", async () => {

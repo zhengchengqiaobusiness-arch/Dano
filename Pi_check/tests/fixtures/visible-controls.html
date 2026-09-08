@@ -147,6 +147,24 @@
     <textarea placeholder="请输入提交意见"></textarea>
     <button type="button" class="el-button">确认提交</button>
   </div>
+  <div class="el-dialog" role="dialog" aria-modal="true" id="user-picker">
+    <div class="el-dialog__header">选择抄送用户</div>
+    <table class="el-table">
+      <thead><tr><th></th><th>用户名称</th><th>姓名</th></tr></thead>
+      <tbody>
+        <tr class="el-table__row">
+          <td>
+            <label class="el-checkbox">
+              <input type="checkbox" class="el-checkbox__original" style="opacity:0;width:14px;height:14px" />
+              <span class="el-checkbox__inner" style="display:inline-block;width:14px;height:14px;background:#fff;border:1px solid #ccc"></span>
+            </label>
+          </td>
+          <td>000027</td>
+          <td>张三</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
   <script>
     document.getElementById("expand").addEventListener("click", () => {
       document.getElementById("extra-filters").style.display = "block";

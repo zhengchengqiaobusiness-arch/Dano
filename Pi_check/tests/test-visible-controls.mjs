@@ -145,6 +145,17 @@ test("采集日期、下拉、上传和折叠筛选，日期只读输入不当�
   const opinion = controls.find((item) => item.placeholder === "请输入提交意见" || item.label === "提交意见");
   assert.ok(opinion, "confirm-dialog textarea should be collected");
   assert.equal(opinion.region, "dialog");
+  const picker = controls.find((item) => item.control_kind === "checkbox" && /张三/.test(item.label));
+  assert.ok(picker, "dialog user-picker checkbox should be a visible_control fact");
+  assert.equal(picker.region, "dialog");
+  assert.ok(
+    (facts.actions || []).some((item) => item.label === "张三" && (item.kind === "row" || item.kind === "checkbox")),
+    "snapshot must expose 张三 as a clickable row or checkbox",
+  );
+  assert.ok(
+    (facts.actions || []).some((item) => item.kind === "checkbox" && /张三/.test(item.label || "")),
+    "snapshot must expose the user-picker checkbox",
+  );
   assert.ok(!JSON.stringify(controls).includes("capability"));
   assert.ok(!JSON.stringify(controls).includes("work-report"));
 });

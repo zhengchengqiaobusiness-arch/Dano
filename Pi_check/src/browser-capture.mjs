@@ -108,6 +108,23 @@ function locatorBuilders(parsed) {
     ];
   }
   if (parsed.kind === "role") {
+    if (parsed.role === "checkbox" || parsed.role === "radio") {
+      const host = parsed.role === "checkbox"
+        ? ".el-checkbox, .ant-checkbox-wrapper, label, tr, .el-table__row, .ant-table-row"
+        : ".el-radio, .ant-radio-wrapper, label";
+      if (!parsed.name) {
+        return [
+          (scope) => scope.locator(host),
+          (scope) => scope.getByRole(parsed.role),
+        ];
+      }
+      return [
+        (scope) => scope.getByRole(parsed.role, { name: parsed.name, exact: true }),
+        (scope) => scope.getByRole(parsed.role, { name: parsed.name, exact: false }),
+        (scope) => scope.locator(host).filter({ hasText: exactText }),
+        (scope) => scope.getByText(parsed.name, { exact: true }),
+      ];
+    }
     if (!parsed.name) return [(scope) => scope.getByRole(parsed.role)];
     return [
       (scope) => scope.getByRole(parsed.role, { name: parsed.name, exact: true }),
@@ -142,6 +159,8 @@ async function firstVisibleInFrames(page, build, { exactFirst = false, limit = 1
       for (let index = 0; index < Math.min(count, limit); index += 1) {
         const item = loc.nth(index);
         if (await item.isVisible().catch(() => false)) return item;
+        const box = await item.boundingBox().catch(() => null);
+        if (box && box.width >= 2 && box.height >= 2) return item;
       }
     }
   }

@@ -14,6 +14,7 @@ import {
   resolveInteractionActor,
   shouldSteerHumanAct,
 } from "../src/browser-actions.mjs";
+import { stripImageFromToolResult } from "../src/pi-tools.mjs";
 
 test("Control In App Browser 与人点击共用同一浏览器，协助不锁预览", async () => {
   const harness = await createHarness();
@@ -85,6 +86,9 @@ test("snapshot 给控件打稳定 ref 和语义 selector", () => {
   });
   assert.equal(parseLocator('role=button[name="搜索"]').kind, "role");
   assert.equal(parseLocator("c2").kind, "ref");
+  assert.deepEqual(parseLocator("type=checkbox"), { kind: "role", role: "checkbox", name: "", value: "checkbox" });
+  assert.equal(snapshotSelector({ label: "张三", kind: "checkbox" }, "action"), 'role=checkbox[name="张三"]');
+  assert.equal(snapshotSelector({ label: "张三", kind: "row" }, "action"), "text=张三");
 });
 
 test("choose 用语义选择器一次选中，不必再 snapshot", async () => {
@@ -115,7 +119,16 @@ test("choose 用语义选择器一次选中，不必再 snapshot", async () => {
     assert.equal(clicked.ok, true);
     const shot = await tools.control_in_app_browser({ action: "snapshot", include_screenshot: true });
     assert.equal(shot.screenshot?.data, undefined);
-    assert.ok(Array.isArray(shot.recentUserActions) || shot.controls || shot.__image || shot.url);
+    assert.equal(shot.__image, undefined);
+    assert.equal(shot.data, undefined);
+    assert.equal(shot.image_in_conversation, false);
+    assert.ok(Array.isArray(shot.recentUserActions) || shot.controls || shot.url);
+    const pictured = await tools.control_in_app_browser({ action: "screenshot" });
+    assert.equal(pictured.__image, undefined);
+    assert.equal(pictured.data, undefined);
+    assert.equal(pictured.image_in_conversation, false);
+    assert.match(String(pictured.note || ""), /不写入对话/);
+    assert.ok(pictured.controls || pictured.url);
   } finally {
     await harness.cleanup();
   }
@@ -146,4 +159,21 @@ test("PI 点击后页面 hook 不得累计人手打断", async () => {
   } finally {
     await harness.cleanup();
   }
+});
+
+test("工具结果里的截图二进制不得进入 PI 对话", () => {
+  const stripped = stripImageFromToolResult({
+    __image: true,
+    data: "AAAA",
+    mimeType: "image/jpeg",
+    url: "http://fixture.local/demo",
+    width: 10,
+    height: 10,
+  });
+  assert.equal(stripped.__image, undefined);
+  assert.equal(stripped.data, undefined);
+  assert.equal(stripped.image_in_conversation, false);
+  assert.equal(stripped.url, "http://fixture.local/demo");
+  const plain = stripImageFromToolResult({ ok: true, path: "/api/leave" });
+  assert.deepEqual(plain, { ok: true, path: "/api/leave" });
 });

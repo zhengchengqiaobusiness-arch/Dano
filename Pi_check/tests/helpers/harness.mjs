@@ -80,6 +80,7 @@ export class ScriptedPiSession {
     this.userMessages = [];
     this.driveStarted = false;
     this.driveStopped = false;
+    this.lastStopReason = "";
     this.aborted = false;
     this.onThought = typeof onThought === "function" ? onThought : null;
     this.exitListeners = new Set();
@@ -131,9 +132,14 @@ export class ScriptedPiSession {
     return { ok: true, resumeDrive, text: message };
   }
 
+  get needsFreshSession() {
+    return this.lastStopReason === "instant_empty";
+  }
+
   async abortLiveWork() {
     this.aborted = true;
     this.driveStopped = true;
+    this.lastStopReason = "user";
     if (this.status === "driving") this.status = "ready";
     return { ok: true };
   }
@@ -141,6 +147,7 @@ export class ScriptedPiSession {
   async beginLiveDrive({ resumeHint = "" } = {}) {
     this.driveStarted = true;
     this.driveStopped = false;
+    this.lastStopReason = "";
     this.status = "driving";
     if (resumeHint) this.userMessages.push(String(resumeHint));
     if (this.behavior === "drive_fail") {
@@ -162,6 +169,9 @@ export class ScriptedPiSession {
 
   async requestFinalAnalysis() {
     if (!this.alive) throw new Error("PI 在录制期间退出");
+    if (this.behavior === "empty_spin") {
+      throw new Error("PI 连续空转未调用工具且未提交");
+    }
     if (this.behavior === "never_submit" || this.behavior === "submit_unfrozen") return;
     if (this.behavior === "submit_after_delay") {
       await new Promise((resolve) => setTimeout(resolve, this.delayMs));
@@ -363,6 +373,7 @@ export async function createHarness(options = {}) {
   const piBehavior = options.piBehavior || "submit_on_final";
   const result = options.result;
   let piRef = null;
+  let piCreateCount = 0;
   const controller = new RecordingController({
     files,
     evidence,
@@ -373,12 +384,16 @@ export async function createHarness(options = {}) {
       if (options.piFailStart) {
         throw new Error("PI 初始化失败");
       }
+      piCreateCount += 1;
+      const behavior = typeof options.piBehaviorForCreate === "function"
+        ? options.piBehaviorForCreate(piCreateCount)
+        : piBehavior;
       piRef = new ScriptedPiSession({
         tools,
         recordingId: recording.id,
-        behavior: piBehavior,
+        behavior,
         result,
-        sessionId: options.piSessionId || "scripted-pi",
+        sessionId: options.piSessionId || (piCreateCount === 1 ? "scripted-pi" : `scripted-pi-${piCreateCount}`),
         delayMs: options.piDelayMs,
         onThought,
       });
@@ -400,6 +415,7 @@ export async function createHarness(options = {}) {
     controller,
     browserCalls,
     getPi: () => piRef,
+    getPiCreateCount: () => piCreateCount,
     async cleanup() {
       try {
         await controller.browserOf?.(evidence.list()?.[0]?.id)?.close?.();

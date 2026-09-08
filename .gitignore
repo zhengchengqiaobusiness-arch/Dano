@@ -39,3 +39,4 @@ back/.dano/
 /.claude
 .codex/environments/environment.toml
 recording-pipeline.md
+.cursor/skills/control-in-app-browser/SKILL.md

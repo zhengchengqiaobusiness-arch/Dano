@@ -12,34 +12,36 @@ import { projectVisibleControlSnapshot } from "./visible-controls.mjs";
 import { mergeCapabilityIntoDraft } from "./result-merge.mjs";
 import { isNoiseNetworkPath } from "./browser-actions.mjs";
 
-function compactInspect(shot, includeScreenshot = false) {
+const SCREENSHOT_TEXT_ONLY_NOTE = "截图不写入对话。用 snapshot 看控件和 recentUserActions。";
+
+export function compactInspect(shot) {
   if (!shot || typeof shot !== "object") return shot;
   const { screenshot, frames, ...rest } = shot;
-  const compact = {
+  return {
     ...rest,
     controls: Array.isArray(rest.controls) ? rest.controls : [],
     actions: Array.isArray(rest.actions) ? rest.actions : [],
     options: Array.isArray(rest.options) ? rest.options : [],
     recentUserActions: Array.isArray(rest.recentUserActions) ? rest.recentUserActions : [],
+    width: screenshot?.width,
+    height: screenshot?.height,
+    image_in_conversation: false,
   };
-  if (includeScreenshot && screenshot?.data) {
-    return {
-      __image: true,
-      data: screenshot.data,
-      mimeType: "image/jpeg",
-      url: compact.url || "",
-      total_bytes: Math.round((screenshot.data.length * 3) / 4),
-      caption: JSON.stringify({
-        url: compact.url || "",
-        title: compact.title || "",
-        controls: compact.controls,
-        actions: compact.actions,
-        options: compact.options,
-        recentUserActions: compact.recentUserActions,
-      }),
-    };
-  }
-  return compact;
+}
+
+export function stripImageFromToolResult(result) {
+  if (!result || typeof result !== "object") return result;
+  const looksImage = result.__image === true
+    || (typeof result.mimeType === "string" && result.mimeType.startsWith("image/") && result.data);
+  if (!looksImage && !result.screenshot?.data) return result;
+  const { data: _data, __image: _image, screenshot, ...rest } = result;
+  return {
+    ...rest,
+    width: rest.width || screenshot?.width,
+    height: rest.height || screenshot?.height,
+    image_in_conversation: false,
+    note: SCREENSHOT_TEXT_ONLY_NOTE,
+  };
 }
 
 function toolText(payload) {
@@ -49,32 +51,6 @@ function toolText(payload) {
   };
 }
 
-function toolImage(payload) {
-  const caption = payload.caption || JSON.stringify({
-    found: true,
-    stored: "image",
-    url: payload.url || "",
-    total_bytes: payload.total_bytes || 0,
-  });
-  return {
-    content: [
-      { type: "text", text: caption },
-      {
-        type: "image",
-        source: {
-          type: "base64",
-          media_type: payload.mimeType || "image/jpeg",
-          data: payload.data,
-        },
-      },
-    ],
-    details: {
-      stored: "image",
-      url: payload.url || "",
-      total_bytes: payload.total_bytes || 0,
-    },
-  };
-}
 
 function looksLikeImage(bytes) {
   const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || []);
@@ -350,28 +326,23 @@ export function createPiToolHost({
       if (kind === "open_page") return browser.openPage?.(url) ?? { available: false, error: "当前浏览器不能打开页面" };
       if (kind === "list_pages") return browser.listPages?.() ?? { pages: [] };
       if (kind === "snapshot") {
-        const shot = await browser.inspect?.({ includeScreenshot: Boolean(include_screenshot) });
-        return compactInspect(shot, include_screenshot);
+        const shot = await browser.inspect?.({ includeScreenshot: false });
+        return {
+          ...compactInspect(shot),
+          include_screenshot_ignored: Boolean(include_screenshot),
+        };
       }
       if (kind === "screenshot") {
-        const shot = await browser.inspect?.({ includeScreenshot: true });
-        if (shot?.screenshot?.data) {
-          return {
-            __image: true,
-            data: shot.screenshot.data,
-            mimeType: "image/jpeg",
-            url: shot.url,
-            total_bytes: Math.round((shot.screenshot.data.length * 3) / 4),
-            caption: JSON.stringify({
-              url: shot.url,
-              width: shot.screenshot.width,
-              height: shot.screenshot.height,
-              controls: shot.controls?.length || 0,
-              actions: shot.actions?.length || 0,
-            }),
-          };
+        const shot = await browser.inspect?.({ includeScreenshot: false });
+        if (!shot || shot.error || shot.available === false) {
+          return { available: false, error: shot?.error || shot?.screenshot?.error || "无法截图" };
         }
-        return { available: false, error: shot?.error || shot?.screenshot?.error || "无法截图" };
+        return {
+          ...compactInspect(shot),
+          action: "screenshot",
+          image_in_conversation: false,
+          note: SCREENSHOT_TEXT_ONLY_NOTE,
+        };
       }
       if (kind === "click" || kind === "fill" || kind === "select" || kind === "press" || kind === "choose") {
         const target = String(selector || ref || "").trim();
@@ -543,7 +514,7 @@ export function describePiTools() {
     {
       name: "control_in_app_browser",
       label: "Control In App Browser",
-      description: "自动点应用内浏览器。人同时也可以点预览。action=open_page|list_pages|snapshot|screenshot|click|fill|select|choose|press|fill_fields|network_since|assist。先 snapshot，再用 selector（placeholder= / label= / role=button[name=]）操作。下拉用 choose(selector, 可见选项原文) 一次选中。不要每个字段都 snapshot，不要 include_screenshot。要看画面用 action=screenshot。登录或确认写入用 assist，不要锁预览。",
+      description: "自动点应用内浏览器。人同时也可以点预览。action=open_page|list_pages|snapshot|screenshot|click|fill|select|choose|press|fill_fields|network_since|assist。先 snapshot，再用 selector（placeholder= / label= / role=button[name=]）操作。下拉用 choose(selector, 可见选项原文) 一次选中。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回页面摘要和控件，禁止把图片写进对话。登录或确认写入用 assist，不要锁预览。",
       parameters: {
         type: "object",
         properties: {
@@ -611,11 +582,10 @@ export function wrapPiToolsForSdk(host, defineTool, Type, trace = null) {
       if (trace?.recordToolStart) trace.recordToolStart(spec.name, args);
       else logPiOnly(`[PI分析] 调用 ${spec.name} ${summarizeToolArgs(spec.name, args)}`);
       try {
-        const result = await host[spec.name](args);
+        const result = stripImageFromToolResult(await host[spec.name](args));
         const summary = summarizeToolResult(spec.name, result);
         if (trace) trace.recordTool(spec.name, args, summary, true);
         else logPiOnly(`[PI分析] 工具完成 ${spec.name} ${Date.now() - started}ms → ${summary}`);
-        if (result?.__image && result.data) return toolImage(result);
         return toolText(result);
       } catch (error) {
         const message = error?.message || String(error);
