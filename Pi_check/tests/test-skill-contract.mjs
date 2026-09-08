@@ -90,6 +90,8 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(skill, /params 必须是空数组/);
   assert.match(skill, /协助之后/);
   assert.match(skill, /不要去点保存碰运气/);
+  assert.match(skill, /not_writable/);
+  assert.match(skill, /没有业务文案的 `aN`/);
   assert.match(skill, /打开写入表单附带/);
   assert.match(skill, /x-dano-option-source\.params.*不是 `steps\[\]\.params`/);
   assert.doesNotMatch(skill, /登录态、Cookie、分页、流程定义 Key、单据类型/);
@@ -104,6 +106,10 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(browserSkill, /不要去点保存碰运气/);
   assert.match(browserSkill, /人已经离开当前表单/);
   assert.match(browserSkill, /填了请求完全没变/);
+  assert.match(browserSkill, /not_writable/);
+  assert.match(browserSkill, /option_not_seen/);
+  assert.match(browserSkill, /没有业务文案的 `aN`/);
+  assert.doesNotMatch(browserSkill, /这是下拉。用 choose，不要往里面打字/);
   const instructions = buildPiInstructions(skill, browserSkill);
   assert.match(instructions, /不要写 capabilities\[\]\.fields/);
   assert.match(instructions, /input_schema\.properties/);
@@ -118,7 +124,10 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   const drive = buildLiveDrivePrompt({ targetUrl: "http://example.com", goal: "做成能力" });
   assert.match(drive, /你是操作者|control_in_app_browser/);
   assert.match(drive, /network_since/);
+  assert.match(drive, /not_writable/);
+  assert.match(drive, /改点没有业务文案的 aN/);
   assert.doesNotMatch(drive, /按 selector click\/fill\/choose/);
+  assert.doesNotMatch(drive, /这是下拉。用 choose/);
   const prompt = buildFinalAnalysisPrompt(3);
   assert.match(prompt, /readonly\/disabled|readonly=true/);
   assert.match(prompt, /默认已选/);

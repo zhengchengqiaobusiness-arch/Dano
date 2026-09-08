@@ -318,3 +318,214 @@ test("snapshot 写入当前页 visible_control", async (t) => {
   assert.ok(shot.controls.some((item) => item.placeholder === "请输入标题" || item.label === "标题"));
   assert.ok(events.some((event) => event.kind === "visible_control" && event.payload?.reason === "snapshot"));
 });
+
+function evidenceSink() {
+  const appendEvidence = async () => ({ seq: 1 });
+  appendEvidence.saveBlob = async (bytes) => ({ blobId: "blob_test", byteLength: bytes.byteLength });
+  return appendEvidence;
+}
+
+test("fill 日期框不得改口成下拉", async (t) => {
+  const html = await readFile(path.join(ROOT, "tests", "fixtures", "visible-controls.html"));
+  const fixture = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  const port = await listen(fixture);
+  const handle = await createPlaywrightBrowser({
+    recording: { id: "rec_fill_date", targetUrl: `http://127.0.0.1:${port}/` },
+    appendEvidence: evidenceSink(),
+  });
+  t.after(async () => {
+    await handle.close().catch(() => {});
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+  await handle.inspect();
+  const pickerFill = await handle.actBySelector({
+    selector: "placeholder=请选择日期",
+    action: "fill",
+    text: "2026-09-08",
+  });
+  assert.notEqual(pickerFill.error, "这是下拉。用 choose，不要往里面打字。");
+  assert.notEqual(pickerFill.code, "not_found");
+  assert.equal(pickerFill.ok, true, pickerFill.error || "fill date failed");
+  const rangeFill = await handle.actBySelector({
+    selector: "placeholder=开始日期",
+    action: "fill",
+    text: "2026-09-01",
+  });
+  assert.notEqual(rangeFill.error, "这是下拉。用 choose，不要往里面打字。");
+  assert.equal(rangeFill.ok, true, rangeFill.error || "fill range start failed");
+});
+
+test("choose 点已经出现的可见原文，不要求下拉 option", async (t) => {
+  const html = `<!doctype html><html><body>
+    <div role="radiogroup" aria-label="汇报类型">
+      <label role="radio">日报</label>
+      <label role="radio">周报</label>
+      <label role="radio">月报</label>
+    </div>
+    <label>请假类型
+      <select>
+        <option>请选择</option>
+        <option>事假</option>
+        <option>病假</option>
+      </select>
+    </label>
+    <script>
+      window.__picked = "";
+      for (const item of document.querySelectorAll("[role='radio']")) {
+        item.addEventListener("click", () => { window.__picked = item.textContent.trim(); });
+      }
+    </script>
+  </body></html>`;
+  const fixture = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  const port = await listen(fixture);
+  const handle = await createPlaywrightBrowser({
+    recording: { id: "rec_choose_visible", targetUrl: `http://127.0.0.1:${port}/` },
+    appendEvidence: evidenceSink(),
+  });
+  t.after(async () => {
+    await handle.close().catch(() => {});
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+  await handle.inspect();
+  const radio = await handle.actBySelector({
+    selector: "label=汇报类型",
+    action: "choose",
+    text: "日报",
+  });
+  assert.equal(radio.ok, true, radio.error || "choose 日报 failed");
+  assert.equal(await handle.page.evaluate(() => window.__picked), "日报");
+  const selected = await handle.actBySelector({
+    selector: "label=请假类型",
+    action: "choose",
+    text: "事假",
+  });
+  assert.equal(selected.ok, true, selected.error || "choose 事假 failed");
+  const value = await handle.page.locator("select").inputValue();
+  assert.equal(value, "事假");
+});
+
+test("点保存必须点到按钮，不能落到旁边的标题框", async (t) => {
+  const html = `<!doctype html><html><body>
+    <form class="el-form" style="width:720px;padding:24px">
+      <div class="el-form-item">
+        <label class="el-form-item__label">申请标题</label>
+        <div class="el-input"><input placeholder="请输入申请标题" /></div>
+      </div>
+      <div class="el-form-item">
+        <label class="el-form-item__label">请示内容</label>
+        <textarea placeholder="请输入请示内容"></textarea>
+      </div>
+      <div class="dialog-footer" style="margin-top:24px">
+        <button type="button" class="el-button">取消</button>
+        <button type="button" class="el-button" id="save">保存</button>
+      </div>
+    </form>
+    <script>
+      window.__clicked = "";
+      document.getElementById("save").addEventListener("click", () => { window.__clicked = "save"; });
+      document.querySelector("input").addEventListener("click", () => { window.__clicked = "title"; });
+    </script>
+  </body></html>`;
+  const fixture = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  const port = await listen(fixture);
+  const handle = await createPlaywrightBrowser({
+    recording: { id: "rec_save_center", targetUrl: `http://127.0.0.1:${port}/` },
+    appendEvidence: evidenceSink(),
+  });
+  t.after(async () => {
+    await handle.close().catch(() => {});
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+  await handle.inspect();
+  const clicked = await handle.actBySelector({
+    selector: 'role=button[name="保存"]',
+    action: "click",
+  });
+  assert.equal(clicked.ok, true, clicked.error || "click 保存 failed");
+  assert.equal(await handle.page.evaluate(() => window.__clicked), "save");
+});
+
+test("choose 打开后是日历时不得改口，只回报 option_not_seen", async (t) => {
+  const html = `<!doctype html><html><body>
+    <label>开始日期 <input id="start" placeholder="开始日期" readonly /></label>
+    <div id="cal" hidden style="display:none;grid-template-columns:repeat(7,32px);gap:2px"></div>
+    <script>
+      const cal = document.getElementById("cal");
+      for (let day = 1; day <= 31; day += 1) {
+        const cell = document.createElement("div");
+        cell.textContent = String(day);
+        cell.style.width = "28px";
+        cell.style.height = "28px";
+        cal.appendChild(cell);
+      }
+      document.getElementById("start").addEventListener("click", () => {
+        cal.hidden = false;
+        cal.style.display = "grid";
+      });
+    </script>
+  </body></html>`;
+  const fixture = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  const port = await listen(fixture);
+  const handle = await createPlaywrightBrowser({
+    recording: { id: "rec_choose_calendar", targetUrl: `http://127.0.0.1:${port}/` },
+    appendEvidence: evidenceSink(),
+  });
+  t.after(async () => {
+    await handle.close().catch(() => {});
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+  await handle.inspect();
+  const chosen = await handle.actBySelector({
+    selector: "placeholder=开始日期",
+    action: "choose",
+    text: "日报",
+  });
+  assert.equal(chosen.ok, false);
+  assert.equal(chosen.code, "option_not_seen");
+  assert.equal(chosen.panel, "calendar");
+  assert.doesNotMatch(String(chosen.error || ""), /这是下拉/);
+  const written = await handle.actBySelector({
+    selector: "placeholder=开始日期",
+    action: "fill",
+    text: "2026-09-01",
+  });
+  assert.equal(written.ok, true, written.error || "fill 日历格 failed");
+});
+
+test("按钮上 fill 回报 not_writable，不改口", async (t) => {
+  const html = `<!doctype html><html><body><button type="button">保存</button></body></html>`;
+  const fixture = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  const port = await listen(fixture);
+  const handle = await createPlaywrightBrowser({
+    recording: { id: "rec_fill_button", targetUrl: `http://127.0.0.1:${port}/` },
+    appendEvidence: evidenceSink(),
+  });
+  t.after(async () => {
+    await handle.close().catch(() => {});
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+  await handle.inspect();
+  const filled = await handle.actBySelector({
+    selector: 'role=button[name="保存"]',
+    action: "fill",
+    text: "2026-09-01",
+  });
+  assert.equal(filled.ok, false);
+  assert.equal(filled.code, "not_writable");
+  assert.doesNotMatch(String(filled.error || ""), /这是下拉/);
+});

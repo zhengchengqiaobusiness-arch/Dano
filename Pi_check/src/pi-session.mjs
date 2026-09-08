@@ -96,7 +96,7 @@ export function buildLiveDrivePrompt({ targetUrl = "", goal = "" } = {}) {
     `目标：${String(goal || "").trim() || "把该页独立业务动作做成可调用能力"}\n` +
     `入口：${String(targetUrl || "").trim()}\n` +
     `按 Skill 用 control_in_app_browser：open_page → snapshot → network_since。先观察再最小设值，不要盲点。\n` +
-    `只用 snapshot 广告的 placeholder= / label= / role= / text= / ref=。禁止 name=、#id、CSS。下拉用 choose(合法 selector, 可见选项原文) 一次选中。打开弹层后再 snapshot 一次。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回摘要，不要把图片写进对话。人点过的看 recentUserActions。\n` +
+    `只用 snapshot 广告的 placeholder= / label= / role= / text= / ref=。禁止 name=、#id、CSS，禁止改点没有业务文案的 aN。fill 就写，写不进回 not_writable。choose 点可见原文；没有该项看打开后是列表还是日历。打开弹层后再 snapshot 一次。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回摘要，不要把图片写进对话。人点过的看 recentUserActions。\n` +
     `readonly/disabled 只表示整个控件不能改。默认已选仍是调用方，不要写成无独立来源。\n` +
     `填或点之后立刻 network_since 或 read_request_shape。该项有真实 execute 形状后再 submit_recording_capability。人点出的动作也要交。禁止交空壳。\n` +
     `登录、验证码、写不进的字段、点了不发网的保存：action=assist，预览不要锁。写入真实数据前若目标没授权，先 assist。\n` +

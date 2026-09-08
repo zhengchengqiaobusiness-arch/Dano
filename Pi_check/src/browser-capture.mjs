@@ -102,26 +102,24 @@ function locatorBuilders(parsed) {
   }
   if (parsed.kind === "label") {
     return [
+      (scope) => scope.getByLabel(parsed.value, { exact: true }),
       (scope) => scope.getByLabel(parsed.value, { exact: false }),
-      (scope) => scope.locator(".el-form-item, .ant-form-item").filter({ hasText: parsed.value })
-        .locator("input, textarea, select, .el-select, .ant-select, .el-select__wrapper, [role='combobox']"),
+      (scope) => scope.locator("label").filter({ hasText: exactText }),
+      (scope) => scope.getByText(parsed.value, { exact: true }),
     ];
   }
   if (parsed.kind === "role") {
     if (parsed.role === "checkbox" || parsed.role === "radio") {
-      const host = parsed.role === "checkbox"
-        ? ".el-checkbox, .ant-checkbox-wrapper, label, tr, .el-table__row, .ant-table-row"
-        : ".el-radio, .ant-radio-wrapper, label";
       if (!parsed.name) {
         return [
-          (scope) => scope.locator(host),
           (scope) => scope.getByRole(parsed.role),
+          (scope) => scope.locator(`input[type='${parsed.role}']`),
         ];
       }
       return [
         (scope) => scope.getByRole(parsed.role, { name: parsed.name, exact: true }),
         (scope) => scope.getByRole(parsed.role, { name: parsed.name, exact: false }),
-        (scope) => scope.locator(host).filter({ hasText: exactText }),
+        (scope) => scope.locator("label").filter({ hasText: exactText }),
         (scope) => scope.getByText(parsed.name, { exact: true }),
       ];
     }
@@ -129,7 +127,7 @@ function locatorBuilders(parsed) {
     return [
       (scope) => scope.getByRole(parsed.role, { name: parsed.name, exact: true }),
       (scope) => scope.getByRole(parsed.role, { name: parsed.name, exact: false }),
-      (scope) => scope.locator("button, [role='button'], .el-button, .ant-btn, a.ant-btn, input[type='button'], input[type='submit']")
+      (scope) => scope.locator("button, [role='button'], a, input[type='button'], input[type='submit']")
         .filter({ hasText: exactText }),
       (scope) => scope.getByText(parsed.name, { exact: true }),
     ];
@@ -390,6 +388,7 @@ export class PlaywrightBrowser {
     this.piActDepth = 0;
     this.piActUntil = 0;
     this.userActions = [];
+    this.lastSnapshot = null;
     this.appendEvidence = null;
     this.sawLoginPage = false;
     this.snapshotVisibleControls = async () => {};
@@ -610,6 +609,7 @@ export class PlaywrightBrowser {
         options: [...new Set(frames.flatMap((item) => item.options || []))],
         recentUserActions: this.recentUserActions(),
       };
+      this.lastSnapshot = snapshot;
       if (visible.length && typeof this.appendEvidence === "function") {
         await this.appendEvidence("visible_control", {
           page_id: this.pageIds.get(page) || "",
@@ -645,56 +645,40 @@ export class PlaywrightBrowser {
       if (this.closed || !page) return { ok: false, error: "浏览器未打开" };
       const token = String(selector || ref || "").trim();
       if (!token) return { ok: false, error: "缺少 selector。先 snapshot，用 placeholder= / label= / role=。" };
+      const kind = String(action || "click");
       this.beginPiAct();
       try {
-        const kind = String(action || "click");
         if (kind === "choose") {
           return await this.#chooseNow(page, token, text);
         }
         const handle = await this.#locateNow(page, token);
         if (!handle) {
-          return { ok: false, error: `找不到 ${token}。重新 snapshot，用 placeholder= / label= / role=，不要点第一个重名控件。` };
+          return {
+            ok: false,
+            code: "not_found",
+            error: `找不到 ${token}。重新 snapshot，用 placeholder= / label= / role=，不要点第一个重名控件。`,
+          };
         }
         if (kind === "fill") {
-          if (await this.#isChooser(handle)) {
-            return { ok: false, error: "这是下拉。用 choose，不要往里面打字。" };
-          }
-          const input = handle.locator("input, textarea").first();
+          const input = handle.locator("input, textarea, [contenteditable='true']").first();
           const target = (await input.count()) ? input : handle;
-          await target.fill(String(text ?? ""));
-        } else if (kind === "select") {
-          await handle.selectOption(String(text ?? "")).catch(async () => this.#clickChooserAware(handle));
-        } else if (kind === "press") {
-          await handle.press(String(text || "Enter"));
-        } else {
-          const chooser = await this.#isChooser(handle);
-          await this.#clickChooserAware(handle);
-          if (chooser) {
-            await page.waitForTimeout(120);
-            const options = await this.#listOpenOptions(page);
-            this.lastActAt = Date.now();
-            if (typeof this.appendEvidence === "function") {
-              await this.appendEvidence("interaction", {
-                actor: "pi",
-                kind,
-                ref: token,
-                selector: token,
-                text: String(text || "").slice(0, 80),
-                chooser: true,
-              });
-            }
-            this.#scheduleControlResnapshot(page, kind);
+          const written = await this.#fillValue(target, String(text ?? ""));
+          if (!written.ok) {
             return {
-              ok: true,
-              chooser: true,
-              hint: "这是下拉。用 choose(selector, 可见选项原文) 一次选中，不要再 click。",
-              options,
-              url: page.url(),
+              ok: false,
+              code: "not_writable",
+              error: "这一格写不进。",
               selector: token,
               ref: token,
               action: kind,
             };
           }
+        } else if (kind === "select") {
+          await handle.selectOption(String(text ?? "")).catch(async () => this.#mouseClick(handle));
+        } else if (kind === "press") {
+          await handle.press(String(text || "Enter"));
+        } else {
+          await this.#mouseClick(handle);
         }
         this.lastActAt = Date.now();
         if (typeof this.appendEvidence === "function") {
@@ -707,74 +691,90 @@ export class PlaywrightBrowser {
           });
         }
         this.#scheduleControlResnapshot(page, kind);
-        return { ok: true, url: page.url(), selector: token, ref: token, action: kind };
+        if (kind === "click") await page.waitForTimeout(50);
+        const panel = kind === "click" ? await this.#observePanel(page) : null;
+        return {
+          ok: true,
+          url: page.url(),
+          selector: token,
+          ref: token,
+          action: kind,
+          ...(panel && panel.panel !== "none" ? { panel: panel.panel, options: panel.options } : {}),
+        };
       } catch (error) {
-        return { ok: false, error: error.message || String(error) };
+        return {
+          ok: false,
+          code: kind === "fill" ? "not_writable" : "not_found",
+          error: kind === "fill" ? "这一格写不进。" : (error.message || String(error)),
+        };
       } finally {
         this.endPiAct();
       }
     });
   }
 
+  #advertisedRef(token) {
+    const snap = this.lastSnapshot;
+    if (!snap || !token) return "";
+    const items = [...(snap.controls || []), ...(snap.actions || [])];
+    const exact = items.filter((item) => (
+      item.selector === token
+      || item.ref === token
+      || `ref=${item.ref}` === token
+    ));
+    if (!exact.length) return "";
+    const preferred = exact.find((item) => item.region === "dialog")
+      || exact.find((item) => item.region === "form")
+      || exact[exact.length - 1];
+    return String(preferred?.ref || "");
+  }
+
   async #locateNow(page, token) {
+    const advertised = this.#advertisedRef(token);
+    if (advertised) {
+      const marked = await firstVisibleInFrames(
+        page,
+        (scope) => scope.locator(`[data-pi-ref="${advertised}"]`),
+        { limit: 4 },
+      );
+      if (marked) return marked;
+    }
     const parsed = parseLocator(token);
     for (const build of locatorBuilders(parsed)) {
       const found = await firstVisibleInFrames(page, (scope) => build(scope), { limit: 16 });
-      if (found) {
-        const host = await this.#chooserHost(found);
-        return host || found;
-      }
+      if (found) return found;
     }
     return null;
   }
 
-  async #withElement(locator, timeout, work) {
-    const handle = await locator.elementHandle({ timeout }).catch(() => null);
-    if (!handle) return null;
+  async #fillValue(locator, value) {
     try {
-      return await work(handle);
-    } finally {
-      await handle.dispose().catch(() => {});
+      await locator.fill(value);
+      return { ok: true };
+    } catch {
+      const written = await locator.evaluate((el, next) => {
+        const writable = (node) => {
+          if (!node || node.disabled) return false;
+          if (node.isContentEditable) return true;
+          const tag = String(node.tagName || "").toLowerCase();
+          if (tag === "textarea") return true;
+          if (tag !== "input") return false;
+          const type = String(node.type || "text").toLowerCase();
+          return !/^(button|submit|reset|checkbox|radio|file|image)$/.test(type);
+        };
+        const root = el;
+        const nested = [...(root.querySelectorAll?.("input, textarea, [contenteditable='true']") || [])];
+        const target = writable(root) ? root : nested.find(writable);
+        if (!target) return false;
+        if (target.isContentEditable) target.textContent = next;
+        else target.value = next;
+        target.dispatchEvent(new Event("input", { bubbles: true }));
+        target.dispatchEvent(new Event("change", { bubbles: true }));
+        if (target.isContentEditable) return String(target.textContent || "").includes(String(next));
+        return String(target.value) === String(next);
+      }, value).catch(() => false);
+      return { ok: Boolean(written) };
     }
-  }
-
-  async #chooserHost(locator) {
-    const mark = `pi-host-${Date.now().toString(36)}`;
-    const marked = await this.#withElement(locator, 600, (handle) => handle.evaluate((el, token) => {
-      const isHost = (node) => {
-        const cls = String(node.className || "");
-        if (node.getAttribute("role") === "combobox" && !node.matches("input, textarea")) return true;
-        return /(?:^|\s)(el-select|ant-select|el-picker|ant-picker|el-select__wrapper|ant-select-selector)(?:\s|$)/.test(cls);
-      };
-      let best = el;
-      let node = el instanceof Element ? el : el.parentElement;
-      for (let i = 0; i < 6 && node && node !== document.body; i += 1, node = node.parentElement) {
-        if (isHost(node)) {
-          best = node;
-          break;
-        }
-      }
-      if (best instanceof Element) {
-        best.setAttribute("data-pi-host", token);
-        return true;
-      }
-      return false;
-    }, mark)).catch(() => false);
-    if (!marked) return null;
-    const page = this.livePage();
-    for (const scope of actionScopes(page)) {
-      const host = scope.locator(`[data-pi-host="${mark}"]`).first();
-      if (host && await host.count()) return host;
-    }
-    return null;
-  }
-
-  async #isChooser(locator) {
-    return Boolean(await this.#withElement(locator, 600, (handle) => handle.evaluate((el) => {
-      const text = String(el.getAttribute("placeholder") || el.querySelector?.("input")?.getAttribute("placeholder") || "");
-      if (/^(请选择|请挑选|please select)/i.test(text.trim())) return true;
-      return Boolean(el.closest?.(".el-select, .ant-select, .el-picker, .ant-picker, [role='combobox']"));
-    })).catch(() => false));
   }
 
   async #visibleBox(locator, timeout = 400) {
@@ -782,29 +782,52 @@ export class PlaywrightBrowser {
     return locator.boundingBox({ timeout }).catch(() => null);
   }
 
+  async #actionBox(locator) {
+    const hostBox = await this.#visibleBox(locator);
+    const kind = await locator.evaluate((el) => {
+      const tag = String(el.tagName || "").toLowerCase();
+      const role = String(el.getAttribute("role") || "").toLowerCase();
+      if (/^(button|a|option|summary)$/.test(tag)) return "self";
+      if (/^(button|link|option|tab|menuitem|radio|checkbox)$/.test(role)) return "self";
+      if (tag === "input" || tag === "textarea" || tag === "select") return "self";
+      return "host";
+    }).catch(() => "self");
+    if (kind === "self" || !hostBox) return hostBox;
+    const inner = locator.locator("input, textarea, select, button, [role='button']");
+    const count = await inner.count().catch(() => 0);
+    let best = null;
+    for (let index = 0; index < Math.min(count, 8); index += 1) {
+      const box = await this.#visibleBox(inner.nth(index), 200);
+      if (!box || box.width < 4 || box.height < 4) continue;
+      if (!best || (box.width * box.height) < (best.width * best.height)) best = box;
+    }
+    if (best && (hostBox.width > best.width * 2 || hostBox.height > best.height * 2)) return best;
+    return hostBox;
+  }
+
   async #mouseClick(locator) {
     const page = this.livePage();
-    const box = await this.#visibleBox(locator);
+    const box = await this.#actionBox(locator);
     if (!page || !box || box.width < 1 || box.height < 1) {
       await locator.click({ timeout: 800, force: true });
       return { via: "locator", x: 0, y: 0 };
     }
-    const x = box.x + Math.min(Math.max(box.width / 2, 8), 24);
+    const x = box.x + box.width / 2;
     const y = box.y + box.height / 2;
     await page.mouse.click(x, y);
     return { via: "mouse", x, y };
   }
 
-  async #listOpenOptions(page) {
+  async #listRoleTexts(page, role) {
     const labels = [];
     const seen = new Set();
     for (const scope of actionScopes(page)) {
-      const nodes = scope.locator("[role='option'], .el-select-dropdown__item, .ant-select-item-option");
+      const nodes = scope.getByRole(role);
       const count = await nodes.count().catch(() => 0);
       for (let index = 0; index < Math.min(count, 40); index += 1) {
         const item = nodes.nth(index);
-        if (!(await item.isVisible().catch(() => false))) continue;
-        const text = String(await item.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+        if (!(await item.isVisible({ timeout: 0 }).catch(() => false))) continue;
+        const text = String(await item.innerText({ timeout: 200 }).catch(() => "")).replace(/\s+/g, " ").trim();
         if (!text || seen.has(text)) continue;
         seen.add(text);
         labels.push(text);
@@ -813,37 +836,68 @@ export class PlaywrightBrowser {
     return labels;
   }
 
+  async #looksLikeCalendar(page) {
+    for (const scope of actionScopes(page)) {
+      const days = await scope.evaluate(() => {
+        const nodes = [...document.querySelectorAll("td, [role='gridcell'], button, span, div")];
+        let count = 0;
+        for (const node of nodes) {
+          const text = String(node.textContent || "").replace(/\s+/g, "");
+          if (!/^(3[01]|[12]?\d)$/.test(text)) continue;
+          const box = node.getBoundingClientRect?.();
+          if (!box || box.width < 2 || box.height < 2 || box.width > 80 || box.height > 80) continue;
+          count += 1;
+          if (count >= 20) return true;
+        }
+        return false;
+      }).catch(() => false);
+      if (days) return true;
+    }
+    return false;
+  }
+
+  async #observePanel(page) {
+    const options = await this.#listRoleTexts(page, "option");
+    if (options.length) return { panel: "list", options };
+    const radios = await this.#listRoleTexts(page, "radio");
+    const tabs = await this.#listRoleTexts(page, "tab");
+    if (radios.length >= 2 || tabs.length >= 2) {
+      return { panel: "inline", options: [...radios, ...tabs] };
+    }
+    if (await this.#looksLikeCalendar(page)) return { panel: "calendar", options: [] };
+    return { panel: "none", options: [] };
+  }
+
   async #dismissOpenChooser(page) {
     await page.waitForTimeout(80);
-    const panel = await firstVisibleInFrames(
-      page,
-      (scope) => scope.locator(".el-select-dropdown, .ant-select-dropdown, .el-popper.el-select__popper"),
-      { limit: 2 },
-    );
-    if (panel) await page.keyboard.press("Escape").catch(() => {});
+    await page.keyboard.press("Escape").catch(() => {});
   }
 
-  async #clickChooserAware(locator) {
-    const host = await this.#chooserHost(locator);
-    return this.#mouseClick(host || locator);
-  }
-
-  async #dispatchActivate(locator) {
-    return this.#mouseClick(locator);
-  }
-
-  async #waitOption(page, label, timeoutMs = 1600) {
+  async #waitChoice(page, label, timeoutMs = 1600) {
     const deadline = Date.now() + Math.max(80, Number(timeoutMs) || 1600);
-    const exact = new RegExp(`^\\s*${String(label).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`);
     while (Date.now() < deadline) {
       for (const scope of actionScopes(page)) {
-        const option = scope.locator("[role='option'], .el-select-dropdown__item, .ant-select-item-option")
-          .filter({ hasText: exact })
-          .filter({ visible: true })
-          .first();
-        if (!(await option.count().catch(() => 0))) continue;
-        const box = await this.#visibleBox(option, 200);
-        if (box && box.width > 1 && box.height > 1) return option;
+        const builders = [
+          () => scope.getByRole("option", { name: label, exact: true }),
+          () => scope.getByRole("radio", { name: label, exact: true }),
+          () => scope.getByRole("tab", { name: label, exact: true }),
+          () => scope.getByText(label, { exact: true }),
+        ];
+        for (const build of builders) {
+          let loc;
+          try {
+            loc = build();
+          } catch {
+            continue;
+          }
+          const count = await loc.count().catch(() => 0);
+          for (let index = 0; index < Math.min(count, 8); index += 1) {
+            const item = loc.nth(index);
+            if (!(await item.isVisible({ timeout: 0 }).catch(() => false))) continue;
+            const box = await this.#visibleBox(item, 200);
+            if (box && box.width > 1 && box.height > 1 && box.height < 120) return item;
+          }
+        }
       }
       await page.waitForTimeout(40);
     }
@@ -852,30 +906,56 @@ export class PlaywrightBrowser {
 
   async #chooseNow(page, token, text) {
     const label = String(text || "").trim();
-    if (!label) return { ok: false, error: "choose 需要可见选项原文" };
+    if (!label) return { ok: false, code: "option_not_seen", error: "choose 需要可见选项原文" };
     const field = await this.#locateNow(page, token);
-    if (!field) return { ok: false, error: `找不到 ${token}` };
-    const native = field.locator("select").first();
-    if (await native.count()) {
-      await native.selectOption({ label }).catch(() => native.selectOption(label));
-    } else if (await field.evaluate((el) => el.tagName === "SELECT").catch(() => false)) {
-      await field.selectOption({ label }).catch(() => field.selectOption(label));
-    } else {
-      const open = await this.#listOpenOptions(page);
-      let option = open.includes(label) ? await this.#waitOption(page, label, 400) : null;
-      if (!option) {
-        await this.#clickChooserAware(field);
-        option = await this.#waitOption(page, label);
-      }
-      if (!option) {
-        const open = await this.#listOpenOptions(page);
+    if (!field) {
+      return { ok: false, code: "not_found", error: `找不到 ${token}` };
+    }
+    const tag = await field.evaluate((el) => String(el.tagName || ""), { timeout: 800 }).catch(() => "");
+    const nestedSelects = await field.locator("select").count().catch(() => 0);
+    if (tag === "SELECT" || nestedSelects) {
+      const target = tag === "SELECT" ? field : field.locator("select").first();
+      const picked = await target.selectOption({ label }, { timeout: 800 })
+        .then(() => true)
+        .catch(() => target.selectOption(label, { timeout: 400 }).then(() => true).catch(() => false));
+      if (!picked) {
         return {
           ok: false,
-          error: open.length ? `下拉没有选项：${label}。可见：${open.slice(0, 12).join("、")}` : `下拉没有选项：${label}`,
-          options: open,
+          code: "option_not_seen",
+          error: `没有可见项：${label}。`,
+          panel: "list",
+          options: [],
         };
       }
-      await this.#dispatchActivate(option);
+    } else {
+      let option = await this.#waitChoice(page, label, 400);
+      if (!option) {
+        await this.#mouseClick(field);
+        option = await this.#waitChoice(page, label, 800);
+      }
+      if (!option) {
+        await page.keyboard.press("ArrowDown").catch(() => {});
+        option = await this.#waitChoice(page, label, 800);
+      }
+      if (!option) {
+        const seen = await this.#observePanel(page);
+        const visible = seen.options.slice(0, 12).join("、");
+        const where = seen.panel === "calendar"
+          ? "打开后是日历。"
+          : seen.panel === "list"
+            ? `可见：${visible}`
+            : seen.panel === "inline"
+              ? `可见：${visible}`
+              : "打开后没有可见项。";
+        return {
+          ok: false,
+          code: "option_not_seen",
+          error: `没有可见项：${label}。${where}`,
+          panel: seen.panel,
+          options: seen.options,
+        };
+      }
+      await this.#mouseClick(option);
       await this.#dismissOpenChooser(page);
     }
     this.lastActAt = Date.now();
@@ -1041,6 +1121,8 @@ export async function createPlaywrightBrowser({ recording, appendEvidence }) {
     delete contextOptions.storageState;
     context = await browser.newContext(contextOptions);
   }
+  context.setDefaultTimeout(4000);
+  context.setDefaultNavigationTimeout(12000);
   const page = await context.newPage();
   const handle = new PlaywrightBrowser({
     browser,

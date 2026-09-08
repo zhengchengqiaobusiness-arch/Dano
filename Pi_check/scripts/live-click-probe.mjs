@@ -77,7 +77,7 @@ try {
   }));
   report.steps.push(openType);
   if (openType.value && openType.value.ok === false) throw new Error(openType.value.error || "点开下拉失败");
-  console.log(`    chooser=${Boolean(openType.value?.chooser)} options=${(openType.value?.options || []).slice(0, 8).join(",")}`);
+  console.log(`    panel=${openType.value?.panel || "none"} options=${(openType.value?.options || []).slice(0, 8).join(",")}`);
 
   const chooseType = await timed(`choose ${typeSelector} → 事假`, () => browser.actBySelector({
     selector: typeSelector,

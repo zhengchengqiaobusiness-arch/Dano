@@ -322,7 +322,7 @@ test("choose 一次选中下拉，不必再 snapshot 点选项", async (t) => {
     selector: "placeholder=请选择请假类型",
   });
   assert.equal(opened.ok, true, JSON.stringify(opened));
-  assert.equal(opened.chooser, true);
+  assert.equal(opened.panel, "list", JSON.stringify(opened));
   assert.ok((opened.options || []).includes("事假"), JSON.stringify(opened));
   const chosen = await tools.control_in_app_browser({
     action: "choose",

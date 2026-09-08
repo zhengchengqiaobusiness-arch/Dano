@@ -16,9 +16,9 @@ PI 是操作者。人同时也可以点预览。
 - 按钮：`role=button[name="原文"]` 或 `text=原文`
 - 勾选：`role=checkbox[name="原文"]` 或 `type=checkbox`
 - 单选：`role=radio[name="原文"]` 或 `type=radio`
-- 下拉：对宿主 `choose(selector, 可见选项原文)`，一次选中
+- 下拉、分段、单选、页签：对宿主 `choose(selector, 可见选项原文)`，点已经出现的那一项
 
-禁止：`name=`、`#id`、`.class`、xpath、任意 CSS，以及 snapshot 里没有的字符串。不要把失败后的猜测写成新 selector。
+禁止：`name=`、`#id`、`.class`、xpath、任意 CSS，以及 snapshot 里没有的字符串。不要把失败后的猜测写成新 selector。不要改点没有业务文案的 `aN`。
 
 `readonly`/`disabled` 表示整个控件不能改，不是下拉内部展示框带了原生 readonly。
 
@@ -31,7 +31,7 @@ PI 是操作者。人同时也可以点预览。
 3. `network_since`（刚打开用 `after_seq=0`）看首屏已有请求。不要先点完全页。
 4. 多个普通输入框：一次 `fill_fields`。每项 `ref` 必须是上面的合法 token，`value` 是要写入的值。
 5. 立刻再 `network_since`。
-6. 下拉用 `choose`，不要 click 后再 snapshot 再点选项。打开弹层、切换页签或加行后再 snapshot **一次**。
+6. 选项列表、分段、单选、页签用 `choose(selector, 可见原文)`。不要 click 后再猜新 selector。打开弹层、切换页签或加行后再 snapshot **一次**。
 7. 提交/搜索/确认：只点与当前正在填的表单同一 `region` 的那一个按钮。点完立刻 `network_since`。
 
 不要每个字段都 snapshot。不要 `include_screenshot`。`screenshot` 只回页面摘要和控件，禁止把图片写进对话。看控件用 `snapshot`。人点过的看 `snapshot.recentUserActions`，不要停下来等人。
@@ -41,16 +41,18 @@ PI 是操作者。人同时也可以点预览。
 `ok: true` 不等于业务前进。
 
 - `fill` / `choose` / `fill_fields` 之后：回显或随后请求里对应键必须出现或变化。填了请求完全没变，这一格失败，**没写上**。
+- 你要 `fill`，工具就写，不会改口成下拉。回 `not_writable`：这一格写不进，只协助这一格。
+- 你要 `choose`，工具点已经出现的可见原文。回 `option_not_seen`：看回报里打开后是列表还是日历；是日历就改 `fill` 日期值，还是没有就协助这一格。
 - 工具报 `ok` 但随后保存/查询仍不带这个键：同样算没写上，不要当成已填。
 - `click` 之后：`network_since` 没有预期的查询或写请求，就是点错了。禁止再用同一条 selector 连点。
-- 工具返回「找不到」：只重新 `snapshot`，只用**新列表**里的合法 selector。禁止改写成 `name=` / CSS / `#id` 再试。
+- 工具返回 `not_found`：只重新 `snapshot`，只用**新列表**里的合法 selector。禁止改写成 `name=` / CSS / `#id` 再试，禁止改点没有业务文案的 `aN`。
 - 同名「保存 / 确定 / 搜索 / 提交」：看 `region`，点当前表单或当前弹层那一个。点完没网，不要再点同一个 `role=button[name="保存"]`。
 - 同一合法 selector 失败两次，或填了请求完全没变：`assist`，`reason` 只写**这一个控件**要人做什么。预览不锁。
 - 某一格没写上：只协助这一格，**不要去点保存碰运气**。
 - 协助发出之后：禁止再 `click` 同名提交/搜索钮。只读 `recentUserActions` 和 `network_since`。人已经发出预期请求就停手，交给识别 Skill 交能力。不要整张表重做。
 - 人已经离开当前表单（回到列表、关掉弹层、打开另一页）：禁止再点刚才那张表的保存/确认。当前 snapshot 的 `region` 已经不是那张表，就不要再点。
 
-`fill` 只能写入普通 `input` / `textarea`。可编辑宿主、自定义保存钮写不上或点了不发网，属于这类失败，不要 invent selector 重试八次。
+写不进、点了不发网，属于这类失败，不要 invent selector 重试八次。
 
 ## 协助不是排他接管
 

@@ -36,7 +36,7 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 
 1. **观察**：刚打开、弹层刚出现、或选择器失效。用 `control_in_app_browser` 做 `snapshot` + `network_since`。
 2. **最小设值**：台账上已有一个动作，绑定还没证明。只改一个或一批普通框，立刻看网。
-3. **请人点一下**：合法 selector 用尽，或点了不发网，或 `fill` 报成功但随后请求没有对应键。`assist`，只写这一个控件要人做什么。不要去点保存碰运气。
+3. **请人点一下**：合法 selector 用尽，或点了不发网，或工具回 `not_writable` / `option_not_seen`，或 `fill` 报成功但随后请求没有对应键。`assist`，只写这一个控件要人做什么。不要去点保存碰运气，不要改点没有业务文案的 `aN`。
 4. **推断并交一项**：该项已有真实 execute 形状。走后面的字段合同，再 `submit_recording_capability`。
 5. **定稿**：台账每行都有能力或 `unresolved`。`submit_recording_result({final:true, use_draft:true})`。
 
@@ -108,7 +108,7 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 
 `list_recording_manifest` 只有计数。必须先调 `list_recording_index`，看完全场 interaction 文案、xhr/fetch 的 METHOD+path、network_response、`visible_control`、截图和页面跳转，再按需 `read_evidence_item` 读正文。请求/响应正文在 `payload.body.text` 或 `body.blob_id`。`read_response_blob` 只接受 `blob_` 开头的 id，不要把 `request_id` 当 blob，也不要编造截图 blob_id。看完关键请求就 `submit_recording_result`，禁止把完整 result 写在对话里。不要只读前半场。也可用 `list_action_timeline` 按时间看人与 PI 点过的交互（带 `actor`），对候选 execute 调 `read_request_shape`。
 
-浏览器打开后先用 `control_in_app_browser` 观察：`open_page` → `snapshot` → `network_since`。人同时也可以点预览。共用同一页、同一路画面、同一条证据。只用 snapshot 广告的 `placeholder=` / `label=` / `role=` / `text=` / `ref=` 选择器；下拉用 `choose` 一次选中。登录、验证码、写不进的那一个字段、点了不发网的保存用 `assist`，不要锁预览。该项在 `list_action_timeline` 或 `network_since` 里已经对上一条真实 execute 之后，再 `submit_recording_capability`。人点出的动作也要交。全部交完后 `submit_recording_result({final:true, use_draft:true})`。禁止没看到 execute 形状就交空壳。
+浏览器打开后先用 `control_in_app_browser` 观察：`open_page` → `snapshot` → `network_since`。人同时也可以点预览。共用同一页、同一路画面、同一条证据。只用 snapshot 广告的 `placeholder=` / `label=` / `role=` / `text=` / `ref=` 选择器；`choose` 点已经出现的可见原文。登录、验证码、写不进的那一个字段、点了不发网的保存用 `assist`，不要锁预览，不要改点没有业务文案的 `aN`。该项在 `list_action_timeline` 或 `network_since` 里已经对上一条真实 execute 之后，再 `submit_recording_capability`。人点出的动作也要交。全部交完后 `submit_recording_result({final:true, use_draft:true})`。禁止没看到 execute 形状就交空壳。
 
 索引对齐方法（换任何页面都这样做）：
 

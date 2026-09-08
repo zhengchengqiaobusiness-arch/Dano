@@ -27,6 +27,7 @@ const FORBIDDEN = [
   /代码处理中/,
   /自动补齐中/,
   /本地修复中/,
+  /这是下拉。用 choose/,
 ];
 
 async function walk(dir, files = []) {
