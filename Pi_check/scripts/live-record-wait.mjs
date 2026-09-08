@@ -1,6 +1,6 @@
 /**
- * 真机录制：让 PI 自己点请假页，等到交出能力再停。
- * 不替 PI 编能力，只启动、观察、必要时停录触发定稿。
+ * 真机录制：启动 PI，等到交出能力再停。
+ * 不替 PI 编能力，只启动、观察、必要时停录触发定稿。调查顺序以 Skill 为准。
  */
 
 import { readFile } from "node:fs/promises";
@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 const BASE = process.env.PI_CHECK_URL || "http://127.0.0.1:18080";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const targetUrl = process.argv[2] || "http://boot.dianshixinxi.com:90/oa/duty/dutyLeaveApply?billType=duty_leave";
-const goal = process.argv[3] || "在请假申请页用 control_in_app_browser 自己点：选请假类型、填条件、点搜索、点新增并填写表单。每完成一个独立动作立刻 submit_recording_capability，做完后 use_draft 定稿。不要锁预览，不要把 JSON 写在对话里。";
+const goal = process.argv[3] || "按 Skill 把该页独立业务动作做成可调用能力：先观察和看网，再最小设值，有真实 execute 形状再交能力，做完后 use_draft 定稿。不要盲点，不要锁预览，不要把 JSON 写在对话里。";
 const maxWaitMs = Number(process.env.LIVE_RECORD_WAIT_MS || 420000);
 
 async function readJson(response) {

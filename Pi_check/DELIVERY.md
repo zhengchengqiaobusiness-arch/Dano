@@ -2,7 +2,7 @@
 
 PI 是唯一语义决策者；旧录制逻辑绝不启动。
 
-最终必须产出能力。没有非空 `capabilities` 就是失败。`PageRecorder` 预览始终可点：PI 自动操作，人也可以点。识别方法在 `skill/RECORDING_CAPABILITY.md`，点页面方法在 `skill/CONTROL_IN_APP_BROWSER.md`，职责在 `RESPONSIBILITIES.md`。
+最终必须产出能力。没有非空 `capabilities` 就是失败。`PageRecorder` 预览始终可点：PI 先观察再操作，人也可以点。总入口与识别方法在 `skill/RECORDING_CAPABILITY.md`，页面操作在 `skill/CONTROL_IN_APP_BROWSER.md`，职责在 `RESPONSIBILITIES.md`。
 
 ## 变更清单
 

@@ -4,7 +4,7 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 
 本目录是独立录制系统。代码只负责启动浏览器、原样采集证据、把证据交给 PI、原样保存 PI 的最终提交。没有本地能力生成、补齐、编译、修复或回退路径。
 
-浏览器一开，PI 用 Control In App Browser 自动点；人同时也可以点预览。同一只浏览器、同一路画面、同一条证据。协助是横幅，不是锁预览。
+浏览器打开后，PI 先观察再按目标做最小操作；人同时也可以点预览。同一只浏览器、同一路画面、同一条证据。协助是横幅，不是锁预览。
 
 ## 启动
 
@@ -36,7 +36,7 @@ npm start
 
 独立调试时默认端口 `18080`。打开 http://127.0.0.1:18080/ 可看状态页。
 
-最终必须由 PI 提交非空 `capabilities`。没有能力就是失败。识别方法在 `skill/RECORDING_CAPABILITY.md`，点页面方法在 `skill/CONTROL_IN_APP_BROWSER.md`，职责划分在 `RESPONSIBILITIES.md`。
+最终必须由 PI 提交非空 `capabilities`。没有能力就是失败。总入口与识别方法在 `skill/RECORDING_CAPABILITY.md`，页面操作在 `skill/CONTROL_IN_APP_BROWSER.md`，职责划分在 `RESPONSIBILITIES.md`。
 
 1. 填写目标页面和录制目标。
 2. 开始录制：系统先启动 PI，成功后才打开浏览器。

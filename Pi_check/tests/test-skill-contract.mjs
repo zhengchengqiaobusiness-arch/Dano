@@ -7,7 +7,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildFinalAnalysisPrompt, buildPiInstructions, readRecordingSkill } from "../src/pi-session.mjs";
+import {
+  buildFinalAnalysisPrompt,
+  buildLiveDrivePrompt,
+  buildPiInstructions,
+  readControlInAppBrowserSkill,
+  readRecordingSkill,
+} from "../src/pi-session.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SKILL_PATH = path.join(ROOT, "skill", "RECORDING_CAPABILITY.md");
@@ -85,11 +91,24 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.doesNotMatch(skill, /to_flow_spec|compile_capabilities|inferCapability/);
   const loaded = await readRecordingSkill();
   assert.equal(loaded, skill);
-  const instructions = buildPiInstructions(skill);
+  const browserSkill = await readControlInAppBrowserSkill();
+  assert.match(browserSkill, /合法 selector/);
+  assert.match(browserSkill, /本工具不提交能力|不要在本 Skill 里交能力/);
+  const instructions = buildPiInstructions(skill, browserSkill);
   assert.match(instructions, /不要写 capabilities\[\]\.fields/);
   assert.match(instructions, /input_schema\.properties/);
   assert.match(instructions, /control_in_app_browser/);
   assert.match(instructions, /list_action_timeline/);
+  assert.match(instructions, /总入口（先读本节）/);
+  assert.match(instructions, /以下面的 Skill 为准/);
+  assert.match(instructions, /合法 selector/);
+  assert.doesNotMatch(instructions, /浏览器一开就开始/);
+  assert.doesNotMatch(instructions, /按 selector click\/fill\/choose/);
+  assert.doesNotMatch(instructions, /每完成一个独立动作（你点的或人点的）立刻 submit_recording_capability/);
+  const drive = buildLiveDrivePrompt({ targetUrl: "http://example.com", goal: "做成能力" });
+  assert.match(drive, /你是操作者|control_in_app_browser/);
+  assert.match(drive, /network_since/);
+  assert.doesNotMatch(drive, /按 selector click\/fill\/choose/);
   const prompt = buildFinalAnalysisPrompt(3);
   assert.match(prompt, /readonly\/disabled|readonly=true/);
   assert.match(prompt, /默认已选/);
@@ -102,4 +121,6 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(prompt, /param\.path.*末级键.*execute.*真实 query\/body 键/);
   assert.match(prompt, /execute step\.selects.*禁止写到 result 顶层/);
   assert.match(prompt, /multi、label_subkey.*element_template/);
+  assert.match(prompt, /真实 execute 形状再 submit_recording_capability/);
+  assert.doesNotMatch(prompt, /每看完一个独立动作立刻 submit_recording_capability/);
 });

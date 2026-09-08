@@ -1,23 +1,56 @@
 # Control In App Browser
 
-PI 是操作者，也是唯一语义权威。人同时也可以点预览。
+PI 是操作者。人同时也可以点预览。
 
 你们共用同一只 Playwright 浏览器、同一路预览画面、同一条证据。底层用动作队列串行，同一时刻只执行一个鼠标动作。两条通道一直开着。不要锁死预览，不要丢弃人的点击。
 
-## 主力循环
+你只执行页面动作和取证。不要本地推断能力，不要 `submit_recording_capability` / `submit_recording_result`。字段合同仍按 `RECORDING_CAPABILITY.md`。
 
-1. `control_in_app_browser` `action=open_page` 打开目标页。
-2. `action=snapshot` 一次，读 `controls` / `actions` 里的 **selector**（`placeholder=` / `label=` / `role=button[name=]`）。不要死盯 `c1`/`a1`。`readonly`/`disabled` 表示整个控件不能改，不是下拉内部展示框带了原生 readonly。
-3. 按 selector `click` / `fill` / `choose`。下拉必须 `choose(selector, 可见选项原文)`，一次选中。不要 click 后再 snapshot 再点选项。打开弹层、切换页签或加行后再 snapshot 一次。
-4. 不要每个字段都 snapshot，不要 `include_screenshot`。`screenshot` 只回页面摘要和控件，禁止把图片写进对话。看控件用 `snapshot`。
-5. 人点过的看 `snapshot.recentUserActions`。不要停下来等人。
-6. `network_since` 或 `read_request_shape` 看真实请求。
-7. 立刻 `submit_recording_capability` 交这一项。人点出的动作也要交。
-8. 目标做完 `submit_recording_result({final:true, use_draft:true})`。
+可用 `action`：`open_page` / `list_pages` / `snapshot` / `screenshot` / `click` / `fill` / `select` / `choose` / `press` / `fill_fields` / `network_since` / `assist`。不要发明新 action。
+
+## 合法 selector
+
+运行时只认 snapshot 当场广告的这些写法。优先用 `placeholder=` / `label=` / `role=`，也可以用 `ref=cN` / `ref=aN`。
+
+- 输入：`placeholder=原文` 或 `label=原文` 或 `ref=cN`
+- 按钮：`role=button[name="原文"]` 或 `text=原文`
+- 勾选：`role=checkbox[name="原文"]` 或 `type=checkbox`
+- 单选：`role=radio[name="原文"]` 或 `type=radio`
+- 下拉：对宿主 `choose(selector, 可见选项原文)`，一次选中
+
+禁止：`name=`、`#id`、`.class`、xpath、任意 CSS，以及 snapshot 里没有的字符串。不要把失败后的猜测写成新 selector。
+
+`readonly`/`disabled` 表示整个控件不能改，不是下拉内部展示框带了原生 readonly。
+
+## 调查步
+
+开录提示若只给了入口和目标，仍先走下面这一遍，不要盲点。
+
+1. 需要打开时 `open_page`。
+2. `snapshot` **一次**，读 `controls` / `actions` 的 selector 和 `region`（filter / form / table / dialog）。
+3. `network_since`（刚打开用 `after_seq=0`）看首屏已有请求。不要先点完全页。
+4. 多个普通输入框：一次 `fill_fields`。每项 `ref` 必须是上面的合法 token，`value` 是要写入的值。
+5. 立刻再 `network_since`。
+6. 下拉用 `choose`，不要 click 后再 snapshot 再点选项。打开弹层、切换页签或加行后再 snapshot **一次**。
+7. 提交/搜索/确认：只点与当前正在填的表单同一 `region` 的那一个按钮。点完立刻 `network_since`。
+
+不要每个字段都 snapshot。不要 `include_screenshot`。`screenshot` 只回页面摘要和控件，禁止把图片写进对话。看控件用 `snapshot`。人点过的看 `snapshot.recentUserActions`，不要停下来等人。
+
+## 停表
+
+`ok: true` 不等于业务前进。
+
+- `fill` / `choose` / `fill_fields` 之后：回显或随后请求里对应键必须出现或变化。填了请求完全没变，这一格失败。
+- `click` 之后：`network_since` 没有预期的查询或写请求，就是点错了。禁止再用同一条 selector 连点。
+- 工具返回「找不到」：只重新 `snapshot`，只用**新列表**里的合法 selector。禁止改写成 `name=` / CSS / `#id` 再试。
+- 同名「保存 / 确定 / 搜索 / 提交」：看 `region`，点当前表单或当前弹层那一个。点完没网，不要再点同一个 `role=button[name="保存"]`。
+- 同一合法 selector 失败两次，或填了请求完全没变：`assist`，`reason` 只写**这一个控件**要人做什么。预览不锁。人点完看 `recentUserActions` 和 `network_since`，从当前页继续，不要整张表重做。
+
+`fill` 只能写入普通 `input` / `textarea`。可编辑宿主、自定义保存钮写不上或点了不发网，属于这类失败，不要 invent selector 重试八次。
 
 ## 协助不是排他接管
 
-登录、验证码、确认写入：`action=assist`，`reason` 写清楚要人做什么。预览始终可以点。不要把协助做成 takeover，不要让程序丢掉人的 `applyInput`。
+只在这些情况用 `action=assist`：登录、验证码、授权写入、**写不进的那一个字段**、**点了不发网的那一个提交钮**。`reason` 写清楚要人做什么。预览始终可以点。不要把协助做成 takeover，不要让程序丢掉人的 `applyInput`。禁止一次 assist 把整张表交出去然后自己空转。
 
 ## 禁止
 
@@ -25,3 +58,4 @@ PI 是操作者，也是唯一语义权威。人同时也可以点预览。
 - 自动点击失败、空转或超时：只停自动点，不要结束录制，不要丢掉人的 `applyInput`。
 - 不要等人全部点完再读几百条证据拼超大 JSON。
 - 不要本地推断能力。字段合同仍按 `RECORDING_CAPABILITY.md`。
+- 不要在本 Skill 里交能力或定稿。

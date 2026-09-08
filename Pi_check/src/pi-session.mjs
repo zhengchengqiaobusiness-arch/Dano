@@ -35,16 +35,16 @@ export async function readControlInAppBrowserSkill() {
 }
 
 export function buildPiInstructions(skillText = "", browserSkillText = "") {
+  const skill = String(skillText || "").trim();
   const browserSkill = String(browserSkillText || "").trim();
   return `${PI_ONLY_NOTICE}
 
-你是操作者，也是唯一语义权威。Control In App Browser 是你点页面的主力。
-人同时也可以点预览。你们共用同一只浏览器、同一路画面、同一条证据。
-不要锁死预览。登录、验证码或确认写入时用 assist，人随时能点。
+你是本场调查的唯一语义权威。调查顺序、何时操作、何时交能力，以下面的 Skill 为准，不要另写一套点页面流程。
+人同时也可以点预览。你们共用同一只浏览器、同一路画面、同一条证据。不要锁死预览。
 最终必须产出能力。现有录制页会把你提交的 result 原样当作 draft 展示。
 没有非空 capabilities，就等于没有产物。代码不会替你编造能力。
 
-${skillText}
+${skill}
 
 ${browserSkill ? `## Control In App Browser\n\n${browserSkill}\n` : ""}
 可用工具：
@@ -63,17 +63,11 @@ ${browserSkill ? `## Control In App Browser\n\n${browserSkill}\n` : ""}
 - submit_recording_draft
 - submit_recording_result
 
-规则：
-1. 浏览器一开就开始 control_in_app_browser。用 snapshot 里的 selector（placeholder= / label= / role=button[name=]），不要死盯 c1/a1。
-2. 下拉必须 choose(selector, 可见选项原文)，一次选中。不要 click 后再 snapshot 再点选项，不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回页面摘要，禁止把图片写进对话。打开弹层、切换页签或加行后再 snapshot 一次。snapshot / visible_control 的 readonly/disabled 表示整个控件不能改，不是下拉内部展示框带了原生 readonly。默认已选、本场没改，只要还能改，仍是调用方。
-3. 每完成一个独立动作（你点的或人点的）立刻 submit_recording_capability。不要在脑子里组完整 JSON。
-4. 目标做完即可 submit_recording_result；系统会冻结。也可用 use_draft=true 定稿。
-5. submit_recording_result 必须包含 recording_id、final=true；完整 result 或 use_draft=true。
-6. result.capabilities 必须是非空数组，并且包含现有录制页能直接渲染的字段合同与请求编排。
-7. 不要写 capabilities[].fields。request_refs 必须是 {step_id, usage} 对象。steps[].params 必须是含 key/path 的对象数组。调用方字段必须出现在 input_schema.properties 或这些 params 里。
-8. 先自己操作，再用 list_action_timeline 建台账。每个独立业务动作都要有能力或 unresolved。capability_id 不得重复。每个能力恰好一个不共用的 execute。
-9. 系统会原样保存 result，不会补齐、改写或生成替代能力。
-10. 人点过的看 snapshot.recentUserActions。不要停下来等人，不要锁预览。
+信封（录制页能读到才算交上，细节以 Skill 为准）：
+- 不要写 capabilities[].fields。request_refs 必须是 {step_id, usage} 对象。steps[].params 必须是含 key/path 的对象数组。调用方字段必须出现在 input_schema.properties 或这些 params 里。
+- submit_recording_result 必须包含 recording_id、final=true；完整 result 或 use_draft=true。
+- 先用 list_action_timeline 建台账。每个独立业务动作都要有能力或 unresolved。capability_id 不得重复。每个能力恰好一个不共用的 execute。
+- 系统会原样保存 result，不会补齐、改写或生成替代能力。
 `;
 }
 
@@ -87,12 +81,12 @@ export function buildUserSteerPrompt(text, { finalizing = false } = {}) {
   if (finalizing) {
     return (
       `用户说：${body}\n` +
-      `先用一两句话回答用户。不要再 click。已有草稿就立刻 submit_recording_result({final:true, use_draft:true})。没有就先 submit_recording_capability。`
+      `先用一两句话回答用户。不要再 click。已有草稿就立刻 submit_recording_result({final:true, use_draft:true})。没有完整能力就先按 Skill 交已有真实 execute 形状的项。`
     );
   }
   return (
     `用户说：${body}\n` +
-    `这是对话。先用一两句话回答这句话，然后立刻 control_in_app_browser 按这句话操作。不要只复述规则，不要空转。人也可以点预览。不要锁预览。该交的立刻 submit_recording_capability。`
+    `这是对话。先用一两句话回答这句话，然后按 Skill 用 control_in_app_browser 观察或做最小操作，不要盲点，不要 invent selector。人也可以点预览。不要锁预览。该项有真实 execute 形状再 submit_recording_capability。`
   );
 }
 
@@ -101,11 +95,11 @@ export function buildLiveDrivePrompt({ targetUrl = "", goal = "" } = {}) {
     `你是操作者。人也同时可以点预览，共用这一页。\n` +
     `目标：${String(goal || "").trim() || "把该页独立业务动作做成可调用能力"}\n` +
     `入口：${String(targetUrl || "").trim()}\n` +
-    `立刻 control_in_app_browser：open_page → snapshot → 按 selector click/fill/choose。\n` +
-    `下拉用 choose(placeholder=或label=, 可见选项)。打开弹层后再 snapshot 一次。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回摘要，不要把图片写进对话。人点过的看 recentUserActions。\n` +
+    `按 Skill 用 control_in_app_browser：open_page → snapshot → network_since。先观察再最小设值，不要盲点。\n` +
+    `只用 snapshot 广告的 placeholder= / label= / role= / text= / ref=。禁止 name=、#id、CSS。下拉用 choose(合法 selector, 可见选项原文) 一次选中。打开弹层后再 snapshot 一次。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回摘要，不要把图片写进对话。人点过的看 recentUserActions。\n` +
     `readonly/disabled 只表示整个控件不能改。默认已选仍是调用方，不要写成无独立来源。\n` +
-    `每做完一个动作，network_since 或 read_request_shape 看真实请求，再 submit_recording_capability。人点出的动作也要交。\n` +
-    `登录、验证码、确认写入：action=assist，预览不要锁。写入真实数据前若目标没授权，先 assist。\n` +
+    `填或点之后立刻 network_since 或 read_request_shape。该项有真实 execute 形状后再 submit_recording_capability。人点出的动作也要交。禁止交空壳。\n` +
+    `登录、验证码、写不进的字段、点了不发网的保存：action=assist，预览不要锁。写入真实数据前若目标没授权，先 assist。\n` +
     `目标做完后 submit_recording_result({final:true, use_draft:true})。不要把 JSON 写在对话里。不要写 capabilities[].fields。`
   );
 }
@@ -117,7 +111,7 @@ export function buildFinalAnalysisPrompt(latestSeq) {
     "先读各页最近一次 visible_control（不要带弹层前旧 seq），再对 execute 每个 query/body 键。树/页签/分段器/单选组/日期区间都是可改选择。可改控件一律调用方；页面自动计算但仍可手工修改的输入也属于调用方。readonly/disabled 只表示整个控件不能改。默认已选仍是调用方。灰框才是系统，不要进 schema。每个 exposed_to_user=true 的 param 都必须出现在 schema，schema 顶层 key、param.key、param.path 的末级键必须逐字对应 execute 的真实 query/body 键，禁止相近拼写和别名。禁止编造写请求里没有的键。可增行只保留一个对象数组 key，禁止收成 string；items.properties title 用各分区表头原文，同键不同表头写 x-dano-section-titles。form textarea 不要用表格分区标题。确认弹层可填意见：有请求键就建模，没有就 unresolved，不要编新键。登录身份用 current_user，不要写死本场数字。label/title 用页面原文，去掉星号。\n" +
     "可改树/下拉/单选禁止只写 type=number。api_option 必须把 source_url 写进 param.source 和 schema 的 x-dano-option-source；page_enum 必须写当场全部 {label,value}。对象数组选择器的绑定只能写在对应 execute step.selects，禁止写到 result 顶层；必须包含 multi、label_subkey 和覆盖真实对象键的 element_template。把树/下拉藏在 description 里会被拒收。不要读 screenshot。\n" +
     "read_response_blob 只接受 body.blob_id（blob_ 开头）。不要把 request_id 当 blob_id。\n" +
-    "每看完一个独立动作立刻 submit_recording_capability。不要把 JSON 写在对话里。不要写 capabilities[].fields。request_refs 必须是 {step_id, usage}。steps[].params 必须是含 key/path 的对象数组。全部交完后 submit_recording_result({final:true, use_draft:true})。\n" +
+    "该项已有真实 execute 形状再 submit_recording_capability。人点出的动作也要交。不要把 JSON 写在对话里。不要写 capabilities[].fields。request_refs 必须是 {step_id, usage}。steps[].params 必须是含 key/path 的对象数组。全部交完后 submit_recording_result({final:true, use_draft:true})。\n" +
     "若已有草稿，立刻 use_draft=true 提交。草稿不会自动变成结果。"
   );
 }
@@ -385,7 +379,7 @@ export class LivePiSession {
     const idleMs = Math.max(20, Number(idleSubmitMs) || 90000);
     const emptyBudget = Math.max(1, Number(maxEmptySettles) || MAX_EMPTY_FINAL_SETTLES);
     const continueNow = (
-      "继续用 control_in_app_browser 自动操作。人也可以同时点预览。需要登录或确认写入就 assist，不要锁预览。"
+      "继续用 control_in_app_browser 按 Skill 观察或最小操作。人也可以同时点预览。需要登录、写不进的字段或点了不发网的保存就 assist，不要锁预览。不要盲点，不要 invent selector。"
     );
     const checkResult = typeof hasResult === "function" ? hasResult : null;
     let lastToolCount = this.#trace.toolCount;
@@ -664,7 +658,7 @@ export class LivePiSession {
     const idleMs = Math.max(20, Number(idleSubmitMs) || 90000);
     const emptyBudget = Math.max(1, Number(maxEmptySettles) || MAX_EMPTY_FINAL_SETTLES);
     const submitNow = (
-      "证据已经够了。不要把 JSON 写在对话里，不要再读证据。先 submit_recording_capability 交一项完整能力；已有草稿就立刻 submit_recording_result({final:true, use_draft:true})。"
+      "证据已经够了。不要把 JSON 写在对话里，不要再读证据。有真实 execute 形状的项用 submit_recording_capability 交；已有草稿就立刻 submit_recording_result({final:true, use_draft:true})。"
     );
     const checkResult = typeof hasResult === "function" ? hasResult : null;
     let lastToolCount = this.#trace.toolCount;

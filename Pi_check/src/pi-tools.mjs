@@ -265,7 +265,7 @@ export function createPiToolHost({
         final: false,
         capability_count: merged.capabilities.length,
         capability_ids: merged.capabilities.map((item) => item.capability_id),
-        next_action: "继续 submit_recording_capability 交下一项；全部交完后 submit_recording_result({final:true, use_draft:true})。",
+        next_action: "该项已保存。继续按 Skill 调查或交下一项已有真实 execute 形状的能力；台账齐了用 submit_recording_result({final:true, use_draft:true})。",
       };
     },
     async control_in_app_browser({
@@ -497,7 +497,7 @@ export function describePiTools() {
     {
       name: "submit_recording_capability",
       label: "提交一项能力",
-      description: "把一项完整能力及其 steps 写入草稿。同一 capability_id 会替换旧项。人点的和你点的都要交。不要在对话里写 JSON。交完后用 submit_recording_result({final:true, use_draft:true}) 定稿。",
+      description: "把一项完整能力及其 steps 写入草稿。该项须已有真实 execute 形状。同一 capability_id 会替换旧项。人点的和你点的都要交。不要在对话里写 JSON。全部交完后用 submit_recording_result({final:true, use_draft:true}) 定稿。",
       parameters: {
         type: "object",
         properties: {
@@ -514,7 +514,7 @@ export function describePiTools() {
     {
       name: "control_in_app_browser",
       label: "Control In App Browser",
-      description: "自动点应用内浏览器。人同时也可以点预览。action=open_page|list_pages|snapshot|screenshot|click|fill|select|choose|press|fill_fields|network_since|assist。先 snapshot，再用 selector（placeholder= / label= / role=button[name=]）操作。下拉用 choose(selector, 可见选项原文) 一次选中。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回页面摘要和控件，禁止把图片写进对话。登录或确认写入用 assist，不要锁预览。",
+      description: "按 Control In App Browser Skill 操作应用内浏览器。人同时也可以点预览。action=open_page|list_pages|snapshot|screenshot|click|fill|select|choose|press|fill_fields|network_since|assist。先 snapshot 和 network_since。只用 snapshot 广告的 placeholder= / label= / role= / text= / ref=。禁止 name=、#id、CSS。下拉用 choose(selector, 可见选项原文) 一次选中。普通框可用 fill_fields 一次填。点或填后看 network_since。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回页面摘要和控件，禁止把图片写进对话。登录、写不进的字段、点了不发网的保存用 assist，不要锁预览。本工具不提交能力。",
       parameters: {
         type: "object",
         properties: {
