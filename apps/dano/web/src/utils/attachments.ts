@@ -4,6 +4,8 @@ import { getBridgeClientId } from "../composables/bridgeStore.svelte";
 export const MAX_COMPOSER_ATTACHMENTS = 10;
 export const MAX_COMPOSER_ATTACHMENT_BYTES = 50 * 1024 * 1024;
 export const DEFAULT_ATTACHMENT_MIME_TYPE = "application/octet-stream";
+// Keep screenshot text legible without rescaling the source pixels.
+const UPLOAD_WEBP_QUALITY = 0.92;
 
 export interface ComposerAttachment {
   id: string;
@@ -54,6 +56,12 @@ export async function uploadComposerAttachment(
 ): Promise<RpcUploadedFileRef> {
   const clientId = getBridgeClientId();
   if (!clientId) throw new Error("Upload requires an active client");
+  if (file.size > MAX_COMPOSER_ATTACHMENT_BYTES) {
+    throw new Error("Upload exceeds size limit");
+  }
+  signal.throwIfAborted();
+  file = await compressUploadImage(file);
+  signal.throwIfAborted();
   const mimeType = getComposerUploadMimeType(file);
   const sha256 = await sha256File(file);
   const query = new URLSearchParams({ clientId, name: file.name, mimeType });
@@ -80,6 +88,46 @@ export async function uploadComposerAttachment(
     throw new Error(`Upload failed (${response.status})`);
   }
   return (await response.json()) as RpcUploadedFileRef;
+}
+
+async function compressUploadImage(file: File): Promise<File> {
+  const type = getComposerUploadMimeType(file);
+  if (
+    !type.startsWith("image/") ||
+    type === "image/svg+xml" || type === "image/webp" ||
+    typeof ImageDecoder === "undefined" || typeof OffscreenCanvas === "undefined"
+  ) return file;
+
+  let decoder: ImageDecoder | undefined;
+  let image: VideoFrame | undefined;
+  try {
+    decoder = new ImageDecoder({
+      data: await file.arrayBuffer(), type, preferAnimation: true,
+    });
+    await Promise.all([decoder.completed, decoder.tracks.ready]);
+    const track = decoder.tracks.selectedTrack;
+    // Only convert when the native decoder can positively identify a still image.
+    if (!track || track.animated) return file;
+    ({ image } = await decoder.decode());
+    const canvas = new OffscreenCanvas(image.displayWidth, image.displayHeight);
+    const context = canvas.getContext("2d");
+    if (!context) return file;
+    context.drawImage(image, 0, 0);
+    const blob = await canvas.convertToBlob({
+      type: "image/webp", quality: UPLOAD_WEBP_QUALITY,
+    });
+    // Unsupported encoders may return PNG instead of the requested format.
+    if (blob.type !== "image/webp" || blob.size === 0 || blob.size >= file.size) return file;
+    return new File([blob], `${file.name.replace(/\.[^.]+$/, "")}.webp`, {
+      type: blob.type,
+      lastModified: file.lastModified,
+    });
+  } catch {
+    return file;
+  } finally {
+    image?.close();
+    decoder?.close();
+  }
 }
 
 export async function imageFileToRpcData(file: File): Promise<string | undefined> {

@@ -26,6 +26,59 @@ describe("ComposerBar prompt submission", () => {
     document.body.replaceChildren();
   });
 
+  it("keeps the original display name while submitting the uploaded WebP metadata", async () => {
+    bridgeClient.id = "client_1";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      id: "converted", name: "screen.webp", size: 3, mimeType: "image/webp",
+      path: "/uploads/hash.webp", relativePath: "uploads/hash.webp",
+      previewUrl: "/api/uploads/converted/preview",
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    const onSubmit = vi.fn().mockResolvedValue(false);
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(ComposerBar, { target, props: { connectionStatus: "connected", onSubmit } });
+    try {
+      await tick();
+      const input = target.querySelector<HTMLInputElement>('input[type="file"]')!;
+      Object.defineProperty(input, "files", { value: [new File(["original bytes"], "screen.png", { type: "image/png" })] });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await vi.waitFor(() => expect(target.textContent).toContain("3 B"));
+      expect(target.querySelector('button[aria-label="查看 screen.png"]')).not.toBeNull();
+      target.querySelector<HTMLButtonElement>('button[aria-label="发送消息"]')!.click();
+      await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+        files: [expect.objectContaining({ name: "screen.png", size: 3, mimeType: "image/webp", relativePath: "uploads/hash.webp" })],
+      })));
+    } finally {
+      await unmount(component);
+    }
+  });
+
+  it("rejects oversized originals at the file input before uploading", async () => {
+    bridgeClient.id = "client_1";
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === "GET") return new Response("", { status: 404 });
+      return new Response(JSON.stringify({ id: "small", name: "notes.txt", size: 4, mimeType: "text/plain", path: "/uploads/notes.txt" }));
+    }));
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(ComposerBar, { target, props: { connectionStatus: "connected" } });
+    try {
+      await tick();
+      const file = new File(["image"], "large.png", { type: "image/png" });
+      Object.defineProperty(file, "size", { value: 50 * 1024 * 1024 + 1 });
+      const input = target.querySelector<HTMLInputElement>('input[type="file"]')!;
+      Object.defineProperty(input, "files", { value: [file, new File(["note"], "notes.txt", { type: "text/plain" })] });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await vi.waitFor(() => expect(target.textContent).toContain("4 B"));
+      const posts = vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === "POST");
+      expect(posts).toHaveLength(1);
+      expect((posts[0]![1]?.body as File).name).toBe("notes.txt");
+      expect(target.querySelector('button[aria-label="查看 large.png"]')).toBeNull();
+    } finally {
+      await unmount(component);
+    }
+  });
+
   it("uses the configured assistant name in the input placeholder", async () => {
     const originalConfig = window.__PI_WEB_CONFIG__;
     window.__PI_WEB_CONFIG__ = { productName: "My Agent" };
