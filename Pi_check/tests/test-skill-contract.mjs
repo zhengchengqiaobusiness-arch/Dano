@@ -86,6 +86,12 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(skill, /list_action_timeline/);
   assert.match(skill, /control_in_app_browser|Control In App Browser/);
   assert.match(skill, /submit_recording_capability/);
+  assert.match(skill, /只许来自 execute/);
+  assert.match(skill, /params 必须是空数组/);
+  assert.match(skill, /协助之后/);
+  assert.match(skill, /不要去点保存碰运气/);
+  assert.match(skill, /打开写入表单附带/);
+  assert.match(skill, /x-dano-option-source\.params.*不是 `steps\[\]\.params`/);
   assert.doesNotMatch(skill, /登录态、Cookie、分页、流程定义 Key、单据类型/);
   assert.doesNotMatch(skill, /workItems|planItems|createTime=/);
   assert.doesNotMatch(skill, /to_flow_spec|compile_capabilities|inferCapability/);
@@ -94,6 +100,10 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   const browserSkill = await readControlInAppBrowserSkill();
   assert.match(browserSkill, /合法 selector/);
   assert.match(browserSkill, /本工具不提交能力|不要在本 Skill 里交能力/);
+  assert.match(browserSkill, /协助发出之后/);
+  assert.match(browserSkill, /不要去点保存碰运气/);
+  assert.match(browserSkill, /人已经离开当前表单/);
+  assert.match(browserSkill, /填了请求完全没变/);
   const instructions = buildPiInstructions(skill, browserSkill);
   assert.match(instructions, /不要写 capabilities\[\]\.fields/);
   assert.match(instructions, /input_schema\.properties/);
