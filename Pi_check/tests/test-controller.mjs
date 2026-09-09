@@ -5,6 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHarness, sampleResult } from "./helpers/harness.mjs";
+import { PI_ONLY_NOTICE } from "../src/policy.mjs";
 import { publicFailureMessage } from "../src/policy.mjs";
 
 test("1. PI 启动失败时，浏览器录制不启动", async () => {
@@ -75,13 +76,19 @@ test("5. PI 提交错误录制编号时必须失败", async () => {
   }
 });
 
-test("6. PI 可通过工具自行冻结并定稿", async () => {
+test("6. 直播中禁止定稿，结束前证据不冻结，人仍可点", async () => {
   const harness = await createHarness({ piBehavior: "submit_unfrozen" });
   try {
     const started = await harness.controller.start({ targetUrl: "http://example.com", goal: "目标" });
     await new Promise((resolve) => setTimeout(resolve, 80));
-    assert.equal(harness.getPi().unfrozenRejected, false);
-    assert.equal(await harness.files.hasPiResult(started.id), true);
+    assert.equal(harness.getPi().unfrozenRejected, true);
+    assert.equal(await harness.files.hasPiResult(started.id), false);
+    assert.equal(harness.evidence.snapshot(started.id).frozen, false);
+    assert.equal(harness.controller.acceptHumanInput(started.id), true);
+    const browser = harness.controller.browserOf(started.id);
+    await browser.applyInput({ kind: "pointer_down", nx: 0.3, ny: 0.4 });
+    const events = await harness.files.readEvidence(started.id);
+    assert.ok(events.some((item) => item.kind === "interaction" && item.payload?.actor === "human"));
     const stopped = await harness.controller.stop(started.id);
     assert.equal(stopped.session.status, "succeeded");
     assert.equal(stopped.session.hasFinalResult, true);
@@ -170,6 +177,33 @@ test("6b. 录制中人始终可以点预览", async () => {
     harness.controller.requestAssist(started.id, "请登录");
     assert.equal(harness.controller.acceptHumanInput(started.id), true);
     assert.match(harness.controller.view(started.id).assist.reason, /请登录/);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("上一稿之后又有人手动作则旧终稿作废，结束时再交", async () => {
+  const harness = await createHarness();
+  try {
+    const started = await harness.controller.start({ targetUrl: "http://example.com", goal: "目标" });
+    const snap = harness.evidence.snapshot(started.id);
+    await harness.files.writePiResult(started.id, sampleResult({ marker: "stale" }));
+    await harness.files.writeReceipt(started.id, {
+      recording_id: started.id,
+      status: "accepted",
+      evidence_last_seq: snap.lastSeq,
+      notice: PI_ONLY_NOTICE,
+    });
+    harness.gate.accepted.set(started.id, {
+      recordingId: started.id,
+      piSessionId: snap.piSessionId,
+    });
+    const browser = harness.controller.browserOf(started.id);
+    await browser.applyInput({ kind: "pointer_down", nx: 0.2, ny: 0.3 });
+    const stopped = await harness.controller.stop(started.id);
+    assert.equal(stopped.session.status, "succeeded");
+    assert.equal(stopped.result.marker, undefined);
+    assert.equal(stopped.result.capabilities[0].capability_id, "cap_create_leave");
   } finally {
     await harness.cleanup();
   }

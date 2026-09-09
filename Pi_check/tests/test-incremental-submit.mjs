@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHarness, sampleResult } from "./helpers/harness.mjs";
+import { createHarness, sampleResult, seedExecuteEvidence } from "./helpers/harness.mjs";
 import { createPiToolHost } from "../src/pi-tools.mjs";
 
 test("单项能力写入草稿后可用 use_draft 定稿", async () => {
@@ -18,12 +18,9 @@ test("单项能力写入草稿后可用 use_draft 定稿", async () => {
       files: harness.files,
       gate: harness.gate,
       getPiSessionId: () => "pi-1",
-      freezeEvidence: async () => {
-        if (!harness.evidence.snapshot(session.id).frozen) {
-          await harness.evidence.freeze(session.id);
-        }
-      },
     });
+    await seedExecuteEvidence(harness.evidence, session.id);
+    await harness.evidence.freeze(session.id);
     const result = sampleResult();
     const saved = await tools.submit_recording_capability({
       capability: result.capabilities[0],

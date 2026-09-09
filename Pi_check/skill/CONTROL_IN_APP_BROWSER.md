@@ -44,6 +44,7 @@ PI 是操作者。人同时也可以点预览。
 - 你要 `fill`，工具就写，不会改口成下拉。回 `not_writable`：这一格写不进，只协助这一格。
 - 你要 `choose`，工具点已经出现的可见原文。回 `option_not_seen`：看回报里打开后是列表还是日历；是日历就改 `fill` 日期值，还是没有就协助这一格。
 - 工具报 `ok` 但随后保存/查询仍不带这个键：同样算没写上，不要当成已填。
+- `click` 回报实际点到的可见文案 `hit_text`。对不上所点 selector 回 `click_miss`，就是没点中，不要当成已点。
 - `click` 之后：`network_since` 没有预期的查询或写请求，就是点错了。禁止再用同一条 selector 连点。
 - 工具返回 `not_found`：只重新 `snapshot`，只用**新列表**里的合法 selector。禁止改写成 `name=` / CSS / `#id` 再试，禁止改点没有业务文案的 `aN`。
 - 同名「保存 / 确定 / 搜索 / 提交」：看 `region`，点当前表单或当前弹层那一个。点完没网，不要再点同一个 `role=button[name="保存"]`。
@@ -64,4 +65,4 @@ PI 是操作者。人同时也可以点预览。
 - 自动点击失败、空转或超时：只停自动点，不要结束录制，不要丢掉人的 `applyInput`。
 - 不要等人全部点完再读几百条证据拼超大 JSON。
 - 不要本地推断能力。字段合同仍按 `RECORDING_CAPABILITY.md`。
-- 不要在本 Skill 里交能力或定稿。
+- 不要在本 Skill 里交能力或定稿。未接到用户结束，禁止 `submit_recording_result`。

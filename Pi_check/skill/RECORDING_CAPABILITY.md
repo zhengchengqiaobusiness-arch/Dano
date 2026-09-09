@@ -36,17 +36,26 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 
 1. **观察**：刚打开、弹层刚出现、或选择器失效。用 `control_in_app_browser` 做 `snapshot` + `network_since`。
 2. **最小设值**：台账上已有一个动作，绑定还没证明。只改一个或一批普通框，立刻看网。
-3. **请人点一下**：合法 selector 用尽，或点了不发网，或工具回 `not_writable` / `option_not_seen`，或 `fill` 报成功但随后请求没有对应键。`assist`，只写这一个控件要人做什么。不要去点保存碰运气，不要改点没有业务文案的 `aN`。
+3. **请人点一下**：合法 selector 用尽，或点了不发网，或工具回 `not_writable` / `option_not_seen` / `click_miss`，或 `fill` 报成功但随后请求没有对应键。`assist`，只写这一个控件要人做什么。不要去点保存碰运气，不要改点没有业务文案的 `aN`。
 4. **推断并交一项**：该项已有真实 execute 形状。走后面的字段合同，再 `submit_recording_capability`。
-5. **定稿**：台账每行都有能力或 `unresolved`。`submit_recording_result({final:true, use_draft:true})`。
+5. **定稿**：只在用户已经结束、`get_recording_freeze_state.frozen=true` 之后。台账每行都有能力或 `unresolved`。`submit_recording_result({final:true, use_draft:true})`。未接到用户结束，这一项不出现。
+
+### 换页口令（只改本 Skill，不要改代码）
+
+1. **台账**：目标里每件事一行。没看到真实 execute 就 `unresolved`，禁止丢掉整页。
+2. **定稿权**：未接到用户结束，只许 `submit_recording_capability`。禁止 `submit_recording_result`。
+3. **写上**：随后请求出现或变化了这个键，才算写上。没变：这一格失败，禁止把该键写进 schema。
+4. **协助**：合法 selector 用尽、写不进、点了不发网、或 `click_miss`：只协助这一格。没有业务文案的 `aN` 不准点。不要先点保存。
+5. **人手**：人点过看 `recentUserActions` 和网。人发出的 execute 用那条交，旧稿作废。
+6. **节奏**：开页 `snapshot` + `network_since` 各一次。普通框一次 `fill_fields`。不要每个字段 snapshot。
 
 协助之后只读 `recentUserActions` 和网。人已经发出 execute 就交该项，禁止再点同一个保存/确认/搜索。人点出的动作也要交。被拒收时按返回的 `error` 只改信封，保留其它已完成能力，不要重录，不要另加审核或回放。
 
-本场达到现有定稿条件即可：非空 `capabilities`，台账缺口都在 `unresolved`。导出消费包仍由现有导出链路生成。不要在录制里写执行器。
+本场达到现有定稿条件即可：用户已结束，非空 `capabilities`，台账缺口都在 `unresolved`。导出消费包仍由现有导出链路生成。不要在录制里写执行器。
 
 ## 代码 / Skill / 模型
 
-- 代码：启动浏览器、原样采集证据、冻结、把你的 result 原样交给前端。可提供 `list_recording_index` 这种无分类事实索引。只拒收页面读不到的信封、重复的 `capability_id`、两个能力共用同一个 `execute`。不识别页面，不补能力。
+- 代码：启动浏览器、原样采集证据、在用户结束时冻结、把你的 result 原样交给前端。可提供 `list_recording_index` 这种无分类事实索引。只拒收页面读不到的信封、重复的 `capability_id`、两个能力共用同一个 `execute`、以及调用方键不在该 execute 现场请求里的终稿。不识别页面，不补能力，不能自行冻结。
 - Skill（本文件）：跨页面通用的总入口与识别方法。改调查顺序或识别策略就改本 Skill，不要改采集代码，也不要改现有录制页。
 - 模型（你）：阅读本场证据，判断“这是几个独立业务动作”、每个字段谁提供、请求怎么串起来。不同页面由你现场判断，不要套死某个系统的 URL。
 
@@ -106,9 +115,9 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 
 ### 用索引建台账，不要靠抽样
 
-`list_recording_manifest` 只有计数。必须先调 `list_recording_index`，看完全场 interaction 文案、xhr/fetch 的 METHOD+path、network_response、`visible_control`、截图和页面跳转，再按需 `read_evidence_item` 读正文。请求/响应正文在 `payload.body.text` 或 `body.blob_id`。`read_response_blob` 只接受 `blob_` 开头的 id，不要把 `request_id` 当 blob，也不要编造截图 blob_id。看完关键请求就 `submit_recording_result`，禁止把完整 result 写在对话里。不要只读前半场。也可用 `list_action_timeline` 按时间看人与 PI 点过的交互（带 `actor`），对候选 execute 调 `read_request_shape`。
+`list_recording_manifest` 只有计数。必须先调 `list_recording_index`，看完全场 interaction 文案、xhr/fetch 的 METHOD+path、network_response、`visible_control`、截图和页面跳转，再按需 `read_evidence_item` 读正文。请求/响应正文在 `payload.body.text` 或 `body.blob_id`。`read_response_blob` 只接受 `blob_` 开头的 id，不要把 `request_id` 当 blob，也不要编造截图 blob_id。用户结束后看完关键请求再 `submit_recording_result`，禁止把完整 result 写在对话里。不要只读前半场。也可用 `list_action_timeline` 按时间看人与 PI 点过的交互（带 `actor`），对候选 execute 调 `read_request_shape`。
 
-浏览器打开后先用 `control_in_app_browser` 观察：`open_page` → `snapshot` → `network_since`。人同时也可以点预览。共用同一页、同一路画面、同一条证据。只用 snapshot 广告的 `placeholder=` / `label=` / `role=` / `text=` / `ref=` 选择器；`choose` 点已经出现的可见原文。登录、验证码、写不进的那一个字段、点了不发网的保存用 `assist`，不要锁预览，不要改点没有业务文案的 `aN`。该项在 `list_action_timeline` 或 `network_since` 里已经对上一条真实 execute 之后，再 `submit_recording_capability`。人点出的动作也要交。全部交完后 `submit_recording_result({final:true, use_draft:true})`。禁止没看到 execute 形状就交空壳。
+浏览器打开后先用 `control_in_app_browser` 观察：`open_page` → `snapshot` → `network_since`。人同时也可以点预览。共用同一页、同一路画面、同一条证据。只用 snapshot 广告的 `placeholder=` / `label=` / `role=` / `text=` / `ref=` 选择器；`choose` 点已经出现的可见原文。登录、验证码、写不进的那一个字段、点了不发网的保存用 `assist`，不要锁预览，不要改点没有业务文案的 `aN`。该项在 `list_action_timeline` 或 `network_since` 里已经对上一条真实 execute 之后，再 `submit_recording_capability`。人点出的动作也要交。未接到用户结束，禁止 `submit_recording_result`。禁止没看到 execute 形状就交空壳。
 
 索引对齐方法（换任何页面都这样做）：
 
@@ -131,9 +140,9 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 2. **摊开 execute 请求形状**：把这条请求的每个 query/body 键列出来。同一键出现几次就建几个 param，共用这个 path。一个数组只建一个数组 path；行差别写在行内字段。
 3. **摊开当前页控件**：读该动作所在页的**最近一次** `visible_control` 和点过的 interaction，并与当场 `snapshot` 对照。每个控件看 `region`（filter/form/table/dialog）、`label`/`placeholder`/`name`、`control_kind`（input/select/date/textarea/upload/button/readonly）、`required_mark`、`readonly`。`region=table` 的输入是加行后出现的行内框；`region=form` 的大段 textarea 是另一份补充说明；`region=dialog` 是确认/选择弹层。打开弹层、切换页签、加行后必须再 snapshot；`read_visible_controls` 不传 seq。不要带着打开弹层之前的 seq 去对字段。
    `readonly`/`disabled` 表示**整个控件当前不能改**（宿主带 disabled / aria-disabled / is-disabled）。自定义下拉、日期、级联、单选组的内部展示框常常带原生 `readonly`，那不是灰框。只有宿主锁死才是系统字段；点一下能出选项或能改选 → 可改 → 调用方。
-4. **最小设值证明绑定**：能安全改的调用方字段，至少改一个值，再 `network_since` 或 `read_request_shape`。哪个请求键变了，才把该控件绑到那个键。值碰巧相等、字段名相似、同一个请求里仅剩两个字段，都不能单独定案。本场没改过、但控件可改：仍是调用方，不要写成 `constant` / 「无独立来源」。无法做这个最小实验（合法 selector 写不进、未授权写入）：该键写入 `unresolved`，或按下面「无独立来源，按录制请求原值提交」处理；禁止编 path，禁止 invent selector。来源没看清不能说成已经理解业务。`default_value` 只固定无来源字段怎么提交，不是下次执行必须填的业务值。
+4. **最小设值证明绑定**：能安全改的调用方字段，至少改一个值，再 `network_since` 或 `read_request_shape`。哪个请求键变了，才把该控件绑到那个键。值碰巧相等、字段名相似、同一个请求里仅剩两个字段，都不能单独定案。本场没改过、但该键已出现在 execute 且控件可改：仍是调用方，不要写成 `constant` / 「无独立来源」。没出现或没变化的键禁止写进 schema。无法做这个最小实验（合法 selector 写不进、未授权写入）：该键写入 `unresolved`；禁止编 path，禁止 invent selector。来源没看清不能说成已经理解业务。`default_value` 只固定无来源字段怎么提交，不是下次执行必须填的业务值。
 5. **逐键对上控件，决定调用方还是系统**：
-   - 对得上**可改**控件（input/select/date/textarea/upload，以及树、页签、分段器、单选组，且 `readonly`/`disabled` 都不是 true）→ **调用方**。即使本场没改、这次 query/body 没带这个键，也留下可选调用方字段。页面上已有默认选中（单选默认启用、下拉已有值）只要还能改，仍是调用方，禁止写成 `constant` / 「无独立来源」。`path` 用控件 `name` 或同页已发出请求里的同义键。对不上 path 就写入 `unresolved`，不要假装控件不存在。
+   - 对得上**可改**控件（input/select/date/textarea/upload，以及树、页签、分段器、单选组，且 `readonly`/`disabled` 都不是 true）且该键已出现在该能力 execute 的 query/body → **调用方**。本场没改过、但键在请求里且控件可改：仍是调用方，禁止写成 `constant` / 「无独立来源」。页面上已有默认选中只要还能改且键在请求里，仍是调用方。看得见但对不上 execute 键：写入 `unresolved`，不要编进 schema。`path` 用控件 `name` 或同页已发出请求里的同义键。
    - 一个可见**日期区间**（`range=true` 或一个控件里两个起止输入）对上两个请求键时，两个键都是调用方，不要把起止收成系统。
    - 页面因切换类型/页签自动改了日期，只要日期控件仍能点，仍是调用方，不要当成计算公式。
    - 入口 URL / 上一页带入的默认值：本页对应控件**仍能改** → 调用方，`source_kind=page_default`。`visible_control` 上该控件 `readonly=true` 或 `disabled=true` → **系统**，按请求原值，不要进 `input_schema`。同一标签若既有只读下拉、又有一份看起来可改的空 input，认只读那条，不要把灰掉的类型收成调用方数字框。
@@ -149,7 +158,7 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 点「添加××行」或工具栏加行产生的行类型码不是调用方控件，不要放进 `input_schema`（包括数组 `items.properties`）。  
 `input_schema`（含数组 `items.properties`）的每个 key 必须对应某个 `exposed_to_user=true` 的 param.key。params 标系统的 key 禁止再出现在 schema。  
 **每个** `exposed_to_user=true` 的 param 都必须出现在该能力 `input_schema.properties`；只写在 params 里等于调用方字段丢失。数组只出现数组自己的 key，行内调用方写在 `items.properties`。  
-execute 的 query/body 没有、当前页也没有对应可改控件的键，禁止写进 params 或 schema。可见可改控件即使本场没带，仍要留下调用方可选字段。  
+execute 的 query/body 没有的键，禁止写进 params 或 schema。看得见但对不上请求键：写入 `unresolved`。  
 不要编造本场没发出的写请求，也不要把同一数组拆成多行并列字段。  
 分页只留在真正执行查询的那个能力的 **execute** 系统字段。写入能力的 execute 没有分页键，就不要出现页码/每页条数。打开表单拉到的空列表、弹层内部翻页，禁止写进该能力 `params`。
 
@@ -238,8 +247,8 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 - 可增行数组的 `reason` 必须写清「调用方按行填写添加行后出现的输入框，系统再组装成该数组」。
 - `option_source` 只挂**这个能力的表单**上真实存在的下拉。列表筛选的“创建人”选项不要挂到新增/编辑。页面加载时的权限/字典/菜单不要挂进业务能力。`option_source` / `preflight` 的 `params` 必须是空数组。
 
-人在筛选框、表单、下拉里能填或能选的值，必须是调用方字段，不能丢。  
-筛选条上看得见的输入框，即使本场空着没进 query，也要留下调用方可选字段。`key`/`path` 必须能从控件的 name、placeholder 或同页已发出的请求看出来；看不出来就写入 `unresolved`，不要假装这个筛选项不存在。  
+人在筛选框、表单、下拉里能填或能选、并且已经出现在该能力 execute query/body 里的值，必须是调用方字段，不能丢。  
+筛选条上看得见但对不上 execute 键的输入框：写入 `unresolved`，不要编进 schema。`key`/`path` 必须能从控件的 name、placeholder 或同页已发出的请求看出来。  
 页面标签用当前页原文。筛选条写「流程状态」就不要改成「审批状态」。  
 不要把系统字段标成调用方，也不要把调用方必填标成系统自动。  
 不要把密码、token、Cookie、Authorization 的真实值写进 result。
@@ -466,6 +475,10 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 32. 能安全做的最小设值已经做过，或该键已写入 `unresolved`。没有只靠字段名相似、值相等或排除法定绑定。来源没看清没有写成已经理解业务。
 33. 写入/提交类能力的系统栏 params 只许来自 execute。`preflight` / `option_source` 的 params 是空数组。没有把页码、每页条数、排序、状态过滤、占位业务 ID 写成该能力的系统字段。
 34. 协助之后没有再 click 同名提交/搜索钮。人已经发出 execute 的，按那条请求交，不要再点一遍。
+35. 未接到用户结束（`frozen=false`）没有调用 `submit_recording_result`。
+36. 每个 `input_schema` 键都能在该能力 execute 现场请求的 query/body 里找到。没出现或没变化的键没有进 schema。
+37. 台账每行有能力或 `unresolved`，没有丢掉整页。
+38. `click_miss` / 写不进 / 点了不发网时只协助那一格，没有改点没有业务文案的 `aN`。
 
 ## 泛化
 

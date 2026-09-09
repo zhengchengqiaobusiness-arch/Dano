@@ -38,7 +38,7 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(skill, /当前页可见标签/);
   assert.match(skill, /不要编 `enum_options`/);
   assert.match(skill, /附件、审批进度是 `fact_check`/);
-  assert.match(skill, /筛选条上看得见的输入框/);
+  assert.match(skill, /筛选条上看得见/);
   assert.match(skill, /不要追求每个字段都有一套来源规则/);
   assert.match(skill, /无独立来源，按录制请求原值提交/);
   assert.match(skill, /核对的是\*\*处理逻辑\*\*/);
@@ -92,6 +92,11 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(skill, /不要去点保存碰运气/);
   assert.match(skill, /not_writable/);
   assert.match(skill, /没有业务文案的 `aN`/);
+  assert.match(skill, /未接到用户结束/);
+  assert.match(skill, /禁止 `submit_recording_result`/);
+  assert.match(skill, /换页口令/);
+  assert.match(skill, /click_miss/);
+  assert.match(skill, /该能力 execute 现场请求/);
   assert.match(skill, /打开写入表单附带/);
   assert.match(skill, /x-dano-option-source\.params.*不是 `steps\[\]\.params`/);
   assert.doesNotMatch(skill, /登录态、Cookie、分页、流程定义 Key、单据类型/);
@@ -108,7 +113,9 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(browserSkill, /填了请求完全没变/);
   assert.match(browserSkill, /not_writable/);
   assert.match(browserSkill, /option_not_seen/);
+  assert.match(browserSkill, /click_miss/);
   assert.match(browserSkill, /没有业务文案的 `aN`/);
+  assert.match(browserSkill, /未接到用户结束/);
   assert.doesNotMatch(browserSkill, /这是下拉。用 choose，不要往里面打字/);
   const instructions = buildPiInstructions(skill, browserSkill);
   assert.match(instructions, /不要写 capabilities\[\]\.fields/);
@@ -126,6 +133,9 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(drive, /network_since/);
   assert.match(drive, /not_writable/);
   assert.match(drive, /改点没有业务文案的 aN/);
+  assert.match(drive, /未接到用户结束/);
+  assert.match(drive, /click_miss/);
+  assert.doesNotMatch(drive, /目标做完后 submit_recording_result/);
   assert.doesNotMatch(drive, /按 selector click\/fill\/choose/);
   assert.doesNotMatch(drive, /这是下拉。用 choose/);
   const prompt = buildFinalAnalysisPrompt(3);

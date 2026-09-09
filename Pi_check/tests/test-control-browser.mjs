@@ -13,6 +13,8 @@ import {
   isNoiseNetworkPath,
   resolveInteractionActor,
   shouldSteerHumanAct,
+  expectedClickLabel,
+  clickLabelMatches,
 } from "../src/browser-actions.mjs";
 import { stripImageFromToolResult } from "../src/pi-tools.mjs";
 
@@ -85,6 +87,11 @@ test("snapshot 给控件打稳定 ref 和语义 selector", () => {
     value: "请选择请假类型",
   });
   assert.equal(parseLocator('role=button[name="搜索"]').kind, "role");
+  assert.equal(expectedClickLabel('role=button[name="甲"]').expected, "甲");
+  assert.equal(expectedClickLabel('role=button[name="甲"]').enforce, true);
+  assert.equal(clickLabelMatches("搜 索", "搜索"), true);
+  assert.equal(clickLabelMatches("甲", "乙"), false);
+  assert.equal(expectedClickLabel("label=开始日期").enforce, false);
   assert.equal(parseLocator("c2").kind, "ref");
   assert.deepEqual(parseLocator("type=checkbox"), { kind: "role", role: "checkbox", name: "", value: "checkbox" });
   assert.equal(snapshotSelector({ label: "张三", kind: "checkbox" }, "action"), 'role=checkbox[name="张三"]');

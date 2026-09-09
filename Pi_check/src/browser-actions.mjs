@@ -21,6 +21,47 @@ export function parseLocator(raw) {
   return { kind: "text", value: text };
 }
 
+export function normalizeVisibleLabel(value) {
+  return String(value || "").replace(/\s+/g, "").trim();
+}
+
+export function advertisedSnapshotLabel(token, snapshot = null) {
+  const parsed = parseLocator(token);
+  const items = [
+    ...(Array.isArray(snapshot?.controls) ? snapshot.controls : []),
+    ...(Array.isArray(snapshot?.actions) ? snapshot.actions : []),
+  ];
+  const ref = parsed.kind === "ref" ? parsed.value : "";
+  const hit = items.find((item) => (
+    item.selector === token
+    || item.ref === token
+    || (ref && (item.ref === ref || `ref=${item.ref}` === token))
+  ));
+  return normalizeVisibleLabel(hit?.label || hit?.text || hit?.name || "");
+}
+
+export function expectedClickLabel(token, snapshot = null) {
+  const parsed = parseLocator(token);
+  if (parsed.kind === "role" && parsed.name) {
+    return { expected: normalizeVisibleLabel(parsed.name), enforce: true };
+  }
+  if (parsed.kind === "text" && parsed.value) {
+    return { expected: normalizeVisibleLabel(parsed.value), enforce: true };
+  }
+  if (parsed.kind === "ref") {
+    const expected = advertisedSnapshotLabel(token, snapshot);
+    return { expected, enforce: Boolean(expected) };
+  }
+  return { expected: "", enforce: false };
+}
+
+export function clickLabelMatches(expected, hit) {
+  const want = normalizeVisibleLabel(expected);
+  const got = normalizeVisibleLabel(hit);
+  if (!want || !got) return false;
+  return want === got;
+}
+
 export function snapshotSelector(item = {}, role = "control") {
   const placeholder = String(item.placeholder || "").trim();
   const label = String(item.label || item.text || "").trim();

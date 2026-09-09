@@ -11,7 +11,13 @@ import { randomUUID } from "node:crypto";
 import { logPiOnly } from "./policy.mjs";
 import { collectPageFacts } from "./visible-controls.mjs";
 import { assignSnapshotRefs } from "./browser-snapshot.mjs";
-import { parseLocator, resolveInteractionActor } from "./browser-actions.mjs";
+import {
+  parseLocator,
+  resolveInteractionActor,
+  expectedClickLabel,
+  clickLabelMatches,
+  normalizeVisibleLabel,
+} from "./browser-actions.mjs";
 import {
   isLoginUrl,
   looksLoggedIn,
@@ -368,6 +374,7 @@ async function snapshotVisibleControls(page, handle, append, reason) {
 
 export class PlaywrightBrowser {
   #actionQueue = Promise.resolve();
+  #hitText = "";
 
   constructor({ browser, context, page, recordingId, targetUrl = "" }) {
     this.browser = browser;
@@ -678,7 +685,8 @@ export class PlaywrightBrowser {
         } else if (kind === "press") {
           await handle.press(String(text || "Enter"));
         } else {
-          await this.#mouseClick(handle);
+          const clicked = await this.#clickNow(page, handle, token);
+          if (!clicked.ok) return clicked;
         }
         this.lastActAt = Date.now();
         if (typeof this.appendEvidence === "function") {
@@ -693,12 +701,14 @@ export class PlaywrightBrowser {
         this.#scheduleControlResnapshot(page, kind);
         if (kind === "click") await page.waitForTimeout(50);
         const panel = kind === "click" ? await this.#observePanel(page) : null;
+        const hitText = kind === "click" ? await this.#lastHitText() : "";
         return {
           ok: true,
           url: page.url(),
           selector: token,
           ref: token,
           action: kind,
+          ...(hitText ? { hit_text: hitText } : {}),
           ...(panel && panel.panel !== "none" ? { panel: panel.panel, options: panel.options } : {}),
         };
       } catch (error) {
@@ -805,17 +815,67 @@ export class PlaywrightBrowser {
     return hostBox;
   }
 
-  async #mouseClick(locator) {
-    const page = this.livePage();
+  async #readHitLabel(page, locator, box) {
+    if (page && box) {
+      const fromPoint = await page.evaluate(({ x, y }) => {
+        const node = document.elementFromPoint(x, y);
+        if (!node) return "";
+        const control = node.closest("button, a, [role='button'], [role='tab'], [role='menuitem'], [role='option'], [role='radio'], [role='checkbox'], label") || node;
+        const raw = control.getAttribute("aria-label")
+          || control.getAttribute("placeholder")
+          || (control.matches?.("input, textarea, select") ? (control.value || "") : "")
+          || control.innerText
+          || control.textContent
+          || control.title
+          || "";
+        return String(raw || "").replace(/\s+/g, "").trim();
+      }, { x: box.x + box.width / 2, y: box.y + box.height / 2 }).catch(() => "");
+      if (fromPoint) return fromPoint;
+    }
+    return normalizeVisibleLabel(await locator.evaluate((el) => {
+      const raw = el.getAttribute("aria-label")
+        || el.getAttribute("placeholder")
+        || el.innerText
+        || el.textContent
+        || el.value
+        || el.title
+        || "";
+      return String(raw || "");
+    }).catch(() => ""));
+  }
+
+  async #clickNow(page, locator, token) {
     const box = await this.#actionBox(locator);
+    const hit = await this.#readHitLabel(page, locator, box);
+    const { expected, enforce } = expectedClickLabel(token, this.lastSnapshot);
+    this.#hitText = hit;
+    if (enforce && expected && !clickLabelMatches(expected, hit)) {
+      return {
+        ok: false,
+        code: "click_miss",
+        error: "没有点中所点 selector。",
+        selector: token,
+        ref: token,
+        action: "click",
+        hit_text: hit,
+      };
+    }
     if (!page || !box || box.width < 1 || box.height < 1) {
       await locator.click({ timeout: 800, force: true });
-      return { via: "locator", x: 0, y: 0 };
+      return { ok: true, via: "locator", hit_text: hit };
     }
-    const x = box.x + box.width / 2;
-    const y = box.y + box.height / 2;
-    await page.mouse.click(x, y);
-    return { via: "mouse", x, y };
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    return { ok: true, via: "mouse", hit_text: hit };
+  }
+
+  #lastHitText() {
+    return String(this.#hitText || "");
+  }
+
+  async #mouseClick(locator) {
+    const page = this.livePage();
+    const clicked = await this.#clickNow(page, locator, "");
+    return clicked;
   }
 
   async #listRoleTexts(page, role) {

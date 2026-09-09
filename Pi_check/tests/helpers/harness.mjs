@@ -12,6 +12,19 @@ import { RecordingController } from "../../src/recording-controller.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
+export async function seedExecuteEvidence(evidence, recordingId, {
+  method = "POST",
+  url = "http://x/api/leave",
+  body = { days: 1 },
+} = {}) {
+  return evidence.append(recordingId, "network_request", {
+    method,
+    url,
+    resource_type: "xhr",
+    body: { stored: "inline", text: JSON.stringify(body) },
+  });
+}
+
 export function sampleResult(overrides = {}) {
   return {
     recording_goal: "演示目标",
@@ -172,7 +185,7 @@ export class ScriptedPiSession {
     if (this.behavior === "empty_spin") {
       throw new Error("PI 连续空转未调用工具且未提交");
     }
-    if (this.behavior === "never_submit" || this.behavior === "submit_unfrozen") return;
+    if (this.behavior === "never_submit") return;
     if (this.behavior === "submit_after_delay") {
       await new Promise((resolve) => setTimeout(resolve, this.delayMs));
       if (!this.alive) throw new Error("PI 会话已关闭");
@@ -242,11 +255,19 @@ export class FakeBrowser {
     this.piActUntil = 0;
     this.userActions = [];
     this.ready = emitOnStart
-      ? Promise.resolve(appendEvidence?.("network_request", {
-        method: "GET",
-        url: "http://fixture.local/demo",
-        resource_type: "xhr",
-      }))
+      ? Promise.resolve().then(async () => {
+        await appendEvidence?.("network_request", {
+          method: "GET",
+          url: "http://fixture.local/demo",
+          resource_type: "xhr",
+        });
+        await appendEvidence?.("network_request", {
+          method: "POST",
+          url: "http://fixture.local/api/leave",
+          resource_type: "xhr",
+          body: { stored: "inline", text: JSON.stringify({ days: 1 }) },
+        });
+      })
       : Promise.resolve();
   }
 

@@ -4,10 +4,11 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHarness, sampleResult } from "./helpers/harness.mjs";
+import { createHarness, sampleResult, seedExecuteEvidence } from "./helpers/harness.mjs";
 import {
   assertPageDisplayContract,
   assertCapabilityIdentityContract,
+  assertExecuteEvidenceContract,
   SubmitRejectedError,
 } from "../src/result-gate.mjs";
 
@@ -99,6 +100,7 @@ test("成功提交原样保存，且拒绝第二次提交和任何改写", async
   try {
     const session = await harness.evidence.create({ targetUrl: "http://x", goal: "g" });
     await harness.evidence.setStatus(session.id, { piSessionId: "pi-1" });
+    await seedExecuteEvidence(harness.evidence, session.id);
     await harness.evidence.freeze(session.id);
     const result = sampleResult({ keep_this_exact_value: "π", capabilities: [{ id: "only" }] });
     await harness.gate.submitRecordingResult({
@@ -432,4 +434,79 @@ test("错误信封不得落盘", async () => {
   } finally {
     await harness.cleanup();
   }
+});
+
+test("拒收调用方键不在 execute 现场请求里的终稿", async () => {
+  const invented = sampleResult({
+    capabilities: [{
+      capability_id: "cap_create_leave",
+      request_refs: [{ step_id: "step_1", usage: "execute", method: "POST", path: "/api/leave" }],
+      input_schema: {
+        type: "object",
+        properties: {
+          days: { type: "number", title: "天数" },
+          processStatus: { type: "string", title: "未见过的键" },
+        },
+      },
+    }],
+    steps: [{
+      step_id: "step_1",
+      method: "POST",
+      path: "/api/leave",
+      params: [
+        { key: "days", path: "body.days", exposed_to_user: true },
+        { key: "processStatus", path: "query.processStatus", exposed_to_user: true },
+      ],
+    }],
+  });
+  const events = [{
+    seq: 1,
+    kind: "network_request",
+    payload: {
+      method: "POST",
+      url: "http://x/api/leave",
+      resource_type: "xhr",
+      body: { stored: "inline", text: JSON.stringify({ days: 1 }) },
+    },
+  }];
+  assert.throws(
+    () => assertExecuteEvidenceContract(invented, events),
+    (error) => error instanceof SubmitRejectedError && /processStatus/.test(error.message),
+  );
+  const harness = await createHarness();
+  try {
+    const session = await harness.evidence.create({ targetUrl: "http://x", goal: "g" });
+    await harness.evidence.setStatus(session.id, { piSessionId: "pi-1" });
+    await seedExecuteEvidence(harness.evidence, session.id);
+    await harness.evidence.freeze(session.id);
+    await assert.rejects(
+      () => harness.gate.submitRecordingResult({
+        recordingId: session.id,
+        expectedRecordingId: session.id,
+        callerSessionId: "pi-1",
+        expectedSessionId: "pi-1",
+        final: true,
+        result: invented,
+        frozen: true,
+      }),
+      /processStatus/,
+    );
+    assert.equal(await harness.files.hasPiResult(session.id), false);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("调用方键在 execute 现场请求里则通过", () => {
+  const events = [{
+    seq: 1,
+    kind: "network_request",
+    payload: {
+      method: "POST",
+      url: "http://x/api/leave",
+      resource_type: "xhr",
+      body: { stored: "inline", text: JSON.stringify({ days: 1 }) },
+    },
+  }];
+  assert.doesNotThrow(() => assertExecuteEvidenceContract(sampleResult(), events));
 });

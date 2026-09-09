@@ -4,7 +4,14 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildActionTimeline, requestShapeFromEvents } from "../src/evidence-facts.mjs";
+import {
+  buildActionTimeline,
+  requestShapeFromEvents,
+  pathExistsInShape,
+  isFinalStale,
+  findExecuteEvidenceGaps,
+} from "../src/evidence-facts.mjs";
+import { sampleResult } from "./helpers/harness.mjs";
 
 test("动作台账带 actor，并挂上随后的 xhr/fetch", () => {
   const timeline = buildActionTimeline([
@@ -40,4 +47,61 @@ test("请求形状摊开 query/body 键，不判断来源", () => {
   assert.ok(shape.query_keys.some((item) => item.key === "dept"));
   assert.ok(shape.body_keys.some((item) => item.key === "days"));
   assert.ok(shape.body_keys.some((item) => item.key === "reason"));
+});
+
+test("请求形状只核键在不在，不判断来源", () => {
+  const shape = requestShapeFromEvents([
+    {
+      seq: 1,
+      kind: "network_request",
+      payload: {
+        method: "POST",
+        url: "https://x.test/api/leave",
+        body: { text: JSON.stringify({ days: 2 }) },
+      },
+    },
+  ], 1);
+  assert.equal(pathExistsInShape("body.days", shape), true);
+  assert.equal(pathExistsInShape("query.processStatus", shape), false);
+});
+
+test("上一稿之后的人手或业务请求算过期", () => {
+  const events = [
+    { seq: 1, kind: "network_request", payload: { method: "GET", url: "/api/a", resource_type: "xhr" } },
+    { seq: 2, kind: "interaction", payload: { actor: "human", kind: "click" } },
+  ];
+  assert.equal(isFinalStale(events, 1), true);
+  assert.equal(isFinalStale(events, 2), false);
+});
+
+test("调用方键必须能在 execute 现场请求里找到", () => {
+  const events = [{
+    seq: 3,
+    kind: "network_request",
+    payload: {
+      method: "POST",
+      url: "http://x/api/leave",
+      resource_type: "xhr",
+      body: { stored: "inline", text: JSON.stringify({ days: 1 }) },
+    },
+  }];
+  assert.deepEqual(findExecuteEvidenceGaps(sampleResult(), events), []);
+  const invented = sampleResult({
+    capabilities: [{
+      capability_id: "cap_create_leave",
+      request_refs: [{ step_id: "step_1", usage: "execute" }],
+      input_schema: {
+        type: "object",
+        properties: { processStatus: { type: "string", title: "未见" } },
+      },
+    }],
+    steps: [{
+      step_id: "step_1",
+      method: "POST",
+      path: "/api/leave",
+      params: [{ key: "processStatus", path: "query.processStatus", exposed_to_user: true }],
+    }],
+  });
+  const gaps = findExecuteEvidenceGaps(invented, events);
+  assert.ok(gaps.some((item) => item.key === "processStatus"));
 });

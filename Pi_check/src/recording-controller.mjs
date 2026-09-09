@@ -20,6 +20,7 @@ import { capabilityCountFromPiResult } from "./capability-presence.mjs";
 import { thoughtFromEvidence } from "./pi-trace.mjs";
 import { resolveInteractionActor, shouldSteerHumanAct } from "./browser-actions.mjs";
 import { isEmptySpinError } from "./pi-session.mjs";
+import { isFinalStale } from "./evidence-facts.mjs";
 
 export class RecordingController {
   constructor({
@@ -138,8 +139,6 @@ export class RecordingController {
       hasResult: () => this.files.hasPiResult(recordingId),
     })).then(async () => {
       if (slot.failed || slot.completing) return;
-      if (!await this.files.hasPiResult(recordingId)) return;
-      await this.#succeed(recordingId);
     }).catch(async (error) => {
       if (slot.failed || slot.completing) return;
       logPiOnly(`自动点击不可用，人手点预览继续 recording=${recordingId} ${error?.message || error}`);
@@ -162,11 +161,6 @@ export class RecordingController {
       gate: this.gate,
       getPiSessionId: () => this.evidence.snapshot(recordingId).piSessionId,
       getBrowser: () => this.#active.get(recordingId)?.browser || null,
-      freezeEvidence: async () => {
-        if (!this.evidence.snapshot(recordingId).frozen) {
-          await this.evidence.freeze(recordingId);
-        }
-      },
       onAssist: (payload) => this.requestAssist(recordingId, payload?.reason || ""),
     });
   }
@@ -387,29 +381,23 @@ export class RecordingController {
     if (session.status === "succeeded" && session.hasFinalResult) {
       return this.#succeed(recordingId);
     }
-    if (await this.files.hasPiResult(recordingId)) {
-      if (!session.frozen) {
-        await this.evidence.freeze(recordingId);
-      }
-      return this.#succeed(recordingId);
-    }
-    if (!slot?.pi?.alive) {
-      await this.#fail(recordingId, "PI 在录制期间退出");
-      throw new RecordingFailedError(publicFailureMessage());
-    }
     if (session.status === "failed") {
       throw new RecordingFailedError(publicFailureMessage());
     }
     try {
-      await slot.pi.stopLiveDrive?.();
+      await slot?.pi?.stopLiveDrive?.();
     } catch {
       // 结束自动操作失败仍要冻结并定稿
     }
     if (!this.evidence.snapshot(recordingId).frozen) {
       await this.evidence.freeze(recordingId);
     }
-    if (await this.files.hasPiResult(recordingId)) {
+    if (await this.#hasFreshFinal(recordingId)) {
       return this.#succeed(recordingId);
+    }
+    if (!slot?.pi?.alive) {
+      await this.#fail(recordingId, "PI 在录制期间退出");
+      throw new RecordingFailedError(publicFailureMessage());
     }
     logPiOnly("自动操作已结束，浏览器保持打开，等待 PI 提交已完成的能力");
     await this.evidence.setStatus(recordingId, {
@@ -446,6 +434,17 @@ export class RecordingController {
       throw new RecordingFailedError(publicFailureMessage());
     }
     return this.#succeed(recordingId);
+  }
+
+  async #hasFreshFinal(recordingId) {
+    if (!await this.files.hasPiResult(recordingId)) return false;
+    const events = await this.files.readEvidence(recordingId).catch(() => []);
+    const receipt = await this.files.readReceipt(recordingId).catch(() => null);
+    const acceptedLastSeq = Number(receipt?.evidence_last_seq) || 0;
+    if (!isFinalStale(events, acceptedLastSeq)) return true;
+    logPiOnly(`上一稿之后又有人手或新业务请求，旧终稿作废 recording=${recordingId}`);
+    await this.gate.voidAccepted(recordingId);
+    return false;
   }
 
   async #succeed(recordingId) {

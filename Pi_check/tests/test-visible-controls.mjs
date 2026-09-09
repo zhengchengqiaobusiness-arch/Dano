@@ -451,7 +451,43 @@ test("点保存必须点到按钮，不能落到旁边的标题框", async (t) =
     action: "click",
   });
   assert.equal(clicked.ok, true, clicked.error || "click 保存 failed");
+  assert.equal(clicked.hit_text, "保存");
   assert.equal(await handle.page.evaluate(() => window.__clicked), "save");
+});
+
+test("点到的可见文案对不上 selector 就是没点中", async (t) => {
+  const html = `<!doctype html><html><body>
+    <div role="button" aria-label="甲" style="width:400px;height:40px;position:relative;border:1px solid #000">
+      <span style="position:absolute;left:0;top:10px;width:40px">甲</span>
+      <button type="button" id="other" style="position:absolute;left:40px;top:0;width:360px;height:40px">乙</button>
+    </div>
+    <script>
+      window.__hit = "";
+      document.getElementById("other").addEventListener("click", () => { window.__hit = "乙"; });
+    </script>
+  </body></html>`;
+  const fixture = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  const port = await listen(fixture);
+  const handle = await createPlaywrightBrowser({
+    recording: { id: "rec_click_miss", targetUrl: `http://127.0.0.1:${port}/` },
+    appendEvidence: evidenceSink(),
+  });
+  t.after(async () => {
+    await handle.close().catch(() => {});
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+  await handle.inspect();
+  const missed = await handle.actBySelector({
+    selector: 'role=button[name="甲"]',
+    action: "click",
+  });
+  assert.equal(missed.ok, false);
+  assert.equal(missed.code, "click_miss");
+  assert.equal(missed.hit_text, "乙");
+  assert.equal(await handle.page.evaluate(() => window.__hit), "");
 });
 
 test("choose 打开后是日历时不得改口，只回报 option_not_seen", async (t) => {
