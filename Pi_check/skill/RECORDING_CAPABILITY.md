@@ -12,7 +12,11 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 
 入口提示只给目标和工具列表。调查顺序以本节为准。禁止盲点。禁止 invent selector。禁止没看到该项真实 execute 形状就交空能力。
 
-### 保住用户完整目标
+你是在按目标把业务动作做完，并留下那次真实操作的合同。不是尽快点出一条请求。
+
+### 目标是剧本
+
+按目标原文的顺序，在每一页把该页的事做完，再离开这一页。
 
 不要把需求压成 query+create。至少记住：
 
@@ -23,39 +27,39 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 - 顺序要求
 - 成功条件
 
+什么叫这一页、这一行已经做完：
+
+- **查询**：目标要求的可见条件（筛选、树/列表节点、日期、类型）已经设齐，再由该查询自己的触发点发出请求。首屏自动加载、误点、只改了一个下拉就离开，都不算做完。
+- **新增 / 保存 / 提交**：目标要求填写的可见字段已经写上（上传按排除项跳过）；目标要求加行的，行内框也已经写上。随后那条写请求才是 execute。
+- 表单还是空的、加行后行内框还没写，就去点保存：失败。那不是调查，是没操作页面。
+- 写不进、加行后 snapshot 仍看不到行内框：只协助这一格，不要去点保存碰运气。
+
 ### 工作记忆（写在对话里，不新造工具）
 
 - 目标原文
 - 动作台账（独立业务按钮 + 随后改数据或查询的请求）
-- 已看见的首屏请求
+- 已看见的首屏请求（只记账，不是已做完）
 - 已证明的绑定（字段 → 请求键 → 证据 seq）
 - `unresolved`
 - 下一步只选一个
 
 ### 下一步只允许这五种
 
-1. **观察**：刚打开、弹层刚出现、或选择器失效。用 `control_in_app_browser` 做 `snapshot` + `network_since`。
-2. **最小设值**：台账上已有一个动作，绑定还没证明。只改一个或一批普通框，立刻看网。
-3. **请人点一下**：合法 selector 用尽，或点了不发网，或工具回 `not_writable` / `option_not_seen` / `click_miss`，或 `fill` 报成功但随后请求没有对应键。`assist`，只写这一个控件要人做什么。不要去点保存碰运气，不要改点没有业务文案的 `aN`。
-4. **推断并交一项**：该项已有真实 execute 形状。走后面的字段合同，再 `submit_recording_capability`。
-5. **定稿**：只在用户已经结束、`get_recording_freeze_state.frozen=true` 之后。台账每行都有能力或 `unresolved`。`submit_recording_result({final:true, use_draft:true})`。未接到用户结束，这一项不出现。
+1. **观察**：刚打开、弹层刚出现、或选择器失效。用 `control_in_app_browser` 做 `snapshot` + `network_since`。首屏自动请求先记下，不要当成已经查询。
+2. **按目标操作**：当前台账行还没做完。把该动作需要的可见条件/字段写上，再点该动作自己的查询/保存/提交。没有「搜索 / 查询」文案时，点已经出现的树或列表节点就是查询，不要为找搜索钮去点没文案的 `aN`。只点当前业务区（filter / form / table / dialog）。通知角标、头像、偏好、退出、外观不是业务。空状态提示（「请在左侧选择…」）是还没做成，不是按钮。筛选框只过滤；列表/树变了还要选已经出现的可见节点。
+3. **请人点一下**：合法 selector 用尽，或点了不发网，或工具回 `not_writable` / `option_not_seen`，或 `fill` 报成功但随后请求没有对应键，或加行后看不到行内框。`assist`，只写这一个控件要人做什么。不要去点保存碰运气，不要改点没有业务文案的 `aN`。
+4. **推断并交一项**：该动作已按目标做完，且那次操作发出了真实 execute。走后面的字段合同，再 `submit_recording_capability`。空表保存出来的请求不要交成完整能力。
+5. **定稿**：只在用户已经结束之后。台账每行都有能力或 `unresolved`。`submit_recording_result({final:true, use_draft:true})`。未接到用户结束，禁止 `submit_recording_result`。
 
-### 换页口令（只改本 Skill，不要改代码）
+**最小设值**只发生在第 2 步之后：表上已经按目标填过，再改一个值看哪个请求键变了。禁止用空表保存换请求形状。
 
-1. **台账**：目标里每件事一行。没看到真实 execute 就 `unresolved`，禁止丢掉整页。
-2. **定稿权**：未接到用户结束，只许 `submit_recording_capability`。禁止 `submit_recording_result`。
-3. **写上**：随后请求出现或变化了这个键，才算写上。没变：这一格失败，禁止把该键写进 schema。
-4. **协助**：合法 selector 用尽、写不进、点了不发网、或 `click_miss`：只协助这一格。没有业务文案的 `aN` 不准点。不要先点保存。
-5. **人手**：人点过看 `recentUserActions` 和网。人发出的 execute 用那条交，旧稿作废。
-6. **节奏**：开页 `snapshot` + `network_since` 各一次。普通框一次 `fill_fields`。不要每个字段 snapshot。
-
-协助之后只读 `recentUserActions` 和网。人已经发出 execute 就交该项，禁止再点同一个保存/确认/搜索。人点出的动作也要交。被拒收时按返回的 `error` 只改信封，保留其它已完成能力，不要重录，不要另加审核或回放。
+协助之后只读 `recentUserActions` 和网。直到人做完或用户说继续，禁止再 click。人已经发出 execute 就交该项，禁止再点同一个保存/确认/搜索。人点出的动作也要交。被拒收时按返回的 `error` 只改信封，保留其它已完成能力，不要重录，不要另加审核或回放。
 
 本场达到现有定稿条件即可：用户已结束，非空 `capabilities`，台账缺口都在 `unresolved`。导出消费包仍由现有导出链路生成。不要在录制里写执行器。
 
 ## 代码 / Skill / 模型
 
-- 代码：启动浏览器、原样采集证据、在用户结束时冻结、把你的 result 原样交给前端。可提供 `list_recording_index` 这种无分类事实索引。只拒收页面读不到的信封、重复的 `capability_id`、两个能力共用同一个 `execute`、以及调用方键不在该 execute 现场请求里的终稿。不识别页面，不补能力，不能自行冻结。
+- 代码：启动浏览器、原样采集证据、冻结、把你的 result 原样交给前端。可提供 `list_recording_index` 这种无分类事实索引。只拒收页面读不到的信封、重复的 `capability_id`、两个能力共用同一个 `execute`。不识别页面，不补能力。
 - Skill（本文件）：跨页面通用的总入口与识别方法。改调查顺序或识别策略就改本 Skill，不要改采集代码，也不要改现有录制页。
 - 模型（你）：阅读本场证据，判断“这是几个独立业务动作”、每个字段谁提供、请求怎么串起来。不同页面由你现场判断，不要套死某个系统的 URL。
 
@@ -117,7 +121,7 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 
 `list_recording_manifest` 只有计数。必须先调 `list_recording_index`，看完全场 interaction 文案、xhr/fetch 的 METHOD+path、network_response、`visible_control`、截图和页面跳转，再按需 `read_evidence_item` 读正文。请求/响应正文在 `payload.body.text` 或 `body.blob_id`。`read_response_blob` 只接受 `blob_` 开头的 id，不要把 `request_id` 当 blob，也不要编造截图 blob_id。用户结束后看完关键请求再 `submit_recording_result`，禁止把完整 result 写在对话里。不要只读前半场。也可用 `list_action_timeline` 按时间看人与 PI 点过的交互（带 `actor`），对候选 execute 调 `read_request_shape`。
 
-浏览器打开后先用 `control_in_app_browser` 观察：`open_page` → `snapshot` → `network_since`。人同时也可以点预览。共用同一页、同一路画面、同一条证据。只用 snapshot 广告的 `placeholder=` / `label=` / `role=` / `text=` / `ref=` 选择器；`choose` 点已经出现的可见原文。登录、验证码、写不进的那一个字段、点了不发网的保存用 `assist`，不要锁预览，不要改点没有业务文案的 `aN`。该项在 `list_action_timeline` 或 `network_since` 里已经对上一条真实 execute 之后，再 `submit_recording_capability`。人点出的动作也要交。未接到用户结束，禁止 `submit_recording_result`。禁止没看到 execute 形状就交空壳。
+浏览器打开后先用 `control_in_app_browser` 观察：`open_page` → `snapshot` → `network_since`。人同时也可以点预览。共用同一页、同一路画面、同一条证据。只用 snapshot 广告的 `placeholder=` / `label=` / `role=` / `text=` / `ref=` 选择器；`choose` 点已经出现的可见原文。按目标把当前动作的可见字段写上，再点该动作自己的查询/保存。首屏自动请求不是已经查询。空表不要点保存。登录、验证码、写不进的那一个字段、点了不发网的保存用 `assist`，不要锁预览，不要改点没有业务文案的 `aN`。协助之后停手，只读 `recentUserActions` 和网。该项已按目标做完、并在 `list_action_timeline` 或 `network_since` 里对上那次操作的真实 execute 之后，再 `submit_recording_capability`。人点出的动作也要交。未接到用户结束，禁止 `submit_recording_result`。禁止没看到 execute 形状就交空壳。
 
 索引对齐方法（换任何页面都这样做）：
 
@@ -140,9 +144,9 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 2. **摊开 execute 请求形状**：把这条请求的每个 query/body 键列出来。同一键出现几次就建几个 param，共用这个 path。一个数组只建一个数组 path；行差别写在行内字段。
 3. **摊开当前页控件**：读该动作所在页的**最近一次** `visible_control` 和点过的 interaction，并与当场 `snapshot` 对照。每个控件看 `region`（filter/form/table/dialog）、`label`/`placeholder`/`name`、`control_kind`（input/select/date/textarea/upload/button/readonly）、`required_mark`、`readonly`。`region=table` 的输入是加行后出现的行内框；`region=form` 的大段 textarea 是另一份补充说明；`region=dialog` 是确认/选择弹层。打开弹层、切换页签、加行后必须再 snapshot；`read_visible_controls` 不传 seq。不要带着打开弹层之前的 seq 去对字段。
    `readonly`/`disabled` 表示**整个控件当前不能改**（宿主带 disabled / aria-disabled / is-disabled）。自定义下拉、日期、级联、单选组的内部展示框常常带原生 `readonly`，那不是灰框。只有宿主锁死才是系统字段；点一下能出选项或能改选 → 可改 → 调用方。
-4. **最小设值证明绑定**：能安全改的调用方字段，至少改一个值，再 `network_since` 或 `read_request_shape`。哪个请求键变了，才把该控件绑到那个键。值碰巧相等、字段名相似、同一个请求里仅剩两个字段，都不能单独定案。本场没改过、但该键已出现在 execute 且控件可改：仍是调用方，不要写成 `constant` / 「无独立来源」。没出现或没变化的键禁止写进 schema。无法做这个最小实验（合法 selector 写不进、未授权写入）：该键写入 `unresolved`；禁止编 path，禁止 invent selector。来源没看清不能说成已经理解业务。`default_value` 只固定无来源字段怎么提交，不是下次执行必须填的业务值。
+4. **按目标写上再证明绑定**：先按目标把该动作的可见字段写上并点出 execute，再对还没对上的键改一个值看哪个请求键变了。禁止用空表保存换请求形状。值碰巧相等、字段名相似、同一个请求里仅剩两个字段，都不能单独定案。本场没改过、但控件可改：仍是调用方，不要写成 `constant` / 「无独立来源」。无法做这个实验（合法 selector 写不进、未授权写入）：该键写入 `unresolved`，或按下面「无独立来源，按录制请求原值提交」处理；禁止编 path，禁止 invent selector。来源没看清不能说成已经理解业务。`default_value` 只固定无来源字段怎么提交，不是下次执行必须填的业务值。
 5. **逐键对上控件，决定调用方还是系统**：
-   - 对得上**可改**控件（input/select/date/textarea/upload，以及树、页签、分段器、单选组，且 `readonly`/`disabled` 都不是 true）且该键已出现在该能力 execute 的 query/body → **调用方**。本场没改过、但键在请求里且控件可改：仍是调用方，禁止写成 `constant` / 「无独立来源」。页面上已有默认选中只要还能改且键在请求里，仍是调用方。看得见但对不上 execute 键：写入 `unresolved`，不要编进 schema。`path` 用控件 `name` 或同页已发出请求里的同义键。
+   - 对得上**可改**控件（input/select/date/textarea/upload，以及树、页签、分段器、单选组，且 `readonly`/`disabled` 都不是 true）→ **调用方**。即使本场没改、这次 query/body 没带这个键，也留下可选调用方字段。页面上已有默认选中（单选默认启用、下拉已有值）只要还能改，仍是调用方，禁止写成 `constant` / 「无独立来源」。`path` 用控件 `name` 或同页已发出请求里的同义键。对不上 path 就写入 `unresolved`，不要假装控件不存在。
    - 一个可见**日期区间**（`range=true` 或一个控件里两个起止输入）对上两个请求键时，两个键都是调用方，不要把起止收成系统。
    - 页面因切换类型/页签自动改了日期，只要日期控件仍能点，仍是调用方，不要当成计算公式。
    - 入口 URL / 上一页带入的默认值：本页对应控件**仍能改** → 调用方，`source_kind=page_default`。`visible_control` 上该控件 `readonly=true` 或 `disabled=true` → **系统**，按请求原值，不要进 `input_schema`。同一标签若既有只读下拉、又有一份看起来可改的空 input，认只读那条，不要把灰掉的类型收成调用方数字框。
@@ -158,7 +162,7 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 点「添加××行」或工具栏加行产生的行类型码不是调用方控件，不要放进 `input_schema`（包括数组 `items.properties`）。  
 `input_schema`（含数组 `items.properties`）的每个 key 必须对应某个 `exposed_to_user=true` 的 param.key。params 标系统的 key 禁止再出现在 schema。  
 **每个** `exposed_to_user=true` 的 param 都必须出现在该能力 `input_schema.properties`；只写在 params 里等于调用方字段丢失。数组只出现数组自己的 key，行内调用方写在 `items.properties`。  
-execute 的 query/body 没有的键，禁止写进 params 或 schema。看得见但对不上请求键：写入 `unresolved`。  
+execute 的 query/body 没有、当前页也没有对应可改控件的键，禁止写进 params 或 schema。可见可改控件即使本场没带，仍要留下调用方可选字段。  
 不要编造本场没发出的写请求，也不要把同一数组拆成多行并列字段。  
 分页只留在真正执行查询的那个能力的 **execute** 系统字段。写入能力的 execute 没有分页键，就不要出现页码/每页条数。打开表单拉到的空列表、弹层内部翻页，禁止写进该能力 `params`。
 
@@ -247,8 +251,8 @@ execute 的 query/body 没有的键，禁止写进 params 或 schema。看得见
 - 可增行数组的 `reason` 必须写清「调用方按行填写添加行后出现的输入框，系统再组装成该数组」。
 - `option_source` 只挂**这个能力的表单**上真实存在的下拉。列表筛选的“创建人”选项不要挂到新增/编辑。页面加载时的权限/字典/菜单不要挂进业务能力。`option_source` / `preflight` 的 `params` 必须是空数组。
 
-人在筛选框、表单、下拉里能填或能选、并且已经出现在该能力 execute query/body 里的值，必须是调用方字段，不能丢。  
-筛选条上看得见但对不上 execute 键的输入框：写入 `unresolved`，不要编进 schema。`key`/`path` 必须能从控件的 name、placeholder 或同页已发出的请求看出来。  
+人在筛选框、表单、下拉里能填或能选的值，必须是调用方字段，不能丢。  
+筛选条上看得见的输入框，即使本场空着没进 query，也要留下调用方可选字段。`key`/`path` 必须能从控件的 name、placeholder 或同页已发出的请求看出来；看不出来就写入 `unresolved`，不要假装这个筛选项不存在。  
 页面标签用当前页原文。筛选条写「流程状态」就不要改成「审批状态」。  
 不要把系统字段标成调用方，也不要把调用方必填标成系统自动。  
 不要把密码、token、Cookie、Authorization 的真实值写进 result。
@@ -472,25 +476,25 @@ execute 的 query/body 没有的键，禁止写进 params 或 schema。看得见
 29. 可增行 `items.properties` 的 title 是表头原文，覆盖各分区可见表头（序号、操作除外）；数组 title 是分区标题原文。同一线格式键在不同分区表头不同时写了 `x-dano-section-titles`。没有把可增行收成 string，也没有用分区标题去命名同请求里的 form textarea。
 30. 确认弹层可填意见：有请求键则建成调用方，没有则写入 `unresolved`，没有编造写请求里没有的键。
 31. 弹层选人/选记录若对应对象数组：调用方 schema 是带实时候选的多选；execute step 有同容器的 `multi + label_subkey + element_template`；每个对象键来自常量或选项响应（含嵌套路径）；没有复制本场人员对象，也没有新增别名容器。
-32. 能安全做的最小设值已经做过，或该键已写入 `unresolved`。没有只靠字段名相似、值相等或排除法定绑定。来源没看清没有写成已经理解业务。
+32. 该动作已按目标把可见字段写上并点出 execute；需要证明绑定的键已经改过值，或已写入 `unresolved`。没有用空表保存换请求形状。没有只靠字段名相似、值相等或排除法定绑定。来源没看清没有写成已经理解业务。
 33. 写入/提交类能力的系统栏 params 只许来自 execute。`preflight` / `option_source` 的 params 是空数组。没有把页码、每页条数、排序、状态过滤、占位业务 ID 写成该能力的系统字段。
 34. 协助之后没有再 click 同名提交/搜索钮。人已经发出 execute 的，按那条请求交，不要再点一遍。
-35. 未接到用户结束（`frozen=false`）没有调用 `submit_recording_result`。
-36. 每个 `input_schema` 键都能在该能力 execute 现场请求的 query/body 里找到。没出现或没变化的键没有进 schema。
-37. 台账每行有能力或 `unresolved`，没有丢掉整页。
-38. `click_miss` / 写不进 / 点了不发网时只协助那一格，没有改点没有业务文案的 `aN`。
+35. 未接到用户结束没有调用 `submit_recording_result`。
+36. 首屏自动加载没有被当成已经查询。目标要求先查询后新增时，查询条件设齐并看到该查询 execute 之前没有进入新增。
+37. 没有在表单仍空、或目标要求的加行还没写上时点保存。
 
 ## 泛化
 
 - 本 Skill 不绑定任何具体业务页、系统名或字段名。上面的例子只说明形状，不是某页的补丁。
 - 只根据本场点击、输入、请求、响应、`visible_control`、截图判断。
-- 换一个页面也走同一套台账 / 切分 / 编排 / 字段形状规则：先摊请求形状，再摊可见控件，能安全改的字段先改一个值看哪个请求键变了，再对控件；值相等、字段名相似、排除法不能单独定案；对得上可改控件就是调用方且必须进 schema；`readonly`/`disabled` 灰框是系统；树/页签/区间日期同样是调用方；弹层选人/选记录若提交对象数组，就保留一个多选字段并用 `element_template` 从实时选项行组装对象；可增行按行填写再组装成一个对象数组 path，列名用各分区表头原文，同一键不同表头写 `x-dano-section-titles`，不要把同名 textarea 当成行，也不要把一个数组拆成多个调用方数组或收成一段字符串；空容器有上传/选人/可增行控件仍是调用方；确认弹层可填意见完整处理，没有请求键就 unresolved，不要编造写请求里没有的键；无控件的 execute query/body 键按身份或原值交给系统，并只写进 execute 系统栏；打开表单附带列表与弹层翻页不进写入能力系统栏。名字与页面原文一致，去掉星号。
+- 换一个页面也走同一套台账 / 切分 / 编排 / 字段形状规则：先按目标把该页动作做完再离开；首屏自动请求不是已经查询；空表不要点保存；先摊那次真实操作的请求形状，再摊可见控件，表上已经按目标填过后再改一个值看哪个请求键变了；值相等、字段名相似、排除法不能单独定案；对得上可改控件就是调用方且必须进 schema；`readonly`/`disabled` 灰框是系统；树/页签/区间日期同样是调用方；弹层选人/选记录若提交对象数组，就保留一个多选字段并用 `element_template` 从实时选项行组装对象；可增行按行填写再组装成一个对象数组 path，列名用各分区表头原文，同一键不同表头写 `x-dano-section-titles`，不要把同名 textarea 当成行，也不要把一个数组拆成多个调用方数组或收成一段字符串；空容器有上传/选人/可增行控件仍是调用方；确认弹层可填意见完整处理，没有请求键就 unresolved，不要编造写请求里没有的键；无控件的 execute query/body 键按身份或原值交给系统，并只写进 execute 系统栏；打开表单附带列表与弹层翻页不进写入能力系统栏。名字与页面原文一致，去掉星号。
 - 最终 `result` 必须完整、可编排、可执行：每个点过的独立动作都在，关联和顺序能执行，字段处理逻辑与真实请求一致。
 - 证据不够、台账对不齐、点过的独立动作做不成能力时：写入 `unresolved`，不要猜测成看似可用的残缺能力。导出层只拒绝这种能力缺口。
 - 字段来源写不出时：标系统自动处理，`default_value` 用请求原值。不要猜测来源，也不要因此阻止导出。
 
 以后再碰到识别缺口，先回到本文件补**通用形状规则**，不要给某一页打补丁：
 
+- 首屏自动请求不是已经查询；空表保存不是调查。
 - 点加行才出现的输入框 → 调用方按行提供，系统再组装成一个数组。
 - 弹层勾选记录、execute 提交对象数组 → 调用方选择显示项，系统按实时响应组装原数组对象，不能写死本场所选行。
 - 同名大段 textarea ≠ 这些行。

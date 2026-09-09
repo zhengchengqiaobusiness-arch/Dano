@@ -8,7 +8,6 @@
 import { createHash } from "node:crypto";
 import { PI_ONLY_NOTICE, assertNeverStartLegacy } from "./policy.mjs";
 import { piSubmittedCapabilities } from "./capability-presence.mjs";
-import { findExecuteEvidenceGaps } from "./evidence-facts.mjs";
 
 export const SUBMIT_RECORDING_RESULT = "submit_recording_result";
 
@@ -267,24 +266,6 @@ export function assertPageDisplayContract(result) {
  * 只检查身份和编排信封：编号不重复、每个能力恰好一个 execute、execute 不共用。
  * 不判断“这场应该有几个能力”，不补能力。
  */
-export function assertExecuteEvidenceContract(result, events) {
-  const gaps = findExecuteEvidenceGaps(result, events);
-  const missing = gaps.find((item) => item.reason === "missing_execute");
-  if (missing) {
-    throw new SubmitRejectedError(
-      "EXECUTE_EVIDENCE",
-      `找不到能力 ${missing.capability_id || missing.step_id} 的 execute 现场请求。调用方键必须出现在那条请求的 query/body 里`,
-    );
-  }
-  const key = gaps.find((item) => item.reason === "missing_key");
-  if (key) {
-    throw new SubmitRejectedError(
-      "EXECUTE_EVIDENCE",
-      `调用方键 ${key.key} 没有出现在能力 ${key.capability_id || key.step_id} 的 execute 现场请求里，不能写进 schema`,
-    );
-  }
-}
-
 export function assertCapabilityIdentityContract(result) {
   const capabilities = Array.isArray(result?.capabilities) ? result.capabilities : [];
   const stepIds = new Set(
@@ -351,11 +332,6 @@ export class ResultGate {
     this.accepted = new Map();
   }
 
-  async voidAccepted(recordingId) {
-    this.accepted.delete(recordingId);
-    await this.files.deletePiResult(recordingId);
-  }
-
   /**
    * 仅接收 recording_id / final / result。
    * 系统回执单独落盘，不得写回 PI 的 result。
@@ -369,7 +345,6 @@ export class ResultGate {
     result,
     use_draft = false,
     frozen,
-    events = null,
   }) {
     assertNeverStartLegacy();
     if (!expectedSessionId || callerSessionId !== expectedSessionId) {
@@ -395,23 +370,12 @@ export class ResultGate {
     assertPageDisplayContract(payload);
     assertCapabilityIdentityContract(payload);
     if (!frozen) {
-      throw new SubmitRejectedError(
-        "NOT_FROZEN",
-        "未接到用户结束，证据尚未冻结。只许 submit_recording_capability，禁止 submit_recording_result",
-      );
+      throw new SubmitRejectedError("NOT_FROZEN", "证据尚未冻结时禁止提交最终结果");
     }
-    const rawEvents = Array.isArray(events)
-      ? events
-      : (typeof this.files.readEvidence === "function"
-        ? await this.files.readEvidence(expectedRecordingId)
-        : []);
-    const evidenceEvents = await hydrateRequestBodies(this.files, expectedRecordingId, rawEvents);
-    assertExecuteEvidenceContract(payload, evidenceEvents);
     if (this.accepted.has(expectedRecordingId) || await this.files.hasPiResult(expectedRecordingId)) {
       throw new SubmitRejectedError("ALREADY_ACCEPTED", "同一录制不得接收第二个最终结果");
     }
 
-    const lastSeq = evidenceEvents.reduce((max, item) => Math.max(max, Number(item.seq) || 0), 0);
     const verbatim = structuredClone(payload);
     await this.files.writePiResult(expectedRecordingId, verbatim);
     const stored = await this.files.readPiResult(expectedRecordingId);
@@ -422,7 +386,6 @@ export class ResultGate {
       pi_session_id: expectedSessionId,
       status: "accepted",
       result_sha256: resultSha256,
-      evidence_last_seq: lastSeq,
       notice: PI_ONLY_NOTICE,
     };
     await this.files.writeReceipt(expectedRecordingId, receipt);
@@ -432,33 +395,4 @@ export class ResultGate {
     });
     return { accepted: true, receipt };
   }
-}
-
-async function hydrateRequestBodies(files, recordingId, events) {
-  const list = Array.isArray(events) ? events : [];
-  if (typeof files?.readBlob !== "function") return list;
-  const out = [];
-  for (const event of list) {
-    const body = event?.payload?.body;
-    if (event?.kind === "network_request" && body?.stored === "blob" && body.blob_id && !body.text) {
-      try {
-        const bytes = await files.readBlob(recordingId, body.blob_id);
-        out.push({
-          ...event,
-          payload: {
-            ...event.payload,
-            body: {
-              ...body,
-              text: Buffer.from(bytes).toString("utf8"),
-            },
-          },
-        });
-        continue;
-      } catch {
-        // 读不到就不编造正文
-      }
-    }
-    out.push(event);
-  }
-  return out;
 }

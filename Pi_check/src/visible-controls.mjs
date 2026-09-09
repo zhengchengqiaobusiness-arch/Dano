@@ -123,6 +123,19 @@ export function collectPageFacts() {
     node.closest?.("aside, .el-aside, .ant-layout-sider, [class*='sidebar'], [class*='sider']"),
   );
   const tableRoot = (node) => node.closest?.("table, .el-table, .ant-table, .vxe-table, tbody, thead");
+  const inChrome = (node) => {
+    if (!node) return false;
+    if (dialogRoot(node) || tableRoot(node) || inFilter(node) || inSidebar(node)) return false;
+    if (node.closest?.("header, [role='banner'], .el-header, .ant-layout-header")) return true;
+    if (node.closest?.("[class*='topbar'], [class*='navbar']")) return true;
+    const nav = node.closest?.("nav");
+    return Boolean(nav && !nav.closest?.(PAGINATION_SELECTOR));
+  };
+  const isBusinessLabel = (value) => {
+    const text = compactText(String(value || "").replace(/^[＊*\s]+/, "").replace(/[＊*]\s*$/g, ""));
+    if (!text) return false;
+    return !/^\d+$/.test(text);
+  };
   const regionOf = (node) => {
     if (dialogRoot(node)) return "dialog";
     if (tableRoot(node)) return "table";
@@ -528,13 +541,18 @@ export function collectPageFacts() {
     seenSnap.add(node);
     for (const inner of node.querySelectorAll?.("input, textarea, select") || []) seenSnap.add(inner);
     const input = firstInput(node) || (node.matches?.("input, textarea, select") ? node : null);
+    const inputs = [...(node.querySelectorAll?.("input") || [])];
     const label = extras.label || nearbyLabel(node) || nearbyHeading(node) || compactText(node.getAttribute?.("aria-label"));
+    const controlKind = extras.control_kind || detectKind(node, `${label} ${extras.placeholder || ""}`);
+    const range = extras.range ?? (controlKind === "date" && dateRange(node));
     const placeholder = compactText(
       extras.placeholder
+      || (range
+        ? inputs.map((item) => item.getAttribute?.("placeholder")).filter(Boolean).join(" → ")
+        : "")
       || input?.getAttribute?.("placeholder")
       || node.getAttribute?.("placeholder"),
     );
-    const controlKind = extras.control_kind || detectKind(node, `${label} ${placeholder}`);
     const locked = widgetLocked(node, input, controlKind);
     const ref = `c${snapshotControls.length + 1}`;
     mark(node, ref);
@@ -546,8 +564,11 @@ export function collectPageFacts() {
       placeholder,
       readonly: locked,
       disabled: locked,
+      range,
       options: extras.options || optionTexts(node),
-      selector: placeholder ? `placeholder=${placeholder}` : (label ? `label=${cleanLabel(label)}` : `ref=${ref}`),
+      selector: placeholder && !placeholder.includes(" → ")
+        ? `placeholder=${placeholder}`
+        : (label ? `label=${cleanLabel(label)}` : (placeholder ? `placeholder=${placeholder.split(" → ")[0]}` : `ref=${ref}`)),
     });
   };
   for (const host of document.querySelectorAll(WIDGET_HOST_SELECTOR)) {
@@ -563,10 +584,7 @@ export function collectPageFacts() {
     });
   }
   for (const node of document.querySelectorAll("button, [role='button'], a.ant-btn, .el-button, input[type='button'], input[type='submit']")) {
-    if (!snapshotVisible(node) || seenSnap.has(node) || inPagination(node)) continue;
-    seenSnap.add(node);
-    const ref = `a${snapshotActions.length + 1}`;
-    mark(node, ref);
+    if (!snapshotVisible(node) || seenSnap.has(node) || inPagination(node) || inChrome(node)) continue;
     const label = cleanLabel(
       node.getAttribute?.("aria-label")
       || node.innerText
@@ -574,11 +592,16 @@ export function collectPageFacts() {
       || node.getAttribute?.("name")
       || textOf(node),
     );
+    if (!isBusinessLabel(label)) continue;
+    seenSnap.add(node);
+    const ref = `a${snapshotActions.length + 1}`;
+    mark(node, ref);
     snapshotActions.push({
       ref,
       label,
       kind: "button",
-      selector: label ? `role=button[name="${label}"]` : `ref=${ref}`,
+      region: regionOf(node),
+      selector: `role=button[name="${label}"]`,
     });
   }
   const pickRowName = (text) => {
@@ -588,7 +611,9 @@ export function collectPageFacts() {
   };
   const pushSelectable = (node, label, kind) => {
     const text = cleanLabel(label);
-    if (!text || seenSnap.has(node) || inPagination(node) || snapshotActions.length >= 80) return;
+    if (!isBusinessLabel(text) || seenSnap.has(node) || inPagination(node) || inChrome(node) || snapshotActions.length >= 80) {
+      return;
+    }
     seenSnap.add(node);
     const ref = `a${snapshotActions.length + 1}`;
     mark(node, ref);
@@ -596,9 +621,18 @@ export function collectPageFacts() {
       ref,
       label: text,
       kind,
+      region: regionOf(node),
       selector: kind === "checkbox" ? `role=checkbox[name="${text}"]` : `text=${text}`,
     });
   };
+  const seenTreeLabel = new Set();
+  for (const node of document.querySelectorAll("[role='treeitem'], .el-tree-node__label, .ant-tree-title")) {
+    if (!snapshotVisible(node) || inChrome(node) || inPagination(node)) continue;
+    const text = cleanLabel(node.getAttribute?.("aria-label") || textOf(node));
+    if (!isBusinessLabel(text) || seenTreeLabel.has(text)) continue;
+    seenTreeLabel.add(text);
+    pushSelectable(node, text, "treeitem");
+  }
   for (const node of document.querySelectorAll(
     "[role='checkbox'], .el-checkbox, .ant-checkbox-wrapper, label.el-checkbox, input[type='checkbox']",
   )) {

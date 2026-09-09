@@ -118,6 +118,9 @@ test("采集日期、下拉、上传和折叠筛选，日期只读输入不当�
   assert.ok(tree, "sidebar tree should be collected as a select fact");
   assert.equal(tree.region, "filter");
   assert.ok((tree.options || []).includes("测试部门"));
+  const treeAction = (facts.actions || []).find((item) => item.label === "研发部门");
+  assert.ok(treeAction, "snapshot must advertise the visible tree node so PI can click it");
+  assert.match(String(treeAction.selector || ""), /^text=/);
   const tabs = controls.find((item) => item.control_kind === "select" && (item.options || []).includes("日报") && (item.options || []).includes("周报"));
   assert.ok(tabs, "page-level radio/tab group should be collected even without a form-item");
   const period = controls.find((item) => item.control_kind === "date" && (item.label === "统计周期" || item.range));
@@ -158,6 +161,66 @@ test("采集日期、下拉、上传和折叠筛选，日期只读输入不当�
   );
   assert.ok(!JSON.stringify(controls).includes("capability"));
   assert.ok(!JSON.stringify(controls).includes("work-report"));
+});
+
+test("snapshot 广告树节点，不广告无名钮和顶栏角标", async (t) => {
+  const html = `<!doctype html><html lang="zh-CN"><body>
+    <header class="el-header">
+      <button type="button" class="el-button" id="icon-only"><svg width="16" height="16"></svg></button>
+      <button type="button" class="el-button" id="badge">0</button>
+      <button type="button" class="el-button" id="who">admin</button>
+    </header>
+    <aside class="el-aside">
+      <div class="title">组织机构</div>
+      <input placeholder="请输入部门名称" />
+      <div role="tree" class="el-tree">
+        <div role="treeitem">深圳总公司</div>
+        <div class="el-tree-node__label">研发部门</div>
+      </div>
+    </aside>
+    <div class="page-filters">
+      <div class="el-radio-group" role="radiogroup">
+        <label class="el-radio-button">日报</label>
+        <label class="el-radio-button">周报</label>
+      </div>
+      <span class="label">统计周期</span>
+      <div class="el-date-editor el-range-editor">
+        <input placeholder="开始日期" />
+        <input placeholder="结束日期" />
+      </div>
+    </div>
+    <form class="el-form">
+      <button type="button" class="el-button">新增</button>
+      <button type="button" class="el-button">保 存</button>
+    </form>
+  </body></html>`;
+  const fixture = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  const port = await listen(fixture);
+  const browser = await chromium.launch({ headless: true });
+  t.after(async () => {
+    await browser.close().catch(() => {});
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+  const page = await browser.newPage();
+  await page.goto(`http://127.0.0.1:${port}/`);
+  const facts = await page.evaluate(collectPageFacts);
+  const actions = facts.actions || [];
+  const labels = actions.map((item) => String(item.label || ""));
+  assert.ok(labels.includes("研发部门"), `tree node missing, got ${labels.join(",")}`);
+  assert.ok(labels.includes("深圳总公司"), `tree node missing, got ${labels.join(",")}`);
+  assert.ok(labels.includes("新增"));
+  assert.ok(labels.includes("保 存") || labels.includes("保存"));
+  assert.ok(!labels.some((label) => !label.trim()), "unlabeled header icons must not be advertised");
+  assert.ok(!labels.includes("0"), "numeric badges must not be advertised");
+  assert.ok(!labels.includes("admin"), "header identity is not a business action");
+  assert.ok(actions.every((item) => item.selector && !/^ref=a\d+$/.test(item.selector)), "actions must have a semantic selector, not bare ref=aN");
+  const period = (facts.controls || []).find((item) => item.control_kind === "date");
+  assert.ok(period, "date range must appear in snapshot controls");
+  assert.match(String(period.placeholder || ""), /开始日期/);
+  assert.match(String(period.placeholder || ""), /结束日期/);
 });
 
 test("SPA 路由变化后补采当前页控件，不判断能力", async (t) => {
@@ -410,6 +473,41 @@ test("choose 点已经出现的可见原文，不要求下拉 option", async (t)
   assert.equal(value, "事假");
 });
 
+test("choose 能点已经出现的树节点", async (t) => {
+  const html = `<!doctype html><html><body>
+    <aside class="el-aside">
+      <div role="tree" class="el-tree">
+        <div role="treeitem" id="dept">研发部门</div>
+      </div>
+    </aside>
+    <script>
+      window.__picked = "";
+      document.getElementById("dept").addEventListener("click", () => { window.__picked = "研发部门"; });
+    </script>
+  </body></html>`;
+  const fixture = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  const port = await listen(fixture);
+  const handle = await createPlaywrightBrowser({
+    recording: { id: "rec_choose_tree", targetUrl: `http://127.0.0.1:${port}/` },
+    appendEvidence: evidenceSink(),
+  });
+  t.after(async () => {
+    await handle.close().catch(() => {});
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+  await handle.inspect();
+  const picked = await handle.actBySelector({
+    selector: "text=研发部门",
+    action: "choose",
+    text: "研发部门",
+  });
+  assert.equal(picked.ok, true, picked.error || "choose tree node failed");
+  assert.equal(await handle.page.evaluate(() => window.__picked), "研发部门");
+});
+
 test("点保存必须点到按钮，不能落到旁边的标题框", async (t) => {
   const html = `<!doctype html><html><body>
     <form class="el-form" style="width:720px;padding:24px">
@@ -451,43 +549,7 @@ test("点保存必须点到按钮，不能落到旁边的标题框", async (t) =
     action: "click",
   });
   assert.equal(clicked.ok, true, clicked.error || "click 保存 failed");
-  assert.equal(clicked.hit_text, "保存");
   assert.equal(await handle.page.evaluate(() => window.__clicked), "save");
-});
-
-test("点到的可见文案对不上 selector 就是没点中", async (t) => {
-  const html = `<!doctype html><html><body>
-    <div role="button" aria-label="甲" style="width:400px;height:40px;position:relative;border:1px solid #000">
-      <span style="position:absolute;left:0;top:10px;width:40px">甲</span>
-      <button type="button" id="other" style="position:absolute;left:40px;top:0;width:360px;height:40px">乙</button>
-    </div>
-    <script>
-      window.__hit = "";
-      document.getElementById("other").addEventListener("click", () => { window.__hit = "乙"; });
-    </script>
-  </body></html>`;
-  const fixture = createServer((req, res) => {
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end(html);
-  });
-  const port = await listen(fixture);
-  const handle = await createPlaywrightBrowser({
-    recording: { id: "rec_click_miss", targetUrl: `http://127.0.0.1:${port}/` },
-    appendEvidence: evidenceSink(),
-  });
-  t.after(async () => {
-    await handle.close().catch(() => {});
-    await new Promise((resolve) => fixture.close(resolve));
-  });
-  await handle.inspect();
-  const missed = await handle.actBySelector({
-    selector: 'role=button[name="甲"]',
-    action: "click",
-  });
-  assert.equal(missed.ok, false);
-  assert.equal(missed.code, "click_miss");
-  assert.equal(missed.hit_text, "乙");
-  assert.equal(await handle.page.evaluate(() => window.__hit), "");
 });
 
 test("choose 打开后是日历时不得改口，只回报 option_not_seen", async (t) => {

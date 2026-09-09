@@ -105,6 +105,7 @@ export function createPiToolHost({
   gate,
   getPiSessionId,
   getBrowser = null,
+  freezeEvidence = null,
   onAssist = null,
 }) {
   return {
@@ -264,7 +265,7 @@ export function createPiToolHost({
         final: false,
         capability_count: merged.capabilities.length,
         capability_ids: merged.capabilities.map((item) => item.capability_id),
-        next_action: "该项已保存。继续按 Skill 调查或交下一项已有真实 execute 形状的能力。未接到用户结束，禁止 submit_recording_result。",
+        next_action: "该项已保存。继续按 Skill 调查或交下一项已有真实 execute 形状的能力；台账齐了用 submit_recording_result({final:true, use_draft:true})。",
       };
     },
     async control_in_app_browser({
@@ -379,8 +380,11 @@ export function createPiToolHost({
       return { saved: true, final: false };
     },
     async [SUBMIT_RECORDING_RESULT]({ recording_id, final, result, use_draft = false }) {
-      const session = evidence.snapshot(recordingId);
-      const events = await files.readEvidence(recordingId).catch(() => []);
+      let session = evidence.snapshot(recordingId);
+      if (!session.frozen && typeof freezeEvidence === "function") {
+        await freezeEvidence();
+        session = evidence.snapshot(recordingId);
+      }
       return gate.submitRecordingResult({
         recordingId: recording_id,
         expectedRecordingId: recordingId,
@@ -390,7 +394,6 @@ export function createPiToolHost({
         result,
         use_draft,
         frozen: Boolean(session.frozen),
-        events,
       });
     },
   };
@@ -494,7 +497,7 @@ export function describePiTools() {
     {
       name: "submit_recording_capability",
       label: "提交一项能力",
-      description: "把一项完整能力及其 steps 写入草稿。该项须已有真实 execute 形状。同一 capability_id 会替换旧项。人点的和你点的都要交。不要在对话里写 JSON。未接到用户结束，不要调用 submit_recording_result。",
+      description: "把一项完整能力及其 steps 写入草稿。该项须已有真实 execute 形状。同一 capability_id 会替换旧项。人点的和你点的都要交。不要在对话里写 JSON。全部交完后用 submit_recording_result({final:true, use_draft:true}) 定稿。",
       parameters: {
         type: "object",
         properties: {
@@ -511,7 +514,7 @@ export function describePiTools() {
     {
       name: "control_in_app_browser",
       label: "Control In App Browser",
-      description: "按 Control In App Browser Skill 操作应用内浏览器。人同时也可以点预览。action=open_page|list_pages|snapshot|screenshot|click|fill|select|choose|press|fill_fields|network_since|assist。先 snapshot 和 network_since。只用 snapshot 广告的 placeholder= / label= / role= / text= / ref=。禁止 name=、#id、CSS，禁止改点没有业务文案的 aN。fill 就写，不会改口成下拉；写不进回 not_writable。choose 点已经出现的可见原文（选项/单选/分段/页签）；没有该项回 option_not_seen 并说明打开后是列表还是日历。click 回报实际点到的可见文案；对不上所点 selector 回 click_miss，不算点中。普通框可用 fill_fields 一次填。点或填后看 network_since。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回页面摘要和控件，禁止把图片写进对话。登录、写不进的字段、点了不发网的保存用 assist，不要锁预览。本工具不提交能力。",
+      description: "按 Control In App Browser Skill 操作应用内浏览器。人同时也可以点预览。action=open_page|list_pages|snapshot|screenshot|click|fill|select|choose|press|fill_fields|network_since|assist。先 snapshot 和 network_since。只用 snapshot 广告的 placeholder= / label= / role= / text= / ref=。禁止 name=、#id、CSS，禁止改点没有业务文案的 aN。fill 就写，不会改口成下拉；写不进回 not_writable。choose 点已经出现的可见原文（选项/单选/分段/页签）；没有该项回 option_not_seen 并说明打开后是列表还是日历。普通框可用 fill_fields 一次填。点或填后看 network_since。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回页面摘要和控件，禁止把图片写进对话。登录、写不进的字段、点了不发网的保存用 assist，不要锁预览。本工具不提交能力。",
       parameters: {
         type: "object",
         properties: {
@@ -549,7 +552,7 @@ export function describePiTools() {
     {
       name: SUBMIT_RECORDING_RESULT,
       label: "最终结果",
-      description: "唯一最终提交入口。仅在用户结束、证据已冻结后调用。直播中禁止。可提交完整 result，或 use_draft=true 把已用 submit_recording_capability 写入的草稿定稿。系统原样保存，不会补齐、修改或自行冻结。信封必须是现有录制页能直接渲染的 draft：每个独立动作一项能力；capability_id 不重复；每个能力恰好一个不共用的 execute；request_refs 为 {step_id,usage} 对象；steps[].params 为含 key/path 的数组；调用方字段写在 capability.input_schema.properties，且必须出现在该 execute 现场请求的 query/body；可改树/下拉必须写 x-dano-option-source 或完整 {label,value}，禁止只写 type=number；禁止只写 capabilities[].fields。",
+      description: "唯一最终提交入口。可提交完整 result，或 use_draft=true 把已用 submit_recording_capability 写入的草稿定稿。程序会先冻结再交给闸门。系统原样保存，不会补齐或修改。信封必须是现有录制页能直接渲染的 draft：每个独立动作一项能力；capability_id 不重复；每个能力恰好一个不共用的 execute；request_refs 为 {step_id,usage} 对象；steps[].params 为含 key/path 的数组；调用方字段写在 capability.input_schema.properties；可改树/下拉必须写 x-dano-option-source 或完整 {label,value}，禁止只写 type=number；禁止只写 capabilities[].fields。",
       parameters: {
         type: "object",
         properties: {

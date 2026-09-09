@@ -65,8 +65,8 @@ ${browserSkill ? `## Control In App Browser\n\n${browserSkill}\n` : ""}
 
 信封（录制页能读到才算交上，细节以 Skill 为准）：
 - 不要写 capabilities[].fields。request_refs 必须是 {step_id, usage} 对象。steps[].params 必须是含 key/path 的对象数组。调用方字段必须出现在 input_schema.properties 或这些 params 里。
-- 未接到用户结束（frozen=false）禁止 submit_recording_result，只许 submit_recording_capability。
-- submit_recording_result 必须包含 recording_id、final=true；完整 result 或 use_draft=true。调用方键必须出现在该 execute 现场请求的 query/body。
+- 未接到用户结束禁止 submit_recording_result，只许 submit_recording_capability。
+- submit_recording_result 必须包含 recording_id、final=true；完整 result 或 use_draft=true。
 - 先用 list_action_timeline 建台账。每个独立业务动作都要有能力或 unresolved。capability_id 不得重复。每个能力恰好一个不共用的 execute。
 - 系统会原样保存 result，不会补齐、改写或生成替代能力。
 `;
@@ -82,25 +82,26 @@ export function buildUserSteerPrompt(text, { finalizing = false } = {}) {
   if (finalizing) {
     return (
       `用户说：${body}\n` +
-      `先用一两句话回答用户。不要再 click。证据已冻结。已有草稿就立刻 submit_recording_result({final:true, use_draft:true})。没有完整能力就先按 Skill 交已有真实 execute 形状的项。`
+      `先用一两句话回答用户。不要再 click。已有草稿就立刻 submit_recording_result({final:true, use_draft:true})。没有完整能力就先按 Skill 交已有真实 execute 形状的项。`
     );
   }
   return (
     `用户说：${body}\n` +
-    `这是对话。先用一两句话回答这句话，然后按 Skill 用 control_in_app_browser 观察或做最小操作，不要盲点，不要 invent selector。人也可以点预览。不要锁预览。该项有真实 execute 形状再 submit_recording_capability。未接到用户结束，禁止 submit_recording_result。`
+    `这是对话。先用一两句话回答这句话，然后按 Skill 用 control_in_app_browser 继续当前页目标，不要盲点，不要 invent selector。人也可以点预览。不要锁预览。按目标做完的那次操作有真实 execute 形状再 submit_recording_capability。未接到用户结束，禁止 submit_recording_result。`
   );
 }
 
 export function buildLiveDrivePrompt({ targetUrl = "", goal = "" } = {}) {
   return (
-    `你是操作者。人也同时可以点预览，共用这一页。\n` +
+    `你是操作者。人也同时可以点预览，共用这一页。调查顺序以 Skill 为准。\n` +
     `目标：${String(goal || "").trim() || "把该页独立业务动作做成可调用能力"}\n` +
     `入口：${String(targetUrl || "").trim()}\n` +
-    `按 Skill 用 control_in_app_browser：open_page → snapshot → network_since。先观察再最小设值，不要盲点。\n` +
-    `只用 snapshot 广告的 placeholder= / label= / role= / text= / ref=。禁止 name=、#id、CSS，禁止改点没有业务文案的 aN。fill 就写，写不进回 not_writable。choose 点可见原文；没有该项看打开后是列表还是日历。click 回报实际点到的可见文案，对不上 selector 就是 click_miss。打开弹层后再 snapshot 一次。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回摘要，不要把图片写进对话。人点过的看 recentUserActions。\n` +
+    `按 Skill 用 control_in_app_browser：open_page → snapshot → network_since。先观察，再按目标把当前动作的可见字段写上，再点该动作自己的查询或保存。不要盲点。\n` +
+    `只用 snapshot 广告的 placeholder= / label= / role= / text= / ref=。禁止 name=、#id、CSS，禁止改点没有业务文案的 aN。fill 就写，写不进回 not_writable。choose 点可见原文；没有该项看打开后是列表还是日历。打开弹层后再 snapshot 一次。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回摘要，不要把图片写进对话。人点过的看 recentUserActions。\n` +
+    `首屏自动请求不是已经做完。表单还是空的，不要点保存。没有搜索/查询文案时，点已经出现的树或列表节点。禁止点没文案的 aN。\n` +
     `readonly/disabled 只表示整个控件不能改。默认已选仍是调用方，不要写成无独立来源。\n` +
-    `填或点之后立刻 network_since 或 read_request_shape。该项有真实 execute 形状后再 submit_recording_capability。人点出的动作也要交。禁止交空壳。\n` +
-    `登录、验证码、写不进的字段、点了不发网的保存：action=assist，预览不要锁。写入真实数据前若目标没授权，先 assist。\n` +
+    `按目标做完的那次操作发出真实 execute 后再 submit_recording_capability。人点出的动作也要交。禁止交空壳。\n` +
+    `登录、验证码、写不进的字段、点了不发网的保存：action=assist，预览不要锁。写入真实数据前若目标没授权，先 assist。协助之后不要再 click。\n` +
     `未接到用户结束，禁止 submit_recording_result。不要把 JSON 写在对话里。不要写 capabilities[].fields。`
   );
 }
