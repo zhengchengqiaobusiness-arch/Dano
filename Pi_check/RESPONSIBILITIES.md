@@ -2,6 +2,8 @@
 
 PI 加载且只加载四个 Skill。Investigator 是唯一入口。代码是冻住的运输层。
 
+自动控制。只有登录、验证码、写不进、点了不发网这类阻断才请人。目标页做完且台账齐了就出包定稿，不要等用户说结束。
+
 ```text
 用户目标 + 入口 URL
         ↓
@@ -15,7 +17,7 @@ PI = Business Skill Investigator
 
 | 文件 | 负责 | 禁止 |
 | --- | --- | --- |
-| `skill/BUSINESS_SKILL_INVESTIGATOR.md` | 目标、台账、下一步、分诊、导出条件 | 字段规则、selector、source_kind |
+| `skill/BUSINESS_SKILL_INVESTIGATOR.md` | 目标、台账、下一步、分诊、目标做完即出包定稿 | 字段规则、selector、source_kind |
 | `skill/CONTROL_IN_APP_BROWSER.md` | 点、填、选、快照、图像、同源前端 | 交能力、认来源 |
 | `skill/INFER_BUSINESS_CONTRACT.md` | 切能力、来源、绑定、信封 | 点页面、写消费者包、冻录制值结案 |
 | `skill/BUILD_AND_VALIDATE_DEDICATED_SKILL.md` | 写包、投影、隔离运行、能不能发布 | 回头猜页面 |
@@ -38,8 +40,8 @@ PI = Business Skill Investigator
 
 | 现象 | 只改 |
 | --- | --- |
-| 目标理解错、过早定稿、校验失败分诊错 | Skill 1 |
+| 目标理解错、该产出却空转、不该发布却定稿、分诊错 | Skill 1 |
 | 点不到、选不上、该看图没看、没验证写上 | Skill 2 |
-| 切错能力、来源错、绑错、冻录制值、分区弹层 | Skill 3 |
+| 切错能力、来源错、绑错、冻录制值、灰框进调用方、假 links、错挂 preflight、分区行不全 | Skill 3 |
 | 触发差、披露不对、执行器与合同不一致、不该发布 | Skill 4 |
 | 点了没反应、图送不进、证据丢失、投影工具补了键 | 才改代码 |

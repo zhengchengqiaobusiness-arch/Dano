@@ -11,9 +11,9 @@ description: Recording contract and capability envelope for Dano PI sessions. Us
 
 | 现象 | 只改 |
 | --- | --- |
-| 目标、台账、过早定稿、分诊 | `Pi_check/skill/BUSINESS_SKILL_INVESTIGATOR.md` |
+| 目标、台账、该产出却空转、不该发布却定稿、分诊 | `Pi_check/skill/BUSINESS_SKILL_INVESTIGATOR.md` |
 | 点、填、选、图、同源前端 | `Pi_check/skill/CONTROL_IN_APP_BROWSER.md` |
-| 切能力、来源、绑定、信封 | `Pi_check/skill/INFER_BUSINESS_CONTRACT.md` |
+| 切能力、来源、绑定、信封、残缺合同、假 links、错挂 preflight | `Pi_check/skill/INFER_BUSINESS_CONTRACT.md` |
 | handbook、投影、能不能发布 | `Pi_check/skill/BUILD_AND_VALIDATE_DEDICATED_SKILL.md` |
 
 代码只运输。详见 `Pi_check/RESPONSIBILITIES.md`。

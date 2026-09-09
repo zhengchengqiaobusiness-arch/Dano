@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 const BASE = process.env.PI_CHECK_URL || "http://127.0.0.1:18080";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const targetUrl = process.argv[2] || "http://boot.dianshixinxi.com:90/oa/duty/dutyLeaveApply?billType=duty_leave";
-const goal = process.argv[3] || "按 Skill 把该页独立业务动作做成可调用能力：先观察和看网，再按目标把当前动作的可见字段写上，再点该动作自己的查询或保存。空表不要点保存。首屏自动请求不是已经做完。有按目标做完的真实 execute 再交能力。未接到用户结束不要定稿。不要盲点，不要锁预览，不要把 JSON 写在对话里。";
+const goal = process.argv[3] || "按 Skill 把该页独立业务动作做成可调用能力。自动控制。只有阻断才请人。目标做完就交能力、出包、定稿。不要等用户说结束。不要锁预览，不要把 JSON 写在对话里。";
 const maxWaitMs = Number(process.env.LIVE_RECORD_WAIT_MS || 420000);
 
 async function readJson(response) {
