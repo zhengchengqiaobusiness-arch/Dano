@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 import uuid
 
 import structlog
-from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -1762,9 +1762,23 @@ async def export_recording_result_skill(
 
 
 @app.get("/v1/skills")
-async def list_skills(x_tenant_key: str | None = Header(default=None)) -> list[dict]:
+async def list_skills(
+    x_tenant_key: str | None = Header(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=100),
+) -> list[dict] | dict:
     tenant = await _auth_tenant(x_tenant_key)
-    return await _manifests_for_tenant(tenant)
+    items = await _manifests_for_tenant(tenant)
+    if page_size is None:
+        return items
+    total = len(items)
+    start = (page - 1) * page_size
+    return {
+        "items": items[start:start + page_size],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @app.delete("/v1/skills/{skill_id}")

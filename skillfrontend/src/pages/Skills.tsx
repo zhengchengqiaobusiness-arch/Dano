@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { Table, Tag, Button, Space, Typography, message, Empty, Modal, Input, Alert, Popconfirm, Select } from "antd";
+import { Table, Tag, Button, Space, Typography, message, Empty, Modal, Input, Alert, Popconfirm, Select, Pagination } from "antd";
+import { useNavigate } from "react-router-dom";
 import { ReloadOutlined, ExportOutlined, DeleteOutlined, KeyOutlined, PauseCircleOutlined, CheckCircleOutlined } from "@ant-design/icons";
-import { listSkills, exportAgentSkills, getExportDirectory, saveExportDirectory, deleteSkill, freezeSkill, resumeSkill, SkillManifest, SkillExportMode } from "../api/skills";
+import { listSkillsPage, exportAgentSkills, getExportDirectory, saveExportDirectory, deleteSkill, freezeSkill, resumeSkill, SkillManifest, SkillExportMode } from "../api/skills";
 import TokenModal from "../components/TokenModal";
 import { TENANT_NAME } from "../api/client";
 import { rememberExportDir, rememberedExportDir } from "../api/recording";
@@ -43,6 +44,7 @@ function groupByBusiness(skills: SkillManifest[]): Row[] {
 }
 
 export default function Skills() {
+  const nav = useNavigate();
   const [data, setData] = useState<SkillManifest[]>([]);
   const [loading, setLoading] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
@@ -50,6 +52,9 @@ export default function Skills() {
   const [exportMode, setExportMode] = useState<SkillExportMode>("package");
   const [exporting, setExporting] = useState(false);
   const [tokenSub, setTokenSub] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(8);
+  const [total, setTotal] = useState(0);
   const tenant = localStorage.getItem(TENANT_NAME) || "";
 
   async function loadExportDir() {
@@ -104,7 +109,9 @@ export default function Skills() {
     try {
       const r = await deleteSkill(skill.name);
       message.success(`已删除 ${skillDisplayId(skill)}(${r.deleted} 条资产,清理 ${r.removed_folders?.length || 0} 个文件夹)`);
-      load();
+      const nextPage = data.length <= 1 && page > 1 ? page - 1 : page;
+      if (nextPage !== page) setPage(nextPage);
+      else void load(page, pageSize);
     } catch (e: any) {
       message.error("删除失败:" + (e?.response?.data?.detail || e.message));
     }
@@ -114,7 +121,7 @@ export default function Skills() {
     try {
       const r = await freezeSkill(skill.name);
       message.success(`已冻结 ${skillDisplayId(skill)}(清理 ${r.removed_folders?.length || 0} 个文件夹)`);
-      load();
+      void load(page, pageSize);
     } catch (e: any) {
       message.error("冻结失败:" + (e?.response?.data?.detail || e.message));
     }
@@ -124,44 +131,60 @@ export default function Skills() {
     try {
       const r = await resumeSkill(skill.name);
       message.success(`已恢复 ${skillDisplayId(skill)}(${r.state})`);
-      load();
+      void load(page, pageSize);
     } catch (e: any) {
       message.error("恢复失败:" + (e?.response?.data?.detail || e.message));
     }
   }
 
-  async function load() {
+  async function load(nextPage = page, nextSize = pageSize) {
     setLoading(true);
     try {
-      setData(await listSkills());
+      const result = await listSkillsPage(nextPage, nextSize);
+      setData(result.items || []);
+      setTotal(Number(result.total) || 0);
+      setPage(Number(result.page) || nextPage);
+      setPageSize(Number(result.page_size) || nextSize);
     } catch (e: any) {
       message.error("加载失败:" + (e?.response?.data?.detail || e.message));
     } finally {
       setLoading(false);
     }
   }
-  useEffect(() => { load(); }, []);
+  useEffect(() => { void load(page, pageSize); }, [page, pageSize]);
   useEffect(() => {
-    const refresh = () => { void load(); };
+    const refresh = () => { void load(page, pageSize); };
     const stop = observeSkillCatalogChanges(refresh);
     window.addEventListener("focus", refresh);
     return () => {
       stop();
       window.removeEventListener("focus", refresh);
     };
-  }, []);
+  }, [page, pageSize]);
   useEffect(() => {
     if (exportOpen) void loadExportDir();
   }, [exportOpen]);
 
   return (
-    <div>
+    <div className="skill-catalog-page">
+      <div className="skill-catalog-body">
       <Table<Row>
         rowKey="name"
+        size="small"
         loading={loading}
         dataSource={groupByBusiness(data)}
         expandable={{ defaultExpandAllRows: true }}
-        locale={{ emptyText: <Empty description="本租户暂无已发布 Skill,先去接入系统生成" /> }}
+        pagination={false}
+        locale={{ emptyText: (
+          <Empty
+            description={(
+              <Space direction="vertical" size={8}>
+                <span>本租户暂无已发布 Skill,先去接入系统生成</span>
+                <Button type="link" onClick={() => nav("/onboard")}>去接入系统(API)</Button>
+              </Space>
+            )}
+          />
+        ) }}
         columns={[
           {
             title: "Skill",
@@ -188,7 +211,7 @@ export default function Skills() {
                 <Button size="small" icon={<ExportOutlined />} onClick={() => setExportOpen(true)} disabled={!data.length}>
                   导出为 pi skill
                 </Button>
-                <Button size="small" icon={<ReloadOutlined />} onClick={load}>刷新</Button>
+                <Button size="small" icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>刷新</Button>
               </Space>
             ),
             width: 360,
@@ -218,6 +241,27 @@ export default function Skills() {
           },
         ]}
       />
+      </div>
+      <div className="skill-catalog-pager">
+        <Pagination
+          size="small"
+          current={page}
+          pageSize={pageSize}
+          total={total}
+          showSizeChanger
+          showQuickJumper
+          pageSizeOptions={[8, 10, 20, 50]}
+          showTotal={(count) => `共 ${count} 条`}
+          onChange={(nextPage, nextSize) => {
+            if (nextSize !== pageSize) {
+              setPage(1);
+              setPageSize(nextSize);
+              return;
+            }
+            setPage(nextPage);
+          }}
+        />
+      </div>
       <TokenModal tenant={tenant} subsystem={tokenSub || ""} open={!!tokenSub} onClose={() => setTokenSub(null)} />
 
       <Modal

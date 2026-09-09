@@ -132,6 +132,22 @@ export async function listSkills(): Promise<SkillManifest[]> {
   return data;
 }
 
+export interface SkillListPage {
+  items: SkillManifest[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export async function listSkillsPage(page: number, pageSize: number): Promise<SkillListPage> {
+  const { data } = await api.get("/v1/skills", { params: { page, page_size: pageSize } });
+  if (Array.isArray(data)) {
+    const start = (page - 1) * pageSize;
+    return { items: data.slice(start, start + pageSize), total: data.length, page, page_size: pageSize };
+  }
+  return data as SkillListPage;
+}
+
 export async function deleteSkill(skillId: string): Promise<{ deleted: number; removed_folders?: string[] }> {
   const { data } = await api.delete(`/v1/skills/${encodeURIComponent(skillId)}`);
   return data;

@@ -1,10 +1,10 @@
-import { Layout, Menu, Button, Tag, Space, Typography } from "antd";
-import { AppstoreOutlined, ImportOutlined, SafetyOutlined, LogoutOutlined, GlobalOutlined } from "@ant-design/icons";
+import { ConfigProvider, Layout } from "antd";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { clearTenant, TENANT_NAME } from "../api/client";
-import { beginFreshRecordingEntry } from "../api/recordingResume";
+import { STUDIO_THEME } from "../studioTheme";
+import StudioHeader from "./StudioHeader";
 
-const { Header, Sider, Content } = Layout;
+const { Content } = Layout;
 
 export default function AppLayout() {
   const nav = useNavigate();
@@ -15,47 +15,33 @@ export default function AppLayout() {
     : loc.pathname.startsWith("/onboard") ? "onboard" : "skills";
 
   return (
-    <Layout style={{ height: "100vh", overflow: "hidden" }}>
-      <Sider theme="light" width={210} style={{ height: "100%", overflow: "auto", borderRight: "1px solid #f0f0f0" }}>
-        <div style={{ padding: "16px 20px", fontSize: 16, fontWeight: 500 }}>Dano Skill 管理</div>
-        <Menu
-          mode="inline"
-          selectedKeys={[selected]}
-          onClick={(e) => {
-            if (e.key === "skills") nav("/skills");
-            if (e.key === "onboard") nav("/onboard");
-            if (e.key === "recording") {
-              nav("/recording", { state: beginFreshRecordingEntry(sessionStorage) });
-            }
-          }}
-          items={[
-            { key: "skills", icon: <AppstoreOutlined />, label: "Skill 目录" },
-            { key: "onboard", icon: <ImportOutlined />, label: "接入系统(API)" },
-            { key: "recording", icon: <GlobalOutlined />, label: "录制 V2" },
-            { key: "ops", icon: <SafetyOutlined />, label: "运维保障(P2)", disabled: true },
-          ]}
-        />
-      </Sider>
-      <Layout style={{ minWidth: 0, height: "100%", overflow: "hidden" }}>
-        {selected === "skills" && (
-          <Header style={{ background: "#fff", borderBottom: "1px solid #f0f0f0", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 20px", flexShrink: 0 }}>
-            <Typography.Text type="secondary">阶段一 接入生成 · 阶段三 运维</Typography.Text>
-            <Space style={{ marginLeft: "auto" }}>
-              <Tag color="blue">租户 {tenant}</Tag>
-              <Button size="small" icon={<LogoutOutlined />} onClick={() => { clearTenant(); nav("/tenant"); }}>
-                切换租户
-              </Button>
-            </Space>
-          </Header>
-        )}
+    <ConfigProvider theme={STUDIO_THEME}>
+      <div className="studio-root">
+        {selected !== "recording" ? (
+          <StudioHeader
+            current={selected === "skills" ? 3 : -1}
+            keepRecording
+            keepResult
+            onChange={(next) => {
+              if (next === 3) nav("/skills");
+              else nav("/recording");
+            }}
+            tenant={tenant}
+            onSwitchTenant={() => { clearTenant(); nav("/tenant"); }}
+          />
+        ) : null}
         <Content
-          style={selected === "recording"
-            ? { padding: 8, flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column", boxSizing: "border-box" }
-            : { padding: 20, flex: 1, minHeight: 0, overflow: "auto" }}
+          className={
+            selected === "recording"
+              ? "studio-app-content is-recording"
+              : selected === "skills"
+                ? "studio-app-content is-catalog"
+                : "studio-app-content"
+          }
         >
           <Outlet />
         </Content>
-      </Layout>
-    </Layout>
+      </div>
+    </ConfigProvider>
   );
 }

@@ -13,8 +13,6 @@ import {
   Select,
   Space,
   Spin,
-  Steps,
-  Switch,
   Table,
   Tabs,
   Tag,
@@ -46,6 +44,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useNavigate } from "react-router-dom";
 import type {
   FormEvent,
   KeyboardEvent,
@@ -73,6 +72,9 @@ import {
 } from "../api/recordingResume";
 import type { SkillGenerationRequest } from "../api/recording";
 import { getExportDirectory, saveExportDirectory } from "../api/skills";
+import { clearTenant } from "../api/client";
+import Skills from "../pages/Skills";
+import StudioHeader from "../layout/StudioHeader";
 import type {
   RecordingResultDetail,
   RecordingResultSummary,
@@ -777,6 +779,7 @@ export default function PageRecorder({
   baseUrl,
   storageState,
 }: PageRecorderProps) {
+  const nav = useNavigate();
   const setup = useMemo(readSetupDraft, []);
   const [startUrl, setStartUrl] = useState(setup.startUrl);
   const [goalText, setGoalText] = useState(setup.goalText);
@@ -785,7 +788,6 @@ export default function PageRecorder({
   const [snapshot, setSnapshot] = useState<WorkflowSnapshot | null>(null);
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
-  const [assistantOpen, setAssistantOpen] = useState(false);
   const [answer, setAnswer] = useState("");
   const [hasFrame, setHasFrame] = useState(false);
   const [finishRequested, setFinishRequested] = useState(false);
@@ -805,6 +807,7 @@ export default function PageRecorder({
   const [cancelling, setCancelling] = useState(false);
   const [history, setHistory] = useState<RecordingResultSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(Boolean(tenant));
+  const [historyOpen, setHistoryOpen] = useState(false);
   const historyBodyRef = useRef<HTMLDivElement | null>(null);
   const [historyPageSize, setHistoryPageSize] = useState(5);
   const [historyScrollY, setHistoryScrollY] = useState(240);
@@ -977,7 +980,6 @@ export default function PageRecorder({
     }
     if (reachedStage > reachedStageRef.current) {
       setViewStage(reachedStage);
-      if (reachedStage >= 1 && !resumeOnly) setAssistantOpen(true);
     }
     reachedStageRef.current = reachedStage;
   }, [reachedStage, resumeOnly]);
@@ -989,7 +991,7 @@ export default function PageRecorder({
   }, [thoughts]);
 
   useEffect(() => {
-    if (viewStage !== 0) return;
+    if (viewStage !== 0 && !historyOpen) return;
     const node = historyBodyRef.current;
     if (!node) return;
     const measure = () => {
@@ -1005,7 +1007,7 @@ export default function PageRecorder({
     const observer = new ResizeObserver(measure);
     observer.observe(node);
     return () => observer.disconnect();
-  }, [viewStage]);
+  }, [viewStage, historyOpen]);
 
   function isUsefulRecorderThought(chunk: ThoughtChunk) {
     if (chunk.kind === "tool") return true;
@@ -1336,7 +1338,6 @@ export default function PageRecorder({
     setSnapshot(failed);
     if (!resumeOnlyRef.current) {
       setKeepResult(Boolean(current.draft));
-      setAssistantOpen(true);
     }
     appendThought({ kind: "text", text: detail });
     message.error(detail);
@@ -1575,9 +1576,6 @@ export default function PageRecorder({
       && !resumeOnlyRef.current
     ) {
       setKeepResult(true);
-      setAssistantOpen(true);
-    } else if (next.status === "waiting_operator") {
-      setAssistantOpen(true);
     }
     if (next.status === "published") setEditingResult(false);
     if (finishRequestedRef.current && next.status !== "recording") {
@@ -1713,7 +1711,6 @@ export default function PageRecorder({
             setSnapshot(failed);
             if (!resumeOnlyRef.current) {
               setKeepResult(true);
-              setAssistantOpen(true);
             }
           }
           message.error(detail);
@@ -2219,7 +2216,6 @@ export default function PageRecorder({
     if (finishRequestedRef.current || status !== "recording") return;
     finishRequestedRef.current = true;
     setFinishRequested(true);
-    setAssistantOpen(true);
     if (!send({ type: "finish",
       title: title.trim(),
       machine_verification: machineVerificationRef.current,
@@ -2694,61 +2690,17 @@ export default function PageRecorder({
     event.preventDefault();
   }
 
-  function renderSetup() {
+  function changeStage(next: number) {
+    if (next === 3) {
+      setViewStage(3);
+      return;
+    }
+    if (next <= (keepResult ? 2 : keepRecording ? 1 : 0)) setViewStage(next);
+  }
+
+  function renderHistoryTable() {
     return (
-      <div style={{ height: "100%", minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-      <Card style={{ flexShrink: 0 }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flexWrap: "nowrap" }}>
-            <Text strong style={{ whiteSpace: "nowrap" }}><Text type="danger">* </Text>业务地址</Text>
-            <Input
-              value={startUrl}
-              onChange={(event) => setStartUrl(event.target.value)}
-              placeholder="https://example.com/business/page"
-              style={{ flex: 1.4, minWidth: 160 }}
-            />
-            <Text strong style={{ whiteSpace: "nowrap" }}>Skill 名称</Text>
-            <Input
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              placeholder="例如：请假申请"
-              style={{ flex: 0.8, minWidth: 120 }}
-            />
-            {status !== "recording" ? (
-              <Button
-                type="primary"
-                loading={connecting && !resumeOnly}
-                onClick={startRecording}
-                style={{ flexShrink: 0 }}
-              >
-                开始录制
-              </Button>
-            ) : null}
-          </div>
-          <div style={{ display: "flex", alignItems: "flex-start", gap: 10, width: "100%", minWidth: 0 }}>
-            <Text strong style={{ whiteSpace: "nowrap", paddingTop: 5 }}><Text type="danger">* </Text>录制目标</Text>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <Input.TextArea
-                value={goalText}
-                onChange={(event) => setGoalText(event.target.value)}
-                placeholder="查询记录、保存草稿并提交申请"
-                autoSize={{ minRows: 2, maxRows: 5 }}
-                style={{ width: "100%" }}
-              />
-              <div style={{ marginTop: 4 }}>
-                <Text type="secondary">PI 会自动点页面，你也可以随时点预览。系统只根据实际发生且有完整证据的业务操作生成能力。</Text>
-              </div>
-            </div>
-          </div>
-        </div>
-      </Card>
-      <Card
-        title="历史录制结果"
-        size="small"
-        style={{ marginTop: 12, flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
-        styles={{ body: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", paddingBottom: 8 } }}
-      >
-        <div ref={historyBodyRef} style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
+      <div ref={historyBodyRef} style={{ flex: 1, minHeight: 240, overflow: "hidden" }}>
         <Table<RecordingResultSummary>
           rowKey="id"
           size="small"
@@ -2776,21 +2728,13 @@ export default function PageRecorder({
                       {historySkillName(item)}
                       <Tag color={lifecycle.color as "success"} style={{ marginLeft: 8 }}>{lifecycle.label}</Tag>
                     </div>
-                    <div style={{ fontSize: 12, color: "#999", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.action}</div>
+                    <div style={{ fontSize: 12, color: "#94a3b8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.action}</div>
                   </div>
                 );
               },
             },
-            {
-              title: "能力",
-              width: 80,
-              render: (_, item) => item.capability_count,
-            },
-            {
-              title: "请求",
-              width: 80,
-              render: (_, item) => item.request_count,
-            },
+            { title: "能力", width: 80, render: (_, item) => item.capability_count },
+            { title: "请求", width: 80, render: (_, item) => item.request_count },
             {
               title: "产出时间",
               width: 180,
@@ -2806,7 +2750,10 @@ export default function PageRecorder({
                   <Button
                     size="small"
                     loading={openingId === item.id}
-                    onClick={() => openResult(item)}
+                    onClick={() => {
+                      setHistoryOpen(false);
+                      void openResult(item);
+                    }}
                   >继续分析</Button>
                   <Button
                     size="small"
@@ -2821,76 +2768,77 @@ export default function PageRecorder({
             },
           ]}
         />
-        </div>
-      </Card>
+      </div>
+    );
+  }
+
+  function renderSetup() {
+    return (
+      <div style={{ height: "100%", minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", padding: 12, boxSizing: "border-box" }}>
+        <Card style={{ flexShrink: 0 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flexWrap: "nowrap" }}>
+              <Text strong style={{ whiteSpace: "nowrap" }}><Text type="danger">* </Text>业务地址</Text>
+              <Input
+                value={startUrl}
+                onChange={(event) => setStartUrl(event.target.value)}
+                placeholder="https://example.com/business/page"
+                style={{ flex: 1.4, minWidth: 160 }}
+              />
+              <Text strong style={{ whiteSpace: "nowrap" }}>Skill 名称</Text>
+              <Input
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                placeholder="例如：请假申请"
+                style={{ flex: 0.8, minWidth: 120 }}
+              />
+              {status !== "recording" ? (
+                <Button
+                  type="primary"
+                  loading={connecting && !resumeOnly}
+                  onClick={startRecording}
+                  style={{ flexShrink: 0 }}
+                >
+                  开始录制
+                </Button>
+              ) : null}
+            </div>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 10, width: "100%", minWidth: 0 }}>
+              <Text strong style={{ whiteSpace: "nowrap", paddingTop: 5 }}><Text type="danger">* </Text>录制目标</Text>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <Input.TextArea
+                  value={goalText}
+                  onChange={(event) => setGoalText(event.target.value)}
+                  placeholder="查询记录、保存草稿并提交申请"
+                  autoSize={{ minRows: 2, maxRows: 5 }}
+                  style={{ width: "100%" }}
+                />
+                <div style={{ marginTop: 4 }}>
+                  <Text type="secondary">PI 会自动点页面，你也可以随时点预览。系统只根据实际发生且有完整证据的业务操作生成能力。</Text>
+                </div>
+              </div>
+            </div>
+          </div>
+        </Card>
+        <Card
+          title="历史录制结果"
+          size="small"
+          style={{ marginTop: 12, flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+          styles={{ body: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", paddingBottom: 8 } }}
+        >
+          {renderHistoryTable()}
+        </Card>
       </div>
     );
   }
 
   function renderRecording() {
     return (
-      <div style={{ minWidth: 0, flex: 1, minHeight: 0, height: "100%", display: "flex", flexDirection: "column" }}>
-        <Card size="small" styles={{ body: { padding: 10 } }} style={{ flexShrink: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flexWrap: "nowrap" }}>
-            <Tag color={status === "recording" ? "processing" : processing ? "blue" : "default"}>
-              {status === "processing" && snapshot?.progress.label
-                ? snapshot.progress.label
-                : STATUS_LABELS[status]}
-            </Tag>
-            {status === "recording" ? <Tag color="geekblue">双通道操作</Tag> : null}
-            <Space size={6} style={{ whiteSpace: "nowrap" }}>
-              <Switch
-                size="small"
-                checked={machineVerification}
-                disabled={processing || (status !== "recording" && !canRetryPublish)}
-                onChange={(checked) => {
-                  machineVerificationRef.current = checked;
-                  setMachineVerification(checked);
-                  if (status === "recording") {
-                    send({ type: "set_analysis_mode", machine_verification: checked });
-                  }
-                }}
-              />
-              <Text>编译并进行机器验证</Text>
-            </Space>
-            {status === "recording" || finishRequested || processing ? (
-              <Button
-                type="primary"
-                loading={finishRequested || status === "processing"}
-                disabled={processing || (status !== "recording" && !canRetryPublish)}
-                onClick={requestPublish}
-              >
-                结束并产出能力
-              </Button>
-            ) : (
-              <Button
-                type="primary"
-                loading={connecting}
-                onClick={startRecording}
-              >
-                {connecting ? "正在连接" : "重新连接"}
-              </Button>
-            )}
-            {processing || cancelling ? (
-              <Button danger icon={<StopOutlined />} loading={cancelling} onClick={cancelProcessing}>一键终止</Button>
-            ) : null}
-            <Button icon={<RobotOutlined />} onClick={() => setAssistantOpen(true)}>录制助手</Button>
-          </div>
-        </Card>
+      <div style={{ minWidth: 0, flex: 1, minHeight: 0, height: "100%", display: "flex", flexDirection: "column", padding: 8, boxSizing: "border-box" }}>
         <div
           ref={previewHostRef}
-          style={{
-            flex: 1,
-            minHeight: 0,
-            marginTop: 10,
-            width: "100%",
-            height: "100%",
-            position: "relative",
-            overflow: "hidden",
-            border: "1px solid #d9d9d9",
-            borderRadius: 8,
-            background: "#eef1f5",
-          }}
+          className="studio-preview-host"
+          style={{ flex: 1, minHeight: 0, borderRadius: 8 }}
         >
           <canvas
             ref={canvasRef}
@@ -3892,8 +3840,6 @@ export default function PageRecorder({
       });
     }
 
-    const isEmpty = activities.length === 0 && entries.length === 0 && !processing && !connecting;
-
     return (
       <Card
         size="small"
@@ -3949,30 +3895,18 @@ export default function PageRecorder({
         ) : null}
         {renderOperatorQuestion()}
         <div ref={verificationLogRef} style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
-          {isEmpty && status !== "cancelled" && !replaySkipped ? (
-            <Empty
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={
-                connecting || runBusy
-                  ? "正在连接…"
-                  : "尚未开始机器验证，确认能力后点击开始机器验证"
-              }
-              style={{ marginTop: 24 }}
+          {tlItems.length ? (
+            <Timeline
+              style={{ paddingTop: 8 }}
+              items={tlItems}
             />
-          ) : (
-            <>
-              {tlItems.length ? (
-                <Timeline
-                  style={{ paddingTop: 8 }}
-                  items={tlItems}
-                />
-              ) : status === "cancelled" ? null : processing ? (
-                <Text type="secondary" style={{ display: "block", padding: "8px 0 4px" }}>
-                  {snapshot?.progress.label || "正在启动机器验证"}
-                </Text>
-              ) : null}
-            </>
-          )}
+          ) : status === "cancelled" ? null : processing ? (
+            <Text type="secondary" style={{ display: "block", padding: "8px 0 4px" }}>
+              {snapshot?.progress.label || "正在启动机器验证"}
+            </Text>
+          ) : connecting || runBusy ? (
+            <Text type="secondary" style={{ display: "block", padding: "8px 0 4px" }}>正在连接…</Text>
+          ) : null}
         </div>
       </Card>
     );
@@ -3981,7 +3915,7 @@ export default function PageRecorder({
   function renderResult() {
     return (
       <Card>
-        {analysisMode ? (
+        {analysisMode && (processing || connecting || cancelling || status === "cancelled" || status === "failed" || (snapshot?.activity || []).length || thoughts.length || snapshot?.question) ? (
           <div style={RESULT_STATUS_BOX_STYLE}>
             {renderVerificationLog()}
           </div>
@@ -4080,7 +4014,7 @@ export default function PageRecorder({
   }
 
   const assistantBody = (
-    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+    <div className="studio-feed">
       <Alert
         showIcon
         type={status === "failed" ? "error" : status === "waiting_operator" ? "warning" : "info"}
@@ -4123,8 +4057,8 @@ export default function PageRecorder({
         </Card>
       ) : null}
       {thoughts.length ? (
-        <Card size="small" title="实时输出" styles={{ body: { padding: 8 } }}>
-          <div ref={assistantLogRef} style={{ maxHeight: "58vh", overflow: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
+        <Card size="small" title="思考过程" styles={{ body: { padding: 8 } }}>
+          <div ref={assistantLogRef} style={{ maxHeight: "52vh", overflow: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
             {thoughts.map((item, index) => renderThoughtBlock(item, index))}
           </div>
         </Card>
@@ -4147,37 +4081,28 @@ export default function PageRecorder({
       ) : thoughts.length || (snapshot?.activity || []).length || snapshot?.question
         ? null
         : <Empty description={status === "recording" ? "操作页面后会在这里同步后台输出" : "暂无分析结论"} />}
-    </Space>
+    </div>
   );
 
   return (
-    <div style={{ width: "100%", height: "100%", minWidth: 0, minHeight: 0, padding: viewStage === 1 ? "4px 8px" : "8px 12px", boxSizing: "border-box", display: "flex", flexDirection: "column", overflow: "hidden" }}>
-      <Steps
+    <div className="studio-root">
+      <StudioHeader
         current={viewStage}
-        onChange={(next) => {
-          if (next <= (keepResult ? 2 : keepRecording ? 1 : 0)) setViewStage(next);
-        }}
-        items={[
-          {
-            title: "录制准备",
-            status: viewStage === 0 ? "process" : "finish",
-          },
-          {
-            title: "页面录制",
-            disabled: !keepRecording,
-            status: viewStage === 1 ? "process" : keepRecording ? "finish" : "wait",
-          },
-          {
-            title: "能力结果",
-            disabled: !keepResult,
-            status: viewStage === 2 ? "process" : keepResult ? "finish" : "wait",
-          },
-        ]}
-        style={{ maxWidth: 980, margin: "0 auto 12px", flexShrink: 0 }}
+        keepRecording={keepRecording}
+        keepResult={keepResult}
+        onChange={changeStage}
+        tenant={tenant}
+        onSwitchTenant={() => { clearTenant(); nav("/tenant"); }}
       />
-      <div style={{ display: viewStage === 0 ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>{renderSetup()}</div>
-      {keepRecording ? <div style={{ display: viewStage === 1 ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>{renderRecording()}</div> : null}
-      {keepResult ? <div style={{ display: viewStage === 2 ? "block" : "none", flex: 1, minHeight: 0, overflow: "auto" }}>{renderResult()}</div> : null}
+      <div className="studio-body">
+      <div className="studio-main">
+      <div className="studio-workspace">
+      <div style={{ display: viewStage === 0 ? "flex" : "none", height: "100%", minHeight: 0 }}>{renderSetup()}</div>
+      {keepRecording ? <div style={{ display: viewStage === 1 ? "flex" : "none", height: "100%", minHeight: 0 }}>{renderRecording()}</div> : null}
+      {keepResult ? <div className="studio-result" style={{ display: viewStage === 2 ? "block" : "none" }}>{renderResult()}</div> : null}
+      <div className="studio-catalog" style={{ display: viewStage === 3 ? "flex" : "none" }}><Skills /></div>
+      </div>
+      </div>
       <Modal
         title={skillExportOutcome?.status === "exported" ? "Skill 已导出" : "配置并导出 Skill"}
         open={skillExportOpen}
@@ -4357,49 +4282,65 @@ export default function PageRecorder({
         )}
       </Modal>
       <Drawer
-        title="录制助手"
+        title="历史录制结果"
         placement="right"
-        width={440}
-        open={viewStage === 1 && assistantOpen}
-        onClose={() => setAssistantOpen(false)}
-        destroyOnClose={false}
-        footer={(
-          <div
-            onPointerDown={(event) => event.stopPropagation()}
-            onKeyDown={(event) => event.stopPropagation()}
-          >
-            <Input.TextArea
-              value={piMessage}
-              onChange={(event) => setPiMessage(event.target.value)}
-              placeholder={canSteerPi() ? "给 PI 发指示，例如：继续搜、去点新增" : "未连接或录制已结束，无法发给 PI"}
-              autoSize={{ minRows: 2, maxRows: 5 }}
-              disabled={!canSteerPi()}
-              onPressEnter={(event) => {
-                if (event.shiftKey) return;
-                event.preventDefault();
-                sendPiMessage();
-              }}
-            />
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
-              <Button
-                danger
-                icon={<StopOutlined />}
-                loading={cancelling}
-                disabled={!(status === "recording" && connected) && !processing && !cancelling}
-                onClick={terminateAssistantWork}
-              >终止</Button>
-              <Button
-                type="primary"
-                icon={<SendOutlined />}
-                disabled={!canSteerPi() || !piMessage.trim()}
-                onClick={sendPiMessage}
-              >发送</Button>
-            </div>
-          </div>
-        )}
+        width={720}
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
       >
-        {assistantBody}
+        {renderHistoryTable()}
       </Drawer>
+      <aside className="studio-session">
+        <div className="studio-session-head">
+          <div className="studio-session-title">当前会话</div>
+          <Button
+            type="primary"
+            size="small"
+            loading={finishRequested || status === "processing"}
+            disabled={processing || (status !== "recording" && !canRetryPublish)}
+            onClick={requestPublish}
+          >
+            结束并产出能力
+          </Button>
+        </div>
+        <div className="studio-session-body">
+          {assistantBody}
+        </div>
+        <div
+          className="studio-session-foot"
+          onPointerDown={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          <Input.TextArea
+            value={piMessage}
+            onChange={(event) => setPiMessage(event.target.value)}
+            placeholder={canSteerPi() ? "给 PI 发指示，例如：继续搜、去点新增" : "未连接或录制已结束，无法发给 PI"}
+            autoSize={{ minRows: 2, maxRows: 5 }}
+            disabled={!canSteerPi()}
+            onPressEnter={(event) => {
+              if (event.shiftKey) return;
+              event.preventDefault();
+              sendPiMessage();
+            }}
+          />
+          <div className="studio-session-actions">
+            <Button
+              danger
+              icon={<StopOutlined />}
+              loading={cancelling}
+              disabled={!(status === "recording" && connected) && !processing && !cancelling}
+              onClick={terminateAssistantWork}
+            >终止</Button>
+            <Button
+              type="primary"
+              icon={<SendOutlined />}
+              disabled={!canSteerPi() || !piMessage.trim()}
+              onClick={sendPiMessage}
+            >发送</Button>
+          </div>
+        </div>
+      </aside>
+      </div>
     </div>
   );
 }
