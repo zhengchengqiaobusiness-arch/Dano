@@ -14,6 +14,30 @@ import { isNoiseNetworkPath } from "./browser-actions.mjs";
 
 const SCREENSHOT_TEXT_ONLY_NOTE = "截图不写入对话。用 snapshot 看控件和 recentUserActions。";
 
+export function parseStructuredToolValue(value) {
+  if (typeof value !== "string") return value;
+  const text = value.trim();
+  if (!text || (text[0] !== "{" && text[0] !== "[")) return value;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return value;
+  }
+}
+
+export function coerceStructuredToolArgs(args, schema) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return args;
+  const properties = schema?.properties || {};
+  const next = { ...args };
+  for (const [key, spec] of Object.entries(properties)) {
+    if (!(key in next)) continue;
+    if (spec?.type === "object" || spec?.type === "array") {
+      next[key] = parseStructuredToolValue(next[key]);
+    }
+  }
+  return next;
+}
+
 export function compactInspect(shot) {
   if (!shot || typeof shot !== "object") return shot;
   const { screenshot, frames, ...rest } = shot;
@@ -244,13 +268,21 @@ export function createPiToolHost({
       }
       return snapshot;
     },
-    async submit_recording_capability({ capability, steps = [], links = [], unresolved = [], title = "" } = {}) {
+    async submit_recording_capability({
+      capability,
+      steps = [],
+      links = [],
+      unresolved = [],
+      capability_relations = [],
+      title = "",
+    } = {}) {
       const current = await files.readDraft(recordingId);
       const merged = mergeCapabilityIntoDraft(current?.draft || {}, {
         capability,
         steps,
         links,
         unresolved,
+        capability_relations,
         title,
       });
       assertPageDisplayContract(merged);
@@ -505,6 +537,7 @@ export function describePiTools() {
           steps: { type: "array" },
           links: { type: "array" },
           unresolved: { type: "array" },
+          capability_relations: { type: "array" },
           title: { type: "string" },
         },
         required: ["capability"],
@@ -576,8 +609,9 @@ export function wrapPiToolsForSdk(host, defineTool, Type, trace = null) {
     description: spec.description,
     promptSnippet: spec.description,
     parameters: toTypeBox(spec.parameters, Type),
+    prepareArguments: (args) => coerceStructuredToolArgs(args, spec.parameters),
     execute: async (_id, params) => {
-      const args = params || {};
+      const args = coerceStructuredToolArgs(params || {}, spec.parameters);
       const started = Date.now();
       if (trace?.recordToolStart) trace.recordToolStart(spec.name, args);
       else logPiOnly(`[PI分析] 调用 ${spec.name} ${summarizeToolArgs(spec.name, args)}`);
@@ -606,16 +640,20 @@ export function wrapPiToolsForSdk(host, defineTool, Type, trace = null) {
 
 function toTypeBox(schema, Type) {
   const properties = schema.properties || {};
+  const required = new Set(schema.required || []);
   const shape = {};
   for (const [key, value] of Object.entries(properties)) {
-    if (value.type === "integer") shape[key] = Type.Integer();
-    else if (value.type === "boolean") shape[key] = Type.Boolean();
-    else if (value.type === "object") shape[key] = Type.Object({}, { additionalProperties: true });
-    else if (value.type === "array") shape[key] = Type.Array(Type.Object({}, { additionalProperties: true }));
-    else shape[key] = Type.String();
+    let boxed;
+    if (value.type === "integer") boxed = Type.Integer();
+    else if (value.type === "boolean") boxed = Type.Boolean();
+    else if (value.type === "object") boxed = Type.Object({}, { additionalProperties: true });
+    else if (value.type === "array") boxed = Type.Array(Type.Object({}, { additionalProperties: true }));
+    else boxed = Type.String();
+    shape[key] = required.has(key) || typeof Type.Optional !== "function"
+      ? boxed
+      : Type.Optional(boxed);
   }
   return Type.Object(shape, {
     additionalProperties: false,
-    required: schema.required || [],
   });
 }

@@ -2,8 +2,25 @@
  * 把一项能力写入草稿。只合并调用方交来的对象，不推断字段。
  */
 
+function parseStructured(value) {
+  if (typeof value !== "string") return value;
+  const text = value.trim();
+  if (!text || (text[0] !== "{" && text[0] !== "[")) return value;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return value;
+  }
+}
+
 function asRecord(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const parsed = parseStructured(value);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+}
+
+function asList(value) {
+  const parsed = parseStructured(value);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 export function draftObject(raw) {
@@ -22,6 +39,7 @@ export function mergeCapabilityIntoDraft(draft, {
   steps = [],
   links = [],
   unresolved = [],
+  capability_relations = [],
   title = "",
 } = {}) {
   const next = draftObject(draft);
@@ -35,7 +53,7 @@ export function mergeCapabilityIntoDraft(draft, {
   if (capIndex >= 0) next.capabilities[capIndex] = item;
   else next.capabilities.push(item);
 
-  const incomingSteps = Array.isArray(steps) ? steps : [];
+  const incomingSteps = asList(steps);
   for (const step of incomingSteps) {
     const row = asRecord(step);
     const stepId = String(row.step_id || "").trim();
@@ -44,11 +62,17 @@ export function mergeCapabilityIntoDraft(draft, {
     if (index >= 0) next.steps[index] = row;
     else next.steps.push(row);
   }
-  if (Array.isArray(links) && links.length) {
-    next.links = next.links.concat(links);
+  const incomingLinks = asList(links);
+  if (incomingLinks.length) {
+    next.links = next.links.concat(incomingLinks);
   }
-  if (Array.isArray(unresolved) && unresolved.length) {
-    next.unresolved = next.unresolved.concat(unresolved);
+  const incomingUnresolved = asList(unresolved);
+  if (incomingUnresolved.length) {
+    next.unresolved = next.unresolved.concat(incomingUnresolved);
+  }
+  const incomingRelations = asList(capability_relations);
+  if (incomingRelations.length) {
+    next.capability_relations = [...(next.capability_relations || []), ...incomingRelations];
   }
   if (title && !next.recording_goal && !next.title) {
     next.recording_goal = String(title);

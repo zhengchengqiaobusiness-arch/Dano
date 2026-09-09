@@ -1081,3 +1081,278 @@ def test_readback_link_after_create_does_not_block_export_compile() -> None:
     order = [str(step.get("step_id") or "") for step in api_request.get("steps") or []]
     assert "step_submit" in order and "step_get_detail" in order
     assert order.index("step_submit") < order.index("step_get_detail")
+
+
+def test_step_link_across_capabilities_becomes_bound_route() -> None:
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="cap_save",
+                name="save_record",
+                title="保存草稿",
+                kind="write",
+                step_ids=["step_save"],
+                request_refs=[CapabilityRequestRef(step_id="step_save", usage="execute")],
+                input_schema={"type": "object", "properties": {"title": {"type": "string"}}},
+            ),
+            FlowCapability(
+                capability_id="cap_submit",
+                name="submit_record",
+                title="提交记录",
+                kind="write",
+                step_ids=["step_submit"],
+                request_refs=[CapabilityRequestRef(step_id="step_submit", usage="execute")],
+                input_schema={"type": "object", "properties": {"comment": {"type": "string"}}},
+            ),
+        ],
+        steps=[
+            FlowStep(step_id="step_save", method="POST", path="/api/save"),
+            FlowStep(
+                step_id="step_submit",
+                method="POST",
+                path="/api/submit",
+                params=[
+                    ParamField(
+                        key="id",
+                        path="body.id",
+                        source_kind="previous_response",
+                        exposed_to_user=False,
+                    ),
+                    ParamField(
+                        key="comment",
+                        path="body.comment",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                ],
+            ),
+        ],
+        links=[
+            FlowLink(
+                source_step_id="step_save",
+                source_path="data",
+                target_step_id="step_submit",
+                target_path="body.id",
+            )
+        ],
+    )
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(title="业务办理", business_description="先保存再提交。"),
+        {"cap_save", "cap_submit"},
+        "fp-step-link",
+    )
+    bound = next(
+        route for route in plan.routes
+        if route.capability_sequence == ["cap_save", "cap_submit"]
+    )
+    assert bound.composition_mode.value == "bound"
+    assert any(binding.to_input == "id" for binding in bound.bindings)
+
+
+def test_previous_response_sample_is_not_exported_as_literal() -> None:
+    from dano.export.skill_package.renderer import _capability_plans, _runtime_plan
+
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="cap_submit",
+                name="submit_record",
+                title="提交记录",
+                kind="write",
+                request_refs=[CapabilityRequestRef(step_id="step_submit", usage="execute")],
+                input_schema={
+                    "type": "object",
+                    "properties": {"comment": {"type": "string", "title": "意见"}},
+                },
+            )
+        ],
+        steps=[
+            FlowStep(
+                step_id="step_submit",
+                method="POST",
+                path="/api/submit",
+                params=[
+                    ParamField(
+                        key="id",
+                        path="body.id",
+                        source_kind="previous_response",
+                        exposed_to_user=False,
+                        value=19,
+                    ),
+                    ParamField(
+                        key="title",
+                        path="body.title",
+                        source_kind="previous_response",
+                        exposed_to_user=False,
+                        value="测试日报",
+                    ),
+                    ParamField(
+                        key="comment",
+                        path="body.comment",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                ],
+            )
+        ],
+    )
+    api_request = {
+        "capabilities": [{
+            "capability_id": "cap_submit",
+            "name": "submit_record",
+            "title": "提交记录",
+            "kind": "write",
+            "execution_contract": {
+                "steps": [{
+                    "step_id": "step_submit",
+                    "method": "POST",
+                    "path": "/api/submit",
+                    "body_template": {"id": 19, "title": "测试日报", "comment": "{{comment}}"},
+                }],
+            },
+            "input_schema": spec.capabilities[0].input_schema,
+        }],
+    }
+    plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), spec, api_request)
+    submit = _runtime_plan(plans[0])["steps"][0]
+    assert submit["body_template"].get("id") != 19
+    assert submit["body_template"].get("title") != "测试日报"
+    assert submit["body_template"]["comment"] == "{{comment}}"
+
+
+def test_declared_array_schema_does_not_infer_presence_from_undeclared_cells() -> None:
+    from dano.export.skill_package.renderer import _capability_plans, _runtime_plan
+
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="cap_save",
+                name="save_record",
+                title="保存草稿",
+                kind="write",
+                request_refs=[CapabilityRequestRef(step_id="step_save", usage="execute")],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "title": "已完成工作/工作计划",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "content": {"type": "string", "title": "工作内容"},
+                                },
+                            },
+                        },
+                    },
+                },
+            )
+        ],
+        steps=[
+            FlowStep(
+                step_id="step_save",
+                method="POST",
+                path="/api/save",
+                params=[
+                    ParamField(
+                        key="items",
+                        path="body.items",
+                        type="array",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                        value=[
+                            {"content": "已完成", "progress": 0, "itemType": 1, "sort": 0, "_X_ROW_KEY": "row_1"},
+                            {"content": "计划", "itemType": 2, "sort": 0, "_X_ROW_KEY": "row_2"},
+                        ],
+                    )
+                ],
+            )
+        ],
+    )
+    api_request = {
+        "capabilities": [{
+            "capability_id": "cap_save",
+            "name": "save_record",
+            "title": "保存草稿",
+            "kind": "write",
+            "execution_contract": {
+                "steps": [{
+                    "step_id": "step_save",
+                    "method": "POST",
+                    "path": "/api/save",
+                    "body_template": {"items": "{{items}}"},
+                }],
+            },
+            "input_schema": spec.capabilities[0].input_schema,
+        }],
+    }
+    plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), spec, api_request)
+    rules = next(
+        item for item in (_runtime_plan(plans[0])["steps"][0].get("runtime_fields") or [])
+        if item.get("kind") == "array_item_system_fields"
+    )
+    assert rules["caller_keys"] == ["content"]
+    strategies = {item["key"]: item["strategy"] for item in rules["rules"]}
+    assert strategies.get("itemType") != "caller_presence"
+
+
+def test_labeled_schema_enum_is_not_replaced_by_untyped_option_api() -> None:
+    from dano.export.skill_package.renderer import _attach_capability_param_options
+
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="cap_query",
+                name="query_records",
+                title="查询记录",
+                kind="query",
+                request_refs=[CapabilityRequestRef(step_id="step_query", usage="execute")],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "status": {
+                            "type": "string",
+                            "title": "单据状态",
+                            "x-dano-business-type": "single_enum",
+                            "x-enum-options": [
+                                {"id": "-1", "label": "草稿"},
+                                {"id": "0", "label": "审批中"},
+                            ],
+                            "x-enum-value-map": {"草稿": "-1", "审批中": "0"},
+                        },
+                    },
+                },
+            )
+        ],
+        steps=[
+            FlowStep(
+                step_id="step_query",
+                method="GET",
+                path="/api/records",
+                params=[
+                    ParamField(
+                        key="status",
+                        path="query.status",
+                        source_kind="api_option",
+                        exposed_to_user=True,
+                        source={
+                            "source_method": "GET",
+                            "source_url": "/api/dict-data/simple-list",
+                            "label_key": "label",
+                            "value_key": "value",
+                        },
+                    )
+                ],
+            )
+        ],
+    )
+    schema = _attach_capability_param_options(
+        spec.capabilities[0].input_schema,
+        spec,
+        {"capability_id": "cap_query", "name": "query_records"},
+    )
+    field = schema["properties"]["status"]
+    assert field["x-enum-options"]
+    assert not field.get("x-dano-option-source")
+    assert not field.get("dataSource")

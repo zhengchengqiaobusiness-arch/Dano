@@ -711,13 +711,31 @@ def _enum_pairs_from_text(text: str, field: dict[str, Any]) -> list[dict[str, An
     return pairs if len(pairs) >= 2 else []
 
 
+def _option_source_is_constrained(source: dict[str, Any] | None) -> bool:
+    raw = source if isinstance(source, dict) else {}
+    if raw.get("options_complete") is True:
+        return True
+    params = raw.get("params") if isinstance(raw.get("params"), dict) else (
+        raw.get("query") if isinstance(raw.get("query"), dict) else {}
+    )
+    return any(str(params.get(key) or "").strip() for key in params)
+
+
 def _apply_param_options_to_field(field: dict[str, Any], param: Any) -> None:
     """Copy caller-visible option contract from the capability param onto the schema field."""
     source = _param_option_source(param)
     source_kind = str(getattr(param, "source_kind", "") or source.get("kind") or "")
     endpoint = _option_source_endpoint(source)
+    labeled_field = _capability_enum_options(field)
+    has_labeled = bool(labeled_field) and not _enum_options_unlabeled(labeled_field)
     live = source_kind == "api_option" or _field_choice_kind(field, param) == "api_option"
     if endpoint and (live or _looks_like_tree(field, source, param)):
+        if (
+            has_labeled
+            and not _looks_like_tree(field, source, param)
+            and not _option_source_is_constrained(source)
+        ):
+            return
         _apply_live_option_source(field, source, param)
         return
     labeled = list(getattr(param, "enum_options", None) or [])
@@ -1561,7 +1579,19 @@ def _object_array_rows_from_step_body(spec, step, name: str) -> list[dict[str, A
     return []
 
 
-def _object_array_facts(spec, cap: dict, name: str) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:  # noqa: ANN001
+def _declared_array_item_keys(schema: dict | None, name: str) -> list[str]:
+    if not isinstance(schema, dict):
+        return []
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    field = properties.get(name)
+    if not isinstance(field, dict):
+        return []
+    items = field.get("items") if isinstance(field.get("items"), dict) else {}
+    item_properties = items.get("properties") if isinstance(items.get("properties"), dict) else {}
+    return [str(key) for key in item_properties if str(key)]
+
+
+def _object_array_facts(spec, cap: dict, name: str, schema: dict | None = None) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:  # noqa: ANN001
     from dano.execution.page.flow_materialization.field_contracts.dynamic_array import (
         _caller_keys_for_object_rows,
         _infer_array_item_system_rules,
@@ -1602,7 +1632,11 @@ def _object_array_facts(spec, cap: dict, name: str) -> tuple[list[dict[str, Any]
                 break
     if not rows:
         return [], [], []
-    caller_keys = _caller_keys_for_object_rows(rows, item_params)
+    declared = _declared_array_item_keys(
+        schema if isinstance(schema, dict) else (cap.get("input_schema") if isinstance(cap, dict) else None),
+        name,
+    )
+    caller_keys = declared or _caller_keys_for_object_rows(rows, item_params)
     return rows, caller_keys, _infer_array_item_system_rules(rows, caller_keys)
 
 
@@ -1612,7 +1646,7 @@ def _hydrate_object_array_schema(schema: dict[str, Any], spec, cap: dict) -> dic
     for name, field in list(properties.items()):
         if not isinstance(field, dict) or field.get("type") != "array":
             continue
-        rows, caller_keys, _rules = _object_array_facts(spec, cap, str(name))
+        rows, caller_keys, _rules = _object_array_facts(spec, cap, str(name), packed)
         if not rows or not caller_keys or _array_items_are_objects(field):
             continue
         item_properties: dict[str, Any] = {}
@@ -1777,7 +1811,7 @@ def _attach_array_system_fields(step: dict, schema: dict, spec, cap: dict) -> li
         for item in fields
     }
     for name in body:
-        _rows, caller_keys, rules = _object_array_facts(spec, cap, str(name))
+        _rows, caller_keys, rules = _object_array_facts(spec, cap, str(name), schema)
         if not rules or ("array_item_system_fields", str(name)) in existing:
             continue
         fields.append({
@@ -1815,12 +1849,14 @@ def _sanitize_request_mapping(
     runtime_names: set[str] | None = None,
     identity_paths: set[str] | None = None,
     recorded_literals: dict[str, Any] | None = None,
+    previous_response_paths: set[str] | None = None,
 ) -> Any:
     if not isinstance(template, dict):
         return template
     runtime_names = set(runtime_names or [])
     identity_paths = set(identity_paths or [])
     recorded_literals = dict(recorded_literals or {})
+    previous_response_paths = set(previous_response_paths or [])
     out: dict[str, Any] = {}
     for key, value in template.items():
         name = str(key)
@@ -1830,6 +1866,11 @@ def _sanitize_request_mapping(
             or _path_covers(name, formula_paths)
             or _path_covers(name, identity_paths)
         ):
+            continue
+        if _path_covers(name, previous_response_paths):
+            caller = _caller_name_for_key(name, fields)
+            if caller:
+                out[name] = "{{" + caller + "}}"
             continue
         caller = _caller_name_for_key(name, fields)
         if isinstance(value, dict):
@@ -1844,6 +1885,7 @@ def _sanitize_request_mapping(
                 runtime_names=runtime_names,
                 identity_paths=identity_paths,
                 recorded_literals=recorded_literals,
+                previous_response_paths=previous_response_paths,
             )
             continue
         if _is_placeholder(value):
@@ -1870,6 +1912,9 @@ def _sanitize_request_mapping(
 def _recorded_literals_for_step(spec_step) -> dict[str, Any]:  # noqa: ANN001
     literals: dict[str, Any] = {}
     for param in getattr(spec_step, "params", None) or []:
+        kind = str(getattr(param, "source_kind", "") or "").strip().lower()
+        if kind in {"previous_response", "selected_record_identity"}:
+            continue
         value = getattr(param, "value", None)
         if value in (None, ""):
             value = getattr(param, "default_value", None)
@@ -1881,6 +1926,20 @@ def _recorded_literals_for_step(spec_step) -> dict[str, Any]:  # noqa: ANN001
             if name:
                 literals.setdefault(name, value)
     return literals
+
+
+def _previous_response_paths_for_step(spec_step) -> set[str]:  # noqa: ANN001
+    paths: set[str] = set()
+    for param in getattr(spec_step, "params", None) or []:
+        kind = str(getattr(param, "source_kind", "") or "").strip().lower()
+        if kind not in {"previous_response", "selected_record_identity"}:
+            continue
+        key = str(getattr(param, "key", "") or "")
+        path = str(getattr(param, "path", "") or "")
+        for name in (key, path, path.removeprefix("query."), path.removeprefix("body.")):
+            if name:
+                paths.add(name)
+    return paths
 
 
 def _strip_recorded_query(url: Any) -> Any:
@@ -1934,6 +1993,7 @@ def _project_capability_step(
     }
     caller_names = {name for _path, name, _field in fields if name}
     recorded_literals = _recorded_literals_for_step(spec_step)
+    previous_response_paths = _previous_response_paths_for_step(spec_step)
     if projected.get("body_template") is not None:
         projected["body_template"] = _sanitize_request_mapping(
             projected.get("body_template"),
@@ -1946,6 +2006,7 @@ def _project_capability_step(
             runtime_names=runtime_names,
             identity_paths=identity_paths,
             recorded_literals=recorded_literals,
+            previous_response_paths=previous_response_paths,
         )
     if projected.get("query_template") is not None:
         from dano.execution.page.flow_spec_core.request_contract import (
@@ -1965,6 +2026,7 @@ def _project_capability_step(
             runtime_names=runtime_names,
             identity_paths=identity_paths,
             recorded_literals=recorded_literals,
+            previous_response_paths=previous_response_paths,
         )
         projected["query_template"] = pack_recorded_json_query(
             projected.get("query_template"),

@@ -164,7 +164,7 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 **每个** `exposed_to_user=true` 的 param 都必须出现在该能力 `input_schema.properties`；只写在 params 里等于调用方字段丢失。数组只出现数组自己的 key，行内调用方写在 `items.properties`。  
 execute 的 query/body 没有、当前页也没有对应可改控件的键，禁止写进 params 或 schema。可见可改控件即使本场没带，仍要留下调用方可选字段。  
 不要编造本场没发出的写请求，也不要把同一数组拆成多行并列字段。  
-分页只留在真正执行查询的那个能力的 **execute** 系统字段。写入能力的 execute 没有分页键，就不要出现页码/每页条数。打开表单拉到的空列表、弹层内部翻页，禁止写进该能力 `params`。
+分页只留在真正执行查询的那个能力的 **execute** 系统字段，`source_kind=page_default`，`exposed_to_user=false`，**禁止**再写进 `input_schema`。写入能力的 execute 没有分页键，就不要出现页码/每页条数。打开表单拉到的空列表、弹层内部翻页，禁止写进该能力 `params`。
 
 ## 字段必须出现在页面能读到的两个位置
 
@@ -194,7 +194,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 - `page_enum`：选项来自页面本身；`enum_options` 必须列出**当场下拉里看到的全部** `{label,value}`。写清是否完整。
 - `api_option`：`source` 写 `source_method`、`source_url`、`label_key`、`value_key`；`enum_options` 写本场实际返回的选项。写清 `options_complete=true/false`（只截到一页就标 false）。调用方选显示值，提交接口值。
 - `page_default` / 可改的 `previous_response`：默认从哪一步哪条路径来（`from_step_id` + `from_path`），**调用方可以改**。编辑弹层里的日期、下拉、数字都属于这类，即使本场没改。
-- 只读回填的 `previous_response`：从哪一步哪条路径来，提交时原样带回，调用方不能改。
+- 只读回填的 `previous_response`：`source` 必须写 `from_step_id` + `from_path`，提交时原样带回，调用方不能改。同一条值流还要写进 `links`。导出从这些 `links` 投影跨能力关系，不要另写一份 `capability_relations`，也不要把本场主键/单号/正文当 `default_value`。
 - `selected_record_identity`：从列表哪一次点击/当前行哪个字段带出，提交到哪个 path。
 - `computed`：计算规则写进 `reason` 和 `source.formula`。用页面标签和字段 key 写关系，例如「明细金额 = 数量 × 产品单价」「税额 = 金额 × 税率 / 100」。证据里看不出公式：标系统，`default_value` 用请求原值，不要编公式，也不要写入 `unresolved`。
 - `generated`：谁生成、何时生成（例如保存后服务端生成单号）。看不出生成规则时同样按请求原值固定。
@@ -252,7 +252,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 - `option_source` 只挂**这个能力的表单**上真实存在的下拉。列表筛选的“创建人”选项不要挂到新增/编辑。页面加载时的权限/字典/菜单不要挂进业务能力。`option_source` / `preflight` 的 `params` 必须是空数组。
 
 人在筛选框、表单、下拉里能填或能选的值，必须是调用方字段，不能丢。  
-筛选条上看得见的输入框，即使本场空着没进 query，也要留下调用方可选字段。`key`/`path` 必须能从控件的 name、placeholder 或同页已发出的请求看出来；看不出来就写入 `unresolved`，不要假装这个筛选项不存在。  
+筛选条上看得见的输入框，即使本场空着没进 query，也要留下调用方可选字段。`key`/`path` 必须能从控件的 name、placeholder 或同页已发出的请求看出来；看不出来就写入 `unresolved`，不要假装这个筛选项不存在，也不要编一个看起来像业务的 query 键。没打开过的下拉不要编 `enum_options`，也不要把整站无过滤的字典总表挂成该字段的 `option_source`。schema 已列出当场枚举时，params 必须同属 `page_enum`，不要再改口成无类型 `api_option`。  
 页面标签用当前页原文。筛选条写「流程状态」就不要改成「审批状态」。  
 不要把系统字段标成调用方，也不要把调用方必填标成系统自动。  
 不要把密码、token、Cookie、Authorization 的真实值写进 result。
@@ -340,6 +340,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 - 能力内顺序：`preflight` → `option_source` → `execute` → `fact_check`。`request_refs[].sequence` 必须按这个实际执行顺序编号；页面按 sequence 展示，不要把取详情的 preflight 排到选项接口后面又把 sequence 写反。
 - 跨能力：被依赖的查询/选择/创建在前，写入、撤回、删除在后。
 - `links` 必须用 `source_step_id` / `source_path` / `target_step_id` / `target_path` 写出**值怎么流**。例如创建响应里的流程实例 ID 进入撤回参数。不要把常量写成“上游映射”，也不要只写一句“有依赖”。
+- 跨能力的回填（保存后的主键进入提交、查询结果进入编辑）只写 `links`。导出从 `links` 投影绑定，不会把本场样例写成下次执行的常量。不要为了跨能力关系另编一份能力级关系表。
 - `from_path` / `source_path` 必须能在那个响应里读到。提交返回 `{"data":61}` 就是单据 id，不是流程实例 id；流程实例要从随后的详情回读取。写错路径等于编排错误。
 - 搜索能力上的接口下拉必须挂 `option_source`。父表单没有的选项请求不要挂。
 - 查看能力里随详情带出的附件、审批进度是 `fact_check`，顺序在 execute 之后。不要标成 `option_source`。
@@ -452,7 +453,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 5. 结果里没有 `capabilities[].fields`。
 6. 人能填/能选的筛选、表单、下拉、树、页签、日期、附件都在调用方字段里，并且都在 `input_schema`；`visible_control` 里可改的控件没有被写成系统。每个 `exposed_to_user=true` 的 param 都能在 schema 里找到同名 key。灰框/计算/自动编号/行主键/行类型码只在 params 且 `exposed_to_user=false`。
 7. 从列表行或上一步响应带出的主键/流程实例 ID 是系统字段，不是调用方输入，不要写进 `input_schema`。
-8. 登录态和分页只出现在真正执行查询的那个能力的系统字段里，不要污染撤回/删除。
+8. 登录态和分页只出现在真正执行查询的那个能力的系统字段里，`exposed_to_user=false`，不要进 `input_schema`，不要污染撤回/删除。
 9. 写过“还做了查看/编辑/进度”却没有对应能力，就是失败，必须补能力或写入 `unresolved`。
 10. 每个 `option_source` 都能对上该能力的一个调用方下拉。对不上的选项请求不要挂。
 11. 日期字段在 schema 和 params 都是 `date`/`datetime`。execute 体里的业务字段没有漏。
@@ -460,7 +461,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 13. 已调用 `list_recording_index`。索引里每个带确认的写入都有能力或 `unresolved`，选择器弹层没有被做成独立能力。
 14. `input_schema.required` 与调用方 params 的 `required=true` 一致；`title`/`label` 来自当前页控件，不是另一页。
 15. 同一 path 只有一种归属。系统主键没有进 `input_schema`。execute 的键名、重复键次数、数组形状与本场真实请求一致，没有另编一套发不出去的结构。
-16. 每条 `from_path` 都能在对应响应里读到。
+16. 每条 `from_path` 都能在对应响应里读到。跨能力回填写了 `links`，没有把本场主键/单号/正文写成合同常量。
 17. `option_source` 只对应本能力可见下拉。附件/审批/流程定义不是 option_source。
 18. 没打开过的下拉里没有编造的 `enum_options`。
 19. GET 详情 execute 没有把响应展示字段写成请求 `body.*`。
@@ -498,6 +499,8 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 - 点加行才出现的输入框 → 调用方按行提供，系统再组装成一个数组。
 - 弹层勾选记录、execute 提交对象数组 → 调用方选择显示项，系统按实时响应组装原数组对象，不能写死本场所选行。
 - 同名大段 textarea ≠ 这些行。
-- 确认弹层可填意见必须完整处理。
+- 确认弹层可填意见必须完整处理：对不上请求键就 unresolved，不要编 path。
+- 分页是系统，不准进 schema。
+- 跨能力回填写 links（from/to step + path），不要拿本场样例当合同。
 - 请求有、控件无、也看不出公式 → 系统栏 + 原值传递。
 - 打开写入表单附带的空列表、空抄送、附件计数、弹层内部翻页 → 不进写入能力系统栏；这些 step 的 params 必须是空数组。

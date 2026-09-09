@@ -26,8 +26,8 @@ test("单项能力写入草稿后可用 use_draft 定稿", async () => {
     });
     const result = sampleResult();
     const saved = await tools.submit_recording_capability({
-      capability: result.capabilities[0],
-      steps: result.steps,
+      capability: JSON.stringify(result.capabilities[0]),
+      steps: JSON.stringify(result.steps),
       title: "演示目标",
     });
     assert.equal(saved.saved, true);

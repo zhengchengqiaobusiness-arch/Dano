@@ -287,6 +287,81 @@ def usable_relations(spec: FlowSpec) -> list[CapabilityRelation]:
     return [relation for relation in spec.capability_relations or [] if relation_is_usable(relation)]
 
 
+def _step_owner_ids(spec: FlowSpec) -> dict[str, list[str]]:
+    owners: dict[str, list[str]] = {}
+    for cap in spec.capabilities or []:
+        cap_id = capability_ref(cap)
+        if not cap_id:
+            continue
+        step_ids = {str(item) for item in (cap.step_ids or []) if str(item)}
+        for ref in cap.request_refs or []:
+            if ref.step_id:
+                step_ids.add(str(ref.step_id))
+        for step_id in step_ids:
+            owners.setdefault(step_id, []).append(cap_id)
+    return owners
+
+
+def _link_to_input(link) -> str:  # noqa: ANN001
+    named = str(getattr(link, "param_name", "") or "").strip()
+    if named:
+        return named
+    path = str(getattr(link, "target_path", "") or "").strip()
+    for prefix in ("body.", "query.", "path."):
+        if path.startswith(prefix):
+            path = path[len(prefix):]
+            break
+    return path.split(".", 1)[0] if path else ""
+
+
+def derive_capability_relations_from_step_links(spec: FlowSpec) -> list[CapabilityRelation]:
+    """Project declared step links that cross capabilities. Do not invent sources."""
+    owners = _step_owner_ids(spec)
+    existing = {
+        (
+            str(relation.from_capability or ""),
+            str(relation.to_capability or ""),
+            str(relation.to_input or ""),
+        )
+        for relation in spec.capability_relations or []
+    }
+    derived: list[CapabilityRelation] = []
+    for link in spec.links or []:
+        to_input = _link_to_input(link)
+        if not to_input:
+            continue
+        for source_id in owners.get(str(link.source_step_id or ""), []):
+            for target_id in owners.get(str(link.target_step_id or ""), []):
+                if source_id == target_id:
+                    continue
+                key = (source_id, target_id, to_input)
+                if key in existing:
+                    continue
+                existing.add(key)
+                derived.append(CapabilityRelation(
+                    type="external_transform",
+                    mode="external_transform",
+                    from_capability=source_id,
+                    from_output=str(link.source_path or "").strip(),
+                    to_capability=target_id,
+                    to_input=to_input,
+                    target_path=str(link.target_path or "").strip(),
+                    confirmed=True,
+                    evidence={"kind": "typed_capability_contract"},
+                    reason="capability-declared step link",
+                ))
+    return derived
+
+
+def attach_declared_step_link_relations(spec: FlowSpec) -> FlowSpec:
+    derived = derive_capability_relations_from_step_links(spec)
+    if not derived:
+        return spec
+    current = spec.model_copy(deep=True)
+    current.capability_relations = [*(current.capability_relations or []), *derived]
+    return current
+
+
 def public_capability_catalog(spec: FlowSpec, verified_ids: set[str]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     verified = [

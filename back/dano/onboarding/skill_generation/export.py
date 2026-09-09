@@ -239,11 +239,14 @@ def _current_spec(body: dict[str, Any]) -> FlowSpec:
     except ValidationError as exc:
         raise SkillExportError(409, "录制结果 FlowSpec 无法用于导出") from exc
     from dano.execution.page.flow_spec_core.request_contract import hydrate_recorded_write_bodies
+    from dano.onboarding.skill_generation.catalog import attach_declared_step_link_relations
 
     recording_id = str(body.get("recording_id") or (spec.meta or {}).get("recording_id") or "")
     if recording_id and not (spec.meta or {}).get("recording_id"):
         spec.meta = {**(spec.meta or {}), "recording_id": recording_id}
-    return hydrate_recorded_write_bodies(spec, recording_id=recording_id)
+    return attach_declared_step_link_relations(
+        hydrate_recorded_write_bodies(spec, recording_id=recording_id),
+    )
 
 
 def _stable_skill_id(body: dict[str, Any], title: str) -> str:

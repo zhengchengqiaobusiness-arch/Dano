@@ -4,6 +4,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Type } from "@sinclair/typebox";
+import { validateToolArguments } from "@mariozechner/pi-ai";
 import { createHarness, sampleResult } from "./helpers/harness.mjs";
 import { createPiToolHost, wrapPiToolsForSdk } from "../src/pi-tools.mjs";
 
@@ -15,6 +17,33 @@ const FakeType = {
   Array: () => ({}),
   Optional: (value) => value,
 };
+
+test("SDK 校验前必须解开被收成字符串的 capability/steps", () => {
+  const tools = wrapPiToolsForSdk({
+    async submit_recording_capability() {
+      return { saved: true };
+    },
+  }, (spec) => spec, Type);
+  const tool = tools.find((item) => item.name === "submit_recording_capability");
+  const raw = {
+    capability: JSON.stringify({
+      capability_id: "cap_write",
+      name: "新增并提交",
+      request_refs: [{ step_id: "step_submit", usage: "execute" }],
+    }),
+    steps: JSON.stringify([
+      { step_id: "step_submit", params: [{ key: "title", path: "body.title" }] },
+    ]),
+  };
+  assert.throws(
+    () => validateToolArguments(tool, { arguments: raw }),
+    /capability: must be object/,
+  );
+  const prepared = tool.prepareArguments(raw);
+  const validated = validateToolArguments(tool, { arguments: prepared });
+  assert.equal(validated.capability.capability_id, "cap_write");
+  assert.equal(validated.steps[0].step_id, "step_submit");
+});
 
 test("最终结果校验失败时把具体原因返回给 PI 继续修正", async () => {
   const tools = wrapPiToolsForSdk({

@@ -100,6 +100,10 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(skill, /禁止 `submit_recording_result`/);
   assert.match(skill, /打开写入表单附带/);
   assert.match(skill, /x-dano-option-source\.params.*不是 `steps\[\]\.params`/);
+  assert.match(skill, /分页字段不要放进 `input_schema`/);
+  assert.match(skill, /导出从这些 `links` 投影|导出从 `links` 投影/);
+  assert.match(skill, /from_step_id.*from_path/);
+  assert.match(skill, /看不出来就写入 `unresolved`/);
   assert.doesNotMatch(skill, /登录态、Cookie、分页、流程定义 Key、单据类型/);
   assert.doesNotMatch(skill, /workItems|planItems|createTime=/);
   assert.doesNotMatch(skill, /to_flow_spec|compile_capabilities|inferCapability/);
@@ -156,5 +160,9 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(prompt, /execute step\.selects.*禁止写到 result 顶层/);
   assert.match(prompt, /multi、label_subkey.*element_template/);
   assert.match(prompt, /真实 execute 形状再 submit_recording_capability/);
+  assert.match(prompt, /分页只留 execute 系统栏/);
+  assert.match(prompt, /from_step_id\/from_path 并写成 links/);
+  assert.match(prompt, /筛选项看得见但键看不清就 unresolved/);
+  assert.doesNotMatch(prompt, /capability_relations/);
   assert.doesNotMatch(prompt, /每看完一个独立动作立刻 submit_recording_capability/);
 });

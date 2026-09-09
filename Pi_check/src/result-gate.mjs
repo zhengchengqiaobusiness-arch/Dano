@@ -34,6 +34,8 @@ function isPlainObject(value) {
 
 const SELECTABLE_HINT_RE = /部门树|树选择|树选|下拉|选择器|选择节点|选项接口|实时候选|tree\s*select|treeselect/i;
 const ROW_ARRAY_HINT_RE = /可增行|添加.{0,12}(行|项|明细)|点[「"]添加|组装成.{0,12}数组/;
+const PAGINATION_KEY_RE = /^(pageno|pagesize|pagenum|pageindex|page_no|page_size|page_num|page_index|page|limit|offset)$/i;
+const PAGINATION_LABEL_RE = /页码|每页条数|每页|分页/;
 const SYSTEM_ROW_KEYS = new Set([
   "itemtype", "sort", "index", "seq", "order",
   "xrowkey", "x_row_key", "rowkey", "row_key",
@@ -70,6 +72,15 @@ function hasWrittenOptionContract(node, param) {
 function objectArrayProperties(node) {
   const items = isPlainObject(node?.items) ? node.items : {};
   return isPlainObject(items.properties) ? items.properties : null;
+}
+
+function isPaginationCallerKey(key, param) {
+  const folded = String(key || "").replace(/[^a-z0-9]/gi, "");
+  if (PAGINATION_KEY_RE.test(folded) || PAGINATION_KEY_RE.test(String(key || ""))) {
+    return true;
+  }
+  const text = `${param?.label || ""} ${param?.reason || ""} ${param?.title || ""}`;
+  return PAGINATION_LABEL_RE.test(text);
 }
 
 function looksCollapsedRowArray(node, param) {
@@ -217,6 +228,12 @@ export function assertPageDisplayContract(result) {
       const node = properties[key];
       if (!isPlainObject(node)) continue;
       const param = findParamByKey(stepsById, stepIds, key);
+      if (isPaginationCallerKey(key, param)) {
+        throw new SubmitRejectedError(
+          "DISPLAY_CONTRACT",
+          `input_schema.properties.${key} 是分页系统字段，不能写进调用方 schema`,
+        );
+      }
       const sourceKind = String(
         node["x-dano-business-type"] || param?.source_kind || (isPlainObject(param?.source) ? param.source.kind : "") || "",
       );

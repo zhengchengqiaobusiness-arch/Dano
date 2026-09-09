@@ -11,6 +11,7 @@ import structlog
 
 from dano.execution.page.flow_spec_core.models import FlowCapability, FlowSpec
 from dano.onboarding.skill_generation.catalog import (
+    attach_declared_step_link_relations,
     capability_family,
     capability_ref,
     confirmed_fixed_or_system_inputs,
@@ -676,6 +677,7 @@ def propose_deterministic_plan(
     verified_ids: set[str],
     source_flow_fingerprint: str,
 ) -> SkillPlan:
+    spec = attach_declared_step_link_relations(spec)
     selected, unused = _select_capabilities(spec, request, verified_ids)
     # The Stage-8 plan is a projection of the capability contract. Free-form
     # export prose must not select capabilities, create relationships, or set

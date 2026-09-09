@@ -341,6 +341,38 @@ test("拒收重复 capability_id 和共用 execute", () => {
   );
 });
 
+test("拒收把分页写进 input_schema", () => {
+  assert.throws(
+    () => assertPageDisplayContract({
+      capabilities: [{
+        capability_id: "cap_query",
+        request_refs: [{ step_id: "step_query", usage: "execute" }],
+        input_schema: {
+          type: "object",
+          properties: {
+            keyword: { type: "string", title: "关键字" },
+            pageNo: { type: "number", title: "页码" },
+          },
+        },
+      }],
+      steps: [{
+        step_id: "step_query",
+        params: [
+          { key: "keyword", path: "query.keyword", exposed_to_user: true },
+          {
+            key: "pageNo",
+            path: "query.pageNo",
+            label: "页码",
+            source_kind: "page_default",
+            exposed_to_user: true,
+          },
+        ],
+      }],
+    }),
+    (error) => error instanceof SubmitRejectedError && /分页系统字段/.test(error.message),
+  );
+});
+
 test("拒收把可增行收成字符串", () => {
   assert.throws(
     () => assertPageDisplayContract({
