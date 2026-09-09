@@ -855,6 +855,17 @@ def _capability_plans(skill, spec, api_request: dict) -> list[dict]:  # noqa: AN
         )
         if not links:
             links = _verified_links(spec, step_ids)
+        caller_names = {name for _path, name, _field in _iter_schema_fields(schema) if name}
+
+        def _keep_value_link(item: dict) -> bool:
+            source_path = str(item.get("source_path") or item.get("read_path") or "")
+            target = str(item.get("target_path") or item.get("write_path") or "")
+            leaf = target.rsplit(".", 1)[-1]
+            if "[" in source_path and (leaf in caller_names or target in caller_names):
+                return False
+            return True
+
+        links = [item for item in links if _keep_value_link(item)]
         cap_steps = [
             _project_capability_step(
                 _safe_step(by_id[step_id]),
@@ -1632,12 +1643,19 @@ def _object_array_facts(spec, cap: dict, name: str, schema: dict | None = None) 
                 break
     if not rows:
         return [], [], []
-    declared = _declared_array_item_keys(
-        schema if isinstance(schema, dict) else (cap.get("input_schema") if isinstance(cap, dict) else None),
-        name,
+    schema_node = schema if isinstance(schema, dict) else (
+        cap.get("input_schema") if isinstance(cap, dict) else None
     )
+    declared = _declared_array_item_keys(schema_node, name)
     caller_keys = declared or _caller_keys_for_object_rows(rows, item_params)
-    return rows, caller_keys, _infer_array_item_system_rules(rows, caller_keys)
+    packed = schema_node if isinstance(schema_node, dict) else {}
+    properties = packed.get("properties") if isinstance(packed.get("properties"), dict) else {}
+    field = properties.get(name) if isinstance(properties.get(name), dict) else {}
+    return rows, caller_keys, _infer_array_item_system_rules(
+        rows,
+        caller_keys,
+        section_titles=_object_array_section_names(field),
+    )
 
 
 def _hydrate_object_array_schema(schema: dict[str, Any], spec, cap: dict) -> dict[str, Any]:  # noqa: ANN001
@@ -1703,12 +1721,29 @@ def _matching_spec_step(spec, cap: dict, step: dict):  # noqa: ANN001
     return None
 
 
-def _inferred_identity_bindings(step: dict, schema: dict, spec_step) -> list[dict[str, Any]]:  # noqa: ANN001
-    caller = {
+def _schema_caller_names(schema: dict) -> set[str]:
+    return {
         name
         for _path, name, _field in _iter_schema_fields(schema)
         if name
     }
+
+
+def _path_is_caller_owned(path: str, key: str, caller: set[str]) -> bool:
+    bare = str(path or "").removeprefix("body.").removeprefix("query.").removeprefix("path.")
+    leaf = _export_leaf(key or path)
+    caller_leaves = {_export_leaf(name) for name in caller}
+    return (
+        path in caller
+        or key in caller
+        or bare in caller
+        or leaf in caller_leaves
+        or _export_leaf(bare) in caller_leaves
+    )
+
+
+def _inferred_identity_bindings(step: dict, schema: dict, spec_step) -> list[dict[str, Any]]:  # noqa: ANN001
+    caller = _schema_caller_names(schema)
     bindings: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in step.get("identity") or []:
@@ -1717,18 +1752,23 @@ def _inferred_identity_bindings(step: dict, schema: dict, spec_step) -> list[dic
         packed = dict(item)
         packed.setdefault("kind", "current_user" if str(packed.get("source") or "").startswith("current_user:") else packed.get("kind"))
         packed.setdefault("key", str(packed.get("path") or "").rsplit(".", 1)[-1])
+        path = str(packed.get("path") or "")
+        key = str(packed.get("key") or path.rsplit(".", 1)[-1])
+        if _path_is_caller_owned(path, key, caller):
+            continue
         bindings.append(packed)
-        seen.add(str(packed.get("path")))
+        seen.add(path)
     params = list(getattr(spec_step, "params", None) or [])
     for param in params:
         if getattr(param, "exposed_to_user", False):
             continue
         path = str(param.path or "").removeprefix("body.")
-        leaf = _export_leaf(param.key or path)
+        key = str(param.key or path)
+        leaf = _export_leaf(key)
         reason = str(getattr(param, "reason", "") or "")
         source_kind = str(getattr(param, "source_kind", "") or "")
         if source_kind == "current_user" or "登录身份" in reason or "当前登录" in reason or leaf in _LOGIN_IDENTITY_LEAVES:
-            if path in seen or path in caller or "[" in path:
+            if path in seen or _path_is_caller_owned(path, key, caller) or "[" in path:
                 continue
             source = str((param.source or {}).get("path") or "")
             if not source.startswith(("cookie:", "localStorage:", "requestHeader:", "current_user:")):
@@ -1737,7 +1777,7 @@ def _inferred_identity_bindings(step: dict, schema: dict, spec_step) -> list[dic
                 "path": path,
                 "source": source,
                 "kind": "current_user",
-                "key": str(param.key or path),
+                "key": key,
                 "required": param.value not in (None, ""),
             })
             seen.add(path)
@@ -1745,7 +1785,7 @@ def _inferred_identity_bindings(step: dict, schema: dict, spec_step) -> list[dic
     if isinstance(body, dict):
         for key, value in body.items():
             leaf = _export_leaf(key)
-            if key in seen or key in caller or leaf not in _LOGIN_IDENTITY_LEAVES:
+            if key in seen or _path_is_caller_owned(str(key), str(key), caller) or leaf not in _LOGIN_IDENTITY_LEAVES:
                 continue
             if value not in (None, "", 0) and not isinstance(value, (str, int)):
                 continue
@@ -1814,6 +1854,9 @@ def _attach_array_system_fields(step: dict, schema: dict, spec, cap: dict) -> li
         _rows, caller_keys, rules = _object_array_facts(spec, cap, str(name), schema)
         if not rules or ("array_item_system_fields", str(name)) in existing:
             continue
+        packed = schema if isinstance(schema, dict) else {}
+        properties = packed.get("properties") if isinstance(packed.get("properties"), dict) else {}
+        field = properties.get(name) if isinstance(properties.get(name), dict) else {}
         fields.append({
             "name": f"{name}__system_fields",
             "kind": "array_item_system_fields",
@@ -1821,6 +1864,7 @@ def _attach_array_system_fields(step: dict, schema: dict, spec, cap: dict) -> li
             "container_path": name,
             "rules": rules,
             "caller_keys": caller_keys,
+            "section_titles": _object_array_section_names(field),
         })
     return fields
 
@@ -1860,19 +1904,21 @@ def _sanitize_request_mapping(
     out: dict[str, Any] = {}
     for key, value in template.items():
         name = str(key)
+        caller = _caller_name_for_key(name, fields)
         if (
-            _path_covers(name, linked)
-            or _path_covers(name, system_paths)
-            or _path_covers(name, formula_paths)
-            or _path_covers(name, identity_paths)
+            not caller
+            and (
+                _path_covers(name, linked)
+                or _path_covers(name, system_paths)
+                or _path_covers(name, formula_paths)
+                or _path_covers(name, identity_paths)
+            )
         ):
             continue
         if _path_covers(name, previous_response_paths):
-            caller = _caller_name_for_key(name, fields)
             if caller:
                 out[name] = "{{" + caller + "}}"
             continue
-        caller = _caller_name_for_key(name, fields)
         if isinstance(value, dict):
             out[name] = _sanitize_request_mapping(
                 value,
@@ -1967,6 +2013,7 @@ def _project_capability_step(
         str(item.get("target_path") or "")
         for item in links
         if int(item.get("target_step", -1)) == step_index
+        and "[" not in str(item.get("source_path") or "")
     }
     system_paths = {
         str(item.get("path") or "")
@@ -2090,6 +2137,7 @@ def _runtime_default(name: str, field: dict, control: str) -> str:
         guidance = (
             f"按页面上的“{label}”收集行；"
             "用 columns 的 label 画表，多个 sections 各画一张表；"
+            "提交时按分区标题分组或每行带分区标题；"
             "空表写「暂无数据」，不要展示 JSON 原文"
         )
     elif field.get("type") in {"array", "object"}:
@@ -2240,7 +2288,7 @@ def _input_forms_bundle(plans: list[dict]) -> tuple[str, dict[str, str]]:
         "",
         "- 同一能力的相关字段尽量合并在一次 `questions[]` 中；每个 `id` 与 `input_schema.properties` 的键逐字一致。",
         "- `question` 只用页面标签。禁止附加「JSON 数组」「JSON 对象」或类型名。",
-        "- 展示与能力契约完全一致：`questions[]` 的 id、options 必须与 `input_schema` 逐字一致。枚举只显示契约 options 的 label。对象数组的 `inputType` 是 `table`，按 `columns` 的 label 画表；数组 title 含多个分区时按 `sections` 各画一张表。空表写「暂无数据」。不要把请求 JSON 给用户看。",
+        "- 展示与能力契约完全一致：`questions[]` 的 id、options 必须与 `input_schema` 逐字一致。枚举只显示契约 options 的 label。对象数组的 `inputType` 是 `table`，按 `columns` 的 label 画表；数组 title 含多个分区时按 `sections` 各画一张表，提交时按分区标题分组或每行带分区标题。空表写「暂无数据」。不要把请求 JSON 给用户看。",
         "- 第一次提问必须把该能力 `questions[]` 原样发出，条数与 `input_schema.properties` 一致。只有本轮已给出且通过校验的字段才能从副本中删除。禁止因为可选、用户没提到、或原页控件更少就少问。不要改 `questions[]` 的 id 或 options，也不要另编字段或候选项。",
         "- 下列 `default` 是运行时占位符，调用前必须替换为结合当前用户意图、当前时间和实时候选得到的非空推荐值；不得把占位符本身传给工具。",
         "- 用户回答后，先按 schema 的 `type`、`format`、`enum`、`pattern` 和边界转换为接口线格式。可无歧义转换时自动转换（例如数字文本转 number、日期语义转声明格式、候选 label 转稳定 id）。",
@@ -4122,6 +4170,38 @@ def _apply_identity(step, body):
     return body
 
 
+def expand_sectioned_input(value, section_titles):
+    titles = [str(title).strip() for title in (section_titles or []) if str(title).strip()]
+    if isinstance(value, dict) and titles:
+        title_set = set(titles)
+        keys = [str(key).strip() for key in value]
+        if keys and all(key in title_set for key in keys):
+            rows = []
+            by_title = {str(key).strip(): item for key, item in value.items()}
+            for title in titles:
+                items = by_title.get(title)
+                if not isinstance(items, list):
+                    continue
+                for item in items:
+                    if isinstance(item, dict):
+                        rows.append({**item, "__section": title})
+                    else:
+                        rows.append(item)
+            return rows
+    return value
+
+
+def _expand_plan_sectioned_inputs(step, values):
+    values = dict(values)
+    for field in step.get("runtime_fields") or []:
+        if not isinstance(field, dict) or str(field.get("kind") or "") != "array_item_system_fields":
+            continue
+        name = str(field.get("container_field") or "")
+        if name in values:
+            values[name] = expand_sectioned_input(values[name], field.get("section_titles") or [])
+    return values
+
+
 def _apply_array_item_system_fields(step, body):
     if not isinstance(body, dict):
         return body
@@ -4130,11 +4210,13 @@ def _apply_array_item_system_fields(step, body):
             continue
         container = str(field.get("container_path") or field.get("container_field") or "")
         rows = get_path(body, container) if container else None
+        rows = expand_sectioned_input(rows, field.get("section_titles") or [])
         if not isinstance(rows, list):
             continue
         for index, row in enumerate(rows):
             if not isinstance(row, dict):
                 continue
+            section = str(row.get("__section") or "").strip()
             for rule in field.get("rules") or []:
                 key = str(rule.get("key") or "")
                 strategy = str(rule.get("strategy") or "")
@@ -4175,6 +4257,17 @@ def _apply_array_item_system_fields(step, body):
                         ):
                             row[key] = copy.deepcopy(case.get("value"))
                             break
+                elif strategy == "section":
+                    for case in rule.get("cases") or []:
+                        if str(case.get("section") or "").strip() != section:
+                            continue
+                        value = case.get("value")
+                        if value in (None, ""):
+                            row.pop(key, None)
+                        else:
+                            row[key] = copy.deepcopy(value)
+                        break
+            row.pop("__section", None)
         body = deep_set(body, container, rows)
     return body
 
@@ -4381,7 +4474,7 @@ def execute_plan(plan, inputs):
     outputs = []
     option_cache = {}
     for index, step in enumerate(plan.get("steps") or []):
-        values, option_projections = _apply_selects(step, dict(inputs), option_cache)
+        values, option_projections = _apply_selects(step, _expand_plan_sectioned_inputs(step, dict(inputs)), option_cache)
         for target, value in option_projections.items():
             leaf = [token for token in re.split(r"[.\[]", str(target)) if token and not token.endswith("]")]
             if leaf and leaf[-1] not in values:
@@ -4488,7 +4581,7 @@ import json
 import re
 import sys
 
-from client import emit, execute_plan, option_choices
+from client import emit, execute_plan, expand_sectioned_input, option_choices
 
 PLAN = json.loads(__PLAN__)
 
@@ -4540,7 +4633,7 @@ def _validate(value, schema, path="input"):
         if missing:
             raise ValueError(f"{path} missing required: {', '.join(missing)}")
         if schema.get("additionalProperties") is False:
-            extra = sorted(name for name in value if name not in properties)
+            extra = sorted(name for name in value if name not in properties and name != "__section")
             if extra:
                 raise ValueError(f"{path} has undeclared fields: {', '.join(extra)}")
         for name, child in properties.items():
@@ -4608,6 +4701,10 @@ def inputs_from_args(args, command):
             raw = getattr(args, name, None)
             if raw is not None:
                 values[name] = _coerce(raw, schema)
+            if name in values:
+                title = str((schema or {}).get("title") or (schema or {}).get("label") or "")
+                sections = [part for part in re.split(r"\s*(?:/|；|;)\s*", title) if part]
+                values[name] = expand_sectioned_input(values[name], sections if len(sections) > 1 else [])
         missing = [name for name in PLAN.get("input_schema", {}).get("required") or [] if name not in values]
         if missing:
             command.error("missing required inputs: " + ", ".join(missing))
@@ -4905,6 +5002,7 @@ def _runtime_step(step: dict) -> dict:
         "output_format", "left_field", "right_field", "result_field",
         "container_field", "container_path", "item_field",
         "array_container_path", "array_item_key", "rules", "caller_keys",
+        "section_titles",
     }
     packed["runtime_fields"] = [
         {key: value for key, value in item.items() if key in runtime_keys}

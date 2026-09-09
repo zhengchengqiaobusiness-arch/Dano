@@ -5,6 +5,7 @@ import copy
 import json
 import re
 from typing import Any
+from uuid import uuid4
 
 from dano.execution.page.flow_spec_core.models import FlowSpec, FlowStep, ParamField, SelectBinding
 from dano.execution.page.flow_spec_core.normalization import _infer_type_from_value
@@ -113,15 +114,41 @@ def _presence_cases(
     return _simplify_presence_cases(cases)
 
 
+def _section_cases(
+    rows: list[dict[str, Any]],
+    key: str,
+    section_titles: list[str],
+) -> list[dict[str, Any]]:
+    titles = [str(title).strip() for title in section_titles if str(title).strip()]
+    if len(titles) < 2:
+        return []
+    first_seen: list[Any] = []
+    seen: set[str] = set()
+    for row in rows:
+        encoded = _stable_cell(row.get(key))
+        if encoded in seen:
+            continue
+        seen.add(encoded)
+        first_seen.append(row.get(key))
+    if len(first_seen) != len(titles):
+        return []
+    return [
+        {"section": titles[index], "value": first_seen[index]}
+        for index in range(len(titles))
+    ]
+
+
 def _infer_array_item_system_rules(
     rows: list[dict[str, Any]],
     caller_keys: list[str] | None = None,
+    section_titles: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Derive per-row system fields from recorded rows. No page-specific codes."""
     if not rows:
         return []
     keys = _object_array_keys(rows)
     owned = list(caller_keys) if caller_keys is not None else _caller_keys_for_object_rows(rows)
+    titles = [str(title).strip() for title in (section_titles or []) if str(title).strip()]
     rules: list[dict[str, Any]] = []
     for key in keys:
         if key in owned:
@@ -150,7 +177,101 @@ def _infer_array_item_system_rules(
         cases = _presence_cases(rows, key, owned)
         if cases:
             rules.append({"key": key, "strategy": "caller_presence", "cases": cases})
+            continue
+        section_cases = _section_cases(rows, key, titles)
+        if section_cases:
+            rules.append({"key": key, "strategy": "section", "cases": section_cases})
     return rules
+
+
+def expand_sectioned_array(value: Any, section_titles: list[str] | None) -> Any:
+    """Flatten `{section: [rows]}` into one object array tagged with `__section`."""
+    titles = [str(title).strip() for title in (section_titles or []) if str(title).strip()]
+    if isinstance(value, dict) and titles:
+        title_set = set(titles)
+        keys = [str(key).strip() for key in value]
+        if keys and all(key in title_set for key in keys):
+            rows: list[Any] = []
+            by_title = {str(key).strip(): item for key, item in value.items()}
+            for title in titles:
+                items = by_title.get(title)
+                if not isinstance(items, list):
+                    continue
+                for item in items:
+                    if isinstance(item, dict):
+                        rows.append({**item, "__section": title})
+                    else:
+                        rows.append(item)
+            return rows
+    return value
+
+
+def apply_array_item_system_rules(
+    rows: list[Any],
+    rules: list[dict[str, Any]],
+    caller_keys: list[str] | None = None,
+) -> list[Any]:
+    """Fill undeclared row mechanics. Keep this aligned with the exported client."""
+    owned = [str(key) for key in (caller_keys or []) if str(key)]
+    filled: list[Any] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            filled.append(row)
+            continue
+        current = dict(row)
+        section = str(current.get("__section") or "").strip()
+        for rule in rules:
+            key = str(rule.get("key") or "")
+            strategy = str(rule.get("strategy") or "")
+            if not key:
+                continue
+            if strategy == "uuid":
+                current[key] = str(uuid4())
+            elif strategy == "index":
+                current[key] = index
+            elif strategy == "index_within_presence":
+                names = owned or [
+                    name for name in current
+                    if name not in {str(item.get("key") or "") for item in rules}
+                    and not str(name).startswith("_")
+                ]
+                signature = tuple(
+                    (name, "present" if current.get(name) not in (None, "") else "absent")
+                    for name in names
+                )
+                peers = [
+                    item for item in filled
+                    if isinstance(item, dict)
+                    and tuple(
+                        (name, "present" if item.get(name) not in (None, "") else "absent")
+                        for name in names
+                    ) == signature
+                ]
+                current[key] = len(peers)
+            elif strategy == "constant":
+                current[key] = copy.deepcopy(rule.get("value"))
+            elif strategy == "caller_presence":
+                for case in rule.get("cases") or []:
+                    when = case.get("when") or {}
+                    if all(
+                        (current.get(name) not in (None, "") if state == "present" else current.get(name) in (None, ""))
+                        for name, state in when.items()
+                    ):
+                        current[key] = copy.deepcopy(case.get("value"))
+                        break
+            elif strategy == "section":
+                for case in rule.get("cases") or []:
+                    if str(case.get("section") or "").strip() != section:
+                        continue
+                    value = case.get("value")
+                    if value in (None, ""):
+                        current.pop(key, None)
+                    else:
+                        current[key] = copy.deepcopy(value)
+                    break
+        current.pop("__section", None)
+        filled.append(current)
+    return filled
 
 
 def _stable_cell(value: Any) -> str:

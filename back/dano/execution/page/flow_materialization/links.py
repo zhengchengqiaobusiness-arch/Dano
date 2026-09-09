@@ -86,7 +86,29 @@ def _auto_dependency_target_allowed(param: ParamField | None) -> bool:
     return True
 
 
+def _collection_path_is_value_dependency(source_path: str, param: ParamField | None, lk: FlowLink | None) -> bool:
+    if "[" not in str(source_path or ""):
+        return True
+    evidence = lk.evidence if lk is not None and isinstance(lk.evidence, dict) else {}
+    if lk is not None and (lk.meta or {}).get("captured_record_hydration"):
+        evidence = {**evidence, "kind": evidence.get("kind") or "record_hydration"}
+    source_leaf = re.sub(
+        r"[^a-z0-9]+", "", str(source_path or "").split(".")[-1].lower(),
+    )
+    target_leaf = re.sub(
+        r"[^a-z0-9]+", "",
+        str((param.path if param is not None else "") or (param.key if param is not None else "") or "").split(".")[-1].lower(),
+    )
+    return bool(
+        evidence.get("kind") == "record_hydration"
+        and source_leaf == target_leaf
+        and int(evidence.get("match_count") or 0) >= 3
+    )
+
+
 def _auto_dependency_link_allowed(param: ParamField | None, source_path: str, lk: FlowLink | None = None) -> bool:
+    if not _collection_path_is_value_dependency(source_path, param, lk):
+        return False
     if lk is not None and not _link_is_auto_generated(lk):
         return True
     if param is None:

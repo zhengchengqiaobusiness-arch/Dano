@@ -2720,6 +2720,39 @@ def test_unmapped_query_enum_keeps_page_choices_and_detail_id_is_record_selector
     assert record_id.required is True
 
 
+def test_record_detail_keeps_declared_previous_response() -> None:
+    detail = FlowStep(
+        step_id="detail",
+        method="GET",
+        path="/orders/get",
+        params=[ParamField(
+            path="query.id",
+            key="id",
+            label="id",
+            value="67",
+            type="number",
+            source_kind="previous_response",
+            source={
+                "kind": "previous_response",
+                "step_id": "create",
+                "response_path": "data",
+            },
+            category="runtime_var",
+            exposed_to_user=False,
+            editable=False,
+            required=False,
+        )],
+    )
+    spec = FlowSpec(steps=[detail])
+
+    _apply_query_form_field_contracts(spec)
+
+    record_id = spec.steps[0].params[0]
+    assert record_id.source_kind == "previous_response"
+    assert record_id.exposed_to_user is False
+    assert record_id.source["step_id"] == "create"
+
+
 def test_missing_public_action_is_nonblocking_and_left_for_grounded_fallback() -> None:
     from dano.execution.page.capability_semantic import _required_public_action_request_ids
 

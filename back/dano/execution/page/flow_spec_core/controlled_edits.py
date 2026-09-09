@@ -204,6 +204,9 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
                 (lk.meta or {}).get("captured_record_hydration")
                 or (lk.evidence or {}).get("kind") == "record_hydration"
             )
+            if "[" in str(lk.source_path or "") and not hydration:
+                # Option catalogs and list payloads are not scalar value bindings.
+                continue
             captured_binding_overrides_agent_input = bool(
                 p.source_kind in {
                     "user_input", "page_default", "unknown", *_OPTION_SOURCE_KINDS,

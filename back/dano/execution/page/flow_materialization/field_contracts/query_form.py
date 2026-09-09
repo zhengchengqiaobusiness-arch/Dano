@@ -152,6 +152,10 @@ def _apply_query_form_field_contracts(spec: FlowSpec) -> None:
                     )
                 ):
                     continue
+                if param.source_kind in {
+                    "previous_response", "current_user", "constant",
+                }:
+                    continue
                 param.category = "user_param"
                 param.source_kind = "selected_record_identity"
                 param.source = {

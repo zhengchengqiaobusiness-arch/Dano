@@ -1295,6 +1295,154 @@ def test_declared_array_schema_does_not_infer_presence_from_undeclared_cells() -
     assert rules["caller_keys"] == ["content"]
     strategies = {item["key"]: item["strategy"] for item in rules["rules"]}
     assert strategies.get("itemType") != "caller_presence"
+    assert strategies.get("itemType") == "section"
+    assert strategies.get("progress") == "section"
+    assert rules.get("section_titles") == ["已完成工作", "工作计划"]
+
+
+def test_option_catalog_link_keeps_caller_filter_in_query() -> None:
+    from dano.export.skill_package.renderer import _capability_plans, _runtime_plan
+
+    payload = {
+        "capabilities": [{
+            "capability_id": "cap_stats",
+            "name": "query_stats",
+            "title": "查询统计",
+            "kind": "query",
+            "step_ids": ["step_query"],
+            "request_refs": [
+                {"step_id": "step_opts", "usage": "option_source"},
+                {"step_id": "step_query", "usage": "execute"},
+            ],
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "deptId": {
+                        "type": "string",
+                        "title": "组织机构",
+                        "x-dano-business-type": "api_option",
+                        "x-dano-option-source": {
+                            "source_method": "GET",
+                            "source_url": "/api/dept",
+                            "value_key": "id",
+                            "label_key": "name",
+                        },
+                    },
+                    "reportType": {"type": "string", "title": "类型"},
+                },
+            },
+        }],
+        "steps": [
+            {
+                "step_id": "step_opts",
+                "name": "加载组织树",
+                "method": "GET",
+                "path": "/api/dept",
+                "params": [],
+            },
+            {
+                "step_id": "step_query",
+                "name": "查询统计",
+                "method": "GET",
+                "path": "/api/stats",
+                "url": "https://example.test/api/stats?deptId=101&reportType=1",
+                "params": [
+                    {
+                        "key": "reportType",
+                        "path": "query.reportType",
+                        "source_kind": "page_enum",
+                        "exposed_to_user": True,
+                        "required": False,
+                    },
+                    {
+                        "key": "deptId",
+                        "path": "query.deptId",
+                        "label": "组织机构",
+                        "type": "string",
+                        "source_kind": "api_option",
+                        "exposed_to_user": True,
+                        "required": False,
+                        "source": {
+                            "source_method": "GET",
+                            "source_url": "/api/dept",
+                            "value_key": "id",
+                            "label_key": "name",
+                        },
+                    },
+                ],
+            },
+        ],
+        "links": [{
+            "source_step_id": "step_opts",
+            "source_path": "data[].id",
+            "target_step_id": "step_query",
+            "target_path": "query.deptId",
+        }],
+    }
+    spec = _current_spec({"flow_spec": payload, "recording_id": "rec_option_link"})
+    dept = next(param for param in spec.steps[1].params if param.key == "deptId")
+    assert dept.source_kind == "api_option"
+    assert dept.exposed_to_user is True
+
+    api_request = {
+        "capabilities": [{
+            "capability_id": "cap_stats",
+            "name": "query_stats",
+            "title": "查询统计",
+            "kind": "query",
+            "execution_contract": {
+                "steps": [{
+                    "step_id": "step_query",
+                    "method": "GET",
+                    "path": "/api/stats",
+                    "query_template": {"deptId": "101", "reportType": "1"},
+                }],
+            },
+            "input_schema": spec.capabilities[0].input_schema,
+        }],
+    }
+    plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), spec, api_request)
+    query_step = _runtime_plan(plans[0])["steps"][0]
+    assert query_step["query_template"]["deptId"] == "{{deptId}}"
+    assert not any(
+        str(item.get("key") or item.get("path") or "").split(".")[-1].casefold() == "deptid"
+        for item in query_step.get("identity") or []
+    )
+
+
+def test_sectioned_rows_keep_recorded_system_fields() -> None:
+    from dano.execution.page.flow_materialization.field_contracts.dynamic_array import (
+        apply_array_item_system_rules,
+        expand_sectioned_array,
+        _infer_array_item_system_rules,
+    )
+
+    recorded = [
+        {"content": "已完成", "progress": 0, "itemType": 1, "sort": 0, "_X_ROW_KEY": "row_1"},
+        {"content": "计划", "itemType": 2, "sort": 0, "_X_ROW_KEY": "row_2"},
+    ]
+    rules = _infer_array_item_system_rules(
+        recorded,
+        ["content"],
+        section_titles=["已完成工作", "工作计划"],
+    )
+    strategies = {item["key"]: item["strategy"] for item in rules}
+    assert strategies["itemType"] == "section"
+    assert strategies["progress"] == "section"
+
+    incoming = expand_sectioned_array(
+        {
+            "已完成工作": [{"content": "今天写完接口"}],
+            "工作计划": [{"content": "明天联调"}],
+        },
+        ["已完成工作", "工作计划"],
+    )
+    filled = apply_array_item_system_rules(incoming, rules, ["content"])
+    assert filled[0]["itemType"] == 1
+    assert filled[0]["progress"] == 0
+    assert filled[1]["itemType"] == 2
+    assert "progress" not in filled[1]
+    assert "__section" not in filled[0]
 
 
 def test_labeled_schema_enum_is_not_replaced_by_untyped_option_api() -> None:

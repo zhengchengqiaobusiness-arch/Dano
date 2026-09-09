@@ -1334,7 +1334,7 @@ def _question_default_text(schema: dict, *, query: bool, control: str) -> str:
     elif control == "table" or _is_caller_object_array(schema):
         rule = (
             f"按页面上的“{label}”收集行，用 columns 画表，"
-            "多个 sections 各画一张表，空表写「暂无数据」"
+            "多个 sections 各画一张表，提交时按分区标题分组或每行带分区标题，空表写「暂无数据」"
         )
     elif schema.get("type") in {"array", "object"}:
         rule = f"根据当前用户意图生成满足 schema 的 {schema.get('type')}"
