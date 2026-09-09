@@ -71,19 +71,7 @@ export function mergeCapabilityIntoDraft(draft, {
   if (incomingUnresolved.length) {
     next.unresolved = next.unresolved.concat(incomingUnresolved);
   }
-  const incomingRelations = asList(capability_relations).map((row) => {
-    const item = asRecord(row);
-    if (!String(item.from_capability || "").trim() || !String(item.to_capability || "").trim()) {
-      return item;
-    }
-    if (!item.type) item.type = "suggested_call_chain";
-    if (!item.mode || item.mode === "external_transform") item.mode = "handoff";
-    item.confirmed = true;
-    const evidence = asRecord(item.evidence);
-    if (!evidence.kind) evidence.kind = "typed_capability_contract";
-    item.evidence = evidence;
-    return item;
-  });
+  const incomingRelations = asList(capability_relations).map((row) => asRecord(row));
   if (incomingRelations.length) {
     next.capability_relations = [...(next.capability_relations || []), ...incomingRelations];
   }

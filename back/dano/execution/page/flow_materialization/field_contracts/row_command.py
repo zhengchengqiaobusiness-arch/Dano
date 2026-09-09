@@ -9,6 +9,7 @@ from dano.execution.page.flow_spec_core.models import (
 from dano.execution.page.flow_materialization.field_contracts.common import (
     _param_has_manual_contract,
     _param_source_agent_classified,
+    _param_source_is_unresolved,
 )
 from dano.execution.page.flow_materialization.field_contracts.record_identity import (
     _param_is_document_record_identity,
@@ -63,6 +64,7 @@ def _apply_row_command_field_contracts(spec: FlowSpec) -> None:
                 param.locked
                 or _param_has_manual_contract(param)
                 or _param_source_agent_classified(param)
+                or _param_source_is_unresolved(param)
             ):
                 continue
             if _param_is_document_record_identity(param):

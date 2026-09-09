@@ -15,40 +15,49 @@ import { createPiTrace } from "./pi-trace.mjs";
 import { HUMAN_STEER_MS, isUsefulAssistantThought } from "./browser-actions.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const SKILL_PATH = path.join(ROOT, "skill", "RECORDING_CAPABILITY.md");
-const BROWSER_SKILL_PATH = path.join(ROOT, "skill", "CONTROL_IN_APP_BROWSER.md");
+export const REQUIRED_SKILL_FILES = [
+  "BUSINESS_SKILL_INVESTIGATOR.md",
+  "CONTROL_IN_APP_BROWSER.md",
+  "INFER_BUSINESS_CONTRACT.md",
+  "BUILD_AND_VALIDATE_DEDICATED_SKILL.md",
+];
 
-export async function readRecordingSkill() {
-  try {
-    return await readFile(SKILL_PATH, "utf8");
-  } catch {
-    return "";
+export async function readRequiredSkills(skillDir = path.join(ROOT, "skill")) {
+  const loaded = [];
+  for (const name of REQUIRED_SKILL_FILES) {
+    const file = path.join(skillDir, name);
+    let text;
+    try {
+      text = await readFile(file, "utf8");
+    } catch {
+      throw new Error(`缺少 Skill 文件: ${name}`);
+    }
+    if (!String(text || "").trim()) {
+      throw new Error(`Skill 文件为空: ${name}`);
+    }
+    loaded.push({ name, text: text.trim() });
   }
+  return loaded;
 }
 
-export async function readControlInAppBrowserSkill() {
-  try {
-    return await readFile(BROWSER_SKILL_PATH, "utf8");
-  } catch {
-    return "";
-  }
-}
-
-export function buildPiInstructions(skillText = "", browserSkillText = "") {
-  const skill = String(skillText || "").trim();
-  const browserSkill = String(browserSkillText || "").trim();
+export function buildPiInstructions(skills = []) {
+  const bodies = (Array.isArray(skills) ? skills : []).map((item) => {
+    if (typeof item === "string") return item.trim();
+    const name = String(item?.name || "").replace(/\.md$/i, "");
+    const text = String(item?.text || "").trim();
+    return name ? `## ${name}\n\n${text}` : text;
+  }).filter(Boolean);
   return `${PI_ONLY_NOTICE}
 
-你是本场调查的唯一语义权威。调查顺序、何时操作、何时交能力，以下面的 Skill 为准，不要另写一套点页面流程。
-人同时也可以点预览。你们共用同一只浏览器、同一路画面、同一条证据。不要锁死预览。
-最终必须产出能力。现有录制页会把你提交的 result 原样当作 draft 展示。
+你是 Business Skill Investigator。动手按 Control In App Browser，认产物按 Infer Business Contract，出包按 Build and Validate Dedicated Skill。
+人同时也可以点预览。不要锁死预览。
 没有非空 capabilities，就等于没有产物。代码不会替你编造能力。
 
-${skill}
+${bodies.join("\n\n")}
 
-${browserSkill ? `## Control In App Browser\n\n${browserSkill}\n` : ""}
 可用工具：
 - control_in_app_browser
+- read_page_asset
 - list_recording_manifest
 - list_recording_index
 - list_action_timeline
@@ -60,61 +69,45 @@ ${browserSkill ? `## Control In App Browser\n\n${browserSkill}\n` : ""}
 - read_screenshot
 - get_recording_freeze_state
 - submit_recording_capability
-- submit_recording_draft
+- write_skill_artifact
+- validate_skill_package
+- project_contract_to_request
+- run_isolated_script
 - submit_recording_result
-
-信封（录制页能读到才算交上，细节以 Skill 为准）：
-- 不要写 capabilities[].fields。request_refs 必须是 {step_id, usage} 对象。steps[].params 必须是含 key/path 的对象数组。调用方字段必须出现在 input_schema.properties 或这些 params 里。
-- 未接到用户结束禁止 submit_recording_result，只许 submit_recording_capability。
-- submit_recording_result 必须包含 recording_id、final=true；完整 result 或 use_draft=true。
-- 先用 list_action_timeline 建台账。每个独立业务动作都要有能力或 unresolved。capability_id 不得重复。每个能力恰好一个不共用的 execute。
-- 系统会原样保存 result，不会补齐、改写或生成替代能力。
 `;
 }
 
-export const PI_INSTRUCTIONS = buildPiInstructions(
-  await readRecordingSkill(),
-  await readControlInAppBrowserSkill(),
-);
+export const PI_INSTRUCTIONS = buildPiInstructions(await readRequiredSkills());
 
 export function buildUserSteerPrompt(text, { finalizing = false } = {}) {
   const body = String(text || "").trim();
   if (finalizing) {
     return (
       `用户说：${body}\n` +
-      `先用一两句话回答用户。不要再 click。已有草稿就立刻 submit_recording_result({final:true, use_draft:true})。没有完整能力就先按 Skill 交已有真实 execute 形状的项。`
+      `先用一两句话回答用户。按 Skill 1 继续。已满足导出条件且已有草稿才 submit_recording_result({final:true, use_draft:true})。`
     );
   }
   return (
     `用户说：${body}\n` +
-    `这是对话。先用一两句话回答这句话，然后按 Skill 用 control_in_app_browser 继续当前页目标，不要盲点，不要 invent selector。人也可以点预览。不要锁预览。按目标做完的那次操作有真实 execute 形状再 submit_recording_capability。未接到用户结束，禁止 submit_recording_result。`
+    `这是对话。先用一两句话回答这句话，然后按 Skill 1 继续。人也可以点预览。未接到用户结束，禁止 submit_recording_result。`
   );
 }
 
 export function buildLiveDrivePrompt({ targetUrl = "", goal = "" } = {}) {
   return (
-    `你是操作者。人也同时可以点预览，共用这一页。调查顺序以 Skill 为准。\n` +
+    `你是 Business Skill Investigator。按四份 Skill 协调。\n` +
     `目标：${String(goal || "").trim() || "把该页独立业务动作做成可调用能力"}\n` +
     `入口：${String(targetUrl || "").trim()}\n` +
-    `按 Skill 用 control_in_app_browser：open_page → snapshot → network_since。先观察，再按目标把当前动作的可见字段写上，再点该动作自己的查询、保存或提交。目标要提交就点提交并走完确认，不要用保存换请求形状。不要盲点。\n` +
-    `只用 snapshot 广告的 placeholder= / label= / role= / text= / ref=。禁止 name=、#id、CSS，禁止改点没有业务文案的 aN。fill 就写，写不进回 not_writable。choose 点可见原文；没有该项看打开后是列表还是日历。打开弹层后再 snapshot 一次。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回摘要，不要把图片写进对话。人点过的看 recentUserActions。\n` +
-    `首屏自动请求不是已经做完。表单还是空的，不要点保存。没有搜索/查询文案时，点已经出现的树或列表节点。禁止点没文案的 aN。\n` +
-    `readonly/disabled 只表示整个控件不能改。默认已选仍是调用方，不要写成无独立来源。\n` +
-    `按目标做完的那次操作发出真实 execute 后再 submit_recording_capability。人点出的动作也要交。禁止交空壳。\n` +
-    `登录、验证码、写不进的字段、点了不发网的保存：action=assist，预览不要锁。写入真实数据前若目标没授权，先 assist。协助之后必须停自动点，等用户在预览做完或说继续；工具会暂停自动点击，再 click 会被拦住。\n` +
-    `未接到用户结束，禁止 submit_recording_result。不要把 JSON 写在对话里。不要写 capabilities[].fields。`
+    `人也可以点预览。未接到用户结束，禁止 submit_recording_result。\n` +
+    `不要把完整 JSON 写在对话里。`
   );
 }
 
 export function buildFinalAnalysisPrompt(latestSeq) {
   return (
-    `证据已冻结，最新 seq=${Number(latestSeq) || 0}。现在必须产出能力。\n` +
-    "先调 list_action_timeline 建台账，再用 list_recording_index 核对 interaction、xhr/fetch、network_response 和 visible_control。对候选 execute 调 read_request_shape；正文不够再 read_evidence_item。响应在 network_response 或读请求时附带的 response.body。\n" +
-    "先读各页最近一次 visible_control（不要带弹层前旧 seq），再对 execute 每个 query/body 键。树/页签/分段器/单选组/日期区间都是可改选择。可改控件一律调用方；页面自动计算但仍可手工修改的输入也属于调用方。readonly/disabled 只表示整个控件不能改。默认已选仍是调用方。灰框才是系统，不要进 schema。分页只留 execute 系统栏，不准进 schema。每个 exposed_to_user=true 的 param 都必须出现在 schema，schema 顶层 key、param.key、param.path 的末级键必须逐字对应 execute 的真实 query/body 键，禁止相近拼写和别名。筛选项看得见但键看不清就 unresolved，禁止编 query 键。禁止编造写请求里没有的键。可增行只保留一个对象数组 key，禁止收成 string；列名用各分区表头原文，多分区必须写 x-dano-section-titles，数组 title 用 分区A/分区B，禁止写成拆不开的「A和B」，合并行时带分区标题。form textarea 不要用表格分区标题。确认弹层可填意见：有请求键就建模，没有就 unresolved，不要编新键。previous_response 必须写 from_step_id/from_path 并写成 links，不要把本场主键/单号当常量。目标先 A 后 B 且没有值流时写 capability_relations（handoff）。option_source 只声明候选项，禁止把选项列表路径写成值流 links。登录身份用 current_user，不要写死本场数字。label/title 用页面原文，去掉星号。树单击是单值，schema type 必须和 param 一致。保存与提交若 path 或效果不同必须两项能力。\n" +
-    "可改树/下拉/单选禁止只写 type=number。api_option 必须把 source_url 写进 param.source 和 schema 的 x-dano-option-source；page_enum 必须写当场全部 {label,value}。对象数组选择器的绑定只能写在对应 execute step.selects，禁止写到 result 顶层；必须含 multi、label_subkey 和覆盖真实对象键的 element_template。把树/下拉藏在 description 里会被拒收。不要读 screenshot。\n" +
-    "read_response_blob 只接受 body.blob_id（blob_ 开头）。不要把 request_id 当 blob_id。\n" +
-    "该项已有真实 execute 形状再 submit_recording_capability。人点出的动作也要交。不要把 JSON 写在对话里。不要写 capabilities[].fields。request_refs 必须是 {step_id, usage}。steps[].params 必须是含 key/path 的对象数组。全部交完后 submit_recording_result({final:true, use_draft:true})。\n" +
-    "若已有草稿，立刻 use_draft=true 提交。草稿不会自动变成结果。"
+    `用户已结束。证据已冻结，最新 seq=${Number(latestSeq) || 0}。\n` +
+    `按 Skill 1 对台账，Skill 3 认产物，Skill 4 验证后提交。\n` +
+    `未满足导出条件不要 submit_recording_result。不要把 JSON 写在对话里。`
   );
 }
 
@@ -130,7 +123,7 @@ export function isAbortLikeError(error) {
 }
 
 export function isEmptySpinError(error) {
-  return /连续空转未调用工具且未提交/.test(String(error?.message || error || ""));
+  return /transport_idle|连续空转未调用工具且未提交/.test(String(error?.message || error || ""));
 }
 
 export function isInstantEmptyTurn({ elapsedMs = 0, hadNewTools = false, abortResidue = false } = {}) {
@@ -752,7 +745,7 @@ export class LivePiSession {
           this.lastStopReason = "instant_empty";
           logPiOnly("[PI分析] 中止后连续空轮未提交，停止重试");
           this.#emitThought({ kind: "text", text: "连续空转未提交，停止分析" });
-          settleErr(new Error("PI 连续空转未调用工具且未提交"));
+          settleErr(new Error("transport_idle: 连续空转未调用工具且未提交"));
           return;
         }
         logPiOnly("[PI分析] 中止后的空轮不算空转，继续等待提交");
@@ -767,7 +760,7 @@ export class LivePiSession {
         this.lastStopReason = instantEmptySettles >= INSTANT_EMPTY_BUDGET ? "instant_empty" : "empty";
         logPiOnly(`[PI分析] 连续 ${emptySettles} 轮空转未提交，停止重试`);
         this.#emitThought({ kind: "text", text: "连续空转未提交，停止分析" });
-        settleErr(new Error("PI 连续空转未调用工具且未提交"));
+        settleErr(new Error("transport_idle: 连续空转未调用工具且未提交"));
         return;
       }
       logPiOnly("[PI分析] 本轮结束但未提交，继续要求 submit_recording_result");
@@ -1031,10 +1024,7 @@ export async function createLivePiSession({ recording, tools, onThought = null }
     onRepair: ({ toolCallCount }) => logPiOnly(`已补齐 OpenAI 兼容流的 finish_reason tool_calls=${toolCallCount}`),
   });
 
-  const instructions = buildPiInstructions(
-    await readRecordingSkill(),
-    await readControlInAppBrowserSkill(),
-  );
+  const instructions = buildPiInstructions(await readRequiredSkills());
   const trace = createPiTrace({ onThought });
   const customTools = wrapPiToolsForSdk(tools, defineTool, Type, trace);
   const resourceLoader = new DefaultResourceLoader({
@@ -1068,7 +1058,11 @@ export async function createLivePiSession({ recording, tools, onThought = null }
         "read_screenshot",
         "get_recording_freeze_state",
         "submit_recording_capability",
-        "submit_recording_draft",
+        "write_skill_artifact",
+        "validate_skill_package",
+        "project_contract_to_request",
+        "run_isolated_script",
+        "read_page_asset",
         "submit_recording_result",
         "control_in_app_browser",
       ],

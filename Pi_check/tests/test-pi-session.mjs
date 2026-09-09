@@ -48,7 +48,9 @@ test("beginLiveDrive 立即发出操作者提示，notifyEvidence 仍不打断",
   });
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.ok(prompts.length >= 1);
-  assert.match(prompts[0].text, /你是操作者|control_in_app_browser/);
+  assert.match(prompts[0].text, /Investigator/);
+  assert.match(prompts[0].text, /做成能力/);
+  assert.match(prompts[0].text, /http:\/\/example.com/);
   const before = prompts.length;
   pi.notifyEvidence({ seq: 11 });
   pi.notifyEvidence({ seq: 12 });
@@ -276,16 +278,18 @@ test("卡住中止后的空轮不得因 agent_end 被算成瞬间空转", async 
     maxEmptySettles: 5,
     hasResult: async () => false,
   });
-  await new Promise((resolve) => setTimeout(resolve, 160));
+  const deadline = Date.now() + 1500;
+  while (!thoughts.some((item) => /中止后继续点击/.test(item.text || ""))) {
+    if (Date.now() >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(thoughts.some((item) => /中止后继续点击/.test(item.text || "")));
   for (let index = 0; index < 8; index += 1) {
     trace.handleEvent({ type: "agent_end" });
-    await new Promise((resolve) => setTimeout(resolve, 15));
   }
-  await new Promise((resolve) => setTimeout(resolve, 80));
   assert.notEqual(pi.lastStopReason, "instant_empty");
   assert.equal(pi.driveStopped, false);
   assert.ok(session.aborted >= 1);
-  assert.ok(thoughts.some((item) => /中止后继续点击/.test(item.text || "")));
   await pi.stopLiveDrive();
   await drive;
 });
@@ -330,22 +334,14 @@ test("录制中不打断 PI，冻结后只发一次最终提示，忙时改用 f
   assert.equal(pi.status, "submitted");
   assert.equal(session.prompts.length, 2);
   assert.match(session.prompts[1].text, /证据已冻结/);
-  assert.match(session.prompts[1].text, /不要写 capabilities\[\]\.fields/);
-  assert.match(session.prompts[1].text, /list_recording_index/);
-  assert.match(session.prompts[1].text, /台账/);
-  assert.doesNotMatch(session.prompts[1].text, /现有录制页实际读取的合同/);
-  assert.doesNotMatch(session.prompts[1].text, /先建动作台账/);
+  assert.match(session.prompts[1].text, /Skill 1/);
   assert.match(session.prompts[1].text, /不要把 JSON 写在对话里/);
-  assert.match(session.prompts[1].text, /不要把 request_id 当 blob_id/);
-  assert.match(session.prompts[1].text, /visible_control/);
-  assert.match(session.prompts[1].text, /current_user/);
-  assert.match(session.prompts[1].text, /确认弹层可填意见/);
-  assert.match(session.prompts[1].text, /readonly\/disabled/);
-  assert.match(session.prompts[1].text, /表头原文/);
-  assert.match(session.prompts[1].text, /每个 exposed_to_user=true 的 param 都必须出现在 schema/);
-  assert.match(session.prompts[1].text, /树\/页签\/分段器\/单选组\/日期区间/);
-  assert.match(session.prompts[1].text, /不要读 screenshot/);
-  assert.ok(session.prompts[1].text.length < 1600, `最终提示过长: ${session.prompts[1].text.length}`);
+  assert.doesNotMatch(session.prompts[1].text, /current_user/);
+  assert.doesNotMatch(session.prompts[1].text, /确认弹层/);
+  assert.doesNotMatch(session.prompts[1].text, /x-dano-section-titles/);
+  assert.doesNotMatch(session.prompts[1].text, /部门树/);
+  assert.doesNotMatch(session.prompts[1].text, /不要读 screenshot/);
+  assert.ok(session.prompts[1].text.length < 800, `最终提示过长: ${session.prompts[1].text.length}`);
   assert.equal(session.prompts[1].options.streamingBehavior, "followUp");
 });
 

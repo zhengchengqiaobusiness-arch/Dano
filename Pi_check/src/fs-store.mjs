@@ -71,6 +71,10 @@ export class RecordingFiles {
     return path.join(this.directory(recordingId), "pi-draft.json");
   }
 
+  artifactDir(recordingId) {
+    return path.join(this.directory(recordingId), "skill-artifacts");
+  }
+
   async initialize(recordingId, manifest) {
     const directory = this.directory(recordingId);
     await mkdir(path.join(directory, "blobs"), { recursive: true });

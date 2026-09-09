@@ -32,92 +32,6 @@ function isPlainObject(value) {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-const SELECTABLE_HINT_RE = /部门树|树选择|树选|下拉|选择器|选择节点|选项接口|实时候选|tree\s*select|treeselect/i;
-const ROW_ARRAY_HINT_RE = /可增行|添加.{0,12}(行|项|明细)|点[「"]添加|组装成.{0,12}数组/;
-const PAGINATION_KEY_RE = /^(pageno|pagesize|pagenum|pageindex|page_no|page_size|page_num|page_index|page|limit|offset)$/i;
-const PAGINATION_LABEL_RE = /页码|每页条数|每页|分页/;
-const SYSTEM_ROW_KEYS = new Set([
-  "itemtype", "sort", "index", "seq", "order",
-  "xrowkey", "x_row_key", "rowkey", "row_key",
-]);
-
-function optionEndpoint(node) {
-  const source = isPlainObject(node)
-    ? (
-      isPlainObject(node["x-dano-option-source"]) ? node["x-dano-option-source"]
-        : isPlainObject(node["x-options-source-meta"]) ? node["x-options-source-meta"]
-          : isPlainObject(node.dataSource) ? node.dataSource
-            : isPlainObject(node.option_source) ? node.option_source
-              : node
-    )
-    : {};
-  return String(source.source_url || source.endpoint || source.url || "").trim();
-}
-
-function hasWrittenOptionContract(node, param) {
-  if (isPlainObject(node)) {
-    if (Array.isArray(node.enum) && node.enum.length) return true;
-    if (Array.isArray(node["x-enum-options"]) && node["x-enum-options"].length) return true;
-    if (Array.isArray(node["x-options"]) && node["x-options"].length) return true;
-    if (isPlainObject(node["x-enum-value-map"]) && Object.keys(node["x-enum-value-map"]).length) return true;
-    if (optionEndpoint(node)) return true;
-  }
-  if (!isPlainObject(param)) return false;
-  if (Array.isArray(param.enum_options) && param.enum_options.length) return true;
-  if (isPlainObject(param.enum_value_map) && Object.keys(param.enum_value_map).length) return true;
-  const source = isPlainObject(param.source) ? param.source : {};
-  return Boolean(optionEndpoint(source) || optionEndpoint(source.option_source));
-}
-
-function objectArrayProperties(node) {
-  const items = isPlainObject(node?.items) ? node.items : {};
-  return isPlainObject(items.properties) ? items.properties : null;
-}
-
-function isPaginationCallerKey(key, param) {
-  const folded = String(key || "").replace(/[^a-z0-9]/gi, "");
-  if (PAGINATION_KEY_RE.test(folded) || PAGINATION_KEY_RE.test(String(key || ""))) {
-    return true;
-  }
-  const text = `${param?.label || ""} ${param?.reason || ""} ${param?.title || ""}`;
-  return PAGINATION_LABEL_RE.test(text);
-}
-
-function looksCollapsedRowArray(node, param) {
-  const type = String(node?.type || param?.type || "").toLowerCase();
-  if (type === "array" && objectArrayProperties(node)) return false;
-  const text = [
-    node?.description,
-    node?.title,
-    node?.label,
-    param?.reason,
-    param?.description,
-    param?.label,
-  ].map((item) => String(item || "")).join(" ");
-  return ROW_ARRAY_HINT_RE.test(text);
-}
-
-function isSystemRowKey(key) {
-  const leaf = String(key || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
-  return SYSTEM_ROW_KEYS.has(leaf) || leaf.endsWith("rowkey");
-}
-
-function sectionTitlesFromArrayTitle(title) {
-  return String(title || "")
-    .split(/\s*(?:\/|；|;)\s*/)
-    .map((part) => part.trim())
-    .filter(Boolean);
-}
-
-function hasSectionTitleMap(node, itemProperties) {
-  const arrayTitles = isPlainObject(node) ? node["x-dano-section-titles"] : null;
-  if (isPlainObject(arrayTitles) && Object.keys(arrayTitles).length >= 2) return true;
-  return Object.values(itemProperties).some((item) => {
-    const titles = isPlainObject(item) ? item["x-dano-section-titles"] : null;
-    return isPlainObject(titles) && Object.keys(titles).length > 0;
-  });
-}
-
 function schemaConflictsParamType(node, param) {
   const schemaType = String(node?.type || "").toLowerCase();
   const paramType = String(param?.type || "").toLowerCase();
@@ -128,23 +42,6 @@ function schemaConflictsParamType(node, param) {
   const schemaScalar = ["string", "number", "integer", "boolean"].includes(schemaType);
   const paramArray = paramType === "array" || paramType === "list-enum";
   return (schemaArray && paramScalar) || (schemaScalar && paramArray);
-}
-
-function fieldLooksSelectable(node, param) {
-  const type = String(node?.type || param?.type || "").toLowerCase();
-  const format = String(node?.format || "");
-  if (type === "date" || type === "datetime" || format === "date" || format === "date-time") {
-    return false;
-  }
-  const text = [
-    node?.description,
-    node?.title,
-    node?.label,
-    param?.reason,
-    param?.description,
-    param?.label,
-  ].map((item) => String(item || "")).join(" ");
-  return SELECTABLE_HINT_RE.test(text);
 }
 
 function findParamByKey(stepsById, stepIds, key) {
@@ -256,89 +153,12 @@ export function assertPageDisplayContract(result) {
       const node = properties[key];
       if (!isPlainObject(node)) continue;
       const param = findParamByKey(stepsById, stepIds, key);
-      if (isPaginationCallerKey(key, param)) {
-        throw new SubmitRejectedError(
-          "DISPLAY_CONTRACT",
-          `input_schema.properties.${key} 是分页系统字段，不能写进调用方 schema`,
-        );
-      }
-      const sourceKind = String(
-        node["x-dano-business-type"] || param?.source_kind || (isPlainObject(param?.source) ? param.source.kind : "") || "",
-      );
-      if (sourceKind === "api_option" && !hasWrittenOptionContract(node, param)) {
-        throw new SubmitRejectedError(
-          "DISPLAY_CONTRACT",
-          `input_schema.properties.${key} 是实时候选，必须写 x-dano-option-source.source_url，不能只写 type=number`,
-        );
-      }
-      if (fieldLooksSelectable(node, param) && !hasWrittenOptionContract(node, param)) {
-        throw new SubmitRejectedError(
-          "DISPLAY_CONTRACT",
-          `input_schema.properties.${key} 是树/下拉选择字段，必须把选项合同写进 schema，不能只写 type=number 再把接口藏在说明里`,
-        );
-      }
-      if (looksCollapsedRowArray(node, param)) {
-        throw new SubmitRejectedError(
-          "DISPLAY_CONTRACT",
-          `input_schema.properties.${key} 是可增行，必须写成对象数组并给出 items.properties，不能收成一段字符串`,
-        );
-      }
       if (schemaConflictsParamType(node, param)) {
         throw new SubmitRejectedError(
           "DISPLAY_CONTRACT",
-          `input_schema.properties.${key} 的 type 必须和 param.type 一致；树单击是单值，不要把单选写成 array`,
+          `input_schema.properties.${key} 的 type 必须和对应 param.type 一致`,
         );
       }
-      const itemProperties = objectArrayProperties(node);
-      if (String(node.type || "").toLowerCase() === "array" && itemProperties) {
-        const missingTitle = Object.entries(itemProperties).find(([itemKey, itemNode]) => {
-          if (!isPlainObject(itemNode)) return true;
-          return !String(itemNode.title || itemNode.label || "").trim();
-        });
-        if (missingTitle) {
-          throw new SubmitRejectedError(
-            "DISPLAY_CONTRACT",
-            `input_schema.properties.${key}.items.properties.${missingTitle[0]} 必须有表头原文 title，不能只写键名`,
-          );
-        }
-        const systemKey = Object.keys(itemProperties).find((itemKey) => isSystemRowKey(itemKey));
-        if (systemKey) {
-          throw new SubmitRejectedError(
-            "DISPLAY_CONTRACT",
-            `input_schema.properties.${key}.items.properties 不能包含行类型码/序号/行键 ${systemKey}，这些只留在系统 params`,
-          );
-        }
-        const sections = sectionTitlesFromArrayTitle(node.title || node.label);
-        if (sections.length >= 2 && !hasSectionTitleMap(node, itemProperties)) {
-          throw new SubmitRejectedError(
-            "DISPLAY_CONTRACT",
-            `input_schema.properties.${key} 的 title 含多个分区，必须在 items.properties 上写 x-dano-section-titles`,
-          );
-        }
-      }
-    }
-  }
-  assertOptionCatalogLinks(result);
-}
-
-function assertOptionCatalogLinks(result) {
-  const optionSteps = new Set();
-  for (const capability of Array.isArray(result?.capabilities) ? result.capabilities : []) {
-    for (const ref of Array.isArray(capability.request_refs) ? capability.request_refs : []) {
-      if (ref?.usage === "option_source") {
-        const stepId = String(ref.step_id || "").trim();
-        if (stepId) optionSteps.add(stepId);
-      }
-    }
-  }
-  for (const link of Array.isArray(result?.links) ? result.links : []) {
-    const source = String(link?.source_step_id || "").trim();
-    const sourcePath = String(link?.source_path || "");
-    if (optionSteps.has(source) && sourcePath.includes("[")) {
-      throw new SubmitRejectedError(
-        "DISPLAY_CONTRACT",
-        "选项接口只挂 option_source，禁止把选项列表路径写成值流 links",
-      );
     }
   }
 }

@@ -11,8 +11,15 @@ import { buildActionTimeline, requestShapeFromEvents } from "./evidence-facts.mj
 import { projectVisibleControlSnapshot } from "./visible-controls.mjs";
 import { mergeCapabilityIntoDraft } from "./result-merge.mjs";
 import { isNoiseNetworkPath } from "./browser-actions.mjs";
+import { projectContractToRequest } from "./contract-project.mjs";
+import {
+  writeSkillArtifact,
+  validateSkillPackage,
+  runIsolatedScript,
+  readPageAsset,
+} from "./skill-package-tools.mjs";
 
-const SCREENSHOT_TEXT_ONLY_NOTE = "截图不写入对话。用 snapshot 看控件和 recentUserActions。";
+const SCREENSHOT_TEXT_ONLY_NOTE = "默认不把截图写入对话。需要看图时 screenshot/read_screenshot 设 as_image=true。";
 
 export function parseStructuredToolValue(value) {
   if (typeof value !== "string") return value;
@@ -141,6 +148,7 @@ export function createPiToolHost({
   gate,
   getPiSessionId,
   getBrowser = null,
+  getTargetUrl = null,
   freezeEvidence = null,
   onAssist = null,
   isAssistHold = null,
@@ -232,27 +240,39 @@ export function createPiToolHost({
         throw error;
       }
     },
-    async read_screenshot({ blob_id }) {
+    async read_screenshot({ blob_id, as_image = false }) {
       const index = await evidence.index(recordingId);
       const shots = index.items.filter((item) => item.kind === "screenshot" && item.blob_id);
       const hit = shots.find((item) => item.blob_id === blob_id);
-      if (hit) {
-        let totalBytes = 0;
-        try {
-          const slice = await evidence.readBlob(recordingId, blob_id, { offset: 0, length: 16 });
-          totalBytes = slice.totalBytes;
-        } catch {
-          // 只要索引里有这张图，就只回元数据，不把二进制塞进对话
-        }
-        return imageBlobMeta(blob_id, totalBytes);
+      if (!hit) {
+        return {
+          found: false,
+          blob_id,
+          error: shots.length
+            ? `没有这张截图。可用 blob_id：${shots.map((item) => item.blob_id).join(", ")}`
+            : "这场录制没有截图。不要编造 blob_id。",
+        };
       }
-      return {
-        found: false,
-        blob_id,
-        error: shots.length
-          ? `没有这张截图。可用 blob_id：${shots.map((item) => item.blob_id).join(", ")}`
-          : "这场录制没有截图。不要编造 blob_id，用 visible_control、interaction 和请求正文即可。",
-      };
+      if (as_image) {
+        const bytes = await evidence.files.readBlob(recordingId, blob_id);
+        return {
+          found: true,
+          blob_id,
+          __image: true,
+          as_image: true,
+          mimeType: "image/png",
+          data: Buffer.from(bytes).toString("base64"),
+          total_bytes: bytes.length,
+        };
+      }
+      let totalBytes = 0;
+      try {
+        const slice = await evidence.readBlob(recordingId, blob_id, { offset: 0, length: 16 });
+        totalBytes = slice.totalBytes;
+      } catch {
+        // 元数据即可
+      }
+      return imageBlobMeta(blob_id, totalBytes);
     },
     async list_action_timeline() {
       const events = await evidence.files.readEvidence(recordingId);
@@ -321,6 +341,7 @@ export function createPiToolHost({
       selector = "",
       text = "",
       include_screenshot = false,
+      as_image = false,
       after_seq = 0,
       fields = [],
       reason = "",
@@ -393,9 +414,20 @@ export function createPiToolHost({
         };
       }
       if (kind === "screenshot") {
-        const shot = await browser.inspect?.({ includeScreenshot: false });
+        const shot = await browser.inspect?.({ includeScreenshot: Boolean(as_image) });
         if (!shot || shot.error || shot.available === false) {
           return { available: false, error: shot?.error || shot?.screenshot?.error || "无法截图" };
+        }
+        if (as_image && shot.screenshot?.data) {
+          return {
+            ...compactInspect(shot),
+            action: "screenshot",
+            __image: true,
+            as_image: true,
+            mimeType: "image/png",
+            data: shot.screenshot.data,
+            image_in_conversation: true,
+          };
         }
         return {
           ...compactInspect(shot),
@@ -427,17 +459,27 @@ export function createPiToolHost({
         has_final_result: Boolean(session.hasFinalResult),
       };
     },
-    async submit_recording_draft({ draft }) {
-      if (!draft || typeof draft !== "object" || Array.isArray(draft)) {
-        throw new Error("draft 必须是非空对象，且不得冒充最终结果");
-      }
-      const payload = {
-        recording_id: recordingId,
-        saved_at: new Date().toISOString(),
-        draft: structuredClone(draft),
-      };
-      await files.writeDraft(recordingId, payload);
-      return { saved: true, final: false };
+    async read_page_asset({ url }) {
+      const session = evidence.snapshot(recordingId);
+      return readPageAsset({
+        evidence,
+        recordingId,
+        url,
+        targetUrl: typeof getTargetUrl === "function" ? getTargetUrl() : session.targetUrl,
+      });
+    },
+    async write_skill_artifact({ path: rel, content }) {
+      return writeSkillArtifact(files, recordingId, rel, content);
+    },
+    async validate_skill_package() {
+      return validateSkillPackage(files, recordingId);
+    },
+    async project_contract_to_request({ capability_id, inputs = {} } = {}) {
+      const saved = await files.readDraft(recordingId);
+      return projectContractToRequest(saved?.draft || {}, capability_id, inputs);
+    },
+    async run_isolated_script({ script, args = [] } = {}) {
+      return runIsolatedScript(files, recordingId, script, args);
     },
     async [SUBMIT_RECORDING_RESULT]({ recording_id, final, result, use_draft = false }) {
       let session = evidence.snapshot(recordingId);
@@ -515,11 +557,12 @@ export function describePiTools() {
     {
       name: "read_screenshot",
       label: "读取截图",
-      description: "确认截图是否存在。只返回元数据，不返回图片二进制。控件用 visible_control，请求正文用 network_request / network_response。不要用本工具找接口字段。",
+      description: "按 blob 读截图。默认只回元数据；as_image=true 以图像消息送给模型。细节看 Skill 2。",
       parameters: {
         type: "object",
         properties: {
           blob_id: { type: "string" },
+          as_image: { type: "boolean" },
           offset: { type: "integer" },
           length: { type: "integer" },
         },
@@ -557,7 +600,7 @@ export function describePiTools() {
     {
       name: "submit_recording_capability",
       label: "提交一项能力",
-      description: "把一项完整能力及其 steps 写入草稿。该项须已有真实 execute 形状。同一 capability_id 会替换旧项。人点的和你点的都要交。不要在对话里写 JSON。全部交完后用 submit_recording_result({final:true, use_draft:true}) 定稿。",
+      description: "把一项能力写入草稿。细节看 Skill 3。",
       parameters: {
         type: "object",
         properties: {
@@ -575,7 +618,7 @@ export function describePiTools() {
     {
       name: "control_in_app_browser",
       label: "Control In App Browser",
-      description: "按 Control In App Browser Skill 操作应用内浏览器。人同时也可以点预览。action=open_page|list_pages|snapshot|screenshot|click|fill|select|choose|press|fill_fields|network_since|assist。先 snapshot 和 network_since。只用 snapshot 广告的 placeholder= / label= / role= / text= / ref=。禁止 name=、#id、CSS，禁止改点没有业务文案的 aN。fill 就写，不会改口成下拉；写不进回 not_writable。choose 点已经出现的可见原文（选项/单选/分段/页签）；没有该项回 option_not_seen 并说明打开后是列表还是日历。普通框可用 fill_fields 一次填。点或填后看 network_since。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回页面摘要和控件，禁止把图片写进对话。登录、写不进的字段、点了不发网的保存用 assist，不要锁预览。assist 会暂停自动点击，直到用户说继续；暂停期间再 click/fill 会被拦住。本工具不提交能力。",
+      description: "操作应用内浏览器。细节看 Skill 2。screenshot 设 as_image=true 才把图像送给模型。",
       parameters: {
         type: "object",
         properties: {
@@ -585,11 +628,71 @@ export function describePiTools() {
           selector: { type: "string" },
           text: { type: "string" },
           include_screenshot: { type: "boolean" },
+          as_image: { type: "boolean" },
           after_seq: { type: "integer" },
           fields: { type: "array" },
           reason: { type: "string" },
         },
         required: ["action"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "read_page_asset",
+      label: "同源前端",
+      description: "读取本场已加载的同源前端资源。细节看 Skill 2。",
+      parameters: {
+        type: "object",
+        properties: { url: { type: "string" } },
+        required: ["url"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "write_skill_artifact",
+      label: "写 Skill 产物",
+      description: "写入本场导出草稿文件。细节看 Skill 4。",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          content: { type: "string" },
+        },
+        required: ["path", "content"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "validate_skill_package",
+      label: "校验 Skill 包",
+      description: "跑结构/披露检查。细节看 Skill 4。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
+      name: "project_contract_to_request",
+      label: "合同投影",
+      description: "只按合同投影请求，缺键失败，不补键。细节看 Skill 4。",
+      parameters: {
+        type: "object",
+        properties: {
+          capability_id: { type: "string" },
+          inputs: { type: "object" },
+        },
+        required: ["capability_id"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "run_isolated_script",
+      label: "隔离运行",
+      description: "在隔离目录运行生成的脚本。细节看 Skill 4。",
+      parameters: {
+        type: "object",
+        properties: {
+          script: { type: "string" },
+          args: { type: "array" },
+        },
+        required: ["script"],
         additionalProperties: false,
       },
     },
@@ -600,20 +703,9 @@ export function describePiTools() {
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
     {
-      name: "submit_recording_draft",
-      label: "过程草稿",
-      description: "保存过程草稿。草稿绝不能被当成最终结果。",
-      parameters: {
-        type: "object",
-        properties: { draft: { type: "object" } },
-        required: ["draft"],
-        additionalProperties: false,
-      },
-    },
-    {
       name: SUBMIT_RECORDING_RESULT,
       label: "最终结果",
-      description: "唯一最终提交入口。可提交完整 result，或 use_draft=true 把已用 submit_recording_capability 写入的草稿定稿。程序会先冻结再交给闸门。系统原样保存，不会补齐或修改。信封必须是现有录制页能直接渲染的 draft：每个独立动作一项能力；capability_id 不重复；每个能力恰好一个不共用的 execute；request_refs 为 {step_id,usage} 对象；steps[].params 为含 key/path 的数组；调用方字段写在 capability.input_schema.properties；可改树/下拉必须写 x-dano-option-source 或完整 {label,value}，禁止只写 type=number；禁止只写 capabilities[].fields。",
+      description: "唯一最终提交。use_draft=true 定稿已交能力。细节看 Skill 1。",
       parameters: {
         type: "object",
         properties: {
@@ -644,7 +736,20 @@ export function wrapPiToolsForSdk(host, defineTool, Type, trace = null) {
       if (trace?.recordToolStart) trace.recordToolStart(spec.name, args);
       else logPiOnly(`[PI分析] 调用 ${spec.name} ${summarizeToolArgs(spec.name, args)}`);
       try {
-        const result = stripImageFromToolResult(await host[spec.name](args));
+        const raw = await host[spec.name](args);
+        if (raw?.__image && raw.data && (args.as_image === true || raw.as_image === true)) {
+          const { data, mimeType, __image, screenshot, ...rest } = raw;
+          const payload = { ...rest, image_in_conversation: true };
+          if (trace) trace.recordTool(spec.name, args, "image", true);
+          return {
+            content: [
+              { type: "text", text: JSON.stringify(payload) },
+              { type: "image", mimeType: mimeType || "image/png", data },
+            ],
+            details: payload,
+          };
+        }
+        const result = stripImageFromToolResult(raw);
         const summary = summarizeToolResult(spec.name, result);
         if (trace) trace.recordTool(spec.name, args, summary, true);
         else logPiOnly(`[PI分析] 工具完成 ${spec.name} ${Date.now() - started}ms → ${summary}`);

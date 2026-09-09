@@ -3604,8 +3604,8 @@ def test_export_hydrates_write_body_from_pi_evidence(tmp_path) -> None:
     }
     assert submit["body_template"]["reportType"] == 1
     assert "creator" not in submit["body_template"]
-    assert "createTime" not in submit["body_template"]
-    assert any(item.get("path") == "createTime" for item in submit.get("system_values") or [])
+    assert submit["body_template"]["createTime"] == ""
+    assert not any(item.get("path") == "createTime" for item in submit.get("system_values") or [])
     assert rules["itemType"] == "caller_presence"
     assert rules["sort"] == "constant"
     assert rules["_X_ROW_KEY"] == "uuid"

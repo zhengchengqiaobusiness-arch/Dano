@@ -1,187 +1,70 @@
 /**
- * PI 是唯一语义决策者；旧录制逻辑绝不启动。
+ * 只断言四份 Skill 被加载。禁止锁提示词/Skill 金句。
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, writeFile, mkdir } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  buildFinalAnalysisPrompt,
-  buildLiveDrivePrompt,
+  REQUIRED_SKILL_FILES,
+  readRequiredSkills,
   buildPiInstructions,
-  readControlInAppBrowserSkill,
-  readRecordingSkill,
+  buildLiveDrivePrompt,
+  buildFinalAnalysisPrompt,
 } from "../src/pi-session.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const SKILL_PATH = path.join(ROOT, "skill", "RECORDING_CAPABILITY.md");
+const SKILL_DIR = path.join(ROOT, "skill");
 
-test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的私有结构", async () => {
-  const skill = await readFile(SKILL_PATH, "utf8");
-  assert.match(skill, /input_schema\.properties/);
-  assert.match(skill, /request_refs/);
-  assert.match(skill, /step_id/);
-  assert.match(skill, /exposed_to_user/);
-  assert.match(skill, /enum_options/);
-  assert.match(skill, /capabilities\[\]\.fields/);
-  assert.match(skill, /不要写它们/);
-  assert.match(skill, /字段对象数组/);
-  assert.match(skill, /先建动作台账/);
-  assert.match(skill, /不要按 URL 或 HTTP 方法合并/);
-  assert.match(skill, /capability_id/);
-  assert.match(skill, /selected_record_identity/);
-  assert.match(skill, /list_recording_index/);
-  assert.match(skill, /选择器弹层/);
-  assert.match(skill, /同一 path/);
-  assert.match(skill, /当前页可见标签/);
-  assert.match(skill, /不要编 `enum_options`/);
-  assert.match(skill, /附件、审批进度是 `fact_check`/);
-  assert.match(skill, /筛选条上看得见的输入框/);
-  assert.match(skill, /不要追求每个字段都有一套来源规则/);
-  assert.match(skill, /无独立来源，按录制请求原值提交/);
-  assert.match(skill, /核对的是\*\*处理逻辑\*\*/);
-  assert.match(skill, /不要另编一份/);
-  assert.match(skill, /不要把 `request_id` 当 blob/);
-  assert.match(skill, /visible_control/);
-  assert.match(skill, /陌生页解题步骤/);
-  assert.match(skill, /source_kind=current_user/);
-  assert.match(skill, /禁止把 `visible_control` 里看得见\*\*且可改\*\*的日期/);
-  assert.match(skill, /不绑定任何具体业务页、系统名或字段名/);
-  assert.match(skill, /确认弹层、二次确认框里的说明/);
-  assert.match(skill, /空数组\/空对象/);
-  assert.match(skill, /跳转带进本页 query/);
-  assert.match(skill, /input_schema.*items\.properties/);
-  assert.match(skill, /execute 的 query\/body 没有/);
-  assert.match(skill, /每个.*exposed_to_user=true.*param/);
-  assert.match(skill, /树、页签、分段器、单选组/);
-  assert.match(skill, /不要编造本场没发出的写请求/);
-  assert.match(skill, /不要把同一数组拆成多行并列字段/);
-  assert.match(skill, /可增行明细/);
-  assert.match(skill, /系统再组装成/);
-  assert.match(skill, /同名文本域不是行/);
-  assert.match(skill, /必须完整处理/);
-  assert.match(skill, /region=table/);
-  assert.match(skill, /调用系统能直接用的选项合同/);
-  assert.match(skill, /会被拒收/);
-  assert.match(skill, /x-dano-option-source/);
-  assert.match(skill, /readonly=true|disabled=true/);
-  assert.match(skill, /整个控件当前不能改/);
-  assert.match(skill, /不要带着打开弹层之前的 seq/);
-  assert.match(skill, /默认选中/);
-  assert.match(skill, /去掉星号|不要把星号写进/);
-  assert.match(skill, /表头原文/);
-  assert.match(skill, /x-dano-section-titles/);
-  assert.match(skill, /弹层选人\/选记录的对象数组/);
-  assert.match(skill, /label_subkey/);
-  assert.match(skill, /element_template/);
-  assert.match(skill, /item_key.*嵌套路径/);
-  assert.match(skill, /多选选择器.*不是.*textarea/);
-  assert.match(skill, /禁止复制本场已选中的对象行/);
-  assert.match(skill, /禁止新增大小写不同、拼写相近或别名容器/);
-  assert.match(skill, /option_source.*execute/);
-  assert.match(skill, /禁止把一个数组拆成多个调用方数组/);
-  assert.match(skill, /写请求里不存在的.*键|不要编造写请求里没有的键/);
-  assert.match(skill, /list_action_timeline/);
-  assert.match(skill, /control_in_app_browser|Control In App Browser/);
-  assert.match(skill, /submit_recording_capability/);
-  assert.match(skill, /只许来自 execute/);
-  assert.match(skill, /params 必须是空数组/);
-  assert.match(skill, /协助之后/);
-  assert.match(skill, /不要去点保存碰运气/);
-  assert.match(skill, /not_writable/);
-  assert.match(skill, /没有业务文案的 `aN`/);
-  assert.match(skill, /目标是剧本/);
-  assert.match(skill, /首屏自动/);
-  assert.match(skill, /空表/);
-  assert.match(skill, /没有「搜索 \/ 查询」文案时|点已经出现的树或列表节点就是查询/);
-  assert.match(skill, /未接到用户结束/);
-  assert.match(skill, /禁止 `submit_recording_result`/);
-  assert.match(skill, /打开写入表单附带/);
-  assert.match(skill, /x-dano-option-source\.params.*不是 `steps\[\]\.params`/);
-  assert.match(skill, /分页字段不要放进 `input_schema`/);
-  assert.match(skill, /导出从这些 `links` 投影|导出从 `links` 投影/);
-  assert.match(skill, /capability_relations/);
-  assert.match(skill, /suggested_call_chain/);
-  assert.match(skill, /分区A\/分区B|拆不开的「A和B」/);
-  assert.match(skill, /suggested_call_chain/);
-  assert.match(skill, /禁止写成「A和B」|拆不开的合并名|分区A\/分区B/);
-  assert.match(skill, /from_step_id.*from_path/);
-  assert.match(skill, /看不出来就写入 `unresolved`/);
-  assert.match(skill, /禁止把选项列表路径/);
-  assert.match(skill, /path 或效果不同，已拆成两项能力|不要并进提交/);
-  assert.match(skill, /树单击是单值/);
-  assert.match(skill, /合并行时带分区标题|每行带分区标题/);
-  assert.doesNotMatch(skill, /登录态、Cookie、分页、流程定义 Key、单据类型/);
-  assert.doesNotMatch(skill, /workItems|planItems|createTime=/);
-  assert.doesNotMatch(skill, /to_flow_spec|compile_capabilities|inferCapability/);
-  const loaded = await readRecordingSkill();
-  assert.equal(loaded, skill);
-  const browserSkill = await readControlInAppBrowserSkill();
-  assert.match(browserSkill, /合法 selector/);
-  assert.match(browserSkill, /本工具不提交能力|不要在本 Skill 里交能力/);
-  assert.match(browserSkill, /协助发出之后/);
-  assert.match(browserSkill, /工具会暂停自动点击|必须停自动点/);
-  assert.match(browserSkill, /不要去点保存碰运气/);
-  assert.match(browserSkill, /人已经离开当前表单/);
-  assert.match(browserSkill, /填了请求完全没变/);
-  assert.match(browserSkill, /not_writable/);
-  assert.match(browserSkill, /option_not_seen/);
-  assert.match(browserSkill, /没有业务文案的 `aN`/);
-  assert.match(browserSkill, /首屏自动加载不是已经查询/);
-  assert.match(browserSkill, /表单还是空的，禁止点保存/);
-  assert.match(browserSkill, /region=table/);
-  assert.match(browserSkill, /label=表头/);
-  assert.match(browserSkill, /没有「搜索 \/ 查询」文案时|点已经出现的树或列表节点就是查询/);
-  assert.match(browserSkill, /未接到用户结束/);
-  assert.doesNotMatch(browserSkill, /这是下拉。用 choose，不要往里面打字/);
-  const instructions = buildPiInstructions(skill, browserSkill);
-  assert.match(instructions, /不要写 capabilities\[\]\.fields/);
-  assert.match(instructions, /input_schema\.properties/);
+test("PI 必须加载且只加载四份 Skill", async () => {
+  const loaded = await readRequiredSkills();
+  assert.deepEqual(loaded.map((item) => item.name), REQUIRED_SKILL_FILES);
+  assert.equal(loaded.length, 4);
+  for (const item of loaded) {
+    assert.ok(item.text.length > 20, item.name);
+  }
+  const instructions = buildPiInstructions(loaded);
+  assert.match(instructions, /Business Skill Investigator/);
   assert.match(instructions, /control_in_app_browser/);
-  assert.match(instructions, /list_action_timeline/);
-  assert.match(instructions, /总入口（先读本节）/);
-  assert.match(instructions, /以下面的 Skill 为准/);
-  assert.match(instructions, /合法 selector/);
-  assert.doesNotMatch(instructions, /浏览器一开就开始/);
-  assert.doesNotMatch(instructions, /按 selector click\/fill\/choose/);
-  assert.doesNotMatch(instructions, /每完成一个独立动作（你点的或人点的）立刻 submit_recording_capability/);
+  assert.match(instructions, /project_contract_to_request/);
+  assert.doesNotMatch(instructions, /RECORDING_CAPABILITY/);
+  assert.doesNotMatch(instructions, /submit_recording_draft/);
+});
+
+test("缺一份 Skill 文件不准开录", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "dano-skills-"));
+  await mkdir(dir, { recursive: true });
+  for (const name of REQUIRED_SKILL_FILES.slice(0, 3)) {
+    await writeFile(path.join(dir, name), `# ${name}\n内容`, "utf8");
+  }
+  await assert.rejects(() => readRequiredSkills(dir), /缺少 Skill 文件/);
+});
+
+test("入口和定稿提示只留协调句，不含字段细则", () => {
   const drive = buildLiveDrivePrompt({ targetUrl: "http://example.com", goal: "做成能力" });
-  assert.match(drive, /你是操作者|control_in_app_browser/);
-  assert.match(drive, /network_since/);
-  assert.match(drive, /not_writable/);
-  assert.match(drive, /改点没有业务文案的 aN/);
-  assert.match(drive, /空的，不要点保存/);
-  assert.match(drive, /点已经出现的树或列表节点/);
-  assert.match(drive, /未接到用户结束/);
-  assert.match(drive, /目标要提交就点提交/);
-  assert.match(drive, /协助之后必须停自动点|已暂停自动操作/);
-  assert.doesNotMatch(drive, /再点该动作自己的查询或保存。/);
-  assert.doesNotMatch(drive, /目标做完后 submit_recording_result/);
-  assert.doesNotMatch(drive, /先观察再最小设值/);
-  assert.doesNotMatch(drive, /按 selector click\/fill\/choose/);
-  assert.doesNotMatch(drive, /这是下拉。用 choose/);
+  assert.match(drive, /Investigator/);
+  assert.match(drive, /做成能力/);
+  assert.match(drive, /http:\/\/example.com/);
+  assert.doesNotMatch(drive, /x-dano-section-titles/);
+  assert.doesNotMatch(drive, /部门树/);
+  assert.doesNotMatch(drive, /空表/);
   const prompt = buildFinalAnalysisPrompt(3);
-  assert.match(prompt, /readonly\/disabled|readonly=true/);
-  assert.match(prompt, /默认已选/);
-  assert.match(prompt, /表头原文/);
-  assert.match(prompt, /x-dano-section-titles/);
-  assert.match(prompt, /不要编新键|不要编造写请求里没有的键/);
-  assert.match(prompt, /x-dano-option-source/);
-  assert.match(prompt, /藏在 description|type=number/);
-  assert.match(prompt, /自动计算但仍可手工修改.*调用方/);
-  assert.match(prompt, /param\.path.*末级键.*execute.*真实 query\/body 键/);
-  assert.match(prompt, /execute step\.selects.*禁止写到 result 顶层/);
-  assert.match(prompt, /multi、label_subkey.*element_template/);
-  assert.match(prompt, /真实 execute 形状再 submit_recording_capability/);
-  assert.match(prompt, /分页只留 execute 系统栏/);
-  assert.match(prompt, /from_step_id\/from_path 并写成 links/);
-  assert.match(prompt, /筛选项看得见但键看不清就 unresolved/);
-  assert.match(prompt, /禁止把选项列表路径写成值流 links/);
-  assert.match(prompt, /合并行时带分区标题/);
-  assert.match(prompt, /树单击是单值/);
-  assert.match(prompt, /保存与提交若 path 或效果不同必须两项能力/);
-  assert.match(prompt, /capability_relations/);
-  assert.doesNotMatch(prompt, /每看完一个独立动作立刻 submit_recording_capability/);
+  assert.match(prompt, /Skill 1/);
+  assert.match(prompt, /seq=3/);
+  assert.doesNotMatch(prompt, /x-dano-section-titles/);
+  assert.doesNotMatch(prompt, /部门树/);
+  assert.doesNotMatch(prompt, /确认弹层/);
+});
+
+test("仓库里没有旧 RECORDING_CAPABILITY", async () => {
+  const { readdir } = await import("node:fs/promises");
+  const names = await readdir(SKILL_DIR);
+  assert.equal(names.includes("RECORDING_CAPABILITY.md"), false);
+  assert.deepEqual(
+    names.filter((name) => name.endsWith(".md")).sort(),
+    REQUIRED_SKILL_FILES.slice().sort(),
+  );
 });

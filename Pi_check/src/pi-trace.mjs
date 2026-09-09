@@ -20,10 +20,6 @@ export function summarizeToolArgs(name, args = {}) {
   if (name === "read_response_blob" || name === "read_screenshot") {
     return `blob=${payload.blob_id || ""} offset=${payload.offset ?? 0} length=${payload.length ?? ""}`;
   }
-  if (name === "submit_recording_draft") {
-    const caps = Array.isArray(payload.draft?.capabilities) ? payload.draft.capabilities.length : 0;
-    return `capabilities=${caps} title=${compactText(payload.draft?.title, 80)}`;
-  }
   if (name === "submit_recording_result") {
     const caps = Array.isArray(payload.result?.capabilities) ? payload.result.capabilities.length : 0;
     const unresolved = Array.isArray(payload.result?.unresolved) ? payload.result.unresolved.length : 0;
@@ -58,7 +54,6 @@ export function summarizeToolResult(name, result) {
     return `stored=${result.stored || ""} bytes=${result.total_bytes ?? ""}`;
   }
   if (name === "read_evidence_delta") return `events=${result.events?.length ?? 0} next_seq=${result.next_seq ?? ""}`;
-  if (name === "submit_recording_draft") return `saved=${result.saved} final=${result.final}`;
   if (name === "submit_recording_result") {
     const caps = result.result?.capabilities?.length ?? result.capability_count ?? result.capabilityCount;
     return `accepted=${result.accepted ?? true} capabilities=${caps ?? "?"}`;

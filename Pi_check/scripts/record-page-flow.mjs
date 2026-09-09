@@ -1,9 +1,7 @@
 /**
- * 对目标页做一场真实 PI 录制：打开、点业务按钮、停止并等待结果。
- * 不改写 PI 的 result，只把动作发给录制浏览器。
+ * 对目标页开一场真实 PI 录制：开场、等人/PI 操作、停录。
+ * 只许开一场/停录，不许喂 actions.json。
  */
-
-import { readFile } from "node:fs/promises";
 
 const BASE = process.env.PI_CHECK_URL || "http://127.0.0.1:18080";
 
@@ -42,12 +40,8 @@ async function waitReady(id, timeoutMs = 90000) {
 
 const targetUrl = process.argv[2];
 const goal = process.argv[3] || "请将我接下来在页面中实际完成的每项业务操作分别生成一个可调用能力。";
-const actionArg = process.argv[4] || "[]";
-const actions = actionArg.endsWith(".json")
-  ? JSON.parse(await readFile(actionArg, "utf8"))
-  : JSON.parse(actionArg);
 if (!targetUrl) {
-  console.error("usage: node scripts/record-page-flow.mjs <url> [goal] [actions.json]");
+  console.error("usage: node scripts/record-page-flow.mjs <url> [goal]");
   process.exit(1);
 }
 
@@ -56,12 +50,7 @@ const id = started.id || started.session?.id;
 if (!id) throw new Error("没有 recording id");
 console.log(`started ${id}`);
 await waitReady(id);
-for (const action of actions) {
-  console.log(`act ${JSON.stringify(action)}`);
-  await api("POST", `/api/recordings/${id}/act`, action);
-  await new Promise((resolve) => setTimeout(resolve, 800));
-}
-console.log("stopping, waiting for PI");
+console.log("ready; operate in the preview, then this script will stop");
 const stopped = await api("POST", `/api/recordings/${id}/stop`);
 const caps = stopped.result?.capabilities || [];
 console.log(`status=${stopped.session?.status || stopped.status} capabilities=${caps.length}`);

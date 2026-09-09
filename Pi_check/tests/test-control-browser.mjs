@@ -14,7 +14,7 @@ import {
   resolveInteractionActor,
   shouldSteerHumanAct,
 } from "../src/browser-actions.mjs";
-import { stripImageFromToolResult } from "../src/pi-tools.mjs";
+import { stripImageFromToolResult, wrapPiToolsForSdk } from "../src/pi-tools.mjs";
 
 function recordingTools(harness, recordingId) {
   return createPiToolHost({
@@ -169,8 +169,11 @@ test("choose 用语义选择器一次选中，不必再 snapshot", async () => {
     assert.equal(pictured.__image, undefined);
     assert.equal(pictured.data, undefined);
     assert.equal(pictured.image_in_conversation, false);
-    assert.match(String(pictured.note || ""), /不写入对话/);
     assert.ok(pictured.controls || pictured.url);
+    const asImage = await tools.control_in_app_browser({ action: "screenshot", as_image: true });
+    assert.equal(asImage.__image, true);
+    assert.equal(asImage.as_image, true);
+    assert.ok(asImage.data);
   } finally {
     await harness.cleanup();
   }
@@ -183,8 +186,9 @@ test("PI 自己点出的页面 hook 不得当成人手去打断", () => {
   assert.equal(shouldSteerHumanAct("interaction", { actor: "pi", kind: "click" }), false);
   assert.equal(shouldSteerHumanAct("interaction", { actor: "human", kind: "input" }), false);
   assert.equal(shouldSteerHumanAct("interaction", { actor: "human", kind: "click" }), true);
-  assert.equal(isNoiseNetworkPath("http://x/prod-api/im/chatMessage/getChatNotReadMessageCount"), true);
+  assert.equal(isNoiseNetworkPath("http://x/prod-api/im/chatMessage/getChatNotReadMessageCount"), false);
   assert.equal(isNoiseNetworkPath("http://x/prod-api/oa/dutyApply/list"), false);
+  assert.equal(isNoiseNetworkPath("http://x/sockjs/info"), true);
 });
 
 test("PI 点击后页面 hook 不得累计人手打断", async () => {
@@ -203,7 +207,7 @@ test("PI 点击后页面 hook 不得累计人手打断", async () => {
   }
 });
 
-test("工具结果里的截图二进制不得进入 PI 对话", () => {
+test("默认剥图；as_image=true 才把图像放进 PI 对话", async () => {
   const stripped = stripImageFromToolResult({
     __image: true,
     data: "AAAA",
@@ -216,6 +220,30 @@ test("工具结果里的截图二进制不得进入 PI 对话", () => {
   assert.equal(stripped.data, undefined);
   assert.equal(stripped.image_in_conversation, false);
   assert.equal(stripped.url, "http://fixture.local/demo");
-  const plain = stripImageFromToolResult({ ok: true, path: "/api/leave" });
-  assert.deepEqual(plain, { ok: true, path: "/api/leave" });
+  const defineTool = (spec) => spec;
+  const host = {
+    async control_in_app_browser({ as_image } = {}) {
+      return {
+        url: "http://fixture.local/demo",
+        __image: true,
+        as_image: Boolean(as_image),
+        mimeType: "image/png",
+        data: "AAAA",
+      };
+    },
+  };
+  const tools = wrapPiToolsForSdk(host, defineTool, {
+    String: () => ({}),
+    Integer: () => ({}),
+    Boolean: () => ({}),
+    Object: () => ({}),
+    Optional: (item) => item,
+    Array: () => ({}),
+  });
+  const shot = tools.find((item) => item.name === "control_in_app_browser");
+  const withImage = await shot.execute("1", { action: "screenshot", as_image: true });
+  assert.equal(withImage.content[1].type, "image");
+  assert.equal(withImage.content[1].data, "AAAA");
+  const without = await shot.execute("1", { action: "screenshot" });
+  assert.ok(!without.content.some((part) => part.type === "image"));
 });

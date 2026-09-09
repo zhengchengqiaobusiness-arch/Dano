@@ -19,7 +19,7 @@ import { attachBlobSaver } from "./browser-capture.mjs";
 import { capabilityCountFromPiResult } from "./capability-presence.mjs";
 import { thoughtFromEvidence } from "./pi-trace.mjs";
 import { resolveInteractionActor, shouldSteerHumanAct } from "./browser-actions.mjs";
-import { isEmptySpinError } from "./pi-session.mjs";
+import { isEmptySpinError, readRequiredSkills } from "./pi-session.mjs";
 
 export class RecordingController {
   constructor({
@@ -174,6 +174,7 @@ export class RecordingController {
       gate: this.gate,
       getPiSessionId: () => this.evidence.snapshot(recordingId).piSessionId,
       getBrowser: () => this.#active.get(recordingId)?.browser || null,
+      getTargetUrl: () => this.evidence.snapshot(recordingId).targetUrl || "",
       freezeEvidence: async () => {
         if (!this.evidence.snapshot(recordingId).frozen) {
           await this.evidence.freeze(recordingId);
@@ -316,6 +317,7 @@ export class RecordingController {
     onFailed = null,
   }) {
     assertNeverStartLegacy();
+    await readRequiredSkills();
     if (!String(targetUrl || "").trim()) throw new Error("必须提供目标页面地址");
     if (!String(goal || "").trim()) throw new Error("必须提供录制目标");
 

@@ -3,7 +3,7 @@
  * 只定位和点击，不推断能力。
  */
 
-const NOISE_NETWORK = /getChatNotReadMessageCount|getChatNotRead|queryTopBarMessageCount|queryTodoTaskCount|queryNoticeCount|\/im\/chatMessage|\/common\/sysMessage\/queryTopBar|\/oa\/myTask\/queryTodoTaskCount|\/prod-api\/getInfo(?:\?|$)|\/prod-api\/getRouters(?:\?|$)|sockjs|websocket|favicon\.ico/i;
+const NOISE_NETWORK = /sockjs|websocket|favicon\.ico/i;
 
 export const HUMAN_STEER_MS = 2500;
 

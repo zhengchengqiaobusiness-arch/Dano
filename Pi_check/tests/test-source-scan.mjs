@@ -28,6 +28,9 @@ const FORBIDDEN = [
   /自动补齐中/,
   /本地修复中/,
   /这是下拉。用 choose/,
+  /SELECTABLE_HINT/,
+  /exerciseListPage/,
+  /_inferred_system_values/,
 ];
 
 async function walk(dir, files = []) {
@@ -56,4 +59,10 @@ test("12. 源码不存在本地能力生成、推断、补齐、编译、修复�
   assert.match(controller, /旧录制逻辑绝不启动/);
   assert.match(controller, /createPi/);
   assert.match(controller, /唯一录制链路/);
+  const gate = await readFile(path.join(SRC, "result-gate.mjs"), "utf8");
+  assert.doesNotMatch(gate, /SELECTABLE_HINT/);
+  assert.doesNotMatch(gate, /部门树/);
+  assert.doesNotMatch(gate, /itemtype/);
+  const capture = await readFile(path.join(SRC, "browser-capture.mjs"), "utf8");
+  assert.doesNotMatch(capture, /exerciseListPage/);
 });

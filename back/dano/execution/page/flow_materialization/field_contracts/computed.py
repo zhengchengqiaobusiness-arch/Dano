@@ -440,7 +440,8 @@ def _arithmetic_strong_structure(
 
 
 def _infer_arithmetic_computed_fields(spec: FlowSpec) -> None:
-    """Hide numeric fields that the recorded values prove are derived from siblings."""
+    """Do not invent formulas from field names or numeric samples."""
+    return
     changed = True
     while changed:
         changed = False
@@ -522,7 +523,8 @@ def _infer_arithmetic_computed_fields(spec: FlowSpec) -> None:
 
 
 def _infer_collection_computed_fields(spec: FlowSpec) -> None:
-    """Infer totals over dynamic rows without hard-coding a page or endpoint."""
+    """Do not invent collection formulas from field names or numeric samples."""
+    return
     for step in spec.steps or []:
         aggregates = [
             param for param in step.params or []
@@ -801,6 +803,8 @@ def _infer_computed_runtime_fields(spec: FlowSpec) -> None:
             param.editable = True
             param.need_human_confirm = False
             param.reason = "该百分比字段没有可执行的百分比结果公式，按调用方可提供字段处理"
+    _repair_invalid_date_span_contracts(spec)
+    return
     _apply_date_range_companions(spec)
     _infer_arithmetic_computed_fields(spec)
     _infer_collection_computed_fields(spec)

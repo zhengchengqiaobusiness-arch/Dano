@@ -4,12 +4,22 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createHarness, sampleResult } from "./helpers/harness.mjs";
 import {
   assertPageDisplayContract,
   assertCapabilityIdentityContract,
   SubmitRejectedError,
 } from "../src/result-gate.mjs";
+
+const GOLDEN = JSON.parse(
+  await readFile(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "golden-envelope.json"),
+    "utf8",
+  ),
+);
 
 test("证据未冻结时提交最终结果必须失败", async () => {
   const harness = await createHarness();
@@ -243,80 +253,9 @@ test("拒收 input_schema 里编造的、params 没有的调用方键", () => {
   }));
 });
 
-test("拒收把树/下拉藏进说明的数字手填字段", () => {
-  assert.throws(
-    () => assertPageDisplayContract({
-      capabilities: [{
-        capability_id: "cap_stats",
-        request_refs: [{ step_id: "step_stats", usage: "execute" }],
-        input_schema: {
-          type: "object",
-          properties: {
-            deptId: {
-              type: "number",
-              title: "部门ID",
-              description: "从部门树选择节点自动带出，运行时取选中部门ID；页面允许修改",
-            },
-          },
-        },
-      }],
-      steps: [{
-        step_id: "step_stats",
-        params: [{
-          key: "deptId",
-          path: "query.deptId",
-          label: "部门ID",
-          type: "number",
-          source_kind: "user_input",
-          exposed_to_user: true,
-          reason: "从部门树选择节点自动带出，页面允许修改",
-        }],
-      }],
-    }),
-    (error) => error instanceof SubmitRejectedError && /选项合同/.test(error.message),
-  );
-  assert.doesNotThrow(() => assertPageDisplayContract({
-    capabilities: [{
-      capability_id: "cap_stats",
-      request_refs: [{ step_id: "step_stats", usage: "execute" }],
-      input_schema: {
-        type: "object",
-        properties: {
-          deptId: {
-            type: "number",
-            title: "部门ID",
-            description: "从部门树选择节点",
-            "x-dano-business-type": "api_option",
-            "x-dano-option-source": {
-              source_method: "GET",
-              source_url: "/admin-api/system/dept/simple-list",
-              label_key: "name",
-              value_key: "id",
-              children_key: "children",
-            },
-          },
-        },
-      },
-    }],
-    steps: [{
-      step_id: "step_stats",
-      params: [{
-        key: "deptId",
-        path: "query.deptId",
-        label: "部门ID",
-        type: "number",
-        source_kind: "api_option",
-        exposed_to_user: true,
-        source: {
-          source_method: "GET",
-          source_url: "/admin-api/system/dept/simple-list",
-          label_key: "name",
-          value_key: "id",
-          children_key: "children",
-        },
-      }],
-    }],
-  }));
+test("金样信封被档 1 接受", () => {
+  assert.doesNotThrow(() => assertPageDisplayContract(GOLDEN));
+  assert.doesNotThrow(() => assertCapabilityIdentityContract(GOLDEN));
 });
 
 test("拒收重复 capability_id 和共用 execute", () => {
@@ -354,209 +293,7 @@ test("拒收重复 capability_id 和共用 execute", () => {
   );
 });
 
-test("拒收把分页写进 input_schema", () => {
-  assert.throws(
-    () => assertPageDisplayContract({
-      capabilities: [{
-        capability_id: "cap_query",
-        request_refs: [{ step_id: "step_query", usage: "execute" }],
-        input_schema: {
-          type: "object",
-          properties: {
-            keyword: { type: "string", title: "关键字" },
-            pageNo: { type: "number", title: "页码" },
-          },
-        },
-      }],
-      steps: [{
-        step_id: "step_query",
-        params: [
-          { key: "keyword", path: "query.keyword", exposed_to_user: true },
-          {
-            key: "pageNo",
-            path: "query.pageNo",
-            label: "页码",
-            source_kind: "page_default",
-            exposed_to_user: true,
-          },
-        ],
-      }],
-    }),
-    (error) => error instanceof SubmitRejectedError && /分页系统字段/.test(error.message),
-  );
-});
-
-test("拒收把可增行收成字符串", () => {
-  assert.throws(
-    () => assertPageDisplayContract({
-      capabilities: [{
-        capability_id: "cap_create",
-        request_refs: [{ step_id: "step_submit", usage: "execute" }],
-        input_schema: {
-          type: "object",
-          properties: {
-            items: {
-              type: "string",
-              title: "已完成工作 / 工作计划",
-              description: "调用方按行填写添加行后出现的输入框，系统再组装成该数组",
-            },
-          },
-        },
-      }],
-      steps: [{
-        step_id: "step_submit",
-        params: [
-          { key: "items", path: "body.items", exposed_to_user: true, reason: "可增行，点添加后按行填写" },
-        ],
-      }],
-    }),
-    (error) => error instanceof SubmitRejectedError && /不能收成一段字符串/.test(error.message),
-  );
-});
-
-test("拒收可增行把行类型码写进 items.properties", () => {
-  assert.throws(
-    () => assertPageDisplayContract({
-      capabilities: [{
-        capability_id: "cap_create",
-        request_refs: [{ step_id: "step_submit", usage: "execute" }],
-        input_schema: {
-          type: "object",
-          properties: {
-            items: {
-              type: "array",
-              title: "已完成工作 / 工作计划",
-              items: {
-                type: "object",
-                properties: {
-                  content: { type: "string", title: "工作内容" },
-                  itemType: { type: "number", title: "类型" },
-                },
-              },
-            },
-          },
-        },
-      }],
-      steps: [{
-        step_id: "step_submit",
-        params: [
-          { key: "items", path: "body.items", exposed_to_user: true },
-        ],
-      }],
-    }),
-    (error) => error instanceof SubmitRejectedError && /不能包含行类型码/.test(error.message),
-  );
-});
-
-test("数组上的 x-dano-section-titles 也算分区合同", () => {
-  assert.doesNotThrow(() => assertPageDisplayContract({
-    capabilities: [{
-      capability_id: "cap_create",
-      request_refs: [{ step_id: "step_submit", usage: "execute" }],
-      input_schema: {
-        type: "object",
-        properties: {
-          items: {
-            type: "array",
-            title: "已完成工作 / 工作计划",
-            "x-dano-section-titles": {
-              "已完成工作": "工作内容",
-              "工作计划": "计划内容",
-            },
-            items: {
-              type: "object",
-              properties: {
-                content: { type: "string", title: "内容" },
-              },
-            },
-          },
-        },
-      },
-    }],
-    steps: [{
-      step_id: "step_submit",
-      params: [
-        { key: "items", path: "body.items", exposed_to_user: true },
-      ],
-    }],
-  }));
-});
-
-test("拒收多分区数组不写 x-dano-section-titles", () => {
-  assert.throws(
-    () => assertPageDisplayContract({
-      capabilities: [{
-        capability_id: "cap_create",
-        request_refs: [{ step_id: "step_submit", usage: "execute" }],
-        input_schema: {
-          type: "object",
-          properties: {
-            items: {
-              type: "array",
-              title: "已完成工作 / 工作计划",
-              items: {
-                type: "object",
-                properties: {
-                  content: { type: "string", title: "工作内容" },
-                },
-              },
-            },
-          },
-        },
-      }],
-      steps: [{
-        step_id: "step_submit",
-        params: [
-          { key: "items", path: "body.items", exposed_to_user: true },
-        ],
-      }],
-    }),
-    (error) => error instanceof SubmitRejectedError && /x-dano-section-titles/.test(error.message),
-  );
-});
-
-test("拒收把选项列表路径写成值流 links", () => {
-  assert.throws(
-    () => assertPageDisplayContract({
-      capabilities: [{
-        capability_id: "cap_stats",
-        request_refs: [
-          { step_id: "step_opts", usage: "option_source" },
-          { step_id: "step_query", usage: "execute" },
-        ],
-        input_schema: {
-          type: "object",
-          properties: {
-            deptId: {
-              type: "string",
-              title: "组织机构",
-              "x-dano-business-type": "api_option",
-              "x-dano-option-source": { source_url: "/api/dept" },
-            },
-          },
-        },
-      }],
-      steps: [
-        { step_id: "step_opts", params: [] },
-        {
-          step_id: "step_query",
-          params: [
-            { key: "deptId", path: "query.deptId", exposed_to_user: true, source_kind: "api_option" },
-          ],
-        },
-      ],
-      links: [{
-        source_step_id: "step_opts",
-        source_path: "data[].id",
-        target_step_id: "step_query",
-        target_path: "query.deptId",
-      }],
-    }),
-    (error) => error instanceof SubmitRejectedError && /禁止把选项列表路径写成值流 links/.test(error.message),
-  );
-});
-
-test("拒收树单选写成 array 而 param 是标量", () => {
+test("拒收 schema array 与 param 标量的纯类型冲突", () => {
   assert.throws(
     () => assertPageDisplayContract({
       capabilities: [{
@@ -582,7 +319,7 @@ test("拒收树单选写成 array 而 param 是标量", () => {
         ],
       }],
     }),
-    (error) => error instanceof SubmitRejectedError && /树单击是单值/.test(error.message),
+    (error) => error instanceof SubmitRejectedError && /type 必须和对应 param.type 一致/.test(error.message),
   );
 });
 

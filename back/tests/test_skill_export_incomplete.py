@@ -7,6 +7,7 @@ from dano.execution.page.flow_materialization.builder import apply_recorded_unkn
 from dano.execution.page.flow_spec_core.models import FlowCapability, FlowSpec, FlowStep, ParamField
 from dano.export.skill_package.renderer import package_slug
 from dano.onboarding.skill_generation.export import (
+    SkillExportError,
     export_recording_skill,
 )
 from dano.onboarding.skill_generation.export_view import list_unconfirmed_write_fields
@@ -123,12 +124,86 @@ async def test_export_does_not_block_on_pi_unresolved(tmp_path: Path) -> None:
     assert persisted.get("skill_export_status") == "exported"
 
 
-def test_export_keeps_unknown_write_as_recorded_literal() -> None:
+def test_export_keeps_unknown_write_unresolved() -> None:
     spec = _spec_with_unknown_write()
     spec.steps[0].params[0].value = "录制原值"
     apply_recorded_unknown_policy(spec)
     param = spec.steps[0].params[0]
-    assert param.source_kind == "constant"
-    assert param.exposed_to_user is False
-    assert param.default_value == "录制原值"
-    assert (param.source or {}).get("kind") == "recorded_literal"
+    assert param.source_kind == "unknown"
+    assert (param.source or {}).get("kind") == "unresolved"
+
+
+@pytest.mark.asyncio
+async def test_export_blocks_unresolved_write_capability(tmp_path: Path) -> None:
+    spec = _spec_with_unknown_write()
+
+    async def proposer(current_spec, current_request, verified, source_fingerprint):  # noqa: ANN001
+        return propose_deterministic_plan(
+            current_spec, current_request, verified, source_fingerprint,
+        )
+
+    async def publish(**_kwargs):  # noqa: ANN003
+        return {"ok": True, "asset_version": 1, "asset_id": "asset-1", "action": "action_export_write"}
+
+    with pytest.raises(SkillExportError) as caught:
+        await export_recording_skill(
+            result_id=uuid4(),
+            body={
+                "flow_spec": spec.model_dump(mode="json"),
+                "action": "action_export_write",
+                "subsystem": "oa",
+                "title": "保存",
+                "unresolved": [{"capability_id": "cap_save", "kind": "write"}],
+            },
+            tenant="test",
+            request=SkillGenerationRequest(
+                title="保存",
+                business_description="保存一条记录。",
+                out_dir=str(tmp_path),
+            ),
+            proposer=proposer,
+            publish=publish,
+        )
+    assert caught.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_export_packs_skill4_artifacts(tmp_path: Path) -> None:
+    spec = _query_spec()
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "scripts").mkdir(parents=True)
+    (artifacts / "SKILL.md").write_text("---\nname: demo\ndescription: 查询日报\n---\n\n# demo\n", encoding="utf-8")
+    (artifacts / "scripts" / "search.py").write_text("print('ok')\n", encoding="utf-8")
+
+    async def proposer(current_spec, current_request, verified, source_fingerprint):  # noqa: ANN001
+        return propose_deterministic_plan(
+            current_spec, current_request, verified, source_fingerprint,
+        )
+
+    async def publish(**_kwargs):  # noqa: ANN003
+        return {"ok": True, "asset_version": 1, "asset_id": "asset-1", "action": "action_export_pack"}
+
+    outcome = await export_recording_skill(
+        result_id=uuid4(),
+        body={
+            "flow_spec": spec.model_dump(mode="json"),
+            "action": "action_export_pack",
+            "subsystem": "oa",
+            "title": "查询日报",
+            "skill_artifacts_dir": str(artifacts),
+        },
+        tenant="test",
+        request=SkillGenerationRequest(
+            title="查询日报",
+            business_description="搜索日报。",
+            out_dir=str(tmp_path / "out"),
+        ),
+        proposer=proposer,
+        publish=publish,
+    )
+    assert outcome.status == "exported", outcome.errors
+    packed = tmp_path / "out" / package_slug(outcome.skill_id)
+    assert (packed / "SKILL.md").is_file()
+    assert (packed / "scripts" / "client.py").is_file()
+    assert (packed / "scripts" / "wire_format.py").is_file()
+    assert (packed / "scripts" / "search.py").is_file()

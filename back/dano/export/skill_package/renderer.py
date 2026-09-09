@@ -1741,9 +1741,7 @@ _LOGIN_IDENTITY_LEAVES = frozenset({
     "deptid", "deptname", "departmentid", "departmentname",
     "companyid", "companyname", "orgid", "orgname",
 })
-_SYSTEM_TIME_LEAVES = frozenset({
-    "createtime", "updatetime", "createdat", "updatedat",
-})
+_SYSTEM_TIME_LEAVES = frozenset()
 
 
 def _export_leaf(name: str) -> str:
@@ -1847,12 +1845,9 @@ def _inferred_identity_bindings(step: dict, schema: dict, spec_step) -> list[dic
     return bindings
 
 
-def _inferred_system_values(step: dict, schema: dict, spec_step) -> list[dict[str, Any]]:  # noqa: ANN001
-    caller = {
-        name
-        for _path, name, _field in _iter_schema_fields(schema)
-        if name
-    }
+def _declared_system_values(step: dict, schema: dict, spec_step) -> list[dict[str, Any]]:  # noqa: ANN001
+    """Copy only contract-declared system time values. Do not guess from leaf names."""
+    del schema
     values = [
         dict(item)
         for item in (step.get("system_values") or [])
@@ -1860,31 +1855,20 @@ def _inferred_system_values(step: dict, schema: dict, spec_step) -> list[dict[st
     ]
     seen = {str(item.get("path")) for item in values}
     for param in getattr(spec_step, "params", None) or []:
+        if str(getattr(param, "source_kind", "") or "") != "system_time":
+            continue
         path = str(param.path or "").removeprefix("body.")
-        leaf = _export_leaf(param.key or path)
-        source_kind = str(getattr(param, "source_kind", "") or "")
-        if path in seen or path in caller or "[" in path:
+        if not path or path in seen or "[" in path:
             continue
-        if source_kind == "constant":
-            seen.add(path)
-            continue
-        if source_kind == "system_time" or leaf in _SYSTEM_TIME_LEAVES:
-            kind = "now_date" if str(getattr(param, "type", "") or "") == "date" else (
-                "now_iso" if str(getattr(param, "type", "") or "") in {"string", "datetime"} else "now_ms"
+        source = getattr(param, "source", None) or {}
+        kind = str(source.get("kind") or "")
+        if kind not in {"now_ms", "now_s", "now_iso", "now_date"}:
+            param_type = str(getattr(param, "type", "") or "")
+            kind = "now_date" if param_type == "date" else (
+                "now_iso" if param_type in {"string", "datetime"} else "now_ms"
             )
-            values.append({"path": path, "kind": kind})
-            seen.add(path)
-    body = step.get("body_template")
-    if isinstance(body, dict):
-        for key, value in body.items():
-            leaf = _export_leaf(key)
-            if key in seen or key in caller or leaf not in _SYSTEM_TIME_LEAVES:
-                continue
-            kind = "now_iso" if isinstance(value, str) and "T" in value else (
-                "now_date" if isinstance(value, str) else "now_ms"
-            )
-            values.append({"path": key, "kind": kind})
-            seen.add(key)
+        values.append({"path": path, "kind": kind})
+        seen.add(path)
     return values
 
 
@@ -2058,7 +2042,7 @@ def _project_capability_step(
     fields = _iter_schema_fields(schema)
     spec_step = _matching_spec_step(spec, cap, projected)
     projected["identity"] = _inferred_identity_bindings(projected, schema, spec_step)
-    projected["system_values"] = _inferred_system_values(projected, schema, spec_step)
+    projected["system_values"] = _declared_system_values(projected, schema, spec_step)
     projected["runtime_fields"] = _attach_array_system_fields(projected, schema, spec, cap)
     linked = {
         str(item.get("target_path") or "")

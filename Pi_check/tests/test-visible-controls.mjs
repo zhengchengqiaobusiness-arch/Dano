@@ -92,8 +92,12 @@ test("采集日期、下拉、上传和折叠筛选，日期只读输入不当�
   const findShot = (label) => shot.find((item) => item.label === label || item.placeholder === label);
   assert.equal(find("编号")?.region, "filter");
   assert.equal(find("编号")?.control_kind, "input");
-  assert.equal(find("创建时间", "date")?.region, "filter");
-  assert.equal(find("创建时间", "date")?.readonly, false);
+  assert.equal(find("创建时间"), undefined, "折叠筛选未展开时不采集隐藏字段");
+  await page.click("#expand");
+  const expanded = await page.evaluate(collectPageFacts);
+  const findExpanded = (label, kind) => expanded.visible.find((item) => item.label === label && (!kind || item.control_kind === kind));
+  assert.equal(findExpanded("创建时间", "date")?.region, "filter");
+  assert.equal(findExpanded("创建时间", "date")?.readonly, false);
   assert.equal(find("类型", "select")?.readonly, false);
   const reportType = find("汇报类型", "select");
   assert.ok(reportType, "disabled select should still be collected");

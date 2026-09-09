@@ -1,5 +1,7 @@
 # Self-contained skill package specification
 
+**对 PI 的指令以 `Pi_check/skill/BUILD_AND_VALIDATE_DEDICATED_SKILL.md` 为准。不要让 PI 读本文件。**
+
 A package is a directory that runs against the recorded business API without a
 Dano runtime or an LLM. It follows Agent Skill progressive disclosure:
 `SKILL.md` is the only always-read entry; `scripts/` and `references/` load on demand.

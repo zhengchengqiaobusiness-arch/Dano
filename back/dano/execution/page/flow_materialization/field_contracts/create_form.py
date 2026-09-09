@@ -1,19 +1,13 @@
 """Stage 5: create/submit form field ownership contracts."""
 from __future__ import annotations
 
-import re
 from dano.execution.page.flow_spec_core.models import (
     FlowSpec,
     FlowStep,
-    IdentityBinding,
     ParamField,
 )
-from dano.execution.page.flow_spec_core.normalization import _strip_body_prefix
 from dano.execution.page.flow_materialization.field_contracts.common import (
-    _looks_audit_actor_leaf,
     _looks_audit_system_leaf,
-    _looks_audit_time_leaf,
-    _looks_page_context_field,
     _looks_runtime_field,
     _looks_system_const_field,
     _param_control_is_readonly,
@@ -221,88 +215,15 @@ def _apply_create_form_field_contracts(spec: FlowSpec) -> None:
 
 
 def _apply_create_form_runtime_origins(step: FlowStep) -> None:
-    """Login identity and system clocks stay off the caller list and off recorded literals."""
-    reserved = {
-        "previous_response", "computed", "selected_option_field", "api_option",
-        "page_enum", "static_enum", "manual_enum", "form_option", "user_input",
-        "caller_input",
-    }
-    seen_sources = {
-        str(item.source)
-        for item in (step.identity or [])
-        if str(getattr(item, "source", "") or "")
-    }
-    for param in step.params or []:
-        if param.locked or _param_has_manual_contract(param):
-            continue
-        if param.exposed_to_user or param.source_kind in reserved:
-            continue
-        if "[" in str(param.path or ""):
-            continue
-        if _looks_audit_time_leaf(param.key, param.path):
-            param.category = "runtime_var"
-            param.source_kind = "system_time"
-            param.exposed_to_user = False
-            param.editable = False
-            param.required = False
-            param.source = {**(param.source or {}), "kind": "system_time", "path": param.path}
-            param.reason = "系统时间戳，运行期使用当前时间生成，不能使用录制空串或旧时刻"
-            continue
-        if _looks_audit_actor_leaf(param.key, param.path) or _looks_page_context_field(param.key, param.path):
-            param.category = "runtime_var"
-            param.source_kind = "current_user"
-            param.exposed_to_user = False
-            param.editable = False
-            param.required = False
-            source = f"current_user:{param.key or _strip_body_prefix(param.path)}"
-            param.source = {
-                **(param.source or {}),
-                "kind": "identity",
-                "path": source,
-            }
-            param.reason = "当前登录身份，运行期从登录态重新读取，不能使用录制者旧值或空串"
-            if source not in seen_sources:
-                step.identity.append(IdentityBinding(
-                    path=_strip_body_prefix(param.path),
-                    source=source,
-                    value=None if param.value in (None, "") else str(param.value),
-                ))
-                seen_sources.add(source)
+    """Do not guess now/current_user from leaf names. Only an explicit contract may mark them."""
+    del step
+    return
 
 
 def _repair_uncontrolled_write_state_fields(spec: FlowSpec) -> int:
-    """Keep request-owned command state out of the caller contract."""
-    repaired = 0
-    for step in spec.steps or []:
-        if not _is_write_step(step):
-            continue
-        for param in step.params or []:
-            leaf = re.sub(
-                r"[^a-z0-9]+", "",
-                str(param.path or param.key).split(".")[-1].casefold(),
-            )
-            if (
-                not re.fullmatch(r"(?:(?:process|workflow|approval|record))?(?:status|state)", leaf)
-                or param.source_kind != "unknown"
-                or param.locked
-                or _param_has_manual_contract(param)
-                or _param_has_editable_control_evidence(param)
-                or isinstance(param.value, (dict, list))
-            ):
-                continue
-            param.category = "system_const"
-            param.source_kind = "constant"
-            param.source = {
-                "kind": "recorded_command_state",
-                "path": param.path,
-            }
-            param.exposed_to_user = False
-            param.editable = False
-            param.need_human_confirm = False
-            param.reason = "录制中没有可编辑控件证明该写入状态由用户提供，按请求自身命令状态保留"
-            step.sample_inputs.pop(param.key, None)
-            repaired += 1
-    return repaired
+    """Do not freeze unrecognized write-state leaves as recorded constants."""
+    del spec
+    return 0
 
 _PENDING_FLOW_SPEC_HELPERS = {'_is_write_step': 'dano.execution.page.capability_kinds', '_param_has_command_local_control': 'dano.execution.page.flow_materialization.field_contracts.row_command', '_step_is_record_edit_form': 'dano.execution.page.flow_materialization.field_contracts.edit_form', '_step_is_row_command': 'dano.execution.page.flow_materialization.field_contracts.row_command'}
 

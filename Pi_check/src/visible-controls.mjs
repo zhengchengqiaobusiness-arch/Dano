@@ -41,6 +41,12 @@ export function projectVisibleControlSnapshot(event) {
         disabled: Boolean(row.disabled),
         range: Boolean(row.range),
         options,
+        display_value: String(row.display_value || ""),
+        host_value: String(row.host_value || ""),
+        date_format: String(row.date_format || ""),
+        min: row.min ?? null,
+        max: row.max ?? null,
+        step: row.step ?? null,
       };
     }),
   };
@@ -88,19 +94,6 @@ export function collectPageFacts() {
   const compactText = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 80);
   const filterRoot =
     ".search-form, .ant-pro-table-search, .el-form--inline, .filter-container, .table-search, .vxe-grid--form-wrapper, [class*='search-form'], [class*='table-search'], [class*='filter-bar'], [class*='search-bar'], [class*='filter-form'], [class*='query-form']";
-  const expandRe = /^(展开|展开筛选|高级搜索|高级|更多筛选|Expand|Advanced)$/i;
-  for (const root of document.querySelectorAll(filterRoot)) {
-    for (const btn of root.querySelectorAll("button, a, .el-button, .ant-btn, span, [role='button']")) {
-      const text = String(btn.innerText || btn.textContent || "").replace(/\s+/g, "");
-      if (!expandRe.test(text) && !/展开筛选|高级搜索/.test(text)) continue;
-      try {
-        btn.click();
-      } catch {
-        // ignore
-      }
-    }
-  }
-
   const textOf = (node) => String(node?.innerText || node?.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80);
   const visible = (node) => {
     if (!node || !node.getBoundingClientRect) return false;
@@ -353,6 +346,12 @@ export function collectPageFacts() {
       disabled: widgetLocked(node, input, controlKind),
       range,
       options,
+      display_value: String(input?.value || extras.display_value || "").slice(0, 200),
+      host_value: String(input?.value || "").slice(0, 200),
+      date_format: String(input?.getAttribute?.("placeholder") || extras.date_format || ""),
+      min: input?.min || input?.getAttribute?.("min") || "",
+      max: input?.max || input?.getAttribute?.("max") || "",
+      step: input?.step || input?.getAttribute?.("step") || "",
     };
   };
 
@@ -495,7 +494,7 @@ export function collectPageFacts() {
     if (!visible(host) && !visible(node)) continue;
     const row = host.closest?.("tr, .el-table__row, .ant-table-row");
     const label = compactText(row ? textOf(row) : textOf(host)) || "勾选";
-    const name = (label.split(" ").find((part) => /[\u4e00-\u9fff]{2,8}/.test(part) && !/部门|公司|操作/.test(part))
+    const name = (label.split(" ").find((part) => /[\u4e00-\u9fff]{2,8}/.test(part))
       || label.split(" ").find((part) => part.length >= 2 && !/^\d+$/.test(part))
       || "勾选");
     push({
@@ -503,7 +502,7 @@ export function collectPageFacts() {
       name: "",
       label: name,
       placeholder: "",
-      section: nearbyHeading(host) || nearbyHeading(row) || "选择用户",
+      section: nearbyHeading(host) || nearbyHeading(row) || "",
       control_kind: "checkbox",
       required_mark: false,
       readonly: false,
@@ -699,7 +698,7 @@ export function collectPageFacts() {
   }
   const pickRowName = (text) => {
     const parts = compactText(text).split(" ").filter(Boolean);
-    const named = parts.find((part) => /[\u4e00-\u9fff]{2,8}/.test(part) && !/部门|公司|未知|操作/.test(part));
+    const named = parts.find((part) => /[\u4e00-\u9fff]{2,8}/.test(part) && !/未知/.test(part));
     return named || parts.find((part) => part.length >= 2 && !/^\d+$/.test(part)) || "";
   };
   const pushSelectable = (node, label, kind) => {
@@ -750,7 +749,7 @@ export function collectPageFacts() {
     if (cell.querySelector?.("input, textarea, button, .el-checkbox, .ant-checkbox")) continue;
     const text = compactText(cell.innerText || cell.textContent);
     if (!text || text.length > 24 || /^\d+$/.test(text)) continue;
-    if (/^(操作|姓名|用户名称|所属部门|手机号码|序号|部门名称)$/.test(text)) continue;
+    if (/^序号$/.test(text)) continue;
     pushSelectable(cell, text, "row");
   }
   const seenOption = new Set();

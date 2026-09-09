@@ -574,6 +574,12 @@ def _param_axis_manually_edited(param: ParamField, *fields: str) -> bool:
     return any(_param_field_manually_edited(param, field) for field in fields)
 
 
+def _param_source_is_unresolved(param: ParamField) -> bool:
+    kind = str(param.source_kind or "").strip().lower()
+    marked = str((param.source or {}).get("kind") or "").strip().lower()
+    return kind in {"", "unknown", "ambiguous"} or marked == "unresolved"
+
+
 def _param_source_agent_classified(param: ParamField) -> bool:
     return any(
         isinstance(item, dict)

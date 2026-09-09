@@ -143,13 +143,14 @@ function locatorBuilders(parsed) {
   ];
 }
 
-async function firstVisibleInFrames(page, build, { exactFirst = false, limit = 12 } = {}) {
+async function listVisibleInFrames(page, build, { exactFirst = false, limit = 12 } = {}) {
   const builders = exactFirst
     ? [
       (scope) => build(scope, true),
       (scope) => build(scope, false),
     ]
     : [(scope) => build(scope, false)];
+  const found = [];
   for (const make of builders) {
     for (const scope of actionScopes(page)) {
       let loc;
@@ -161,13 +162,19 @@ async function firstVisibleInFrames(page, build, { exactFirst = false, limit = 1
       const count = await loc.count().catch(() => 0);
       for (let index = 0; index < Math.min(count, limit); index += 1) {
         const item = loc.nth(index);
-        if (await item.isVisible().catch(() => false)) return item;
-        const box = await item.boundingBox().catch(() => null);
-        if (box && box.width >= 2 && box.height >= 2) return item;
+        const visible = await item.isVisible().catch(() => false);
+        const box = visible ? null : await item.boundingBox().catch(() => null);
+        if (visible || (box && box.width >= 2 && box.height >= 2)) found.push(item);
       }
     }
+    if (found.length) return found;
   }
-  return null;
+  return found;
+}
+
+async function firstVisibleInFrames(page, build, options = {}) {
+  const found = await listVisibleInFrames(page, build, options);
+  return found[0] || null;
 }
 
 async function clickInFrames(page, build, timeout, options = {}) {
@@ -180,66 +187,6 @@ async function fillInFrames(page, build, value, timeout, options = {}) {
   const item = await firstVisibleInFrames(page, build, options);
   if (!item) throw new Error("页面动作没有找到目标");
   await item.fill(value, { timeout });
-}
-
-async function clickFirstVisible(page, texts, timeout = 1200) {
-  for (const text of texts) {
-    const item = await firstVisibleInFrames(
-      page,
-      (scope, exact) => scope.getByText(text, { exact }),
-      { exactFirst: true, limit: 6 },
-    );
-    if (!item) continue;
-    await item.click({ timeout }).catch(() => {});
-    return true;
-  }
-  return false;
-}
-
-async function exerciseListPage(page) {
-  await clickFirstVisible(page, ["展开筛选", "高级搜索", "展开"]);
-  await page.waitForTimeout(300);
-  for (const scope of actionScopes(page)) {
-    const selects = scope.locator(
-      ".el-form .el-select, .el-form .ant-select, form .el-select, .search-form .el-select, .ant-pro-table-search .ant-select, .el-table-filter",
-    );
-    const selectCount = await selects.count().catch(() => 0);
-    for (let index = 0; index < Math.min(selectCount, 12); index += 1) {
-      await selects.nth(index).click({ timeout: 800 }).catch(() => {});
-      await page.waitForTimeout(450);
-      const option = scope.locator(
-        ".el-select-dropdown:visible .el-select-dropdown__item, .ant-select-dropdown:visible .ant-select-item-option",
-      ).first();
-      if (await option.isVisible().catch(() => false)) {
-        await option.click({ timeout: 800 }).catch(() => {});
-      } else {
-        await page.keyboard.press("Escape").catch(() => {});
-      }
-      await page.waitForTimeout(150);
-    }
-    const dates = scope.locator(".el-date-editor, .ant-picker");
-    const dateCount = await dates.count().catch(() => 0);
-    for (let index = 0; index < Math.min(dateCount, 4); index += 1) {
-      await dates.nth(index).click({ timeout: 800 }).catch(() => {});
-      await page.waitForTimeout(350);
-      await page.keyboard.press("Escape").catch(() => {});
-    }
-    const inputs = scope.locator(
-      ".el-form input.el-input__inner, .search-form input, .ant-pro-table-search input:not([readonly]), form input[type='text']",
-    );
-    const inputCount = await inputs.count().catch(() => 0);
-    for (let index = 0; index < Math.min(inputCount, 8); index += 1) {
-      const box = inputs.nth(index);
-      if (!(await box.isVisible().catch(() => false))) continue;
-      const readonly = await box.getAttribute("readonly").catch(() => null);
-      if (readonly !== null) continue;
-      await box.fill("1", { timeout: 800 }).catch(() => {});
-    }
-  }
-  await clickFirstVisible(page, ["搜索", "查询"]);
-  await page.waitForTimeout(800);
-  await clickFirstVisible(page, ["查看", "详情"]);
-  await page.waitForTimeout(800);
 }
 
 function headerEntries(headers) {
@@ -305,32 +252,6 @@ async function waitForPageReady(page) {
 
 const routeSnapshotTimers = new WeakMap();
 
-async function revealCollapsedFilters(page) {
-  for (const scope of actionScopes(page)) {
-    try {
-      await scope.evaluate(() => {
-        const expandRe = /^(展开|展开筛选|高级搜索|高级|更多筛选|Expand|Advanced)$/i;
-        const roots = document.querySelectorAll(
-          ".search-form, .ant-pro-table-search, .el-form--inline, .filter-container, .table-search, .vxe-grid--form-wrapper, [class*='search-form'], [class*='table-search'], [class*='filter-bar'], [class*='search-bar'], [class*='filter-form'], [class*='query-form']",
-        );
-        for (const root of roots) {
-          for (const btn of root.querySelectorAll("button, a, .el-button, .ant-btn, span, [role='button']")) {
-            const text = String(btn.innerText || btn.textContent || "").replace(/\s+/g, "");
-            if (!expandRe.test(text) && !/展开筛选|高级搜索/.test(text)) continue;
-            try {
-              btn.click();
-            } catch {
-              // ignore
-            }
-          }
-        }
-      });
-    } catch {
-      // ignore
-    }
-  }
-}
-
 function scheduleVisibleSnapshot(page, handle, append, reason = "routed", delayMs = 700) {
   if (!page || page.isClosed?.() || handle.closed) return;
   const previous = routeSnapshotTimers.get(page);
@@ -350,8 +271,6 @@ function shouldResnapshotAfterAct(kind) {
 
 async function snapshotVisibleControls(page, handle, append, reason) {
   if (!page || page.isClosed?.() || handle.closed) return;
-  await revealCollapsedFilters(page);
-  await page.waitForTimeout(250).catch(() => {});
   const controls = [];
   for (const scope of actionScopes(page)) {
     try {
@@ -504,8 +423,6 @@ export class PlaywrightBrowser {
       await page.keyboard.press(value);
     } else if (kind === "wait") {
       await page.waitForTimeout(Number(timeout) || 800);
-    } else if (kind === "exercise_list") {
-      await exerciseListPage(page);
     } else if (kind === "evaluate" && value) {
       const results = [];
       for (const scope of actionScopes(page)) {
@@ -656,18 +573,22 @@ export class PlaywrightBrowser {
         if (kind === "choose") {
           return await this.#chooseNow(page, token, text);
         }
-        const handle = await this.#locateNow(page, token);
-        if (!handle) {
+        const located = await this.#locateNow(page, token);
+        if (located?.code === "ambiguous") return located;
+        const handle = located?.handle || located;
+        if (!handle || located?.ok === false) {
           return {
             ok: false,
             code: "not_found",
-            error: `找不到 ${token}。重新 snapshot，用 placeholder= / label= / role=，不要点第一个重名控件。`,
+            error: `找不到 ${token}。重新 snapshot，用 placeholder= / label= / role=。`,
+            snapshot: await this.#peekSnapshot(page),
           };
         }
         if (kind === "fill") {
           const input = handle.locator("input, textarea, [contenteditable='true']").first();
           const target = (await input.count()) ? input : handle;
           const written = await this.#fillValue(target, String(text ?? ""));
+          const host = await this.#hostValue(target);
           if (!written.ok) {
             return {
               ok: false,
@@ -676,6 +597,8 @@ export class PlaywrightBrowser {
               selector: token,
               ref: token,
               action: kind,
+              host_value: host.host_value,
+              display_value: host.display_value,
             };
           }
         } else if (kind === "select") {
@@ -698,12 +621,15 @@ export class PlaywrightBrowser {
         this.#scheduleControlResnapshot(page, kind);
         if (kind === "click") await page.waitForTimeout(50);
         const panel = kind === "click" ? await this.#observePanel(page) : null;
+        const host = kind === "fill" || kind === "select" ? await this.#hostValue(handle) : {};
         return {
           ok: true,
           url: page.url(),
           selector: token,
           ref: token,
           action: kind,
+          host_value: host.host_value,
+          display_value: host.display_value,
           ...(panel && panel.panel !== "none" ? { panel: panel.panel, options: panel.options } : {}),
         };
       } catch (error) {
@@ -737,23 +663,76 @@ export class PlaywrightBrowser {
   async #locateNow(page, token) {
     const advertised = this.#advertisedRef(token);
     if (advertised) {
-      const marked = await firstVisibleInFrames(
+      const marked = await listVisibleInFrames(
         page,
         (scope) => scope.locator(`[data-pi-ref="${advertised}"]`),
         { limit: 4 },
       );
-      if (marked) return marked;
+      if (marked.length === 1) return { handle: marked[0] };
+      if (marked.length > 1) return this.#ambiguous(token, marked);
     }
     const parsed = parseLocator(token);
     if (parsed.kind === "label" || parsed.kind === "text") {
       const column = await this.#locateTableColumn(page, parsed.value);
-      if (column) return column;
+      if (column) return { handle: column };
     }
     for (const build of locatorBuilders(parsed)) {
-      const found = await firstVisibleInFrames(page, (scope) => build(scope), { limit: 16 });
-      if (found) return found;
+      const found = await listVisibleInFrames(page, (scope) => build(scope), { limit: 16 });
+      if (found.length === 1) return { handle: found[0] };
+      if (found.length > 1) return this.#ambiguous(token, found);
     }
     return null;
+  }
+
+  async #ambiguous(token, handles) {
+    const candidates = [];
+    for (const handle of handles.slice(0, 8)) {
+      const label = await handle.evaluate((node) => (
+        node.getAttribute?.("aria-label")
+        || node.getAttribute?.("placeholder")
+        || String(node.innerText || node.textContent || "")
+      ).replace(/\s+/g, " ").trim().slice(0, 80)).catch(() => "");
+      const region = await handle.evaluate((node) => (
+        node.closest?.("[role='dialog'], .el-dialog, .ant-modal") ? "dialog"
+          : node.closest?.("form, .el-form, .ant-form") ? "form"
+            : node.closest?.("table, .el-table, .ant-table") ? "table"
+              : ""
+      )).catch(() => "");
+      candidates.push({ selector: token, region, label });
+    }
+    return {
+      ok: false,
+      code: "ambiguous",
+      error: `多个可见命中：${token}`,
+      candidates,
+    };
+  }
+
+  async #hostValue(locator) {
+    return locator.evaluate((node) => {
+      const el = node.matches?.("input, textarea, select")
+        ? node
+        : node.querySelector?.("input, textarea, select, [contenteditable='true']");
+      if (!el) {
+        return { display_value: String(node.innerText || node.textContent || "").trim().slice(0, 80), host_value: "" };
+      }
+      const value = String(el.value ?? el.textContent ?? "");
+      return { display_value: value.slice(0, 200), host_value: value.slice(0, 200) };
+    }).catch(() => ({ display_value: "", host_value: "" }));
+  }
+
+  async #peekSnapshot(page) {
+    try {
+      const facts = await page.evaluate(collectPageFacts);
+      return {
+        url: facts?.url || page.url(),
+        title: facts?.title || "",
+        controls: Array.isArray(facts?.controls) ? facts.controls : [],
+        actions: Array.isArray(facts?.actions) ? facts.actions : [],
+      };
+    } catch {
+      return { url: page.url(), controls: [], actions: [] };
+    }
   }
 
   async #locateTableColumn(page, label) {
@@ -970,9 +949,16 @@ export class PlaywrightBrowser {
   async #chooseNow(page, token, text) {
     const label = String(text || "").trim();
     if (!label) return { ok: false, code: "option_not_seen", error: "choose 需要可见选项原文" };
-    const field = await this.#locateNow(page, token);
-    if (!field) {
-      return { ok: false, code: "not_found", error: `找不到 ${token}` };
+    const located = await this.#locateNow(page, token);
+    if (located?.code === "ambiguous") return located;
+    const field = located?.handle || located;
+    if (!field || located?.ok === false) {
+      return {
+        ok: false,
+        code: "not_found",
+        error: `找不到 ${token}`,
+        snapshot: await this.#peekSnapshot(page),
+      };
     }
     const tag = await field.evaluate((el) => String(el.tagName || ""), { timeout: 800 }).catch(() => "");
     const nestedSelects = await field.locator("select").count().catch(() => 0);
@@ -1031,7 +1017,16 @@ export class PlaywrightBrowser {
       });
     }
     this.#scheduleControlResnapshot(page, "choose");
-    return { ok: true, url: page.url(), selector: token, action: "choose", text: label };
+    const host = await this.#hostValue(field);
+    return {
+      ok: true,
+      url: page.url(),
+      selector: token,
+      action: "choose",
+      text: label,
+      host_value: host.host_value,
+      display_value: host.display_value,
+    };
   }
 
   #scheduleControlResnapshot(page, kind) {

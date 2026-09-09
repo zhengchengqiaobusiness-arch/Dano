@@ -2043,11 +2043,9 @@ _SYS_TIME_KEY = _re.compile(
 
 
 def _is_system_timestamp(key: str, value) -> bool:
-    """系统在提交时**自动写入**的时间戳(submitTime/createTime/updateTime/gmtCreate 等):**系统类时间 key** + 裸 10–13 位时间戳。
-    用于三处一致判定:① flatten 不参数化 ② build 标 system_values(运行期填 now)③ 检出器不报"焊死会话值"。
-    **关键**:只认系统类 key(create/submit/update…);**用户挑的日期(startTime/endTime/beginTime…)不命中** ——
-    它们是参数(由 match_label 跨格式对样例命名),绝不能被 now 覆盖。通用,不挑系统。"""
-    return bool(_SYS_TIME_KEY.search(key or "")) and bool(_re.fullmatch(r"-?\d{10,13}", str(value if value is not None else "")))
+    """Do not guess now from leaf names. Only an explicit contract may mark system time."""
+    del key, value
+    return False
 
 
 def _infer_type(node, key: str = "") -> str:

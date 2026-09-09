@@ -147,48 +147,27 @@ PRESERVE_RECORDED_UNKNOWN_POLICY = "preserve_recorded_literal"
 
 
 def apply_recorded_unknown_policy(spec: FlowSpec) -> FlowSpec:
-    """Fields without a source become system-handled recorded literals.
+    """Keep unrecognized sources unresolved. Do not freeze recorded values as constants."""
 
-    Do not invent a caller/system split or a source rule. Keep the exact value
-    captured on the wire and treat the field as automatically handled.
-    """
-
+    count = 0
     for step in spec.steps or []:
         for param in step.params or []:
             if str(param.source_kind or "").strip().lower() not in {"", "unknown", "ambiguous"}:
                 continue
             previous_source = dict(param.source or {})
-            previous_kind = str(previous_source.get("kind") or param.source_kind or "unknown")
-            recorded = copy.deepcopy(param.value if param.value is not None else param.default_value)
-            param.category = "system_const"
-            param.source_kind = "constant"
+            param.source_kind = "unknown"
             param.source = {
                 **previous_source,
-                "kind": "recorded_literal",
+                "kind": "unresolved",
                 "path": param.path,
-                "original_source_kind": previous_kind,
-                "preserve_recorded_value": True,
             }
-            param.exposed_to_user = False
-            param.editable = False
-            param.locked = True
-            param.required = False
-            param.need_human_confirm = False
-            param.default_value = recorded
-            param.reason = "无独立来源，按录制请求原值提交"
-            if param.key:
-                step.sample_inputs.pop(param.key, None)
-    preserved = sum(
-        1
-        for step in spec.steps or []
-        for param in step.params or []
-        if param.source_kind == "constant"
-        and str((param.source or {}).get("kind") or "") == "recorded_literal"
-    )
+            param.reason = "来源未识别，不能按录制原值当作已解决"
+            count += 1
     spec.meta = {
         **(spec.meta or {}),
-        "unknown_source_policy": PRESERVE_RECORDED_UNKNOWN_POLICY,
-        "preserved_unknown_field_count": preserved,
+        "unknown_source_policy": "keep_unresolved",
+        "preserved_unknown_field_count": 0,
+        "unresolved_unknown_field_count": count,
     }
     return spec
 

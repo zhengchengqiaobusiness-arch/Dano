@@ -16,8 +16,7 @@ _UNRESOLVED_SOURCE_KINDS = frozenset({"", "unknown", "ambiguous"})
 def list_unconfirmed_write_fields(spec: FlowSpec) -> list[str]:
     """List write fields whose source is still unknown.
 
-    Export no longer blocks on these. Callers should run
-    ``apply_recorded_unknown_policy`` so they become recorded literals.
+    Export blocks write capabilities that still have these fields.
     """
 
     found: list[str] = []

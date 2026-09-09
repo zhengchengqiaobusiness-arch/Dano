@@ -1,0 +1,66 @@
+{
+  "title": "本场能力标题",
+  "capabilities": [
+    {
+      "capability_id": "cap_example_search",
+      "name": "搜索列表示例",
+      "title": "搜索列表示例",
+      "intent": "按调用方给出的筛选条件查询业务列表",
+      "kind": "query",
+      "step_ids": ["step_search"],
+      "request_refs": [
+        { "step_id": "step_options", "usage": "option_source", "method": "GET", "path": "/api/options", "sequence": 1 },
+        { "step_id": "step_search", "usage": "execute", "method": "GET", "path": "/api/items", "sequence": 2 }
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "keyword": { "type": "string", "title": "关键字" }
+        },
+        "required": []
+      }
+    }
+  ],
+  "steps": [
+    {
+      "step_id": "step_options",
+      "name": "加载筛选项",
+      "method": "GET",
+      "path": "/api/options",
+      "params": []
+    },
+    {
+      "step_id": "step_search",
+      "name": "搜索列表",
+      "method": "GET",
+      "path": "/api/items",
+      "params": [
+        {
+          "key": "keyword",
+          "path": "query.keyword",
+          "label": "关键字",
+          "type": "string",
+          "source_kind": "user_input",
+          "exposed_to_user": true,
+          "required": false,
+          "reason": "人在筛选框填写"
+        },
+        {
+          "key": "pageNo",
+          "path": "query.pageNo",
+          "label": "页码",
+          "type": "number",
+          "source_kind": "page_default",
+          "exposed_to_user": false,
+          "required": true,
+          "default_value": 1,
+          "reason": "查询分页，已认清为系统默认"
+        }
+      ]
+    }
+  ],
+  "links": [],
+  "capability_relations": [],
+  "request_facts": { "requests": [] },
+  "unresolved": []
+}

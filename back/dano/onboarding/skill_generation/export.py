@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import inspect
+import json
+import shutil
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -55,6 +57,83 @@ class SkillExportError(Exception):
         super().__init__(detail)
         self.status_code = status_code
         self.detail = detail
+
+
+_WRITE_KINDS = frozenset({"create", "update", "delete", "write", "submit"})
+
+
+def _recording_artifact_dir(body: dict[str, Any]) -> Path | None:
+    explicit = str(body.get("skill_artifacts_dir") or "").strip()
+    if explicit:
+        path = Path(explicit)
+        return path if (path / "SKILL.md").is_file() else None
+    recording_id = str(body.get("recording_id") or "").strip()
+    if not recording_id:
+        return None
+    repo = Path(__file__).resolve().parents[4]
+    candidate = repo / "Pi_check" / "data" / recording_id / "skill-artifacts"
+    return candidate if (candidate / "SKILL.md").is_file() else None
+
+
+def _unresolved_write_blockers(body: dict[str, Any], spec: FlowSpec) -> list[str]:
+    from dano.onboarding.skill_generation.export_view import list_unconfirmed_write_fields
+
+    write_caps = [
+        cap for cap in spec.capabilities
+        if str(cap.kind or "").strip().lower() in _WRITE_KINDS
+    ]
+    write_ids = {
+        str(cap.capability_id or "").strip()
+        for cap in write_caps
+        if str(cap.capability_id or "").strip()
+    }
+    write_ids.update(str(cap.name or "").strip() for cap in write_caps if str(cap.name or "").strip())
+    blockers: list[str] = []
+    unresolved = body.get("unresolved") if isinstance(body.get("unresolved"), list) else []
+    for item in unresolved:
+        if isinstance(item, dict):
+            cap_id = str(item.get("capability_id") or item.get("id") or "").strip()
+            kind = str(item.get("kind") or "").strip().lower()
+            if cap_id in write_ids or kind in _WRITE_KINDS:
+                blockers.append(cap_id or kind or "write")
+        elif isinstance(item, str) and any(cap_id and cap_id in item for cap_id in write_ids):
+            blockers.append(item)
+    blockers.extend(list_unconfirmed_write_fields(spec))
+    return list(dict.fromkeys(item for item in blockers if item))
+
+
+def pack_skill4_artifacts(
+    src: Path,
+    out_dir: str,
+    *,
+    skill_id: str,
+    tenant: str,
+) -> str:
+    from dano.execution.page import wire_format as wire_format_module
+    from dano.export.skill_package.renderer import _CLIENT_TEMPLATE, package_slug
+
+    slug = package_slug(skill_id)
+    dest = Path(out_dir) / slug
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dest, dirs_exist_ok=True)
+    scripts = dest / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    subsystem = skill_id.partition(".")[0] or "oa"
+    config = {
+        "tenant": tenant,
+        "subsystem": subsystem,
+        "base_url": "",
+        "identity_probes": [],
+    }
+    (scripts / "client.py").write_text(
+        _CLIENT_TEMPLATE.replace("__CONFIG__", repr(json.dumps(config, ensure_ascii=False))),
+        encoding="utf-8",
+    )
+    (scripts / "wire_format.py").write_text(
+        Path(wire_format_module.__file__).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    return slug
 
 
 def _preview(text: str, limit: int = 240) -> str:
@@ -478,6 +557,12 @@ async def export_recording_skill(
         )
         raise SkillExportError(400, "导出目录不能为空")
     spec = _current_spec(body)
+    blockers = _unresolved_write_blockers(body, spec)
+    if blockers:
+        raise SkillExportError(
+            409,
+            "写入能力仍有未解决来源，不能发布可执行写能力：" + "；".join(blockers[:8]),
+        )
     from dano.onboarding.recording_stage_seven import working_fingerprint
 
     fingerprint = working_fingerprint(spec)
@@ -596,6 +681,12 @@ async def export_recording_skill(
             view, tenant=tenant, skill_id=skill_id, title=title, plan=plan,
         )
     out_dir = str(request.out_dir).strip()
+    artifact_dir = _recording_artifact_dir(body)
+    if artifact_dir is not None:
+        def _pack_render(_skill, dest: str, *, tenant: str) -> str:  # noqa: ANN001
+            return pack_skill4_artifacts(artifact_dir, dest, skill_id=skill_id, tenant=tenant)
+
+        render = render or _pack_render
     render_fn = render or _default_render
     publish_fn = publish or _default_publish
     published_report: dict[str, Any] | None = None

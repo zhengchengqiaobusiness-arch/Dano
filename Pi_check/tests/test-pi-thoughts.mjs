@@ -28,8 +28,13 @@ test("模型事件和证据会变成助手 thought，指针移动和轮询不发
   assert.equal(thoughtFromEvidence("network_request", {
     resource_type: "xhr",
     method: "GET",
-    path: "/prod-api/im/chatMessage/getChatNotReadMessageCount",
+    path: "/favicon.ico",
   }), null);
+  assert.match(thoughtFromEvidence("network_request", {
+    resource_type: "xhr",
+    method: "GET",
+    path: "/prod-api/im/chatMessage/getChatNotReadMessageCount",
+  }).text, /getChatNotReadMessageCount/);
   assert.equal(thoughtFromEvidence("visible_control", { count: 10, reason: "interaction" }), null);
   assert.match(thoughtFromEvidence("network_request", { resource_type: "xhr", method: "GET", path: "/api/page" }).text, /GET \/api\/page/);
   assert.match(thoughtFromEvidence("interaction", { kind: "click", text: "提交" }).text, /提交/);

@@ -2175,20 +2175,12 @@ def test_pi_unavailable_unknown_fields_preserve_exact_recorded_values() -> None:
     apply_recorded_unknown_policy(spec)
 
     for param in spec.steps[0].params:
-        assert param.source_kind == "constant"
-        assert param.source["kind"] == "recorded_literal"
-        assert param.default_value == param.value
-        assert param.exposed_to_user is False
-        assert param.need_human_confirm is False
-        assert param.locked is True
+        assert param.source_kind == "unknown"
+        assert param.source["kind"] == "unresolved"
     api_request, errors = flow_spec_to_api_request(spec)
-    assert errors == []
-    assert api_request is not None
-    assert api_request["url"] == "https://example.test/orders/17"
-    assert "url_template" not in api_request
-    assert api_request["body_template"] == recorded_values
-    assert api_request["params"] == []
-    assert api_request["sample_inputs"] == {}
+    assert api_request is None
+    assert errors
+    assert any("来源未确认" in item for item in errors)
 
 
 def test_pi_unavailable_fails_without_saving_capabilities() -> None:
