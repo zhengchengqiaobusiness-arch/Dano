@@ -102,6 +102,11 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(skill, /x-dano-option-source\.params.*不是 `steps\[\]\.params`/);
   assert.match(skill, /分页字段不要放进 `input_schema`/);
   assert.match(skill, /导出从这些 `links` 投影|导出从 `links` 投影/);
+  assert.match(skill, /capability_relations/);
+  assert.match(skill, /suggested_call_chain/);
+  assert.match(skill, /分区A\/分区B|拆不开的「A和B」/);
+  assert.match(skill, /suggested_call_chain/);
+  assert.match(skill, /禁止写成「A和B」|拆不开的合并名|分区A\/分区B/);
   assert.match(skill, /from_step_id.*from_path/);
   assert.match(skill, /看不出来就写入 `unresolved`/);
   assert.match(skill, /禁止把选项列表路径/);
@@ -177,6 +182,6 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(prompt, /合并行时带分区标题/);
   assert.match(prompt, /树单击是单值/);
   assert.match(prompt, /保存与提交若 path 或效果不同必须两项能力/);
-  assert.doesNotMatch(prompt, /capability_relations/);
+  assert.match(prompt, /capability_relations/);
   assert.doesNotMatch(prompt, /每看完一个独立动作立刻 submit_recording_capability/);
 });

@@ -24,7 +24,10 @@ from dano.execution.page.flow_spec_core.request_contract import (
 )
 from dano.export.skill_package import validate_skill_package
 from dano.export.skill_package.renderer import package_slug, render_skill_package
-from dano.onboarding.skill_generation.catalog import is_write_capability
+from dano.onboarding.skill_generation.catalog import (
+    attach_declared_step_link_relations,
+    is_write_capability,
+)
 from dano.onboarding.skill_generation.export import (
     _current_spec,
     build_export_skill_spec,
@@ -1298,6 +1301,179 @@ def test_declared_array_schema_does_not_infer_presence_from_undeclared_cells() -
     assert strategies.get("itemType") == "section"
     assert strategies.get("progress") == "section"
     assert rules.get("section_titles") == ["已完成工作", "工作计划"]
+
+
+def test_declared_section_map_does_not_need_a_splitable_title() -> None:
+    from dano.export.skill_package.renderer import _capability_plans, _public_schema, _runtime_plan
+
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="cap_save",
+                name="save_record",
+                title="保存记录",
+                kind="write",
+                request_refs=[CapabilityRequestRef(step_id="step_save", usage="execute")],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "title": "工作项和计划项",
+                            "x-dano-section-titles": {
+                                "工作项": "工作内容",
+                                "计划项": "计划内容",
+                            },
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "content": {"type": "string", "title": "内容"},
+                                    "progress": {"type": "number", "title": "完成进度"},
+                                },
+                            },
+                        },
+                    },
+                },
+            )
+        ],
+        steps=[
+            FlowStep(
+                step_id="step_save",
+                method="POST",
+                path="/api/save",
+                params=[
+                    ParamField(
+                        key="items",
+                        path="body.items",
+                        type="array",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                        value=[
+                            {"content": "已完成", "progress": 0, "itemType": 1, "sort": 0, "_X_ROW_KEY": "row_1"},
+                            {"content": "计划", "itemType": 2, "sort": 0, "_X_ROW_KEY": "row_2"},
+                        ],
+                    )
+                ],
+            )
+        ],
+    )
+    api_request = {
+        "capabilities": [{
+            "capability_id": "cap_save",
+            "name": "save_record",
+            "title": "保存记录",
+            "kind": "write",
+            "execution_contract": {
+                "steps": [{
+                    "step_id": "step_save",
+                    "method": "POST",
+                    "path": "/api/save",
+                    "body_template": {"items": "{{items}}"},
+                }],
+            },
+            "input_schema": spec.capabilities[0].input_schema,
+        }],
+    }
+    plans = _capability_plans(type("Skill", (), {"api_request": api_request})(), spec, api_request)
+    rules = next(
+        item for item in (_runtime_plan(plans[0])["steps"][0].get("runtime_fields") or [])
+        if item.get("kind") == "array_item_system_fields"
+    )
+    public_items = _public_schema(plans[0]["input_schema"])["properties"]["items"]
+    strategies = {item["key"]: item["strategy"] for item in rules["rules"]}
+    assert rules.get("section_titles") == ["工作项", "计划项"]
+    assert strategies.get("itemType") == "section"
+    assert strategies.get("itemType") != "caller_presence"
+    assert public_items["x-dano-section-titles"] == {"工作项": "工作内容", "计划项": "计划内容"}
+
+
+def test_constant_timestamp_is_not_rewritten_to_now() -> None:
+    from dano.export.skill_package.renderer import _capability_plans, _runtime_plan
+
+    spec = FlowSpec(
+        capabilities=[
+            FlowCapability(
+                capability_id="cap_save",
+                name="save_record",
+                title="保存记录",
+                kind="write",
+                request_refs=[CapabilityRequestRef(step_id="step_save", usage="execute")],
+                input_schema={"type": "object", "properties": {"title": {"type": "string"}}},
+            )
+        ],
+        steps=[
+            FlowStep(
+                step_id="step_save",
+                method="POST",
+                path="/api/save",
+                params=[
+                    ParamField(
+                        key="title",
+                        path="body.title",
+                        source_kind="user_input",
+                        exposed_to_user=True,
+                    ),
+                    ParamField(
+                        key="createTime",
+                        path="body.createTime",
+                        source_kind="constant",
+                        exposed_to_user=False,
+                        default_value="2026-09-09T09:20:22.530Z",
+                        value="2026-09-09T09:20:22.530Z",
+                    ),
+                ],
+            )
+        ],
+    )
+    api_request = {
+        "capabilities": [{
+            "capability_id": "cap_save",
+            "name": "save_record",
+            "title": "保存记录",
+            "kind": "write",
+            "execution_contract": {
+                "steps": [{
+                    "step_id": "step_save",
+                    "method": "POST",
+                    "path": "/api/save",
+                    "body_template": {
+                        "title": "{{title}}",
+                        "createTime": "2026-09-09T09:20:22.530Z",
+                    },
+                }],
+            },
+            "input_schema": spec.capabilities[0].input_schema,
+        }],
+    }
+    submit = _runtime_plan(
+        _capability_plans(type("Skill", (), {"api_request": api_request})(), spec, api_request)[0]
+    )["steps"][0]
+    assert not any(item.get("path") == "createTime" for item in submit.get("system_values") or [])
+    assert submit["body_template"]["createTime"] == "2026-09-09T09:20:22.530Z"
+
+
+def test_declared_handoff_relation_compiles_combo_route() -> None:
+    payload = _pi_recording_payload()
+    payload["capability_relations"] = [{
+        "type": "suggested_call_chain",
+        "mode": "handoff",
+        "from_capability": "query_records",
+        "to_capability": "create_record",
+        "reason": "目标要求先查询后新增",
+    }]
+    spec = attach_declared_step_link_relations(FlowSpec.model_validate(payload))
+    plan = propose_deterministic_plan(
+        spec,
+        SkillGenerationRequest(
+            title="业务办理",
+            business_description="先查询后新增",
+        ),
+        {cap.capability_id for cap in spec.capabilities},
+        "declared-handoff",
+    )
+    assert any(route.capability_sequence == ["cap_query", "cap_create"] for route in plan.routes)
+    combo = next(route for route in plan.routes if route.capability_sequence == ["cap_query", "cap_create"])
+    assert combo.checkpoints
 
 
 def test_option_catalog_link_keeps_caller_filter_in_query() -> None:

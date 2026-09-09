@@ -109,9 +109,11 @@ function sectionTitlesFromArrayTitle(title) {
     .filter(Boolean);
 }
 
-function hasSectionTitleMap(itemProperties) {
-  return Object.values(itemProperties).some((node) => {
-    const titles = isPlainObject(node) ? node["x-dano-section-titles"] : null;
+function hasSectionTitleMap(node, itemProperties) {
+  const arrayTitles = isPlainObject(node) ? node["x-dano-section-titles"] : null;
+  if (isPlainObject(arrayTitles) && Object.keys(arrayTitles).length >= 2) return true;
+  return Object.values(itemProperties).some((item) => {
+    const titles = isPlainObject(item) ? item["x-dano-section-titles"] : null;
     return isPlainObject(titles) && Object.keys(titles).length > 0;
   });
 }
@@ -307,7 +309,7 @@ export function assertPageDisplayContract(result) {
           );
         }
         const sections = sectionTitlesFromArrayTitle(node.title || node.label);
-        if (sections.length >= 2 && !hasSectionTitleMap(itemProperties)) {
+        if (sections.length >= 2 && !hasSectionTitleMap(node, itemProperties)) {
           throw new SubmitRejectedError(
             "DISPLAY_CONTRACT",
             `input_schema.properties.${key} 的 title 含多个分区，必须在 items.properties 上写 x-dano-section-titles`,

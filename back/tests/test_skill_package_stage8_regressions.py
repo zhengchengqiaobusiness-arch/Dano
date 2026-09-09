@@ -1936,6 +1936,52 @@ def test_object_array_form_uses_table_sections_and_column_titles() -> None:
     assert template["questions"][0]["columns"][0]["label"] == "工作内容"
 
 
+def test_object_array_form_uses_declared_section_map_without_splitable_title() -> None:
+    forms = _input_forms_md([{
+        "name": "create_record",
+        "title": "新增记录",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "title": "工作项和计划项",
+                    "x-dano-section-titles": {
+                        "工作项": "工作内容",
+                        "计划项": "计划内容",
+                    },
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string", "title": "内容"},
+                            "progress": {"type": "number", "title": "完成进度"},
+                        },
+                    },
+                },
+            },
+            "required": ["items"],
+        },
+    }])
+    questions = {item["id"]: item for item in _form_questions(forms)}
+
+    assert questions["items"]["sections"] == [
+        {
+            "title": "工作项",
+            "columns": [
+                {"id": "content", "label": "工作内容", "type": "string"},
+                {"id": "progress", "label": "完成进度", "type": "number"},
+            ],
+        },
+        {
+            "title": "计划项",
+            "columns": [
+                {"id": "content", "label": "计划内容", "type": "string"},
+                {"id": "progress", "label": "完成进度", "type": "number"},
+            ],
+        },
+    ]
+
+
 def test_result_then_playbook_renders_combination_route_and_readable_scripts(tmp_path: Path) -> None:
     playbook = "先查询工作汇报统计，根据返回进行新增"
     spec = FlowSpec(

@@ -597,6 +597,7 @@ _OPTION_FIELD_KEYS = (
     "format",
     "x-dano-tree",
     "x-dano-business-type",
+    "x-dano-section-titles",
 )
 _ENUM_ID_LABEL_RE = re.compile(
     r"(?P<id>-?\d+)\s*[=:：]\s*(?P<label>[^\s,，;；/、=：:()（）]{1,20})"
@@ -1474,10 +1475,52 @@ def _object_array_columns(field: dict | None) -> list[dict[str, str]]:
     return columns
 
 
+def _object_array_section_title_map(field: dict | None) -> dict[str, str]:
+    titles = (field or {}).get("x-dano-section-titles") if isinstance(field, dict) else None
+    if not isinstance(titles, dict):
+        return {}
+    return {
+        str(key).strip(): str(value or "").strip()
+        for key, value in titles.items()
+        if str(key).strip()
+    }
+
+
 def _object_array_section_names(field: dict | None) -> list[str]:
-    title = str((field or {}).get("title") or (field or {}).get("label") or "").strip()
-    parts = [part for part in _SECTION_TITLE_SPLIT_RE.split(title) if part]
-    return parts if len(parts) > 1 else []
+    """Section names come from the declared contract, then a splitable title."""
+    node = field if isinstance(field, dict) else {}
+    title = str(node.get("title") or node.get("label") or "").strip()
+    from_title = [part for part in _SECTION_TITLE_SPLIT_RE.split(title) if part]
+    from_array = list(_object_array_section_title_map(node))
+    from_props: list[str] = []
+    seen: set[str] = set()
+    for child in _object_array_item_properties(node).values():
+        for name in _object_array_section_title_map(child if isinstance(child, dict) else None):
+            if name in seen:
+                continue
+            seen.add(name)
+            from_props.append(name)
+    if len(from_title) > 1:
+        return from_title
+    if len(from_array) > 1:
+        return from_array
+    if len(from_props) > 1:
+        return from_props
+    return []
+
+
+def _section_header_map_for_property(field: dict | None, prop_node: dict | None) -> dict[str, str]:
+    own = _object_array_section_title_map(prop_node)
+    if own:
+        return own
+    array_map = _object_array_section_title_map(field)
+    if not array_map:
+        return {}
+    if str((prop_node or {}).get("type") or "string") != "string":
+        return {}
+    if not any(value and value != key for key, value in array_map.items()):
+        return {}
+    return array_map
 
 
 def _object_array_section_tables(field: dict | None) -> list[dict[str, Any]]:
@@ -1492,8 +1535,7 @@ def _object_array_section_tables(field: dict | None) -> list[dict[str, Any]]:
         for column in columns:
             node = props.get(column["id"])
             node = node if isinstance(node, dict) else {}
-            titles = node.get("x-dano-section-titles")
-            titles = titles if isinstance(titles, dict) else {}
+            titles = _section_header_map_for_property(field, node)
             if titles:
                 header = titles.get(section)
                 if header in (None, ""):
@@ -1518,6 +1560,8 @@ def _attach_table_question_fields(question: dict[str, Any], field: dict | None) 
 
 def _prefer_object_array_items(field: dict, other: dict) -> dict:
     packed = dict(field)
+    if packed.get("type") == "array" and other.get("x-dano-section-titles") and not packed.get("x-dano-section-titles"):
+        packed["x-dano-section-titles"] = deepcopy(other.get("x-dano-section-titles"))
     if (
         packed.get("type") == "array"
         and not _array_items_are_objects(packed)
@@ -1541,7 +1585,10 @@ def _prefer_object_array_items(field: dict, other: dict) -> dict:
                 node = dict(node)
                 node["title"] = title
                 node["label"] = title
-                packed_props[key] = node
+            if previous.get("x-dano-section-titles") and not (node or {}).get("x-dano-section-titles"):
+                node = dict(node)
+                node["x-dano-section-titles"] = deepcopy(previous.get("x-dano-section-titles"))
+            packed_props[key] = node
         packed_items["properties"] = packed_props
         packed["items"] = packed_items
     return packed
@@ -1815,9 +1862,13 @@ def _inferred_system_values(step: dict, schema: dict, spec_step) -> list[dict[st
     for param in getattr(spec_step, "params", None) or []:
         path = str(param.path or "").removeprefix("body.")
         leaf = _export_leaf(param.key or path)
+        source_kind = str(getattr(param, "source_kind", "") or "")
         if path in seen or path in caller or "[" in path:
             continue
-        if str(getattr(param, "source_kind", "") or "") == "system_time" or leaf in _SYSTEM_TIME_LEAVES:
+        if source_kind == "constant":
+            seen.add(path)
+            continue
+        if source_kind == "system_time" or leaf in _SYSTEM_TIME_LEAVES:
             kind = "now_date" if str(getattr(param, "type", "") or "") == "date" else (
                 "now_iso" if str(getattr(param, "type", "") or "") in {"string", "datetime"} else "now_ms"
             )
@@ -2288,7 +2339,7 @@ def _input_forms_bundle(plans: list[dict]) -> tuple[str, dict[str, str]]:
         "",
         "- 同一能力的相关字段尽量合并在一次 `questions[]` 中；每个 `id` 与 `input_schema.properties` 的键逐字一致。",
         "- `question` 只用页面标签。禁止附加「JSON 数组」「JSON 对象」或类型名。",
-        "- 展示与能力契约完全一致：`questions[]` 的 id、options 必须与 `input_schema` 逐字一致。枚举只显示契约 options 的 label。对象数组的 `inputType` 是 `table`，按 `columns` 的 label 画表；数组 title 含多个分区时按 `sections` 各画一张表，提交时按分区标题分组或每行带分区标题。空表写「暂无数据」。不要把请求 JSON 给用户看。",
+        "- 展示与能力契约完全一致：`questions[]` 的 id、options 必须与 `input_schema` 逐字一致。枚举只显示契约 options 的 label。对象数组的 `inputType` 是 `table`，按 `columns` 的 label 画表；契约声明了多个分区时按 `sections` 各画一张表，提交时按分区标题分组或每行带分区标题。空表写「暂无数据」。不要把请求 JSON 给用户看。",
         "- 第一次提问必须把该能力 `questions[]` 原样发出，条数与 `input_schema.properties` 一致。只有本轮已给出且通过校验的字段才能从副本中删除。禁止因为可选、用户没提到、或原页控件更少就少问。不要改 `questions[]` 的 id 或 options，也不要另编字段或候选项。",
         "- 下列 `default` 是运行时占位符，调用前必须替换为结合当前用户意图、当前时间和实时候选得到的非空推荐值；不得把占位符本身传给工具。",
         "- 用户回答后，先按 schema 的 `type`、`format`、`enum`、`pattern` 和边界转换为接口线格式。可无歧义转换时自动转换（例如数字文本转 number、日期语义转声明格式、候选 label 转稳定 id）。",
@@ -4887,6 +4938,9 @@ _PRIVATE_SCHEMA_KEYS = frozenset({
     "x-dano-wire-format",
     "x-dano-wire-type",
 })
+_PUBLIC_X_DANO_KEYS = frozenset({
+    "x-dano-section-titles",
+})
 
 
 def _public_schema(node: Any, key: str = "") -> Any:
@@ -4902,7 +4956,10 @@ def _public_schema(node: Any, key: str = "") -> Any:
             for child_key, value in node.items()
             if str(child_key) not in _PRIVATE_SCHEMA_KEYS
             and not str(child_key).startswith("x-flow-")
-            and not str(child_key).startswith("x-dano-")
+            and not (
+                str(child_key).startswith("x-dano-")
+                and str(child_key) not in _PUBLIC_X_DANO_KEYS
+            )
             and not str(child_key).startswith("x-options")
             and str(child_key) not in {"source_request_id", "source_step_id", "request_id", "step_id"}
             and not (dynamic_options and str(child_key) == "x-enum-value-map")

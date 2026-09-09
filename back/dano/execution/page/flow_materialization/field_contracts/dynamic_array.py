@@ -174,13 +174,13 @@ def _infer_array_item_system_rules(
         if len(encoded) == 1:
             rules.append({"key": key, "strategy": "constant", "value": values[0]})
             continue
-        cases = _presence_cases(rows, key, owned)
-        if cases:
-            rules.append({"key": key, "strategy": "caller_presence", "cases": cases})
-            continue
         section_cases = _section_cases(rows, key, titles)
         if section_cases:
             rules.append({"key": key, "strategy": "section", "cases": section_cases})
+            continue
+        cases = _presence_cases(rows, key, owned)
+        if cases:
+            rules.append({"key": key, "strategy": "caller_presence", "cases": cases})
     return rules
 
 

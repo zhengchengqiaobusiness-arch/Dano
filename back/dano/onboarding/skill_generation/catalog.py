@@ -353,13 +353,54 @@ def derive_capability_relations_from_step_links(spec: FlowSpec) -> list[Capabili
     return derived
 
 
-def attach_declared_step_link_relations(spec: FlowSpec) -> FlowSpec:
-    derived = derive_capability_relations_from_step_links(spec)
-    if not derived:
+def normalize_declared_capability_relations(spec: FlowSpec) -> FlowSpec:
+    """Treat a declared A→B chain without value flow as a confirmed handoff.
+
+    The recording result is the semantic decision. Export compiles it; it does
+    not invent a sequence from goal prose.
+    """
+    relations: list[CapabilityRelation] = []
+    changed = False
+    for relation in spec.capability_relations or []:
+        handoff = (
+            str(relation.from_capability or "").strip()
+            and str(relation.to_capability or "").strip()
+            and not str(relation.from_output or "").strip()
+            and not str(relation.to_input or "").strip()
+        )
+        if not handoff:
+            relations.append(relation)
+            continue
+        updates: dict[str, Any] = {}
+        if str(relation.type or "").strip() in {"", "suggested_call_chain"}:
+            updates["type"] = "suggested_call_chain"
+        if str(relation.mode or "").strip() in {"", "external_transform"}:
+            updates["mode"] = "handoff"
+        if not relation.confirmed:
+            updates["confirmed"] = True
+        evidence = dict(relation.evidence or {})
+        if str(evidence.get("kind") or "") not in _CONFIRMED_EVIDENCE:
+            updates["evidence"] = {**evidence, "kind": "typed_capability_contract"}
+        if updates:
+            changed = True
+            relations.append(relation.model_copy(update=updates))
+        else:
+            relations.append(relation)
+    if not changed:
         return spec
     current = spec.model_copy(deep=True)
-    current.capability_relations = [*(current.capability_relations or []), *derived]
+    current.capability_relations = relations
     return current
+
+
+def attach_declared_step_link_relations(spec: FlowSpec) -> FlowSpec:
+    current = normalize_declared_capability_relations(spec)
+    derived = derive_capability_relations_from_step_links(current)
+    if not derived:
+        return current
+    next_spec = current.model_copy(deep=True)
+    next_spec.capability_relations = [*(current.capability_relations or []), *derived]
+    return next_spec
 
 
 def public_capability_catalog(spec: FlowSpec, verified_ids: set[str]) -> list[dict[str, Any]]:

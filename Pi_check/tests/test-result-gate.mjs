@@ -448,6 +448,40 @@ test("拒收可增行把行类型码写进 items.properties", () => {
   );
 });
 
+test("数组上的 x-dano-section-titles 也算分区合同", () => {
+  assert.doesNotThrow(() => assertPageDisplayContract({
+    capabilities: [{
+      capability_id: "cap_create",
+      request_refs: [{ step_id: "step_submit", usage: "execute" }],
+      input_schema: {
+        type: "object",
+        properties: {
+          items: {
+            type: "array",
+            title: "已完成工作 / 工作计划",
+            "x-dano-section-titles": {
+              "已完成工作": "工作内容",
+              "工作计划": "计划内容",
+            },
+            items: {
+              type: "object",
+              properties: {
+                content: { type: "string", title: "内容" },
+              },
+            },
+          },
+        },
+      },
+    }],
+    steps: [{
+      step_id: "step_submit",
+      params: [
+        { key: "items", path: "body.items", exposed_to_user: true },
+      ],
+    }],
+  }));
+});
+
 test("拒收多分区数组不写 x-dano-section-titles", () => {
   assert.throws(
     () => assertPageDisplayContract({
