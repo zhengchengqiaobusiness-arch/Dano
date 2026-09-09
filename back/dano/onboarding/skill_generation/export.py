@@ -102,14 +102,80 @@ def _unresolved_write_blockers(body: dict[str, Any], spec: FlowSpec) -> list[str
     return list(dict.fromkeys(item for item in blockers if item))
 
 
+def _base_url_from_spec(spec: FlowSpec) -> str:
+    from dano.export.skill_package.auth_files import base_url_from_steps
+
+    return base_url_from_steps([
+        {"url": str(getattr(step, "url", "") or "")}
+        for step in spec.steps or []
+    ])
+
+
+def recording_id_from_skill(skill: Any) -> str:
+    api = getattr(skill, "api_request", None) or {}
+    if not isinstance(api, dict):
+        api = {}
+    snap = api.get("_release_snapshot") if isinstance(api.get("_release_snapshot"), dict) else {}
+    flow = snap.get("flow_spec") if isinstance(snap.get("flow_spec"), dict) else {}
+    meta = flow.get("meta") if isinstance(flow.get("meta"), dict) else {}
+    call = getattr(skill, "call_metadata", None) or {}
+    if not isinstance(call, dict):
+        call = {}
+    for candidate in (
+        meta.get("recording_id"),
+        flow.get("recording_id"),
+        api.get("recording_id"),
+        call.get("recording_id"),
+    ):
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def skill4_artifacts_for_skill(skill: Any) -> Path | None:
+    return _recording_artifact_dir({"recording_id": recording_id_from_skill(skill)})
+
+
+def export_published_recording_package(
+    skill: Any,
+    out_dir: str,
+    *,
+    tenant: str,
+    auth_headers: dict[str, Any] | None = None,
+) -> str | None:
+    artifacts = skill4_artifacts_for_skill(skill)
+    if artifacts is None:
+        return None
+    from dano.export.skill_package.auth_files import base_url_from_steps
+
+    api = getattr(skill, "api_request", None) or {}
+    steps = api.get("steps") if isinstance(api, dict) and isinstance(api.get("steps"), list) else []
+    if not steps:
+        snap = api.get("_release_snapshot") if isinstance(api, dict) else {}
+        flow = snap.get("flow_spec") if isinstance(snap, dict) else {}
+        steps = flow.get("steps") if isinstance(flow, dict) else []
+    return pack_skill4_artifacts(
+        artifacts,
+        out_dir,
+        skill_id=str(getattr(skill, "skill_id", "") or ""),
+        tenant=tenant,
+        base_url=base_url_from_steps(steps if isinstance(steps, list) else []),
+        auth_headers=auth_headers,
+    )
+
+
 def pack_skill4_artifacts(
     src: Path,
     out_dir: str,
     *,
     skill_id: str,
     tenant: str,
+    base_url: str = "",
+    auth_headers: dict[str, Any] | None = None,
 ) -> str:
     from dano.execution.page import wire_format as wire_format_module
+    from dano.export.skill_package.auth_files import write_auth_local, write_runtime_json
     from dano.export.skill_package.renderer import _CLIENT_TEMPLATE, package_slug
 
     slug = package_slug(skill_id)
@@ -122,7 +188,7 @@ def pack_skill4_artifacts(
     config = {
         "tenant": tenant,
         "subsystem": subsystem,
-        "base_url": "",
+        "base_url": str(base_url or "").rstrip("/"),
         "identity_probes": [],
     }
     (scripts / "client.py").write_text(
@@ -133,6 +199,16 @@ def pack_skill4_artifacts(
         Path(wire_format_module.__file__).read_text(encoding="utf-8"),
         encoding="utf-8",
     )
+    write_runtime_json(dest, tenant=tenant, subsystem=subsystem, base_url=config["base_url"])
+    write_auth_local(dest, auth_headers)
+    if not auth_headers:
+        _log_export(
+            "skill.export.auth_missing",
+            summary="打包时没有 runtime_token，已写入空的 auth.local.json",
+            skill_id=skill_id,
+            tenant=tenant,
+            subsystem=subsystem,
+        )
     return slug
 
 
@@ -593,6 +669,17 @@ async def export_recording_skill(
             fingerprint=fingerprint,
         )
         raise SkillExportError(409, "尚未生成可导出能力，不能生成 Skill")
+    artifact_dir = _recording_artifact_dir(body)
+    if artifact_dir is None and render is None:
+        _log_export(
+            "skill.export.failed",
+            summary="没有 Skill 4 产物，拒绝猜编译",
+            status="failed",
+            level="error",
+            result_id=str(result_id),
+            fingerprint=fingerprint,
+        )
+        raise SkillExportError(409, "没有 Skill 4 产物，拒绝猜编译")
     request_fp = generation_request_fingerprint(
         result_id=str(result_id),
         stage_seven_fingerprint=fingerprint,
@@ -682,11 +769,29 @@ async def export_recording_skill(
         )
     out_dir = str(request.out_dir).strip()
     artifact_dir = _recording_artifact_dir(body)
+    auth_headers: dict[str, Any] = {}
+    try:
+        from dano.infra.token_store import get_token_headers
+
+        auth_headers = await get_token_headers(
+            tenant,
+            str(body.get("subsystem") or view.subsystem or "oa"),
+        )
+    except Exception:  # noqa: BLE001 - missing DB must not invent a token
+        auth_headers = {}
+    base_url = _base_url_from_spec(view)
     if artifact_dir is not None:
         def _pack_render(_skill, dest: str, *, tenant: str) -> str:  # noqa: ANN001
-            return pack_skill4_artifacts(artifact_dir, dest, skill_id=skill_id, tenant=tenant)
+            return pack_skill4_artifacts(
+                artifact_dir,
+                dest,
+                skill_id=skill_id,
+                tenant=tenant,
+                base_url=base_url,
+                auth_headers=auth_headers,
+            )
 
-        render = render or _pack_render
+        render = _pack_render
     render_fn = render or _default_render
     publish_fn = publish or _default_publish
     published_report: dict[str, Any] | None = None

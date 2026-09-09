@@ -30,6 +30,7 @@ test("PI 必须加载且只加载四份 Skill", async () => {
   assert.match(instructions, /Business Skill Investigator/);
   assert.match(instructions, /control_in_app_browser/);
   assert.match(instructions, /project_contract_to_request/);
+  assert.match(instructions, /read_generator_guides/);
   assert.doesNotMatch(instructions, /RECORDING_CAPABILITY/);
   assert.doesNotMatch(instructions, /submit_recording_draft/);
 });

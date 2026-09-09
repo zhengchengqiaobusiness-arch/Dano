@@ -483,6 +483,24 @@ async def post_runtime_token(
     rec = await update_token_headers(req.tenant, req.subsystem, headers, source="manual")
     if not rec:
         raise HTTPException(status_code=500, detail="token 保存失败(DB 不可用?)")
+    try:
+        from dano.export.skill_package.auth_files import write_auth_to_export_dir
+
+        stored = rec.get("headers") or {}
+        for out_dir in _known_export_dirs():
+            write_auth_to_export_dir(
+                out_dir,
+                tenant=req.tenant,
+                subsystem=req.subsystem,
+                headers=stored,
+            )
+    except Exception as exc:  # noqa: BLE001 - package rewrite must not fail token save
+        log.warning(
+            "token.export_rewrite_failed",
+            tenant=req.tenant,
+            subsystem=req.subsystem,
+            error=str(exc),
+        )
     return {"ok": True, "tenant": req.tenant, "subsystem": req.subsystem,
             "headers": mask_headers(rec.get("headers") or {}), "updated_at": rec.get("updated_at")}
 

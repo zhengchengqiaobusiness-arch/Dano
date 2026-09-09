@@ -14,9 +14,11 @@ import { isNoiseNetworkPath } from "./browser-actions.mjs";
 import { projectContractToRequest } from "./contract-project.mjs";
 import {
   writeSkillArtifact,
+  deleteSkillArtifact,
   validateSkillPackage,
   runIsolatedScript,
   readPageAsset,
+  readGeneratorGuides,
 } from "./skill-package-tools.mjs";
 
 const SCREENSHOT_TEXT_ONLY_NOTE = "默认不把截图写入对话。需要看图时 screenshot/read_screenshot 设 as_image=true。";
@@ -306,11 +308,12 @@ export function createPiToolHost({
       capability,
       steps = [],
       links = [],
-      unresolved = [],
+      unresolved,
       capability_relations = [],
       title = "",
     } = {}) {
       const current = await files.readDraft(recordingId);
+      const session = evidence.snapshot(recordingId);
       const merged = mergeCapabilityIntoDraft(current?.draft || {}, {
         capability,
         steps,
@@ -318,6 +321,7 @@ export function createPiToolHost({
         unresolved,
         capability_relations,
         title,
+        recording_goal: session.goal || "",
       });
       assertPageDisplayContract(merged);
       assertCapabilityIdentityContract(merged);
@@ -468,8 +472,14 @@ export function createPiToolHost({
         targetUrl: typeof getTargetUrl === "function" ? getTargetUrl() : session.targetUrl,
       });
     },
+    async read_generator_guides() {
+      return readGeneratorGuides();
+    },
     async write_skill_artifact({ path: rel, content }) {
       return writeSkillArtifact(files, recordingId, rel, content);
+    },
+    async delete_skill_artifact({ path: rel }) {
+      return deleteSkillArtifact(files, recordingId, rel);
     },
     async validate_skill_package() {
       return validateSkillPackage(files, recordingId);
@@ -600,7 +610,7 @@ export function describePiTools() {
     {
       name: "submit_recording_capability",
       label: "提交一项能力",
-      description: "把一项能力写入草稿。细节看 Skill 3。",
+      description: "把一项能力写入草稿。细节看 Skill 3。信封 recording_goal 固定为本场录制目标全文，不会用能力短标题覆盖。传入 unresolved 数组会整表替换，传空数组即清空。",
       parameters: {
         type: "object",
         properties: {
@@ -649,9 +659,15 @@ export function describePiTools() {
       },
     },
     {
+      name: "read_generator_guides",
+      label: "生成规范",
+      description: "读取仓库 doc/ 下全部生成期 Markdown。写消费者包之前用。不认业务。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
       name: "write_skill_artifact",
       label: "写 Skill 产物",
-      description: "写入本场导出草稿文件。细节看 Skill 4。",
+      description: "写入本场导出草稿文件。path 相对包根，例如 SKILL.md、scripts/query.py，不要再加 skill-artifacts/。禁止写入 references/generator-guides。",
       parameters: {
         type: "object",
         properties: {
@@ -659,6 +675,19 @@ export function describePiTools() {
           content: { type: "string" },
         },
         required: ["path", "content"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "delete_skill_artifact",
+      label: "删 Skill 产物",
+      description: "删除本场导出草稿文件或目录。成品误写入 references/generator-guides 时用这个删掉再校验。",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+        },
+        required: ["path"],
         additionalProperties: false,
       },
     },

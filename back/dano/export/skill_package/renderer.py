@@ -2272,8 +2272,8 @@ def _capability_form_section(plan: dict) -> list[str]:
         lines.extend([
             "动态候选调用规则：",
             "",
-            f"- 在调用 `ask_user_question` 前，对字段 {', '.join(f'`{item}`' for item in dynamic_fields)} 分别运行 `{command}`。",
-            "- 把脚本返回的 `options` 原样放进对应 question，并从本次工具参数中移除该 question 的 `dataSource`；保留原 `multiple`。这样候选通过 Skill 的运行期鉴权加载，不能让表单前端直接匿名请求业务接口。",
+            f"- 在调用 `ask_user_question` 前，对字段 {', '.join(f'`{item}`' for item in dynamic_fields)} 可运行 `{command}` 预取候选项。",
+            "- 把脚本返回的 `options` 原样放进对应 question，并保留该 question 的完整 `dataSource` 与 `multiple`。页面和脚本用同一套运行期鉴权打选项接口。",
             "",
         ])
     lines.extend([
@@ -2676,7 +2676,7 @@ def _on_demand_resources(skill, plans: list[dict]) -> list[str]:  # noqa: ANN001
         "## 按需读取资源",
         "",
         "- 变更操作缺少输入时，读取 `references/INPUT_FORMS.md` 中对应能力的章节，按其中完整 `questions[]` 提问。只读操作没有必填字段且用户未指定筛选时不要读取表单。",
-        "- 用户明确要求某个动态筛选字段时，才读取 `references/OPTIONS.md` 并只拉取该字段的 `options`；不得预加载未使用字段，也不得让表单前端匿名请求业务接口。",
+        "- 用户明确要求某个动态筛选字段时，才读取 `references/OPTIONS.md` 并只拉取该字段的 `options`；不得预加载未使用字段。动态字段必须保留 `dataSource`，用包内鉴权调用选项接口。",
         "- 原子路线需要调用命令，或需要判断能力输入输出边界时，读取 `references/CAPABILITIES.md` 对应行。",
         "- 不要在开始前读取 references 下的全部文件。",
         "- 组合路线只在工作流表「详情」列指向该文件时读取；不要为单次原子操作加载组合文件。",
@@ -3472,6 +3472,7 @@ from wire_format import apply_wire_formats, date_span_days
 
 CONFIG = json.loads(__CONFIG__)
 BASE_URL = os.environ.get("DANO_BUSINESS_BASE_URL", CONFIG["base_url"]).rstrip("/")
+_PKG_ROOT = Path(__file__).resolve().parent.parent
 _PLACEHOLDER = re.compile(r"^\{\{([^{}]+)\}\}$")
 _MISSING = object()
 
@@ -3485,6 +3486,20 @@ def _json_object(raw, label):
     if not isinstance(value, dict):
         raise RuntimeError(f"{label} must be a JSON object")
     return value
+
+
+def _local_auth_headers():
+    path = _PKG_ROOT / "config" / "auth.local.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    headers = data.get("headers") if isinstance(data, dict) else {}
+    if not isinstance(headers, dict) or not headers:
+        return {}
+    return {str(key): str(value) for key, value in headers.items() if str(key).strip() and value not in (None, "")}
 
 
 def _runtime_tenant():
@@ -3601,6 +3616,9 @@ def _live_headers():
 
 
 def auth_headers():
+    local = _local_auth_headers()
+    if local:
+        return local
     raw = os.environ.get("DANO_AUTH_HEADERS")
     if raw:
         return _json_object(raw, "DANO_AUTH_HEADERS")
@@ -3610,7 +3628,7 @@ def auth_headers():
     cached = _cache_headers()
     if cached:
         return cached
-    raise RuntimeError("authentication unavailable: set DANO_TENANT_KEYS_JSON or DANO_AUTH_HEADERS")
+    raise RuntimeError("authentication unavailable: set config/auth.local.json or DANO_AUTH_HEADERS")
 
 
 def get_path(node, path):
@@ -4600,7 +4618,13 @@ def main():
     parser = argparse.ArgumentParser(description="Self-contained business API client")
     parser.add_argument("--show-config", action="store_true")
     args = parser.parse_args()
-    emit({"ok": True, "tenant": CONFIG["tenant"], "subsystem": CONFIG["subsystem"], "base_url_configured": bool(BASE_URL)} if args.show_config else {"ok": True})
+    emit({
+        "ok": True,
+        "tenant": CONFIG["tenant"],
+        "subsystem": CONFIG["subsystem"],
+        "base_url_configured": bool(BASE_URL),
+        "has_auth_headers": bool(_local_auth_headers() or os.environ.get("DANO_AUTH_HEADERS")),
+    } if args.show_config else {"ok": True})
 
 
 if __name__ == "__main__":
@@ -5399,7 +5423,7 @@ async def write_skill_packages(
     *,
     skill_ids: list[str] | None = None,
 ) -> list[str]:
-    """Render every published PAGE_SCRIPT skill selected for one tenant."""
+    """Re-export published recording skills by packing Skill 4 drafts only."""
     from dano.assets.repository import AssetRepository
     from dano.orchestrator.skills import SkillRegistry
 
@@ -5416,9 +5440,26 @@ async def write_skill_packages(
         if skill.recording_asset_id is not None and (selected is None or skill.skill_id in selected)
     ]
     written: list[str] = []
+    from dano.infra.token_store import get_token_headers
+    from dano.onboarding.skill_generation.export import export_published_recording_package
+
     for skill in page_skills:
         try:
-            written.append(render_skill_package(skill, out_dir, tenant=tenant))
+            headers = await get_token_headers(tenant, skill.subsystem.value)
+            slug = export_published_recording_package(
+                skill,
+                out_dir,
+                tenant=tenant,
+                auth_headers=headers,
+            )
+            if slug:
+                written.append(slug)
+            else:
+                log.warning(
+                    "export.skill_package_skipped_no_skill4",
+                    skill_id=skill.skill_id,
+                    summary="录制 Skill 没有 Skill 4 产物，跳过再导出，不猜编译",
+                )
         except Exception as exc:  # noqa: BLE001 - one malformed legacy asset cannot block peers
             details = _export_failure_details(skill, out_dir, exc)
             note_run_fact(

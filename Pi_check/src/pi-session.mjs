@@ -50,6 +50,7 @@ export function buildPiInstructions(skills = []) {
   return `${PI_ONLY_NOTICE}
 
 你是 Business Skill Investigator。动手按 Control In App Browser，认产物按 Infer Business Contract，出包按 Build and Validate Dedicated Skill。
+自动控制。只有阻断才请人。目标做完就交能力、出包、定稿，不要等用户再说结束。
 人同时也可以点预览。不要锁死预览。
 没有非空 capabilities，就等于没有产物。代码不会替你编造能力。
 
@@ -69,6 +70,7 @@ ${bodies.join("\n\n")}
 - read_screenshot
 - get_recording_freeze_state
 - submit_recording_capability
+- read_generator_guides
 - write_skill_artifact
 - validate_skill_package
 - project_contract_to_request
@@ -89,7 +91,7 @@ export function buildUserSteerPrompt(text, { finalizing = false } = {}) {
   }
   return (
     `用户说：${body}\n` +
-    `这是对话。先用一两句话回答这句话，然后按 Skill 1 继续。人也可以点预览。未接到用户结束，禁止 submit_recording_result。`
+    `这是对话。先用一两句话回答这句话，然后按 Skill 1 继续。人也可以点预览。只有阻断才 assist。目标做完且台账齐了就出包定稿，不要等用户再说结束。`
   );
 }
 
@@ -98,7 +100,8 @@ export function buildLiveDrivePrompt({ targetUrl = "", goal = "" } = {}) {
     `你是 Business Skill Investigator。按四份 Skill 协调。\n` +
     `目标：${String(goal || "").trim() || "把该页独立业务动作做成可调用能力"}\n` +
     `入口：${String(targetUrl || "").trim()}\n` +
-    `人也可以点预览。未接到用户结束，禁止 submit_recording_result。\n` +
+    `自动控制。只有阻断才 assist。目标做完就交能力、出包、定稿，不要等用户再说结束。\n` +
+    `人也可以点预览。\n` +
     `不要把完整 JSON 写在对话里。`
   );
 }
@@ -1058,7 +1061,9 @@ export async function createLivePiSession({ recording, tools, onThought = null }
         "read_screenshot",
         "get_recording_freeze_state",
         "submit_recording_capability",
+        "read_generator_guides",
         "write_skill_artifact",
+        "delete_skill_artifact",
         "validate_skill_package",
         "project_contract_to_request",
         "run_isolated_script",

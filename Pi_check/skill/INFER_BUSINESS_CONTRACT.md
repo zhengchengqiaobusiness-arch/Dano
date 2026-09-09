@@ -26,7 +26,7 @@ Investigator 叫你认一项产物时立刻工作。该项已按目标做完且�
 - 点「添加××行」产生的行类型码、行序号、前端行键：有加行按钮 + 分区证据 → 系统，reason 写清依据和 seq。
 - 登录身份自动带上、表单没有对应可改控件 → `current_user`，禁止写死本场数字。
 - 可执行 formula 已从页面/前端交叉核对 → `computed`。
-- 每次提交都相同且有业务含义的固定判别值 → `constant`，依据写清。
+- 每次提交都相同且有业务含义的固定判别值 → `constant`，依据写清。入口路径、标题或目标已经标明单据族（如 `duty_rest`），列表/保存请求却漏了这个判别键：仍写成 `constant`，reason 写清来自入口身份，不要因为首屏请求没带就省略。禁止把别的单据族编号或类型写进这一项。
 
 看不清的键（不知道是调用方漏填、系统生成，还是前端时间戳）：`unresolved`。禁止因叶子名叫 createTime 就写成 now。
 
@@ -36,7 +36,7 @@ Investigator 叫你认一项产物时立刻工作。该项已按目标做完且�
 
 交 `submit_recording_capability` 之前，这一项必须同时满足。缺一条就补证或写入 `unresolved`，禁止交残缺合同。
 
-1. 有本场该次操作的真实 execute。首屏自动请求、上一页列表加载、通知未读，都不是这项的 execute。
+1. 有本场该次操作的真实 execute，且该响应业务成功。首屏自动请求、上一页列表加载、通知未读，都不是这项的 execute。请求发出了但 HTTP 失败，或 JSON `code` 不是成功、`msg` 带「失败 / 错误」：不要交完整能力；把站点拒绝原文写入 `unresolved`。
 2. execute 的每个 query/body 业务键：已认清来源并进该 step 的 `params`，或写入 `unresolved`。禁止标系统并按录制原值结案。
 3. 对照**打开该表单或加行之后**的最近一次 `visible_control`。每个可改控件都有调用方字段（目标排除项除外）。宿主 `readonly=true` 或 `disabled=true` 的灰框不进 `input_schema`，只进系统 params。
 4. `input_schema` 的 type、param 的 type、线上 query/body 的实际类型必须一致。日期就是 `date` / `datetime`，数字就是 `number`，不要一边 string 一边 number。
@@ -46,6 +46,7 @@ Investigator 叫你认一项产物时立刻工作。该项已按目标做完且�
 8. 目标先 A 后 B：有值流写 `links`；没有值流写 `capability_relations`，挂在已有 execute 的能力上。本场已做完的页内典型链必须挂 relation。
 9. 目标排除的控件不进调用方。对应空数组不要假装人要填。
 10. 该项的 `name` / `title` / `intent` 覆盖这项完整目标，不要压成半场短句。
+11. 整份信封的 `recording_goal` 必须是用户目标全文，禁止改写成「查询筛选」这种已交行的短标题。目标还有编辑/提交/撤回/删除时，交完查询或新增不能把目标收口。
 
 ## 现有录制页实际读取的合同
 
@@ -185,6 +186,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 - `constant`：已经认清、每次提交都相同且有业务含义的固定值。依据写清。没有认清不要用 `constant`。
 - `selected_option_field`：随哪一个选项接口的哪一个字段带出。
 - **来源未识别**：请求里有、但页面上没有对应可填控件，也看不出公式或上游映射。写入 `unresolved`，`sample_value` 可记本场原值。禁止 `source_kind=constant` + 录制原值 + 已解决。
+- 页面有可见区间日期控件、请求却没带起止：这不是来源未识别，是操作没做完。不要把 startTime/endTime 写成 unresolved 结案。退回补日历弹层（分别填开始/结束日期时间再确定），看到请求真带上再交。后一次同 path 的 execute 已经带上该键：从 unresolved 删掉，不要把前一次漏传留着挡出包。
 
 不要追求每个字段都有一套来源规则。只有已经认清的字段才写成调用方或系统。其余写入 `unresolved`。
 
@@ -197,6 +199,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 
 看页面上的控件，不看业务名：
 
+- 共享列表壳上的筛选文案若与入口单据族矛盾（入口路径/标题已经标明一类单据，壳上却还挂着另一类的类型下拉）：不要收成该项调用方。入口判别键写成 `constant`。禁止把搜到的别族单号写成查询默认值。
 - 白底可改的输入、日期、数字、下拉、单选、页签、分段器、树、附件 → 调用方。编辑弹层里同样可改的字段，即使本场只改了备注，仍是调用方；来源用 `page_default` / `previous_response` / `api_option`（上游默认，可修改）。
 - 灰底只读、保存时自动生成的单号、合计行、金额/税额/优惠后金额这类算出来的格子 → 系统。来源 `computed` / `generated` / `previous_response`。不要标成“自动计算，可修改”，也不要放进 `input_schema`。
 - 列表行点进查看/编辑/删除/审批时带出的主键、明细行 ID、流程实例 ID → `selected_record_identity` 或 `previous_response`，**系统**。不要放进 `input_schema`。
@@ -223,7 +226,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 - **可增行明细**：调用方输入的是点「添加×× / 新增行」后单独出现的那些输入框，行数可变。`input_schema` 只出现 execute 里那一个数组 key，类型必须是对象数组，不能写成 `string`。`items.properties` 的 `title` 用**表头原文**（不要自造合并名去替代列名），必须覆盖各分区可见表头（序号、操作除外）。数组自己的 `title` 用各分区标题原文，多个分区必须用 `/` 或 `；` 连接，禁止写成「A和B」这种拆不开的合并名。数组 title 能拆出多个分区时，必须写 `x-dano-section-titles`。同一线格式键在不同分区表头不同时，在该 property 上写 `x-dano-section-titles`：`{分区标题: 表头原文}`。也可以把同一份 `{分区标题: 表头原文}` 写在数组自己身上，导出按键认分区、按值认该字符串列的表头。合并成一个数组提交时，按分区标题分组或每行带分区标题，系统按分区补行类型等无独立控件的行字段。只在某一个分区表头出现的列（例如只有一种行有进度），只属于该分区，不要写进所有行的 `items.properties`。`reason` 必须写清：调用方按行填写这些实际输入，可增减；**最后**由系统把各行组装成 execute 里的那一个对象数组，并按分区补上无独立控件的行字段。禁止把整份数组当成调用方一次性粘贴的 JSON。禁止把一个数组拆成多个调用方数组或并列字段去抢同一 path。禁止把行序号写成调用方。
 - **同名文本域不是行**：`region=form` 的大段 textarea 与 `region=table` 的行内输入即使标题相近，也是两套控件。有独立 body 键的补充说明单独建模，用它自己的控件标签，不要用表格分区标题去命名这段文本。不要用它代替可增行，也不要把可增行收成一段字符串。
 - **行内字段**：行里对应可填/可选控件的是调用方，写进该数组的 `items.properties`；行里没有独立来源的判别码、序号、前端行键是系统，只留在 params，不要进 schema。行类型码来自点了哪个加行按钮或落在哪张表，不是调用方下拉，禁止编成「类型/项目类型」让调用方选。
-- **键名**：execute 的 `path` / `key` 必须能在实际 **query/body** 里找到，或能对上当前页可见控件。请求和控件都没有的键不要编进去；请求有的键不要改名。`input_schema.properties` 的顶层 key 必须等于某个 `exposed_to_user=true` 的 param.key。不要把请求头写成 `query.*` / `body.*`。
+- **键名**：execute 的 `path` / `key` 必须能在实际 **query/body** 里找到，或能对上当前页可见控件。请求和控件都没有的键不要编进去；请求有的键不要改名。筛选栏写「流程状态」但 execute 发出的是 `status`，path 必须是 `query.status`，不要改成 `flowStatus` / `billStatus` 去迁就文案。`input_schema.properties` 的顶层 key 必须等于某个 `exposed_to_user=true` 的 param.key。不要把请求头写成 `query.*` / `body.*`。
 - **页面原名**：`label` / `title` 用当前页原文，去掉星号（星号只表示 `required_mark`，不要把星号写进名字）。有 `section` 时，附件等分区字段优先用分区标题。
 - **样例值**：`default_value` 只固定无来源字段怎么提交，不是下次执行必须填的业务值。
 - **编排**：`request_refs` / `steps` 只能引用本场真实发出的请求。不要把没发过的 create/update/save 编进执行顺序。

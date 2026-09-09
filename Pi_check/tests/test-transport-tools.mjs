@@ -1,8 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdir, rm } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { projectContractToRequest } from "../src/contract-project.mjs";
-import { readPageAsset } from "../src/skill-package-tools.mjs";
+import { readGeneratorGuides, readPageAsset } from "../src/skill-package-tools.mjs";
 import { stripImageFromToolResult, wrapPiToolsForSdk } from "../src/pi-tools.mjs";
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const REQUIRED_GUIDES = [
+  "skill-generator-ask-user-question-guide.md",
+  "skill-generator-auth-and-token.md",
+  "skill-generator-workflow.md",
+  "skill-generator-live-options.md",
+];
 
 const draft = {
   capabilities: [{
@@ -75,4 +86,38 @@ test("as_image 才把图像放进工具 content", async () => {
   });
   assert.equal(stripped.data, undefined);
   assert.equal(stripped.image_in_conversation, false);
+});
+
+test("read_generator_guides 能读到 doc 下全部规范", async () => {
+  const previous = process.env.DANO_SKILL_REFERENCE_DIR;
+  process.env.DANO_SKILL_REFERENCE_DIR = "doc";
+  try {
+    const result = await readGeneratorGuides();
+    assert.equal(result.ok, true, result.error);
+    const names = new Set(result.files.map((item) => item.path.split("/").pop()));
+    for (const name of REQUIRED_GUIDES) {
+      assert.ok(names.has(name), name);
+    }
+    assert.ok(result.files.every((item) => item.content && item.content.length > 20));
+  } finally {
+    if (previous === undefined) delete process.env.DANO_SKILL_REFERENCE_DIR;
+    else process.env.DANO_SKILL_REFERENCE_DIR = previous;
+  }
+});
+
+test("read_generator_guides 目录空则失败", async () => {
+  const empty = path.join(REPO_ROOT, "Pi_check", "tests", ".tmp-empty-guides");
+  await rm(empty, { recursive: true, force: true });
+  await mkdir(empty, { recursive: true });
+  const previous = process.env.DANO_SKILL_REFERENCE_DIR;
+  process.env.DANO_SKILL_REFERENCE_DIR = "Pi_check/tests/.tmp-empty-guides";
+  try {
+    const result = await readGeneratorGuides();
+    assert.equal(result.ok, false);
+    assert.match(String(result.error || ""), /没有 Markdown|缺少必要规范/);
+  } finally {
+    await rm(empty, { recursive: true, force: true });
+    if (previous === undefined) delete process.env.DANO_SKILL_REFERENCE_DIR;
+    else process.env.DANO_SKILL_REFERENCE_DIR = previous;
+  }
 });

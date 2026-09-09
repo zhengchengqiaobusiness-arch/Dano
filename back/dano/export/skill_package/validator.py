@@ -204,7 +204,7 @@ def _check_scripts(scripts: Path, issues: list[dict], *, missing_as_warnings: bo
     if not client.is_file():
         issues.append(_issue("missing_client", "scripts/client.py is required", client, warning=missing_as_warnings))
     python_scripts = sorted(scripts.glob("*.py"))
-    support_scripts = {"client.py", "wire_format.py", "format_list.py"}
+    support_scripts = {"client.py", "wire_format.py", "format_list.py", "flow.py"}
     capabilities = [
         path for path in python_scripts
         if path.name not in support_scripts and not path.name.startswith("verify_")
@@ -591,7 +591,7 @@ def _check_planning(root: Path, skill_text: str, issues: list[dict]) -> None:
                 Path("SKILL.md"),
             ))
     if selected:
-        support = {"client.py", "wire_format.py", "format_list.py"}
+        support = {"client.py", "wire_format.py", "format_list.py", "flow.py"}
         scripts_dir = root / "scripts"
         if scripts_dir.is_dir():
             allowed_scripts = {
@@ -832,9 +832,18 @@ def _check_packaged_generation_language(root: Path, issues: list[dict]) -> None:
                 break
 
 
+def _is_auth_local(path: Path, pkg_dir: Path) -> bool:
+    try:
+        return path.resolve().relative_to(pkg_dir.resolve()).parts == ("config", "auth.local.json")
+    except ValueError:
+        return False
+
+
 def _check_credentials(pkg_dir: Path, issues: list[dict]) -> None:
     for path in pkg_dir.rglob("*"):
         if not path.is_file() or "__pycache__" in path.parts:
+            continue
+        if _is_auth_local(path, pkg_dir):
             continue
         try:
             text = path.read_text(encoding="utf-8")
@@ -845,6 +854,58 @@ def _check_credentials(pkg_dir: Path, issues: list[dict]) -> None:
             if match:
                 issues.append(_issue("credential_leak", f"possible plaintext credential: {match.group(0)[:24]}", path))
                 break
+
+
+_DELETE_DATASOURCE_RE = re.compile(
+    r"(删除|移除|去掉).{0,32}dataSource|dataSource.{0,16}(删除|移除|去掉)",
+    re.I,
+)
+
+
+def _check_input_forms_datasource(path: Path, text: str, issues: list[dict]) -> None:
+    for line in text.splitlines():
+        compact = line.strip()
+        if not compact:
+            continue
+        if re.search(r"禁止|不得|不要|必须保留|不准", compact):
+            continue
+        if _DELETE_DATASOURCE_RE.search(compact):
+            issues.append(_issue(
+                "input_form_drop_datasource",
+                "INPUT_FORMS.md must keep dataSource on dynamic fields",
+                path,
+            ))
+            return
+
+
+def _check_flow_and_default_route(root: Path, issues: list[dict]) -> None:
+    if not (root / "config" / "runtime.json").is_file():
+        return
+    flow = root / "scripts" / "flow.py"
+    if not flow.is_file():
+        issues.append(_issue("missing_flow", "scripts/flow.py is required", flow))
+    contract_path = root / "references" / "CONTRACT.json"
+    if not contract_path.is_file():
+        return
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(contract, dict):
+        return
+    capabilities = [
+        item for item in (contract.get("capabilities") or [])
+        if isinstance(item, dict)
+    ]
+    if len(capabilities) < 2:
+        return
+    routes = [item for item in (contract.get("routes") or []) if isinstance(item, dict)]
+    if not any(len(_route_operation_sequence(route)) > 1 for route in routes):
+        issues.append(_issue(
+            "missing_default_route",
+            "CONTRACT.json needs a multi-step default route when there are 2+ capabilities",
+            contract_path,
+        ))
 
 
 def flow_spec_verification_ids(spec) -> set[str]:  # noqa: ANN001
@@ -968,6 +1029,7 @@ def validate_skill_package(pkg_dir: Path, *, missing_as_warnings: bool = False) 
         forms = _read(forms_path, issues, missing_as_warnings=True)
         if forms:
             _check_handbook_bans(forms_path, _doc_intro(forms), issues)
+            _check_input_forms_datasource(forms_path, forms, issues)
             if forms.count("\n") >= 100 and "## 目录" not in forms and "/forms/" not in forms:
                 issues.append(_issue("long_reference", "INPUT_FORMS.md over 100 lines needs a TOC or split", forms_path))
     if new_layout:
@@ -1028,6 +1090,7 @@ def validate_skill_package(pkg_dir: Path, *, missing_as_warnings: bool = False) 
             root / "references" / "generator-guides",
         ))
     _check_scripts(root / "scripts", issues, missing_as_warnings=missing_as_warnings)
+    _check_flow_and_default_route(root, issues)
     _check_runtime_artifacts(root, issues)
     _check_packaged_generation_language(root, issues)
     _check_credentials(root, issues)

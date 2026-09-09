@@ -126,43 +126,6 @@ def _validate_reference_markdown(reference_docs: list[tuple[Path, str]]) -> None
         raise ValueError(f"Skill 参考 Markdown 缺少必要的提问契约（{', '.join(missing)}）: {names}")
 
 
-def _write_generation_guides(
-    folder: Path,
-    reference_docs: list[tuple[Path, str]],
-) -> Path:
-    """Bundle every configured Markdown guide into one self-contained Skill.
-
-    The exporter already read and validated the configured guide set, but older
-    packages discarded it afterwards.  Copying the exact set makes the runtime
-    Skill follow the same contract that was used during generation and avoids a
-    hidden dependency on the source checkout.
-    """
-    root = folder / "references" / "generator-guides"
-    root.mkdir(parents=True, exist_ok=True)
-    entries: list[str] = []
-    for relative, content in reference_docs:
-        normalized = Path(relative.as_posix())
-        if normalized.is_absolute() or ".." in normalized.parts:
-            raise ValueError(f"Skill 参考 Markdown 路径非法: {relative}")
-        if normalized.as_posix().casefold() == "index.md":
-            raise ValueError("Skill 参考 Markdown 不得占用 generator-guides/INDEX.md")
-        target = root / normalized
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8", newline="\n")
-        entries.append(normalized.as_posix())
-    index = [
-        "# Skill generation guides",
-        "",
-        "执行本 Skill 前，必须完整阅读并同时遵守下列全部规范；不得只选择其中一份，也不得以录制样例覆盖规范：",
-        "",
-        *(f"- [{name}]({name})" for name in entries),
-        "",
-    ]
-    index_path = root / "INDEX.md"
-    index_path.write_text("\n".join(index), encoding="utf-8", newline="\n")
-    return index_path
-
-
 def _stage_folder(out_dir: Path, slug: str) -> Path:
     """Build a complete export beside its target so failed writes never corrupt it."""
     out_dir.mkdir(parents=True, exist_ok=True)

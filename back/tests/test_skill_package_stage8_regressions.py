@@ -3142,7 +3142,7 @@ def test_dynamic_form_requires_authenticated_option_prefetch() -> None:
     assert question["multiple"] is True
     assert question["dataSource"]["extraFields"] == ["dept.name"]
     assert "python scripts/create_record.py --list-options <字段名>" in text
-    assert "移除该 question 的 `dataSource`" in text
+    assert "保留该 question 的完整 `dataSource`" in text
 
 
 def test_export_keeps_multi_picker_template_and_source_params() -> None:

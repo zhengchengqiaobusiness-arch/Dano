@@ -100,7 +100,62 @@ def test_client_template_reads_tenant_map_and_live_token_before_cache() -> None:
     assert "DANO_TENANT_KEYS_JSON" in source
     assert live_fn < auth_fn
     body = source[auth_fn:]
+    assert body.index("_local_auth_headers()") < body.index("DANO_AUTH_HEADERS")
+    assert body.index("DANO_AUTH_HEADERS") < body.index("_live_headers()")
     assert body.index("_live_headers()") < body.index("_cache_headers()")
+    main_fn = source[source.index("def main()"):]
+    assert "has_auth_headers" in main_fn
+    assert "Authorization" not in main_fn
+
+
+def test_exported_client_uses_local_auth_without_dano_url(tmp_path: Path, monkeypatch) -> None:
+    client_path = _render_client(tmp_path)
+    pkg = client_path.parent.parent
+    (pkg / "config").mkdir(parents=True, exist_ok=True)
+    (pkg / "config" / "auth.local.json").write_text(
+        json.dumps({"headers": {"Authorization": "Bearer local-only-token"}}),
+        encoding="utf-8",
+    )
+    client = _load_client(client_path)
+    monkeypatch.delenv("DANO_URL", raising=False)
+    monkeypatch.delenv("DANO_TENANT_KEY", raising=False)
+    monkeypatch.delenv("DANO_TENANT_KEYS_JSON", raising=False)
+    monkeypatch.delenv("DANO_AUTH_HEADERS", raising=False)
+    seen: dict[str, object] = {}
+
+    def fake_http_json(method, *, url, **kwargs):  # noqa: ANN001
+        seen["headers"] = client.auth_headers()
+        seen["url"] = url
+        return {
+            "ok": True,
+            "data": {"data": [{"dictValue": "1", "dictLabel": "事假"}]},
+        }
+
+    monkeypatch.setattr(client, "http_json", fake_http_json)
+    assert client.auth_headers() == {"Authorization": "Bearer local-only-token"}
+    options = client.option_choices(
+        {
+            "input_schema": {
+                "properties": {
+                    "leaveType": {
+                        "type": "string",
+                        "dataSource": {
+                            "type": "api",
+                            "endpoint": "/prod-api/system/dict/data/type/duty_leave_type",
+                            "method": "GET",
+                            "resultPath": "data",
+                            "idField": "dictValue",
+                            "labelField": "dictLabel",
+                        },
+                    },
+                },
+            },
+            "steps": [{"selects": []}],
+        },
+        "leaveType",
+    )
+    assert seen["headers"] == {"Authorization": "Bearer local-only-token"}
+    assert options == [{"id": "1", "label": "事假"}]
 
 
 def test_exported_operation_exposes_authenticated_list_options_command() -> None:

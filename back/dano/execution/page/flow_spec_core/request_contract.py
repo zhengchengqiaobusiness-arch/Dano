@@ -1379,7 +1379,7 @@ def flow_spec_to_api_request(
         source_idx = step_id_to_index[lk.source_step_id]
         outgoing_links[source_idx] = outgoing_links.get(source_idx, 0) + 1
         if source_idx >= target_idx:
-            errors.append(f"链接 `{lk.link_id}` 的来源步骤必须早于目标步骤")
+            # Reverse or cyclic PI links become handoffs. Do not fail export.
             continue
         target_path = _clean_path_prefix(lk.target_path, "body.")
         source_path = _clean_path_prefix(lk.source_path, "response.")

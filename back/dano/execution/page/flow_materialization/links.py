@@ -529,7 +529,8 @@ def order_steps_for_link_dependencies(spec: FlowSpec) -> FlowSpec:
                 newly_ready.append(target_id)
         ready = sorted(ready + newly_ready, key=ids.index)
     if len(ordered) != len(ids):
-        return spec
+        leftover = [step_id for step_id in ids if step_id not in ordered]
+        ordered.extend(leftover)
     if ordered == ids:
         return spec
     leftovers = [step for step in steps if str(step.step_id or "") not in by_id]
