@@ -103,6 +103,25 @@ test("证据冻结或正在最终分析时，前台断开不得取消", () => {
   assert.equal(shouldCancelOnFrontendDisconnect(null), false);
 });
 
+test("协助暂停等人时，前台断开不得取消", () => {
+  assert.equal(shouldCancelOnFrontendDisconnect({
+    status: "recording",
+    frozen: false,
+    assist_paused: true,
+  }), false);
+  assert.equal(shouldCancelOnFrontendDisconnect({
+    status: "recording",
+    frozen: false,
+    assist: { reason: "这一格写不进" },
+  }), false);
+  assert.equal(shouldCancelOnFrontendDisconnect({
+    status: "recording",
+    frozen: false,
+    assist_paused: false,
+    assist: { reason: "" },
+  }), true);
+});
+
 test("录制中前台断开先宽限，接回后不得取消", async () => {
   const harness = await createHarness({ result: sampleResult() });
   try {
@@ -226,6 +245,49 @@ test("录制助手发话后能看到用户消息并交给 PI", async () => {
     assert.equal(harness.controller.view(snapshots.findLast((item) => String(item.run_id || "").startsWith("rec_")).run_id).status, "recording");
   } finally {
     ws?.terminate();
+    wss.close();
+    await new Promise((resolve) => httpServer.close(resolve));
+    await harness.cleanup();
+  }
+});
+
+test("协助暂停时前台断开不得取消，接回后仍可继续", async () => {
+  const harness = await createHarness({ result: sampleResult() });
+  const catalog = new ResultsCatalog(harness.files);
+  const httpServer = createServer();
+  const wss = attachFrontendBridge(httpServer, { controller: harness.controller, catalog, disconnectGraceMs: 80 });
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const { port } = httpServer.address();
+  let ws;
+  let ws2;
+  try {
+    ws = await openRecorderSocket(port);
+    const snapshots = listenSnapshots(ws);
+    ws.send(JSON.stringify({
+      type: "start",
+      start_url: "http://example.com",
+      goal_text: "产出能力",
+      title: "协助中断线",
+    }));
+    await waitFor(() => snapshots.some((item) => String(item.run_id || "").startsWith("rec_")));
+    const recordingId = snapshots.findLast((item) => String(item.run_id || "").startsWith("rec_")).run_id;
+    harness.controller.requestAssist(recordingId, "这一格写不进");
+    assert.equal(harness.controller.view(recordingId).assist_paused, true);
+    ws.close();
+    await new Promise((resolve) => setTimeout(resolve, 160));
+    assert.equal(harness.controller.view(recordingId).status, "recording");
+    assert.equal(harness.controller.view(recordingId).assist_paused, true);
+    assert.equal(await harness.files.hasPiResult(recordingId), false);
+
+    ws2 = await openRecorderSocket(port);
+    const attached = listenSnapshots(ws2);
+    ws2.send(JSON.stringify({ type: "attach", recording_id: recordingId }));
+    await waitFor(() => attached.some((item) => item.run_id === recordingId && item.status === "recording"));
+    assert.equal(harness.controller.view(recordingId).status, "recording");
+    assert.equal(harness.controller.view(recordingId).assist_paused, true);
+  } finally {
+    ws?.terminate();
+    ws2?.terminate();
     wss.close();
     await new Promise((resolve) => httpServer.close(resolve));
     await harness.cleanup();

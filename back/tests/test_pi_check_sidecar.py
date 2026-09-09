@@ -63,6 +63,14 @@ def test_sidecar_http_bypasses_system_proxy() -> None:
     assert "trust_env=False" in source
 
 
+def test_sidecar_ws_disables_keepalive_ping() -> None:
+    from dano.onboarding import pi_check_sidecar as sidecar
+
+    source = inspect.getsource(sidecar._connect_pi_check_ws)
+    assert "ping_interval=None" in source
+    assert "ping_timeout=None" in source
+
+
 def test_record_ws_does_not_start_legacy_gateway() -> None:
     source = inspect.getsource(record_ws)
     assert "proxy_recording_websocket" in source

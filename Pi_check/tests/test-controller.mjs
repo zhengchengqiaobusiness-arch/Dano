@@ -170,6 +170,9 @@ test("6b. 录制中人始终可以点预览", async () => {
     harness.controller.requestAssist(started.id, "请登录");
     assert.equal(harness.controller.acceptHumanInput(started.id), true);
     assert.match(harness.controller.view(started.id).assist.reason, /请登录/);
+    assert.equal(harness.controller.view(started.id).assist_paused, true);
+    assert.equal(harness.getPi().driveStopped, true);
+    assert.equal(harness.getPi().lastStopReason, "assist");
   } finally {
     await harness.cleanup();
   }

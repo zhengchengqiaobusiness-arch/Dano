@@ -122,6 +122,18 @@ async function responseView(evidence, recordingId, response) {
   return view;
 }
 
+const ASSIST_HOLD_ACTIONS = new Set(["click", "fill", "select", "press", "choose", "fill_fields", "open_page"]);
+
+function assistHoldError() {
+  return {
+    ok: false,
+    paused: true,
+    assist: true,
+    human_can_click: true,
+    error: "已暂停自动操作。等用户在预览做完或说继续。现在只能 snapshot / network_since / 读证据，禁止再 click / fill / choose。",
+  };
+}
+
 export function createPiToolHost({
   recordingId,
   evidence,
@@ -131,6 +143,8 @@ export function createPiToolHost({
   getBrowser = null,
   freezeEvidence = null,
   onAssist = null,
+  isAssistHold = null,
+  onPauseForAssist = null,
 }) {
   return {
     async list_recording_manifest() {
@@ -346,7 +360,21 @@ export function createPiToolHost({
         } catch {
           // 协助通知失败不得假装已经送达
         }
-        return { assist: true, message, human_can_click: true };
+        try {
+          onPauseForAssist?.({ reason: message });
+        } catch {
+          // 暂停自动点击失败仍要回协助已发出
+        }
+        return {
+          assist: true,
+          paused: true,
+          message,
+          human_can_click: true,
+          next_action: "已暂停自动操作。等用户在预览做完或说继续，不要再 click。",
+        };
+      }
+      if (ASSIST_HOLD_ACTIONS.has(kind) && typeof isAssistHold === "function" && isAssistHold()) {
+        return assistHoldError();
       }
       const browser = typeof getBrowser === "function" ? getBrowser() : null;
       if (!browser) {
@@ -547,7 +575,7 @@ export function describePiTools() {
     {
       name: "control_in_app_browser",
       label: "Control In App Browser",
-      description: "按 Control In App Browser Skill 操作应用内浏览器。人同时也可以点预览。action=open_page|list_pages|snapshot|screenshot|click|fill|select|choose|press|fill_fields|network_since|assist。先 snapshot 和 network_since。只用 snapshot 广告的 placeholder= / label= / role= / text= / ref=。禁止 name=、#id、CSS，禁止改点没有业务文案的 aN。fill 就写，不会改口成下拉；写不进回 not_writable。choose 点已经出现的可见原文（选项/单选/分段/页签）；没有该项回 option_not_seen 并说明打开后是列表还是日历。普通框可用 fill_fields 一次填。点或填后看 network_since。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回页面摘要和控件，禁止把图片写进对话。登录、写不进的字段、点了不发网的保存用 assist，不要锁预览。本工具不提交能力。",
+      description: "按 Control In App Browser Skill 操作应用内浏览器。人同时也可以点预览。action=open_page|list_pages|snapshot|screenshot|click|fill|select|choose|press|fill_fields|network_since|assist。先 snapshot 和 network_since。只用 snapshot 广告的 placeholder= / label= / role= / text= / ref=。禁止 name=、#id、CSS，禁止改点没有业务文案的 aN。fill 就写，不会改口成下拉；写不进回 not_writable。choose 点已经出现的可见原文（选项/单选/分段/页签）；没有该项回 option_not_seen 并说明打开后是列表还是日历。普通框可用 fill_fields 一次填。点或填后看 network_since。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回页面摘要和控件，禁止把图片写进对话。登录、写不进的字段、点了不发网的保存用 assist，不要锁预览。assist 会暂停自动点击，直到用户说继续；暂停期间再 click/fill 会被拦住。本工具不提交能力。",
       parameters: {
         type: "object",
         properties: {

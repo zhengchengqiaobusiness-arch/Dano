@@ -105,6 +105,52 @@ test("用户发话在自动点击中走 steer，停掉后要求重新开车", as
   assert.equal(after.resumeDrive, true);
 });
 
+test("pauseForAssist 必须停掉当前自动点击，用户发话才续跑", async () => {
+  const prompts = [];
+  const thoughts = [];
+  let releasePrompt;
+  const pending = new Promise((resolve) => {
+    releasePrompt = resolve;
+  });
+  const session = {
+    prompts,
+    aborted: 0,
+    async prompt(text, options = {}) {
+      prompts.push({ text, options });
+      if (options.streamingBehavior === "steer") return;
+      await pending;
+    },
+    async abort() {
+      this.aborted += 1;
+    },
+  };
+  const pi = new LivePiSession({
+    session,
+    sessionId: "pi_assist_hold",
+    dispose: () => {},
+    onThought: (item) => thoughts.push(item),
+  });
+  const drive = pi.beginLiveDrive({
+    targetUrl: "http://example.com",
+    goal: "正常提交日报",
+    timeoutMs: 5000,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const paused = await pi.pauseForAssist("请选择完成进度");
+  assert.equal(paused.ok, true);
+  assert.equal(pi.driveStopped, true);
+  assert.equal(pi.lastStopReason, "assist");
+  assert.equal(pi.isDriving, false);
+  assert.ok(session.aborted >= 1);
+  assert.ok(thoughts.some((item) => /已暂停自动操作/.test(item.text || "")));
+  releasePrompt?.();
+  await drive;
+  assert.equal(pi.status, "ready");
+  const after = await pi.notifyUserMessage("继续");
+  assert.equal(after.ok, true);
+  assert.equal(after.resumeDrive, true);
+});
+
 test("空转停掉后发话会中止残留轮，再开新对话而不是 followUp 假死", async () => {
   const prompts = [];
   let busy = false;

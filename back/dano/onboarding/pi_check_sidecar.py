@@ -740,7 +740,12 @@ async def _connect_pi_check_ws(sidecar: PiCheckSidecar):
                 last = exc
                 continue
         try:
-            return await websockets.connect(sidecar_ws_url(), max_size=WS_MAX_BYTES)
+            return await websockets.connect(
+                sidecar_ws_url(),
+                max_size=WS_MAX_BYTES,
+                ping_interval=None,
+                ping_timeout=None,
+            )
         except Exception as exc:  # noqa: BLE001
             last = exc
             sidecar.ready = False

@@ -16,20 +16,25 @@ import {
 } from "../src/browser-actions.mjs";
 import { stripImageFromToolResult } from "../src/pi-tools.mjs";
 
+function recordingTools(harness, recordingId) {
+  return createPiToolHost({
+    recordingId,
+    evidence: harness.evidence,
+    files: harness.files,
+    gate: harness.gate,
+    getPiSessionId: () => harness.evidence.snapshot(recordingId).piSessionId,
+    getBrowser: () => harness.controller.browserOf(recordingId),
+    onAssist: (payload) => harness.controller.requestAssist(recordingId, payload?.reason || ""),
+    isAssistHold: () => Boolean(harness.controller.view(recordingId).assist_paused),
+  });
+}
+
 test("Control In App Browser 与人点击共用同一浏览器，协助不锁预览", async () => {
   const harness = await createHarness();
   try {
     const started = await harness.controller.start({ targetUrl: "http://example.com", goal: "目标" });
     const browser = harness.controller.browserOf(started.id);
-    const tools = createPiToolHost({
-      recordingId: started.id,
-      evidence: harness.evidence,
-      files: harness.files,
-      gate: harness.gate,
-      getPiSessionId: () => harness.evidence.snapshot(started.id).piSessionId,
-      getBrowser: () => harness.controller.browserOf(started.id),
-      onAssist: (payload) => harness.controller.requestAssist(started.id, payload?.reason || ""),
-    });
+    const tools = recordingTools(harness, started.id);
     const opened = await tools.control_in_app_browser({ action: "open_page", url: "http://example.com" });
     assert.equal(opened.available, true);
     const shot = await tools.control_in_app_browser({ action: "snapshot" });
@@ -45,6 +50,43 @@ test("Control In App Browser 与人点击共用同一浏览器，协助不锁预
     assert.ok(events.some((item) => item.kind === "interaction" && item.payload?.actor === "pi"));
     assert.ok(events.some((item) => item.kind === "interaction" && item.payload?.actor === "human"));
     assert.match(harness.controller.view(started.id).assist.reason, /验证码/);
+    assert.equal(harness.controller.view(started.id).assist_paused, true);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("assist 必须暂停自动点击，同轮再 click 要被拦住，人手仍可点预览", async () => {
+  const harness = await createHarness();
+  try {
+    const started = await harness.controller.start({ targetUrl: "http://example.com", goal: "目标" });
+    const browser = harness.controller.browserOf(started.id);
+    const tools = recordingTools(harness, started.id);
+    const before = browser.acts.length;
+    const assist = await tools.control_in_app_browser({ action: "assist", reason: "请选择完成进度" });
+    assert.equal(assist.assist, true);
+    assert.equal(assist.paused, true);
+    assert.equal(harness.controller.view(started.id).assist_paused, true);
+    assert.equal(harness.getPi().driveStopped, true);
+    assert.equal(harness.getPi().lastStopReason, "assist");
+    const blocked = await tools.control_in_app_browser({
+      action: "click",
+      selector: 'role=button[name="保 存"]',
+    });
+    assert.equal(blocked.ok, false);
+    assert.match(String(blocked.error || ""), /暂停|协助/);
+    assert.equal(browser.acts.length, before);
+    assert.equal(harness.controller.acceptHumanInput(started.id), true);
+    await browser.applyInput({ kind: "pointer_down", nx: 0.3, ny: 0.4 });
+    const shot = await tools.control_in_app_browser({ action: "snapshot" });
+    assert.ok(shot.actions?.length || shot.controls?.length);
+    await harness.controller.steer(started.id, "继续");
+    assert.equal(harness.controller.view(started.id).assist_paused, false);
+    const after = await tools.control_in_app_browser({
+      action: "click",
+      selector: 'role=button[name="查询"]',
+    });
+    assert.equal(after.ok, true);
   } finally {
     await harness.cleanup();
   }

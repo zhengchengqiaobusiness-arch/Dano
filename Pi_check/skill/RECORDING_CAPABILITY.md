@@ -32,7 +32,7 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 - **查询**：目标要求的可见条件（筛选、树/列表节点、日期、类型）已经设齐，再由该查询自己的触发点发出请求。首屏自动加载、误点、只改了一个下拉就离开，都不算做完。
 - **新增 / 保存 / 提交**：目标要求填写的可见字段已经写上（上传按排除项跳过）；目标要求加行的，行内框也已经写上。随后那条写请求才是 execute。
 - 表单还是空的、加行后行内框还没写，就去点保存：失败。那不是调查，是没操作页面。
-- 写不进、加行后 snapshot 仍看不到行内框：只协助这一格，不要去点保存碰运气。
+- 写不进、加行后再 snapshot 这一列仍没有可写控件：只协助这一格，不要去点保存碰运气。
 
 ### 工作记忆（写在对话里，不新造工具）
 
@@ -46,14 +46,14 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 ### 下一步只允许这五种
 
 1. **观察**：刚打开、弹层刚出现、或选择器失效。用 `control_in_app_browser` 做 `snapshot` + `network_since`。首屏自动请求先记下，不要当成已经查询。
-2. **按目标操作**：当前台账行还没做完。把该动作需要的可见条件/字段写上，再点该动作自己的查询/保存/提交。没有「搜索 / 查询」文案时，点已经出现的树或列表节点就是查询，不要为找搜索钮去点没文案的 `aN`。只点当前业务区（filter / form / table / dialog）。通知角标、头像、偏好、退出、外观不是业务。空状态提示（「请在左侧选择…」）是还没做成，不是按钮。筛选框只过滤；列表/树变了还要选已经出现的可见节点。
-3. **请人点一下**：合法 selector 用尽，或点了不发网，或工具回 `not_writable` / `option_not_seen`，或 `fill` 报成功但随后请求没有对应键，或加行后看不到行内框。`assist`，只写这一个控件要人做什么。不要去点保存碰运气，不要改点没有业务文案的 `aN`。
+2. **按目标操作**：当前台账行还没做完。把该动作需要的可见条件/字段写上，再点该动作自己的查询/保存/提交。目标要提交就点提交并走完确认，不要用保存换请求形状。没有「搜索 / 查询」文案时，点已经出现的树或列表节点就是查询，不要为找搜索钮去点没文案的 `aN`。只点当前业务区（filter / form / table / dialog）。通知角标、头像、偏好、退出、外观不是业务。空状态提示（「请在左侧选择…」）是还没做成，不是按钮。筛选框只过滤；列表/树变了还要选已经出现的可见节点。
+3. **请人点一下**：合法 selector 用尽，或点了不发网，或工具回 `not_writable` / `option_not_seen`，或 `fill` 报成功但随后请求没有对应键，或加行后再 snapshot 这一列仍没有可写控件。`assist`，只写这一个控件要人做什么。不要去点保存碰运气，不要改点没有业务文案的 `aN`。
 4. **推断并交一项**：该动作已按目标做完，且那次操作发出了真实 execute。走后面的字段合同，再 `submit_recording_capability`。空表保存出来的请求不要交成完整能力。
 5. **定稿**：只在用户已经结束之后。台账每行都有能力或 `unresolved`。`submit_recording_result({final:true, use_draft:true})`。未接到用户结束，禁止 `submit_recording_result`。
 
 **最小设值**只发生在第 2 步之后：表上已经按目标填过，再改一个值看哪个请求键变了。禁止用空表保存换请求形状。
 
-协助之后只读 `recentUserActions` 和网。直到人做完或用户说继续，禁止再 click。人已经发出 execute 就交该项，禁止再点同一个保存/确认/搜索。人点出的动作也要交。被拒收时按返回的 `error` 只改信封，保留其它已完成能力，不要重录，不要另加审核或回放。
+协助之后工具会暂停自动点击。只读 `recentUserActions` 和网。直到用户说继续，禁止再 click。人已经发出 execute 就交该项，禁止再点同一个保存/确认/搜索。人点出的动作也要交。被拒收时按返回的 `error` 只改信封，保留其它已完成能力，不要重录，不要另加审核或回放。
 
 本场达到现有定稿条件即可：用户已结束，非空 `capabilities`，台账缺口都在 `unresolved`。导出消费包仍由现有导出链路生成。不要在录制里写执行器。
 
@@ -121,7 +121,7 @@ PI 是唯一语义决策者；旧录制逻辑绝不启动。
 
 `list_recording_manifest` 只有计数。必须先调 `list_recording_index`，看完全场 interaction 文案、xhr/fetch 的 METHOD+path、network_response、`visible_control`、截图和页面跳转，再按需 `read_evidence_item` 读正文。请求/响应正文在 `payload.body.text` 或 `body.blob_id`。`read_response_blob` 只接受 `blob_` 开头的 id，不要把 `request_id` 当 blob，也不要编造截图 blob_id。用户结束后看完关键请求再 `submit_recording_result`，禁止把完整 result 写在对话里。不要只读前半场。也可用 `list_action_timeline` 按时间看人与 PI 点过的交互（带 `actor`），对候选 execute 调 `read_request_shape`。
 
-浏览器打开后先用 `control_in_app_browser` 观察：`open_page` → `snapshot` → `network_since`。人同时也可以点预览。共用同一页、同一路画面、同一条证据。只用 snapshot 广告的 `placeholder=` / `label=` / `role=` / `text=` / `ref=` 选择器；`choose` 点已经出现的可见原文。按目标把当前动作的可见字段写上，再点该动作自己的查询/保存。首屏自动请求不是已经查询。空表不要点保存。登录、验证码、写不进的那一个字段、点了不发网的保存用 `assist`，不要锁预览，不要改点没有业务文案的 `aN`。协助之后停手，只读 `recentUserActions` 和网。该项已按目标做完、并在 `list_action_timeline` 或 `network_since` 里对上那次操作的真实 execute 之后，再 `submit_recording_capability`。人点出的动作也要交。未接到用户结束，禁止 `submit_recording_result`。禁止没看到 execute 形状就交空壳。
+浏览器打开后先用 `control_in_app_browser` 观察：`open_page` → `snapshot` → `network_since`。人同时也可以点预览。共用同一页、同一路画面、同一条证据。只用 snapshot 广告的 `placeholder=` / `label=` / `role=` / `text=` / `ref=` 选择器；`choose` 点已经出现的可见原文。按目标把当前动作的可见字段写上，再点该动作自己的查询/保存/提交。目标要提交就点提交并走完确认，不要用保存换请求形状。首屏自动请求不是已经查询。空表不要点保存。登录、验证码、写不进的那一个字段、点了不发网的保存用 `assist`，不要锁预览，不要改点没有业务文案的 `aN`。协助之后必须停自动点，只读 `recentUserActions` 和网。该项已按目标做完、并在 `list_action_timeline` 或 `network_since` 里对上那次操作的真实 execute 之后，再 `submit_recording_capability`。人点出的动作也要交。未接到用户结束，禁止 `submit_recording_result`。禁止没看到 execute 形状就交空壳。
 
 索引对齐方法（换任何页面都这样做）：
 

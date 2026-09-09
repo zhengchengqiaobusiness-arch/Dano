@@ -552,6 +552,45 @@ test("点保存必须点到按钮，不能落到旁边的标题框", async (t) =
   assert.equal(await handle.page.evaluate(() => window.__clicked), "save");
 });
 
+test("点 保 存 不得落到旁边的 提 交", async (t) => {
+  const html = `<!doctype html><html><body>
+    <form class="el-form">
+      <div class="dialog-footer" style="display:flex;gap:12px;padding:16px">
+        <button type="button" class="el-button el-button--primary" id="submit" style="width:96px;height:36px">提 交</button>
+        <button type="button" class="el-button" id="save" style="width:72px;height:32px">保 存</button>
+        <button type="button" class="el-button" id="del" style="width:72px;height:32px">删 除</button>
+        <button type="button" class="el-button" id="close" style="width:72px;height:32px">关 闭</button>
+      </div>
+    </form>
+    <script>
+      window.__clicked = "";
+      for (const id of ["submit", "save", "del", "close"]) {
+        document.getElementById(id).addEventListener("click", () => { window.__clicked = id; });
+      }
+    </script>
+  </body></html>`;
+  const fixture = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  const port = await listen(fixture);
+  const handle = await createPlaywrightBrowser({
+    recording: { id: "rec_save_not_submit", targetUrl: `http://127.0.0.1:${port}/` },
+    appendEvidence: evidenceSink(),
+  });
+  t.after(async () => {
+    await handle.close().catch(() => {});
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+  await handle.inspect();
+  const clicked = await handle.actBySelector({
+    selector: 'role=button[name="保 存"]',
+    action: "click",
+  });
+  assert.equal(clicked.ok, true, clicked.error || "click 保 存 failed");
+  assert.equal(await handle.page.evaluate(() => window.__clicked), "save");
+});
+
 test("choose 打开后是日历时不得改口，只回报 option_not_seen", async (t) => {
   const html = `<!doctype html><html><body>
     <label>开始日期 <input id="start" placeholder="开始日期" readonly /></label>
@@ -600,6 +639,62 @@ test("choose 打开后是日历时不得改口，只回报 option_not_seen", asy
     text: "2026-09-01",
   });
   assert.equal(written.ok, true, written.error || "fill 日历格 failed");
+});
+
+test("嵌套容器和拆分表头不得吞掉叶子控件，行内列可填可选", async (t) => {
+  const html = await readFile(path.join(ROOT, "tests", "fixtures", "nested-form-table.html"));
+  const fixture = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  const port = await listen(fixture);
+  const handle = await createPlaywrightBrowser({
+    recording: { id: "rec_nested_table", targetUrl: `http://127.0.0.1:${port}/` },
+    appendEvidence: evidenceSink(),
+  });
+  t.after(async () => {
+    await handle.close().catch(() => {});
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+  await handle.inspect();
+  const facts = await handle.page.evaluate(collectPageFacts);
+  const visible = facts.visible || [];
+  const shot = facts.controls || [];
+  const findVisible = (label, kind) => visible.find((item) => item.label === label && (!kind || item.control_kind === kind));
+  const findShot = (label) => shot.find((item) => item.label === label || item.placeholder === label);
+  assert.ok(findVisible("标题"), `标题 should stay a leaf fact, got ${visible.map((item) => item.label).join(",")}`);
+  assert.ok(findVisible("工作总结"), "工作总结 should stay a leaf fact");
+  assert.equal(findVisible("工作内容")?.region, "table");
+  assert.equal(findVisible("完成进度")?.region, "table");
+  assert.ok(!visible.some((item) => /请输入 → 请输入|请选择年月/.test(String(item.placeholder || ""))));
+  assert.ok(findShot("标题") || findShot("请输入标题"), "snapshot must advertise the title field");
+  assert.ok(findShot("工作内容") || findShot("请输入工作内容"), "snapshot must advertise the row content field");
+  const progress = findShot("完成进度");
+  assert.ok(progress, `snapshot must advertise the progress column, got ${shot.map((item) => item.label || item.placeholder).join(",")}`);
+  assert.equal(progress.region, "table");
+  assert.match(String(progress.selector || ""), /label=完成进度|placeholder=/);
+  const shotJson = JSON.stringify(shot);
+  assert.ok(!shotJson.includes("请输入 →"), "snapshot must not join every nested placeholder into one control");
+
+  const filled = await handle.actBySelector({
+    selector: "label=标题",
+    action: "fill",
+    text: "测试标题",
+  });
+  assert.equal(filled.ok, true, filled.error || "fill 标题 failed");
+  const rowFill = await handle.actBySelector({
+    selector: "placeholder=请输入工作内容",
+    action: "fill",
+    text: "写完这一行",
+  });
+  assert.equal(rowFill.ok, true, rowFill.error || "fill 工作内容 failed");
+  const chosen = await handle.actBySelector({
+    selector: "label=完成进度",
+    action: "choose",
+    text: "100%",
+  });
+  assert.equal(chosen.ok, true, chosen.error || "choose 完成进度 failed");
+  assert.equal(await handle.page.evaluate(() => window.__progress), "100%");
 });
 
 test("按钮上 fill 回报 not_writable，不改口", async (t) => {

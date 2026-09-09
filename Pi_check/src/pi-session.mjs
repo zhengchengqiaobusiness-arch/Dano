@@ -96,12 +96,12 @@ export function buildLiveDrivePrompt({ targetUrl = "", goal = "" } = {}) {
     `你是操作者。人也同时可以点预览，共用这一页。调查顺序以 Skill 为准。\n` +
     `目标：${String(goal || "").trim() || "把该页独立业务动作做成可调用能力"}\n` +
     `入口：${String(targetUrl || "").trim()}\n` +
-    `按 Skill 用 control_in_app_browser：open_page → snapshot → network_since。先观察，再按目标把当前动作的可见字段写上，再点该动作自己的查询或保存。不要盲点。\n` +
+    `按 Skill 用 control_in_app_browser：open_page → snapshot → network_since。先观察，再按目标把当前动作的可见字段写上，再点该动作自己的查询、保存或提交。目标要提交就点提交并走完确认，不要用保存换请求形状。不要盲点。\n` +
     `只用 snapshot 广告的 placeholder= / label= / role= / text= / ref=。禁止 name=、#id、CSS，禁止改点没有业务文案的 aN。fill 就写，写不进回 not_writable。choose 点可见原文；没有该项看打开后是列表还是日历。打开弹层后再 snapshot 一次。不要每个字段都 snapshot，不要 include_screenshot。screenshot 只回摘要，不要把图片写进对话。人点过的看 recentUserActions。\n` +
     `首屏自动请求不是已经做完。表单还是空的，不要点保存。没有搜索/查询文案时，点已经出现的树或列表节点。禁止点没文案的 aN。\n` +
     `readonly/disabled 只表示整个控件不能改。默认已选仍是调用方，不要写成无独立来源。\n` +
     `按目标做完的那次操作发出真实 execute 后再 submit_recording_capability。人点出的动作也要交。禁止交空壳。\n` +
-    `登录、验证码、写不进的字段、点了不发网的保存：action=assist，预览不要锁。写入真实数据前若目标没授权，先 assist。协助之后不要再 click。\n` +
+    `登录、验证码、写不进的字段、点了不发网的保存：action=assist，预览不要锁。写入真实数据前若目标没授权，先 assist。协助之后必须停自动点，等用户在预览做完或说继续；工具会暂停自动点击，再 click 会被拦住。\n` +
     `未接到用户结束，禁止 submit_recording_result。不要把 JSON 写在对话里。不要写 capabilities[].fields。`
   );
 }
@@ -110,8 +110,8 @@ export function buildFinalAnalysisPrompt(latestSeq) {
   return (
     `证据已冻结，最新 seq=${Number(latestSeq) || 0}。现在必须产出能力。\n` +
     "先调 list_action_timeline 建台账，再用 list_recording_index 核对 interaction、xhr/fetch、network_response 和 visible_control。对候选 execute 调 read_request_shape；正文不够再 read_evidence_item。响应在 network_response 或读请求时附带的 response.body。\n" +
-    "先读各页最近一次 visible_control（不要带弹层前旧 seq），再对 execute 每个 query/body 键。树/页签/分段器/单选组/日期区间都是可改选择。可改控件一律调用方；页面自动计算但仍可手工修改的输入也属于调用方。readonly/disabled 只表示整个控件不能改。默认已选仍是调用方。灰框才是系统，不要进 schema。分页只留 execute 系统栏，不准进 schema。每个 exposed_to_user=true 的 param 都必须出现在 schema，schema 顶层 key、param.key、param.path 的末级键必须逐字对应 execute 的真实 query/body 键，禁止相近拼写和别名。筛选项看得见但键看不清就 unresolved，禁止编 query 键。禁止编造写请求里没有的键。可增行只保留一个对象数组 key，禁止收成 string；items.properties title 用各分区表头原文，同键不同表头写 x-dano-section-titles。多分区必须 x-dano-section-titles，合并行时带分区标题。form textarea 不要用表格分区标题。确认弹层可填意见：有请求键就建模，没有就 unresolved，不要编新键。previous_response 必须写 from_step_id/from_path 并写成 links，不要把本场主键/单号当常量。option_source 只声明候选项来源，禁止把选项列表路径写成值流 links。登录身份用 current_user，不要写死本场数字。label/title 用页面原文，去掉星号。树单击是单值，schema type 必须和 param 一致，不要无证据写成 array。同一张表保存与提交若 path 或效果不同必须两项能力。\n" +
-    "可改树/下拉/单选禁止只写 type=number。api_option 必须把 source_url 写进 param.source 和 schema 的 x-dano-option-source；page_enum 必须写当场全部 {label,value}。对象数组选择器的绑定只能写在对应 execute step.selects，禁止写到 result 顶层；必须包含 multi、label_subkey 和覆盖真实对象键的 element_template。把树/下拉藏在 description 里会被拒收。不要读 screenshot。\n" +
+    "先读各页最近一次 visible_control（不要带弹层前旧 seq），再对 execute 每个 query/body 键。树/页签/分段器/单选组/日期区间都是可改选择。可改控件一律调用方；页面自动计算但仍可手工修改的输入也属于调用方。readonly/disabled 只表示整个控件不能改。默认已选仍是调用方。灰框才是系统，不要进 schema。分页只留 execute 系统栏，不准进 schema。每个 exposed_to_user=true 的 param 都必须出现在 schema，schema 顶层 key、param.key、param.path 的末级键必须逐字对应 execute 的真实 query/body 键，禁止相近拼写和别名。筛选项看得见但键看不清就 unresolved，禁止编 query 键。禁止编造写请求里没有的键。可增行只保留一个对象数组 key，禁止收成 string；列名用各分区表头原文，多分区必须写 x-dano-section-titles，合并行时带分区标题。form textarea 不要用表格分区标题。确认弹层可填意见：有请求键就建模，没有就 unresolved，不要编新键。previous_response 必须写 from_step_id/from_path 并写成 links，不要把本场主键/单号当常量。option_source 只声明候选项，禁止把选项列表路径写成值流 links。登录身份用 current_user，不要写死本场数字。label/title 用页面原文，去掉星号。树单击是单值，schema type 必须和 param 一致。保存与提交若 path 或效果不同必须两项能力。\n" +
+    "可改树/下拉/单选禁止只写 type=number。api_option 必须把 source_url 写进 param.source 和 schema 的 x-dano-option-source；page_enum 必须写当场全部 {label,value}。对象数组选择器的绑定只能写在对应 execute step.selects，禁止写到 result 顶层；必须含 multi、label_subkey 和覆盖真实对象键的 element_template。把树/下拉藏在 description 里会被拒收。不要读 screenshot。\n" +
     "read_response_blob 只接受 body.blob_id（blob_ 开头）。不要把 request_id 当 blob_id。\n" +
     "该项已有真实 execute 形状再 submit_recording_capability。人点出的动作也要交。不要把 JSON 写在对话里。不要写 capabilities[].fields。request_refs 必须是 {step_id, usage}。steps[].params 必须是含 key/path 的对象数组。全部交完后 submit_recording_result({final:true, use_draft:true})。\n" +
     "若已有草稿，立刻 use_draft=true 提交。草稿不会自动变成结果。"
@@ -352,6 +352,25 @@ export class LivePiSession {
     return { ok: true };
   }
 
+  async pauseForAssist(reason = "") {
+    if (!this.alive) return { ok: false, error: "PI 会话已关闭" };
+    const message = String(reason || "请在预览协助").trim();
+    this.#emitThought({
+      kind: "text",
+      text: `已暂停自动操作。${message}。预览你继续点，做完后说继续。`,
+    });
+    this.lastStopReason = "assist";
+    this.#driveStopped = true;
+    try {
+      await this.session.abort?.();
+    } catch {
+      // 中止失败仍要停自动点
+    }
+    this.#driveSettleOk?.();
+    if (this.status === "driving") this.status = "ready";
+    return { ok: true };
+  }
+
   async beginLiveDrive({
     targetUrl = "",
     goal = "",
@@ -381,7 +400,7 @@ export class LivePiSession {
     const idleMs = Math.max(20, Number(idleSubmitMs) || 90000);
     const emptyBudget = Math.max(1, Number(maxEmptySettles) || MAX_EMPTY_FINAL_SETTLES);
     const continueNow = (
-      "继续用 control_in_app_browser 按 Skill 观察或最小操作。人也可以同时点预览。需要登录、写不进的字段或点了不发网的保存就 assist，不要锁预览。不要盲点，不要 invent selector。"
+      "继续用 control_in_app_browser 按 Skill 观察或最小操作。人也可以同时点预览。需要登录、写不进的字段或点了不发网的保存就 assist，不要锁预览。assist 之后必须停自动点，等用户说继续。不要盲点，不要 invent selector。"
     );
     const checkResult = typeof hasResult === "function" ? hasResult : null;
     let lastToolCount = this.#trace.toolCount;

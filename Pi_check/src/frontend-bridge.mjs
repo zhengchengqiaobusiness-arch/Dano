@@ -24,11 +24,16 @@ function newAction() {
 export const FRONTEND_DISCONNECT_GRACE_MS = 20000;
 const pendingDisconnectCancels = new Map();
 
+function isAssistHoldView(view) {
+  return Boolean(view?.assist_paused || String(view?.assist?.reason || "").trim());
+}
+
 export function shouldCancelOnFrontendDisconnect(view, { finalizing = false } = {}) {
   if (finalizing) return false;
   if (!view) return false;
   if (view.status === "succeeded" || view.hasFinalResult) return false;
   if (view.frozen || view.status === "pi_finalizing") return false;
+  if (isAssistHoldView(view)) return false;
   return true;
 }
 
@@ -253,7 +258,7 @@ export function attachFrontendBridge(httpServer, { controller, catalog, disconne
                   label: "PI 正在自动操作，预览你也可以点",
                   progress: {
                     step: "capturing",
-                    label: "请协助：预览始终可以点",
+                    label: "已暂停自动操作，请协助。做完后说继续。",
                     request_count: controller.view(recordingId).evidenceCount,
                   },
                   ...viewExtra(),
@@ -276,7 +281,11 @@ export function attachFrontendBridge(httpServer, { controller, catalog, disconne
           session.closed = false;
           startFrames(controller.browserOf?.(recordingId));
           logPiOnly(`前台已接回录制 recording=${recordingId}`);
-          think("前台已重新接上，PI 继续这场录制，预览你也可以点");
+          think(
+            view.assist_paused || String(view.assist?.reason || "").trim()
+              ? "前台已重新接上，仍在等人协助。预览你继续点，做完后说继续。"
+              : "前台已重新接上，PI 继续这场录制，预览你也可以点",
+          );
           send(ws, snapshot("recording", {
             label: view.publicMessage || "PI 正在自动操作，预览你也可以点",
             progress: {
@@ -325,7 +334,7 @@ export function attachFrontendBridge(httpServer, { controller, catalog, disconne
                   label: "PI 正在自动操作，预览你也可以点",
                   progress: {
                     step: "capturing",
-                    label: "请协助：预览始终可以点",
+                    label: "已暂停自动操作，请协助。做完后说继续。",
                     request_count: controller.view(session.recordingId).evidenceCount,
                   },
                   ...viewExtra(),
@@ -501,7 +510,11 @@ export function attachFrontendBridge(httpServer, { controller, catalog, disconne
         return;
       }
       if (!shouldCancelOnFrontendDisconnect(view, { finalizing: session.finalizing })) {
-        logPiOnly(`前台断开，证据已冻结或正在最终分析，继续等 PI recording=${recordingId}`);
+        logPiOnly(
+          isAssistHoldView(view)
+            ? `前台断开，正在等人协助，不取消这场录制 recording=${recordingId}`
+            : `前台断开，证据已冻结或正在最终分析，继续等 PI recording=${recordingId}`,
+        );
         return;
       }
       const graceMs = Math.max(20, Number(disconnectGraceMs) || FRONTEND_DISCONNECT_GRACE_MS);

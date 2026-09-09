@@ -144,6 +144,22 @@ export class ScriptedPiSession {
     return { ok: true };
   }
 
+  async pauseForAssist(reason = "") {
+    this.aborted = true;
+    this.driveStopped = true;
+    this.lastStopReason = "assist";
+    if (this.status === "driving") this.status = "ready";
+    try {
+      this.onThought?.({
+        kind: "text",
+        text: `已暂停自动操作。${String(reason || "请在预览协助")}。做完后说继续。`,
+      });
+    } catch {
+      // 协助提示失败仍要停自动点
+    }
+    return { ok: true };
+  }
+
   async beginLiveDrive({ resumeHint = "" } = {}) {
     this.driveStarted = true;
     this.driveStopped = false;

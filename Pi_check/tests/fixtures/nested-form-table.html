@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>nested form table fixture</title>
+  <style>
+    td, th, input, .el-select, textarea { min-width: 48px; min-height: 24px; }
+    .el-table__header-wrapper, .el-table__body-wrapper { display: block; }
+  </style>
+</head>
+<body>
+  <div class="el-tabs">
+    <div role="tablist">
+      <div role="tab" class="el-tabs__item">基本信息</div>
+    </div>
+    <div class="el-tabs__content">
+      <form class="el-form">
+        <div class="el-form-item">
+          <label class="el-form-item__label">单据信息</label>
+          <div>
+            <div class="el-form-item">
+              <label class="el-form-item__label">标题</label>
+              <input placeholder="请输入标题" />
+            </div>
+            <div class="el-form-item">
+              <label class="el-form-item__label">工作总结</label>
+              <textarea placeholder="请输入工作总结"></textarea>
+            </div>
+            <h3>已完成工作</h3>
+            <button type="button" class="el-button" id="add">添加工作项</button>
+            <div class="el-table">
+              <div class="el-table__header-wrapper">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>序号</th>
+                      <th>工作内容</th>
+                      <th>完成进度</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                </table>
+              </div>
+              <div class="el-table__body-wrapper">
+                <table>
+                  <tbody id="rows">
+                    <tr>
+                      <td>1</td>
+                      <td><input placeholder="请输入工作内容" /></td>
+                      <td>
+                        <div class="el-select" role="combobox" id="progress">
+                          <input readonly />
+                        </div>
+                      </td>
+                      <td><button type="button" class="el-button">删除</button></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+  <div id="progress-opts" hidden>
+    <div role="option">25%</div>
+    <div role="option">50%</div>
+    <div role="option">100%</div>
+  </div>
+  <script>
+    window.__progress = "";
+    document.getElementById("progress").addEventListener("click", () => {
+      document.getElementById("progress-opts").hidden = false;
+    });
+    for (const item of document.querySelectorAll("#progress-opts [role='option']")) {
+      item.addEventListener("click", () => {
+        window.__progress = item.textContent.trim();
+        document.querySelector("#progress input").value = window.__progress;
+        document.getElementById("progress-opts").hidden = true;
+      });
+    }
+    document.getElementById("add").addEventListener("click", () => {
+      const row = document.createElement("tr");
+      row.innerHTML = '<td>2</td><td><input placeholder="请输入工作内容" /></td><td><div class="el-select" role="combobox"><input readonly /></div></td><td><button type="button" class="el-button">删除</button></td>';
+      document.getElementById("rows").appendChild(row);
+    });
+  </script>
+</body>
+</html>

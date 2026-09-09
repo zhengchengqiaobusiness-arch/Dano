@@ -65,12 +65,16 @@ export class RecordingController {
   requestAssist(recordingId, reason = "") {
     const slot = this.#active.get(recordingId);
     if (!slot) return { reason: "" };
+    slot.assistHold = true;
     slot.assist = {
       reason: String(reason || "请在预览页帮忙：登录、验证码或确认写入"),
       at: new Date().toISOString(),
     };
     try {
-      slot.onThought?.({ kind: "text", text: `请协助：${slot.assist.reason}。预览始终可以点。` });
+      slot.onThought?.({
+        kind: "text",
+        text: `已暂停自动操作。请协助：${slot.assist.reason}。预览始终可以点。做完后说「继续」。`,
+      });
     } catch {
       // ignore
     }
@@ -79,6 +83,12 @@ export class RecordingController {
     } catch {
       // ignore
     }
+    if (typeof slot.pi?.pauseForAssist === "function") {
+      Promise.resolve(slot.pi.pauseForAssist(slot.assist.reason)).catch(() => {});
+    }
+    this.evidence.setStatus(recordingId, {
+      publicMessage: "已暂停自动操作，请协助。预览始终可以点，做完后说继续。",
+    }).catch(() => {});
     return slot.assist;
   }
 
@@ -92,6 +102,8 @@ export class RecordingController {
     const needsFresh = slot.pi.needsFreshSession || slot.pi.lastStopReason === "instant_empty";
     const sent = await slot.pi.notifyUserMessage(text);
     if (!sent?.ok) throw new Error(sent?.error || "没有发给 PI");
+    slot.assistHold = false;
+    slot.assist = { reason: "" };
     if (sent.resumeDrive) {
       if (needsFresh) {
         try {
@@ -168,6 +180,11 @@ export class RecordingController {
         }
       },
       onAssist: (payload) => this.requestAssist(recordingId, payload?.reason || ""),
+      isAssistHold: () => Boolean(this.#active.get(recordingId)?.assistHold),
+      onPauseForAssist: (payload) => {
+        const slot = this.#active.get(recordingId);
+        slot?.pi?.pauseForAssist?.(payload?.reason || slot?.assist?.reason || "");
+      },
     });
   }
 
@@ -260,6 +277,7 @@ export class RecordingController {
       notice: PI_ONLY_NOTICE,
       human_can_click: this.acceptHumanInput(recordingId),
       assist: slot?.assist || { reason: "" },
+      assist_paused: Boolean(slot?.assistHold),
       capabilityCount: session.status === "failed" || !session.hasFinalResult
         ? 0
         : this.#capabilityCountFromPiResultOnly(recordingId),
@@ -317,6 +335,7 @@ export class RecordingController {
       analysisRetried: false,
       browserStartAttempted: false,
       assist: { reason: "" },
+      assistHold: false,
       drive: null,
       onThought: typeof onThought === "function" ? onThought : null,
       onComplete: typeof onComplete === "function" ? onComplete : null,

@@ -117,6 +117,7 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(browserSkill, /合法 selector/);
   assert.match(browserSkill, /本工具不提交能力|不要在本 Skill 里交能力/);
   assert.match(browserSkill, /协助发出之后/);
+  assert.match(browserSkill, /工具会暂停自动点击|必须停自动点/);
   assert.match(browserSkill, /不要去点保存碰运气/);
   assert.match(browserSkill, /人已经离开当前表单/);
   assert.match(browserSkill, /填了请求完全没变/);
@@ -125,6 +126,8 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(browserSkill, /没有业务文案的 `aN`/);
   assert.match(browserSkill, /首屏自动加载不是已经查询/);
   assert.match(browserSkill, /表单还是空的，禁止点保存/);
+  assert.match(browserSkill, /region=table/);
+  assert.match(browserSkill, /label=表头/);
   assert.match(browserSkill, /没有「搜索 \/ 查询」文案时|点已经出现的树或列表节点就是查询/);
   assert.match(browserSkill, /未接到用户结束/);
   assert.doesNotMatch(browserSkill, /这是下拉。用 choose，不要往里面打字/);
@@ -147,6 +150,9 @@ test("Skill 写死现有录制页能读到的信封，并禁止页面忽略的�
   assert.match(drive, /空的，不要点保存/);
   assert.match(drive, /点已经出现的树或列表节点/);
   assert.match(drive, /未接到用户结束/);
+  assert.match(drive, /目标要提交就点提交/);
+  assert.match(drive, /协助之后必须停自动点|已暂停自动操作/);
+  assert.doesNotMatch(drive, /再点该动作自己的查询或保存。/);
   assert.doesNotMatch(drive, /目标做完后 submit_recording_result/);
   assert.doesNotMatch(drive, /先观察再最小设值/);
   assert.doesNotMatch(drive, /按 selector click\/fill\/choose/);

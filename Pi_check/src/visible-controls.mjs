@@ -65,8 +65,17 @@ export function collectPageFacts() {
     ".el-segmented",
     ".ant-segmented",
     "[role='tablist']",
+  ].join(", ");
+  const LAYOUT_HOST_SELECTOR = [
     ".el-tabs",
     ".ant-tabs",
+    ".el-tab-pane",
+    ".ant-tabs-tabpane",
+    ".el-tabs__content",
+    ".ant-tabs-content",
+    "form",
+    ".el-form",
+    ".ant-form",
   ].join(", ");
   const PAGINATION_SELECTOR = [
     ".el-pagination",
@@ -123,6 +132,39 @@ export function collectPageFacts() {
     node.closest?.("aside, .el-aside, .ant-layout-sider, [class*='sidebar'], [class*='sider']"),
   );
   const tableRoot = (node) => node.closest?.("table, .el-table, .ant-table, .vxe-table, tbody, thead");
+  const tableHostOf = (node) => node.closest?.(".el-table, .ant-table, .vxe-table") || node.closest?.("table");
+  const isLayoutHost = (node) => Boolean(node?.matches?.(LAYOUT_HOST_SELECTOR));
+  const isChoiceGroup = (node) => Boolean(
+    node?.matches?.("[role='tablist'], .el-radio-group, .ant-radio-group, [role='radiogroup'], .el-segmented, .ant-segmented"),
+  );
+  const isCompositeHost = (node) => {
+    if (!node) return false;
+    if (isLayoutHost(node)) return true;
+    if (isChoiceGroup(node)) return false;
+    return Boolean(node.querySelector?.(
+      ".el-form-item, .ant-form-item, .form-item, table, .el-table, .ant-table, .vxe-table",
+    ));
+  };
+  const rowCells = (row) => [...(row?.children || [])].filter((item) => {
+    const tag = String(item.tagName || "");
+    return /^(TD|TH)$/.test(tag)
+      || item.classList?.contains("el-table__cell")
+      || item.classList?.contains("ant-table-cell")
+      || item.classList?.contains("vxe-body--column")
+      || item.classList?.contains("vxe-header--column");
+  });
+  const columnLabel = (cell) => {
+    const hostCell = cell?.closest?.("td, th, .el-table__cell, .ant-table-cell, .vxe-body--column") || cell;
+    const row = hostCell?.closest?.("tr, .el-table__row, .ant-table-row, .vxe-body--row");
+    const cells = rowCells(row);
+    const index = cells.indexOf(hostCell);
+    if (index < 0) return "";
+    const host = tableHostOf(hostCell);
+    const headRow = host?.querySelector?.(
+      ".el-table__header-wrapper thead tr, .el-table__header thead tr, .ant-table-thead tr, .vxe-header--row, thead tr",
+    );
+    return textOf(rowCells(headRow)[index]);
+  };
   const inChrome = (node) => {
     if (!node) return false;
     if (dialogRoot(node) || tableRoot(node) || inFilter(node) || inSidebar(node)) return false;
@@ -145,8 +187,11 @@ export function collectPageFacts() {
   const inPagination = (node) => Boolean(node.closest?.(PAGINATION_SELECTOR));
   const closestWidget = (node) => {
     if (!node?.closest) return null;
-    if (node.matches?.(WIDGET_HOST_SELECTOR)) return node;
-    return node.closest(WIDGET_HOST_SELECTOR);
+    let current = node.matches?.(WIDGET_HOST_SELECTOR) ? node : node.closest(WIDGET_HOST_SELECTOR);
+    while (current && isCompositeHost(current)) {
+      current = current.parentElement?.closest?.(WIDGET_HOST_SELECTOR) || null;
+    }
+    return current;
   };
   const hostLocked = (host) => {
     if (!host) return false;
@@ -228,12 +273,14 @@ export function collectPageFacts() {
     return out.slice(0, 24);
   };
   const dateRange = (node) => {
-    const inputs = [...(node.querySelectorAll?.("input") || [])];
-    return Boolean(
-      node.matches?.(".el-range-editor, .ant-picker-range")
-      || node.querySelector?.(".el-range-separator, .ant-picker-range, .el-range-input")
-      || inputs.length >= 2,
-    );
+    if (node.matches?.(".el-range-editor, .ant-picker-range")) return true;
+    if (node.querySelector?.(":scope > .el-range-separator, :scope > .el-range-input, :scope > .ant-picker-range")) {
+      return true;
+    }
+    if (node.matches?.(".el-date-editor, .ant-picker")) {
+      return [...(node.querySelectorAll?.("input") || [])].length >= 2;
+    }
+    return false;
   };
   const markRequired = (item, label) => (
     Boolean(
@@ -257,7 +304,7 @@ export function collectPageFacts() {
       || node.querySelector?.("[role='tree'], [role='treeitem']")
     ) return "select";
     if (
-      node.matches?.(".el-select, .ant-select, select, [role='combobox'], .el-radio-group, .ant-radio-group, [role='radiogroup'], .el-segmented, .ant-segmented, [role='tablist'], .el-tabs, .ant-tabs")
+      node.matches?.(".el-select, .ant-select, select, [role='combobox'], .el-radio-group, .ant-radio-group, [role='radiogroup'], .el-segmented, .ant-segmented, [role='tablist']")
       || node.querySelector?.(".el-select, .ant-select, select, [role='combobox'], .el-radio-group, .ant-radio-group, [role='radiogroup']")
     ) return "select";
     if (node.matches?.("textarea") || node.querySelector?.("textarea")) return "textarea";
@@ -313,6 +360,11 @@ export function collectPageFacts() {
     if (item.matches?.("label") && item.closest?.(".el-form-item, .ant-form-item, .form-item")) continue;
     if (inPagination(item)) continue;
     if (!visible(item)) continue;
+    if (
+      item.matches?.(".el-form-item, .ant-form-item, .form-item")
+      && item.querySelector?.(".el-form-item, .ant-form-item, .form-item")
+    ) continue;
+    if (item.querySelector?.("table, .el-table, .ant-table, .vxe-table")) continue;
     const label = nearbyLabel(item)
       || textOf(item.querySelector(".el-form-item__label, .ant-form-item-label"))
       || textOf(item.matches?.("label") ? item : item.querySelector("label"));
@@ -323,11 +375,11 @@ export function collectPageFacts() {
     ".el-date-editor, .el-range-editor, .ant-picker, input[type='date'], input[type='datetime-local'], input[type='month']",
     ".el-select, .ant-select, select, [role='combobox']",
     ".el-upload, .ant-upload, .ant-upload-wrapper, input[type='file']",
-    ".el-radio-group, .ant-radio-group, .el-segmented, .ant-segmented, [role='radiogroup'], [role='tablist'], .el-tabs, .ant-tabs",
+    ".el-radio-group, .ant-radio-group, .el-segmented, .ant-segmented, [role='radiogroup'], [role='tablist']",
   ];
   for (const selector of widgetSelectors) {
     for (const node of document.querySelectorAll(selector)) {
-      if (!visible(node) || inPagination(node)) continue;
+      if (!visible(node) || inPagination(node) || isCompositeHost(node)) continue;
       if (node.closest?.(".el-form-item, .ant-form-item, .form-item")) continue;
       push(describe(node));
     }
@@ -370,54 +422,63 @@ export function collectPageFacts() {
   }
 
   const tableColumns = new Set();
-  for (const input of document.querySelectorAll(".el-table input, .el-table textarea, .ant-table input, .ant-table textarea, table input, table textarea")) {
+  const tableFieldSelector = [
+    ".el-table input, .el-table textarea, .el-table select",
+    ".el-table .el-select, .el-table .el-input-number, .el-table .el-slider, .el-table [role='combobox'], .el-table [role='slider']",
+    ".ant-table input, .ant-table textarea, .ant-table select",
+    ".ant-table .ant-select, .ant-table .ant-slider, .ant-table [role='combobox'], .ant-table [role='slider']",
+    ".vxe-table input, .vxe-table textarea, .vxe-table select",
+    ".vxe-table .vxe-input, .vxe-table .vxe-select, .vxe-table [role='combobox']",
+    "table input, table textarea, table select",
+  ].join(", ");
+  for (const input of document.querySelectorAll(tableFieldSelector)) {
     if (!visible(input)) continue;
-    const cell = input.closest("td, th");
-    const row = cell?.parentElement;
-    const index = row ? [...row.children].indexOf(cell) : -1;
-    const table = input.closest("table, .el-table, .ant-table");
-    const head = index >= 0
-      ? table?.querySelector?.(`thead th:nth-child(${index + 1}), thead td:nth-child(${index + 1})`)
-      : null;
-    const wrap = input.closest(".el-date-editor, .el-select, .ant-picker, .ant-select") || input;
-    const label = textOf(head);
+    if (input.matches?.("input, textarea, select")) {
+      const host = input.closest(".el-select, .ant-select, .el-input-number, [role='combobox']");
+      if (host && host !== input) continue;
+    }
+    const cell = input.closest("td, th, .el-table__cell, .ant-table-cell, .vxe-body--column");
+    if (!cell) continue;
+    const wrap = closestWidget(input) || input.closest(".el-date-editor, .el-select, .el-input-number, .ant-picker, .ant-select") || input;
+    const label = columnLabel(cell);
     const controlKind = detectKind(wrap, label);
-    const section = nearbyHeading(table) || nearbyHeading(input);
-    const columnKey = `${label}|${controlKind}|${String(input.placeholder || "")}|${section}`;
+    const section = nearbyHeading(tableHostOf(input)) || nearbyHeading(input);
+    const placeholder = String(input.getAttribute?.("placeholder") || wrap.getAttribute?.("placeholder") || "");
+    const columnKey = `${label}|${controlKind}|${placeholder}|${section}`;
     if (tableColumns.has(columnKey)) continue;
     tableColumns.add(columnKey);
+    const fieldInput = firstInput(wrap) || (wrap.matches?.("input, textarea, select") ? wrap : input);
     push({
       region: dialogRoot(input) ? "dialog" : "table",
-      name: String(input.name || input.id || ""),
+      name: String(fieldInput?.name || fieldInput?.id || ""),
       label,
-      placeholder: String(input.placeholder || ""),
+      placeholder,
       section,
       control_kind: controlKind,
       required_mark: false,
-      readonly: widgetLocked(wrap, input, controlKind),
-      disabled: Boolean(input.disabled),
+      readonly: widgetLocked(wrap, fieldInput, controlKind),
+      disabled: Boolean(fieldInput?.disabled),
       range: controlKind === "date" && dateRange(wrap),
       options: [],
     });
   }
 
-  for (const cell of document.querySelectorAll(".el-table td, .ant-table td, table td, .vxe-table td")) {
+  for (const cell of document.querySelectorAll(".el-table td, .ant-table td, table td, .vxe-table td, .el-table__cell, .ant-table-cell, .vxe-body--column")) {
     if (!visible(cell)) continue;
-    if (cell.querySelector("input, textarea, select")) continue;
+    if (cell.querySelector("input, textarea, select, .el-select, .ant-select, [role='combobox']")) continue;
     const widget = cell.querySelector("[role='slider'], .el-slider, .ant-slider, .el-progress, .ant-progress, [class*='progress']");
     if (!widget || !visible(widget)) continue;
-    const row = cell.parentElement;
-    const index = row ? [...row.children].indexOf(cell) : -1;
-    const table = cell.closest("table, .el-table, .ant-table, .vxe-table");
-    const head = index >= 0
-      ? table?.querySelector?.(`thead th:nth-child(${index + 1}), thead td:nth-child(${index + 1})`)
-      : null;
+    const label = columnLabel(cell) || nearbyLabel(cell);
+    const section = nearbyHeading(tableHostOf(cell)) || nearbyHeading(cell);
+    const columnKey = `${label}|input||${section}`;
+    if (tableColumns.has(columnKey)) continue;
+    tableColumns.add(columnKey);
     push({
       region: dialogRoot(cell) ? "dialog" : "table",
       name: "",
-      label: textOf(head) || nearbyLabel(cell),
+      label,
       placeholder: "",
-      section: nearbyHeading(table) || nearbyHeading(cell),
+      section,
       control_kind: "input",
       required_mark: false,
       readonly: false,
@@ -524,9 +585,13 @@ export function collectPageFacts() {
   const snapshotActions = [];
   const snapshotOptions = [];
   const seenSnap = new Set();
-  const mark = (node, ref) => {
+  const mark = (node, ref, extras = {}) => {
     try {
       node.setAttribute("data-pi-ref", ref);
+      const col = compactText(extras.columnLabel || extras.label || "");
+      if (col && (extras.region === "table" || tableRoot(node))) {
+        node.setAttribute("data-pi-col-label", col);
+      }
     } catch {
       // 只读节点跳过
     }
@@ -537,12 +602,19 @@ export function collectPageFacts() {
     return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) !== 0;
   };
   const pushSnapshotControl = (node, extras = {}) => {
-    if (!node || seenSnap.has(node) || inPagination(node) || !snapshotVisible(node)) return;
+    if (!node || seenSnap.has(node) || inPagination(node) || isCompositeHost(node) || !snapshotVisible(node)) return;
     seenSnap.add(node);
-    for (const inner of node.querySelectorAll?.("input, textarea, select") || []) seenSnap.add(inner);
+    for (const inner of node.querySelectorAll?.("input, textarea, select") || []) {
+      if (closestWidget(inner) === node || inner.parentElement === node) seenSnap.add(inner);
+    }
     const input = firstInput(node) || (node.matches?.("input, textarea, select") ? node : null);
     const inputs = [...(node.querySelectorAll?.("input") || [])];
-    const label = extras.label || nearbyLabel(node) || nearbyHeading(node) || compactText(node.getAttribute?.("aria-label"));
+    const cell = node.closest?.("td, th, .el-table__cell, .ant-table-cell, .vxe-body--column");
+    const label = extras.label
+      || (cell ? columnLabel(cell) : "")
+      || nearbyLabel(node)
+      || nearbyHeading(node)
+      || compactText(node.getAttribute?.("aria-label"));
     const controlKind = extras.control_kind || detectKind(node, `${label} ${extras.placeholder || ""}`);
     const range = extras.range ?? (controlKind === "date" && dateRange(node));
     const placeholder = compactText(
@@ -554,14 +626,18 @@ export function collectPageFacts() {
       || node.getAttribute?.("placeholder"),
     );
     const locked = widgetLocked(node, input, controlKind);
+    const region = extras.region || (cell ? (dialogRoot(node) ? "dialog" : "table") : regionOf(node));
+    const section = compactText(extras.section || (cell ? nearbyHeading(tableHostOf(node)) : "") || nearbyHeading(node));
     const ref = `c${snapshotControls.length + 1}`;
-    mark(node, ref);
+    mark(node, ref, { label, region, columnLabel: cell ? label : "" });
     snapshotControls.push({
       ref,
       label: cleanLabel(label) || placeholder,
       name: compactText(input?.name || input?.id || node.getAttribute?.("name") || node.getAttribute?.("id")),
       control_kind: controlKind,
       placeholder,
+      region,
+      section,
       readonly: locked,
       disabled: locked,
       range,
@@ -572,15 +648,32 @@ export function collectPageFacts() {
     });
   };
   for (const host of document.querySelectorAll(WIDGET_HOST_SELECTOR)) {
+    if (isCompositeHost(host)) continue;
     pushSnapshotControl(host);
+  }
+  for (const node of document.querySelectorAll(tableFieldSelector)) {
+    if (seenSnap.has(node) || inPagination(node)) continue;
+    if (node.matches?.("input, textarea, select")) {
+      const host = node.closest(".el-select, .ant-select, .el-input-number, [role='combobox']");
+      if (host && host !== node) continue;
+    }
+    const cell = node.closest("td, th, .el-table__cell, .ant-table-cell, .vxe-body--column");
+    pushSnapshotControl(node, {
+      label: cell ? columnLabel(cell) : "",
+      region: dialogRoot(node) ? "dialog" : "table",
+      section: nearbyHeading(tableHostOf(node)),
+    });
   }
   for (const node of document.querySelectorAll("input, textarea, select, [contenteditable='true']")) {
     if (seenSnap.has(node) || inPagination(node)) continue;
-    if (node.closest?.(WIDGET_HOST_SELECTOR)) continue;
+    if (closestWidget(node) || node.closest?.(WIDGET_HOST_SELECTOR)) continue;
     if (node.matches?.("input[type='hidden']")) continue;
     if (node.matches?.("input[type='radio'], input[type='checkbox']") && !snapshotVisible(node)) continue;
+    const cell = node.closest?.("td, th, .el-table__cell, .ant-table-cell, .vxe-body--column");
     pushSnapshotControl(node, {
+      label: cell ? columnLabel(cell) : nearbyLabel(node),
       control_kind: detectKind(node, nearbyLabel(node) || node.getAttribute?.("placeholder") || ""),
+      region: cell ? (dialogRoot(node) ? "dialog" : "table") : undefined,
     });
   }
   for (const node of document.querySelectorAll("button, [role='button'], a.ant-btn, .el-button, input[type='button'], input[type='submit']")) {

@@ -87,6 +87,10 @@ function escapeRegExp(value) {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function escapeAttr(value) {
+  return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 function locatorBuilders(parsed) {
   const name = parsed.name || parsed.value || "";
   const exactText = new RegExp(`^\\s*${escapeRegExp(name)}\\s*$`);
@@ -104,8 +108,11 @@ function locatorBuilders(parsed) {
     return [
       (scope) => scope.getByLabel(parsed.value, { exact: true }),
       (scope) => scope.getByLabel(parsed.value, { exact: false }),
+      (scope) => scope.locator(".el-form-item, .ant-form-item, .form-item").filter({
+        has: scope.locator(".el-form-item__label, .ant-form-item-label, label").filter({ hasText: exactText }),
+      }).locator("input, textarea, select, [contenteditable='true']").first(),
       (scope) => scope.locator("label").filter({ hasText: exactText }),
-      (scope) => scope.getByText(parsed.value, { exact: true }),
+      (scope) => scope.locator(`[data-pi-col-label="${escapeAttr(parsed.value)}"]`),
     ];
   }
   if (parsed.kind === "role") {
@@ -126,10 +133,8 @@ function locatorBuilders(parsed) {
     if (!parsed.name) return [(scope) => scope.getByRole(parsed.role)];
     return [
       (scope) => scope.getByRole(parsed.role, { name: parsed.name, exact: true }),
-      (scope) => scope.getByRole(parsed.role, { name: parsed.name, exact: false }),
       (scope) => scope.locator("button, [role='button'], a, input[type='button'], input[type='submit']")
         .filter({ hasText: exactText }),
-      (scope) => scope.getByText(parsed.name, { exact: true }),
     ];
   }
   return [
@@ -740,9 +745,59 @@ export class PlaywrightBrowser {
       if (marked) return marked;
     }
     const parsed = parseLocator(token);
+    if (parsed.kind === "label" || parsed.kind === "text") {
+      const column = await this.#locateTableColumn(page, parsed.value);
+      if (column) return column;
+    }
     for (const build of locatorBuilders(parsed)) {
       const found = await firstVisibleInFrames(page, (scope) => build(scope), { limit: 16 });
       if (found) return found;
+    }
+    return null;
+  }
+
+  async #locateTableColumn(page, label) {
+    const name = String(label || "").trim();
+    if (!name) return null;
+    for (const scope of actionScopes(page)) {
+      const found = await scope.evaluate((want) => {
+        const compact = (value) => String(value || "").replace(/\s+/g, " ").trim();
+        const rowCells = (row) => [...(row?.children || [])].filter((item) => {
+          const tag = String(item.tagName || "");
+          return /^(TD|TH)$/.test(tag)
+            || item.classList?.contains("el-table__cell")
+            || item.classList?.contains("ant-table-cell")
+            || item.classList?.contains("vxe-body--column")
+            || item.classList?.contains("vxe-header--column");
+        });
+        const hostOf = (node) => node.closest(".el-table, .ant-table, .vxe-table") || node.closest("table");
+        const columnIndex = (cell) => {
+          const hostCell = cell.closest("td, th, .el-table__cell, .ant-table-cell, .vxe-body--column, .vxe-header--column") || cell;
+          const row = hostCell.closest("tr, .el-table__row, .ant-table-row, .vxe-body--row");
+          return rowCells(row).indexOf(hostCell);
+        };
+        for (const marked of document.querySelectorAll("[data-pi-col-hit]")) {
+          marked.removeAttribute("data-pi-col-hit");
+        }
+        for (const head of document.querySelectorAll("th, .el-table__header th, .ant-table-thead th, .vxe-header--column")) {
+          if (compact(head.innerText || head.textContent) !== compact(want)) continue;
+          const index = columnIndex(head);
+          if (index < 0) continue;
+          const host = hostOf(head);
+          for (const row of host?.querySelectorAll("tbody tr, .el-table__body-wrapper tr, .el-table__row, .ant-table-row, .vxe-body--row") || []) {
+            const cell = rowCells(row)[index];
+            if (!cell) continue;
+            const field = cell.querySelector("input, textarea, select, [role='combobox'], [role='slider'], .el-select, .ant-select, .el-input-number, .el-slider");
+            if (!field) continue;
+            field.setAttribute("data-pi-col-hit", "1");
+            return true;
+          }
+        }
+        return false;
+      }, name).catch(() => false);
+      if (!found) continue;
+      const loc = scope.locator("[data-pi-col-hit='1']").first();
+      if (await loc.count().catch(() => 0)) return loc;
     }
     return null;
   }
@@ -763,7 +818,11 @@ export class PlaywrightBrowser {
           return !/^(button|submit|reset|checkbox|radio|file|image)$/.test(type);
         };
         const root = el;
-        const nested = [...(root.querySelectorAll?.("input, textarea, [contenteditable='true']") || [])];
+        const item = root.closest?.(".el-form-item, .ant-form-item, .form-item, td, th, .el-table__cell, .ant-table-cell") || root;
+        const nested = [
+          ...(root.querySelectorAll?.("input, textarea, [contenteditable='true']") || []),
+          ...(item !== root ? (item.querySelectorAll?.("input, textarea, [contenteditable='true']") || []) : []),
+        ];
         const target = writable(root) ? root : nested.find(writable);
         if (!target) return false;
         if (target.isContentEditable) target.textContent = next;
