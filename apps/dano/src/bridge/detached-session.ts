@@ -20,6 +20,7 @@ import { askUserQuestionTool } from "./ask-user-question.js";
 import { danoVersionTool } from "./dano-version-tool.js";
 import { configureDanoLlmResilience } from "./llm-resilience.js";
 import type { CredentialBroker } from "./credential-broker.js";
+import { wrapProviderBash } from "./provider-python.js";
 
 function resolveHeimdallExtensionPath(): string {
   try {
@@ -57,7 +58,11 @@ export async function createDetachedAgentSessionRuntime(
 ): Promise<CreateDetachedAgentSessionRuntimeResult> {
   let disposeActiveDanoLlmResilience: (() => void) | undefined;
   let disposeCredentialBinding: (() => void) | undefined;
+  let providerExecutionLifetime: AbortController | undefined;
   const createRuntime: CreateAgentSessionRuntimeFactory = async runtimeOptions => {
+    providerExecutionLifetime?.abort();
+    const lifetime = new AbortController();
+    providerExecutionLifetime = lifetime;
     disposeCredentialBinding?.();
     disposeCredentialBinding = undefined;
     const services = await createAgentSessionServices({
@@ -67,6 +72,20 @@ export async function createDetachedAgentSessionRuntime(
       settingsManager: options.settingsManager,
       resourceLoaderOptions: {
         additionalExtensionPaths: [HEIMDALL_EXTENSION_PATH],
+        extensionsOverride: loaded => {
+          if (options.credentialBroker && options.credentialBrokerScope) {
+            const heimdall = loaded.extensions.find(extension => extension.path === HEIMDALL_EXTENSION_PATH);
+            const bash = heimdall?.tools.get("bash");
+            if (!bash) throw new Error("Heimdall bash is required for provider Python requests");
+            bash.definition = wrapProviderBash(bash.definition, {
+              broker: options.credentialBroker,
+              scope: options.credentialBrokerScope,
+              cwd: runtimeOptions.cwd,
+              signal: lifetime.signal,
+            });
+          }
+          return loaded;
+        },
       },
     });
     const result = await createAgentSessionFromServices({
@@ -113,6 +132,7 @@ export async function createDetachedAgentSessionRuntime(
     sessionManager,
   });
   runtime.setBeforeSessionInvalidate(() => {
+    providerExecutionLifetime?.abort();
     disposeActiveDanoLlmResilience?.();
     disposeActiveDanoLlmResilience = undefined;
     disposeCredentialBinding?.();
@@ -122,6 +142,7 @@ export async function createDetachedAgentSessionRuntime(
   return {
     runtime,
     disposeDanoLlmResilience() {
+      providerExecutionLifetime?.abort();
       disposeActiveDanoLlmResilience?.();
       disposeActiveDanoLlmResilience = undefined;
       disposeCredentialBinding?.();

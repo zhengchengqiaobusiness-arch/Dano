@@ -10,6 +10,7 @@ export default defineConfig({
   sourcemap: false,
   entry: ["src/main.ts"],
   outDir: "dist/server",
+  copy: [{ from: "src/bridge/python/dano_provider.py", to: "dist/server/python" }],
   dts: false,
   tsconfig: "./tsconfig.server.json",
   alias: {

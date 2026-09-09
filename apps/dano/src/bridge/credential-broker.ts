@@ -359,6 +359,20 @@ export class CredentialBroker {
     });
   }
 
+  /** Capture authority at script start; a later turn must never replace it. */
+  bindRequest(scope: string, agentSessionId: string) {
+    const state = this.sessionState(scope, agentSessionId);
+    const binding = state?.activePiTurn;
+    return (request: ProviderRequest, signal?: AbortSignal): Promise<ProviderResponse> => {
+      if (
+        !binding?.loginSessionId || signal?.aborted ||
+        this.sessionState(scope, agentSessionId) !== state ||
+        state?.activePiTurn !== binding
+      ) return Promise.resolve(AUTHENTICATION_REQUIRED);
+      return this.request(scope, agentSessionId, request, signal);
+    };
+  }
+
   async request(
     scope: string,
     agentSessionId: string,
