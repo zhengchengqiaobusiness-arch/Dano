@@ -17,7 +17,7 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def request(method, path, headers=None, body=None):
+def request(method, path, headers=None, body=None, timeout=15.0):
     """Return the Broker envelope: ok/status/headers/body, or raise ProviderError."""
     endpoint = os.environ.get("DANO_PROVIDER_URL", "")
     capability = os.environ.get("DANO_PROVIDER_CAPABILITY", "")
@@ -33,7 +33,7 @@ def request(method, path, headers=None, body=None):
     req = Request(endpoint, data=json.dumps(payload).encode("utf-8"), method="POST",
                   headers={"Authorization": "Bearer " + capability, "Content-Type": "application/json"})
     try:
-        with build_opener(ProxyHandler({}), _NoRedirect()).open(req) as response:
+        with build_opener(ProxyHandler({}), _NoRedirect()).open(req, timeout=timeout) as response:
             result = json.load(response)
     except (HTTPError, URLError, OSError, ValueError):
         raise ProviderError("provider_request_failed", "Dano provider request unavailable or execution ended.") from None

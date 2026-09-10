@@ -1,5 +1,5 @@
 import { execFile, type ExecFileOptions } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -191,6 +191,72 @@ it("wraps the existing bash executor, preserves its checks and redacts the local
   expect(wrapped.label).toBe("guarded bash");
 });
 
+it("redacts full-output capabilities across file chunks without changing other text", async () => {
+  const h = await pythonHarness();
+  const s = h.session("user", "agent", "login-a");
+  await withProviderPython(
+    s.options,
+    async (prefix, _redact, _requests, redactFile) => {
+      const path = join(h.cwd, "output.log");
+      await execute(
+        "bash",
+        [
+          "-c",
+          prefix +
+            'python3 -c \'import os; print(("x" * 65520 + os.environ["DANO_PROVIDER_CAPABILITY"] + "汉字\\n") * 3, end="")\' > output.log',
+        ],
+        { cwd: h.cwd },
+      );
+      await redactFile(path);
+      expect(await readFile(path, "utf8")).toBe(
+        ("x".repeat(65520) + "[redacted]汉字\n").repeat(3),
+      );
+      const untouched = Buffer.concat([
+        Buffer.alloc(65470, "x"),
+        Buffer.from("😀" + "z".repeat(128)),
+        Buffer.from([0, 255, 128]),
+      ]);
+      await writeFile(path, untouched);
+      await redactFile(path);
+      expect(await readFile(path)).toEqual(untouched);
+    },
+  );
+});
+
+it("withholds live full-output artifacts and sanitizes them before publication", async () => {
+  const h = await pythonHarness();
+  const wrapped = wrapProviderBash(createBashTool(h.cwd) as ToolDefinition, {
+    broker: h.broker,
+    scope: "user",
+    cwd: h.cwd,
+  });
+  const updates: unknown[] = [];
+  const result = await wrapped.execute(
+    "verbose",
+    {
+      command:
+        'python3 -c \'import os; print((os.environ["DANO_PROVIDER_CAPABILITY"] + "\\n") * 3000)\'',
+    },
+    undefined,
+    update => updates.push(update),
+    {
+      sessionManager: SessionManager.inMemory(h.cwd),
+      cwd: h.cwd,
+    } as never,
+  );
+  const path = (result.details as { fullOutputPath: string }).fullOutputPath;
+  cleanup.push(() => rm(path, { force: true }));
+  expect(updates.length).toBeGreaterThan(0);
+  for (const update of updates)
+    expect(JSON.stringify(update)).not.toContain(path);
+  expect(
+    (await readFile(path, "utf8"))
+      .trim()
+      .split("\n")
+      .every(line => line === "[redacted]"),
+  ).toBe(true);
+});
+
 async function pythonHarness() {
   const observed: {
     auth?: string;
@@ -207,6 +273,7 @@ async function pythonHarness() {
       method: req.method,
       body,
     });
+    if (req.url === "/stalled") return;
     if (
       req.url === "/refresh" &&
       req.headers.authorization === "Bearer expired"
@@ -306,6 +373,35 @@ async function pythonRequest(
   ]);
   return JSON.parse(result.stdout);
 }
+
+it("bounds a stalled OA request with the Python client's timeout", async () => {
+  const h = await pythonHarness();
+  const s = h.session("user", "agent", "login-a");
+  expect(
+    await withProviderPython(s.options, prefix =>
+      pythonRequest(prefix, "request('GET', '/stalled', timeout=0.05)"),
+    ),
+  ).toEqual({ error: "provider_request_failed" });
+});
+
+it("preserves existing Python module paths for non-OA scripts", async () => {
+  const h = await pythonHarness();
+  await writeFile(join(h.cwd, "existing_module.py"), "value = 42\n");
+  vi.stubEnv("PYTHONPATH", h.cwd);
+  const s = h.session("user", "agent", "login-a");
+  const result = await withProviderPython(s.options, prefix =>
+    execute(
+      "bash",
+      [
+        "-c",
+        prefix +
+          "python3 -c 'import existing_module, dano_provider; print(existing_module.value)'",
+      ],
+      { cwd: tmpdir() },
+    ),
+  );
+  expect(result.stdout.trim()).toBe("42");
+});
 
 it("isolates concurrent Users and separate Login Sessions of the same User", async () => {
   const h = await pythonHarness();

@@ -15,7 +15,7 @@ except ProviderError as error:
     print(error.code)
 ```
 
-`request(method, path, headers=None, body=None)` returns the existing Broker
+`request(method, path, headers=None, body=None, timeout=15.0)` returns the existing Broker
 response envelope (`ok`, HTTP `status`, sanitized `headers`, text `body`). For JSON
 writes, pass an object as `body`; the Broker serializes it. Relative paths retain
 query strings. The configured provider origin and Authorization header are
@@ -23,13 +23,22 @@ server-owned. OA HTTP/business failures must be handled by the caller; they are
 not always login failures. Broker authentication and validation errors raise
 `ProviderError` with its stable `code`.
 
-Dano injects `dano_provider` on PYTHONPATH only while a bash call runs. The client
+Dano prepends `dano_provider` to PYTHONPATH only while a bash call runs, preserving
+existing module directories. The client retains a configurable 15-second socket
+timeout; disconnecting cancels the corresponding Broker request. The client
 uses a loopback HTTP listener with a random 256-bit execution capability. The
 capability is not an OA credential and cannot select an identity. The listener
 accepts at most 1 MiB per request and does not accept requests without that
 capability. The client ignores HTTP proxy environment variables and follows no
 redirects. No public listener, global user-token environment, or token export
 endpoint is introduced.
+
+This transport uses Node HTTP and Python urllib rather than a custom wire protocol
+or an additional RPC framework. A Unix-domain socket would avoid a TCP listener,
+but requires a custom urllib connection adapter and a socket mount through the
+existing sandbox. Loopback HTTP works with the shipped shared-network sandbox
+and both standard libraries. A general HTTP proxy would need a broader forwarding
+surface; this single endpoint retains the Broker's origin and header validation.
 
 The wrapper delegates execution to the existing Heimdall tool, preserving its
 command hooks and sandbox. The shipped sandbox shares the host network, allowing
@@ -45,6 +54,12 @@ The per-execution capability and listener are an application boundary, not a
 sandbox against arbitrary hostile processes with access to the Dano host itself.
 The production sandbox hides host procfs. No access to other Runtime Workspaces
 is added by this feature.
+
+Streaming output is redacted before publication. Full-output artifact links are
+withheld while the underlying bash accumulator is writing, and those files are
+sanitized before the final result exposes them. The accumulator can temporarily
+hold raw output on the host during execution; this does not provide protection
+against other hostile processes with host access.
 
 Bash results include `providerRequests`: method, query-free path, HTTP status or
 stable error, and whether the request was authenticated through the bound Login

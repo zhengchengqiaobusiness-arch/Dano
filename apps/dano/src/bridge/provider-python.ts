@@ -1,7 +1,9 @@
 import { randomBytes } from "node:crypto";
-import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { copyFile, mkdtemp, rename, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
+import { pipeline } from "node:stream/promises";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { CredentialBroker, ProviderRequest } from "./credential-broker.js";
 
@@ -24,6 +26,7 @@ export async function withProviderPython<T>(
     commandPrefix: string,
     redact: <V>(value: V) => V,
     requests: ProviderPythonRequest[],
+    redactFile: (path: string) => Promise<void>,
   ) => Promise<T>,
 ): Promise<T> {
   const request = options.broker.bindRequest(
@@ -36,6 +39,39 @@ export async function withProviderPython<T>(
       ? value
       : JSON.parse(JSON.stringify(value).replaceAll(capability, "[redacted]"));
   const requests: ProviderPythonRequest[] = [];
+  const redactFile = async (path: string) => {
+    const staged = `${path}.${randomBytes(16).toString("hex")}`;
+    try {
+      await pipeline(
+        createReadStream(path),
+        async function* (source) {
+          const secret = Buffer.from(capability);
+          let pending = Buffer.alloc(0);
+          for await (const chunk of source) {
+            pending = Buffer.concat([pending, chunk]);
+            let match: number;
+            while ((match = pending.indexOf(secret)) !== -1) {
+              yield pending.subarray(0, match);
+              yield Buffer.from("[redacted]");
+              pending = pending.subarray(match + secret.length);
+            }
+            // Retain enough text for a capability split between read chunks.
+            const safeLength = Math.max(
+              0,
+              pending.length - secret.length + 1,
+            );
+            yield pending.subarray(0, safeLength);
+            pending = pending.subarray(safeLength);
+          }
+          yield pending;
+        },
+        createWriteStream(staged, { flags: "wx", mode: 0o600 }),
+      );
+      await rename(staged, path);
+    } finally {
+      await rm(staged, { force: true });
+    }
+  };
   const lifetime = new AbortController();
   const signal = options.signal
     ? AbortSignal.any([options.signal, lifetime.signal])
@@ -74,7 +110,13 @@ export async function withProviderPython<T>(
           .end('{"ok":false,"error":{"code":"invalid_provider_request"}}');
         return;
       }
-      const response = await request(input as ProviderRequest, signal);
+      const connection = new AbortController();
+      const disconnected = () => connection.abort();
+      res.once("close", disconnected);
+      const response = await request(
+        input as ProviderRequest,
+        AbortSignal.any([signal, connection.signal]),
+      ).finally(() => res.off("close", disconnected));
       requests.push({
         method: typeof input.method === "string" ? input.method : "",
         path: typeof input.path === "string" ? input.path.split("?")[0] : "",
@@ -106,9 +148,10 @@ export async function withProviderPython<T>(
     return await execute(
       `export DANO_PROVIDER_URL=${shellQuote(`http://127.0.0.1:${address.port}/request`)}; ` +
         `export DANO_PROVIDER_CAPABILITY=${shellQuote(capability)}; ` +
-        `export PYTHONPATH=${shellQuote(directory)}; `,
+        `export PYTHONPATH=${shellQuote(directory)}"\${PYTHONPATH:+:$PYTHONPATH}"; `,
       redact,
       requests,
+      redactFile,
     );
   } catch (error) {
     throw new Error(
@@ -153,15 +196,50 @@ export function wrapProviderBash(
           agentSessionId: context.sessionManager.getSessionId(),
           signal: executionSignal,
         },
-        async (prefix, redact, requests) => {
+        async (prefix, redact, requests, redactFile) => {
           const input = params as { command: string };
-          const result = await tool.execute(
-            id,
-            { ...input, command: prefix + input.command },
-            executionSignal,
-            onUpdate ? update => onUpdate(redact(update)) : undefined,
-            context,
-          );
+          const artifacts = new Set<string>();
+          const artifactPath = (value: { details?: unknown }) => {
+            const path = (
+              value.details as { fullOutputPath?: unknown } | undefined
+            )?.fullOutputPath;
+            if (typeof path === "string") artifacts.add(path);
+            return typeof path === "string" ? path : undefined;
+          };
+          const result = await tool
+            .execute(
+              id,
+              { ...input, command: prefix + input.command },
+              executionSignal,
+              update => {
+                const path = artifactPath(update);
+                // The underlying accumulator may still append raw data. Publish its
+                // artifact only after execution ends and the complete file is scrubbed.
+                const safe = redact(update);
+                if (path) {
+                  delete (safe.details as { fullOutputPath?: unknown })
+                    .fullOutputPath;
+                  for (const part of safe.content) {
+                    if (part.type === "text")
+                      part.text = part.text.replaceAll(
+                        path,
+                        "[available after execution]",
+                      );
+                  }
+                }
+                onUpdate?.(safe);
+              },
+              context,
+            )
+            .then(result => {
+              artifactPath(result);
+              return result;
+            })
+            .finally(async () => {
+              for (const path of artifacts) {
+                await redactFile(path);
+              }
+            });
           return {
             ...redact(result),
             details: {
