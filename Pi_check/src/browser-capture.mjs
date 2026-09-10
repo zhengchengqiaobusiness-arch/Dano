@@ -873,9 +873,26 @@ export class PlaywrightBrowser {
 
   async #mouseClick(locator) {
     const page = this.livePage();
-    const box = await this.#actionBox(locator);
-    if (!page || !box || box.width < 1 || box.height < 1) {
+    if (!page) {
       await locator.click({ timeout: 800, force: true });
+      return { via: "locator", x: 0, y: 0 };
+    }
+    const retarget = await locator.evaluate((el) => {
+      const host = el.closest?.(".vue-treeselect");
+      if (!host) return false;
+      if (el.closest?.(".vue-treeselect__menu, .vue-treeselect__label, .vue-treeselect__option")) return false;
+      const arrow = host.querySelector(".vue-treeselect__control-arrow-container");
+      if (!arrow) return false;
+      for (const marked of document.querySelectorAll("[data-pi-open-hit]")) {
+        marked.removeAttribute("data-pi-open-hit");
+      }
+      arrow.setAttribute("data-pi-open-hit", "1");
+      return true;
+    }).catch(() => false);
+    const target = retarget ? page.locator("[data-pi-open-hit='1']").first() : locator;
+    const box = await this.#actionBox(target);
+    if (!box || box.width < 1 || box.height < 1) {
+      await target.click({ timeout: 800, force: true });
       return { via: "locator", x: 0, y: 0 };
     }
     const x = box.x + box.width / 2;
@@ -925,8 +942,20 @@ export class PlaywrightBrowser {
   async #observePanel(page) {
     const options = await this.#listRoleTexts(page, "option");
     const treeitems = await this.#listRoleTexts(page, "treeitem");
-    if (options.length || treeitems.length) {
-      return { panel: "list", options: [...options, ...treeitems] };
+    const treeLabels = [];
+    for (const scope of actionScopes(page)) {
+      const extra = await scope.evaluate(() => [...document.querySelectorAll(".vue-treeselect__label, .el-tree-node__label, .ant-tree-title")]
+        .filter((el) => {
+          const box = el.getBoundingClientRect();
+          return box.width > 1 && box.height > 1;
+        })
+        .map((el) => String(el.textContent || "").replace(/\s+/g, " ").trim())
+        .filter(Boolean)).catch(() => []);
+      treeLabels.push(...extra);
+    }
+    const listed = [...new Set([...options, ...treeitems, ...treeLabels])];
+    if (listed.length) {
+      return { panel: "list", options: listed };
     }
     const radios = await this.#listRoleTexts(page, "radio");
     const tabs = await this.#listRoleTexts(page, "tab");
@@ -951,6 +980,7 @@ export class PlaywrightBrowser {
           () => scope.getByRole("treeitem", { name: label, exact: true }),
           () => scope.getByRole("radio", { name: label, exact: true }),
           () => scope.getByRole("tab", { name: label, exact: true }),
+          () => scope.locator(".vue-treeselect__label, .el-tree-node__label, .ant-tree-title").filter({ hasText: label }),
           () => scope.getByText(label, { exact: true }),
         ];
         for (const build of builders) {

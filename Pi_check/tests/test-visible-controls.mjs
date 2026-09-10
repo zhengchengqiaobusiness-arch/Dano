@@ -181,6 +181,11 @@ test("snapshot 广告树节点，不广告无名钮和顶栏角标", async (t) =
         <div role="treeitem">深圳总公司</div>
         <div class="el-tree-node__label">研发部门</div>
       </div>
+      <div class="vue-treeselect">
+        <div class="vue-treeselect__menu">
+          <div class="vue-treeselect__label">总公司(5)</div>
+        </div>
+      </div>
     </aside>
     <div class="page-filters">
       <div class="el-radio-group" role="radiogroup">
@@ -215,6 +220,7 @@ test("snapshot 广告树节点，不广告无名钮和顶栏角标", async (t) =
   const labels = actions.map((item) => String(item.label || ""));
   assert.ok(labels.includes("研发部门"), `tree node missing, got ${labels.join(",")}`);
   assert.ok(labels.includes("深圳总公司"), `tree node missing, got ${labels.join(",")}`);
+  assert.ok(labels.includes("总公司(5)"), `vue-treeselect node missing, got ${labels.join(",")}`);
   assert.ok(labels.includes("新增"));
   assert.ok(labels.includes("保 存") || labels.includes("保存"));
   assert.ok(!labels.some((label) => !label.trim()), "unlabeled header icons must not be advertised");

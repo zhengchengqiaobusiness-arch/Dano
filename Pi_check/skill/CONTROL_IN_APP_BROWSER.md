@@ -25,7 +25,7 @@ PI 是操作者。人同时也可以点预览。你们共用同一只 Playwright
 - 勾选：`role=checkbox[name="原文"]` 或 `type=checkbox`
 - 单选：`role=radio[name="原文"]` 或 `type=radio`
 - 下拉、分段、单选、页签：对宿主 `choose(selector, 可见选项原文)`，点已经出现的那一项。工具回「需要可见选项原文」或 `option_not_seen`、打开后是列表不是日历：先点宿主打开下拉，再 snapshot **当前弹层**，用弹层里已经出现的选项原文 `choose`。禁止对空选项、未知车牌、未知人名再 choose。
-- 树 / 列表节点：`text=原文` 或 `choose` 已经出现的可见原文
+- 树 / 列表节点：`text=原文` 或 `choose` 已经出现的可见原文（含打开后的 vue-treeselect / el-tree / ant-tree 节点）。先点开宿主再 snapshot 一次；禁止因为上一张 snapshot 没有树节点就协助。
 
 禁止：`name=`、`#id`、`.class`、xpath、任意 CSS，以及 snapshot 里没有的字符串。不要把失败后的猜测写成新 selector。没有业务文案的 `aN`、纯数字角标、顶栏头像不要点。snapshot 若仍列出它们，忽略。
 

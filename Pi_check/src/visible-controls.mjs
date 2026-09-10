@@ -63,6 +63,7 @@ export function collectPageFacts() {
     ".el-cascader",
     ".ant-cascader",
     ".el-tree-select",
+    ".vue-treeselect",
     ".el-time-picker",
     "[role='combobox']",
     ".el-radio-group",
@@ -259,7 +260,7 @@ export function collectPageFacts() {
       out.push(value);
     };
     for (const item of node.querySelectorAll?.(
-      "[role='treeitem'], [role='tab'], [role='radio'], .el-radio-button, .el-radio, .el-segmented__item, .ant-segmented-item, .ant-radio-wrapper, .el-tabs__item",
+      "[role='treeitem'], [role='tab'], [role='radio'], .el-radio-button, .el-radio, .el-segmented__item, .ant-segmented-item, .ant-radio-wrapper, .el-tabs__item, .vue-treeselect__label",
     ) || []) {
       add(item.getAttribute?.("aria-label") || textOf(item));
     }
@@ -293,8 +294,8 @@ export function collectPageFacts() {
       || node.querySelector?.(".el-date-editor, .el-range-editor, .ant-picker, input[type='date'], input[type='datetime-local'], input[type='month']")
     ) return "date";
     if (
-      node.matches?.("[role='tree'], .el-tree, .ant-tree, .el-tree-select")
-      || node.querySelector?.("[role='tree'], [role='treeitem']")
+      node.matches?.("[role='tree'], .el-tree, .ant-tree, .el-tree-select, .vue-treeselect")
+      || node.querySelector?.("[role='tree'], [role='treeitem'], .vue-treeselect")
     ) return "select";
     if (
       node.matches?.(".el-select, .ant-select, select, [role='combobox'], .el-radio-group, .ant-radio-group, [role='radiogroup'], .el-segmented, .ant-segmented, [role='tablist']")
@@ -372,7 +373,7 @@ export function collectPageFacts() {
 
   const widgetSelectors = [
     ".el-date-editor, .el-range-editor, .ant-picker, input[type='date'], input[type='datetime-local'], input[type='month']",
-    ".el-select, .ant-select, select, [role='combobox']",
+    ".el-select, .ant-select, select, [role='combobox'], .vue-treeselect, .el-tree-select",
     ".el-upload, .ant-upload, .ant-upload-wrapper, input[type='file']",
     ".el-radio-group, .ant-radio-group, .el-segmented, .ant-segmented, [role='radiogroup'], [role='tablist']",
   ];
@@ -726,7 +727,7 @@ export function collectPageFacts() {
     });
   };
   const seenTreeLabel = new Set();
-  for (const node of document.querySelectorAll("[role='treeitem'], .el-tree-node__label, .ant-tree-title")) {
+  for (const node of document.querySelectorAll("[role='treeitem'], .el-tree-node__label, .ant-tree-title, .vue-treeselect__label")) {
     if (!snapshotVisible(node) || inChrome(node) || inPagination(node)) continue;
     const text = cleanLabel(node.getAttribute?.("aria-label") || textOf(node));
     if (!isBusinessLabel(text) || seenTreeLabel.has(text)) continue;
@@ -761,7 +762,7 @@ export function collectPageFacts() {
     pushSelectable(cell, text, "row");
   }
   const seenOption = new Set();
-  for (const node of document.querySelectorAll("[role='option'], .el-select-dropdown__item, .ant-select-item-option")) {
+  for (const node of document.querySelectorAll("[role='option'], .el-select-dropdown__item, .ant-select-item-option, .vue-treeselect__label")) {
     if (!snapshotVisible(node)) continue;
     const text = compactText(node.innerText || node.textContent);
     if (!text || seenOption.has(text)) continue;
