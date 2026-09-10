@@ -6,7 +6,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { contractFidelityIssues, handbookIsFaithful } from "./contract-materialize.mjs";
 
-const REQUIRED_SECTIONS = ["立刻办理", "选择工作流", "执行协议", "按需读取资源", "鉴权"];
+const REQUIRED_SECTIONS = ["立刻办理", "冻结提问", "选择工作流", "执行协议", "按需读取资源", "鉴权"];
 const PROCESS_LEAK = [
   "generator-guides", "阶段1", "阶段 1", "阶段6", "阶段7", "阶段8",
   "FlowSpec", "fingerprint", "x-dano-", "一页面对应一个 Skill",

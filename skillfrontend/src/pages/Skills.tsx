@@ -15,7 +15,8 @@ function fmtTime(s?: string) {
   if (!s) return "-";
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return s;
-  return d.toLocaleString();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 type Row = SkillManifest & { __group?: boolean; __ops?: number; children?: SkillManifest[] };
@@ -208,7 +209,7 @@ export default function Skills() {
           },
           { title: "类型", dataIndex: "integration", width: 110, render: (v, r) => (r.__group ? null : <Tag>{INTEG_LABEL[v] || v}</Tag>) },
           { title: "风险", dataIndex: "risk_level", width: 90, render: (v, r) => (r.__group ? null : <Tag color={RISK_COLOR[v] || "default"}>{v}</Tag>) },
-          { title: "产出时间", dataIndex: "created_at", width: 180, render: (v, r) => (r.__group ? null : <Typography.Text type="secondary" style={{ fontSize: 12 }}>{fmtTime(v)}</Typography.Text>) },
+          { title: "更新时间", dataIndex: "updated_at", width: 180, render: (_v, r) => (r.__group ? null : <Typography.Text type="secondary" style={{ fontSize: 12 }}>{fmtTime(r.updated_at || r.created_at)}</Typography.Text>) },
           {
             title: (
               <Space size={8} wrap={false}>

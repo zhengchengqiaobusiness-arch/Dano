@@ -1,6 +1,10 @@
 /**
  * 只按合同投影请求。缺键失败，绝不补键、不猜 now、不猜公式。
+ * 系统常量按能力已给出的 default_value / 合同理由取值，不把用户样本写成常量。
  */
+
+import { resolveSystemDefault } from "./skill-export/contract-materialize.mjs";
+
 
 function isPlainObject(value) {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -64,8 +68,9 @@ export function projectContractToRequest(draft, capabilityId, inputs = {}) {
       setPath(pathRoot(wirePath) === "query" ? query : body, wirePath, given[key]);
       continue;
     }
-    if (Object.prototype.hasOwnProperty.call(param, "default_value")) {
-      setPath(pathRoot(wirePath) === "query" ? query : body, wirePath, param.default_value);
+    const resolved = resolveSystemDefault(param);
+    if (resolved.has) {
+      setPath(pathRoot(wirePath) === "query" ? query : body, wirePath, resolved.value);
     }
   }
   const extra = [...givenKeys].filter((key) => !used.has(key));

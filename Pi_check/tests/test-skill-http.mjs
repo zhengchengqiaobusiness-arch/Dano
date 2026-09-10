@@ -203,7 +203,7 @@ test("HTTP 目录快速导出不开 Skill 4，只写文件", async () => {
     const dest = dumped.data.written[0];
     const handbook = await readFile(path.join(dest, "SKILL.md"), "utf8");
     assert.match(handbook, /立刻办理/);
-    assert.match(handbook, /禁止 ls/);
+    assert.match(handbook, /不要先 ls|禁止 ls/);
     const auth = JSON.parse(await readFile(path.join(dest, "config", "auth.local.json"), "utf8"));
     assert.equal(auth.headers.Authorization, "Bearer http-dump-token");
   } finally {

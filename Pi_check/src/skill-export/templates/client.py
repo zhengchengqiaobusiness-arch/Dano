@@ -33,17 +33,35 @@ def _json_object(raw, label):
     return value
 
 
+def _canonical_header_name(name):
+    key = str(name or "").strip()
+    if key.lower() == "authorization":
+        return "Authorization"
+    return key
+
+
+def _as_authorization(value):
+    text = str(value or "").strip()
+    while text.lower().startswith("bearer "):
+        text = text[7:].strip()
+    return f"Bearer {text}" if text else ""
+
+
 def _usable_headers(raw):
     if not isinstance(raw, dict):
         return {}
     headers = {}
     for key, value in raw.items():
-        name = str(key).strip()
+        name = _canonical_header_name(key)
         text = str(value).strip()
         if not name or not text:
             continue
         if text.startswith("[sealed:") or text.startswith("****") or "…" in text:
             continue
+        if name == "Authorization":
+            text = _as_authorization(text)
+            if not text:
+                continue
         headers[name] = text
     return headers
 

@@ -84,17 +84,25 @@ export function callerParams(cap, steps = []) {
   const found = paramsByKey(cap, steps);
   const fields = [];
   const seen = new Set();
+  const write = /create|update|delete|submit|write/i.test(String(cap?.kind || ""));
   for (const [key, spec] of Object.entries(properties)) {
     const param = found.get(key) || {};
-    fields.push(normalizeCallerField(key, spec, param, required.has(key) || Boolean(param.required)));
+    fields.push(withPageDateDefault(normalizeCallerField(key, spec, param, required.has(key) || Boolean(param.required)), write));
     seen.add(key);
   }
   for (const [key, param] of found) {
     if (seen.has(key) || param?.exposed_to_user === false) continue;
-    fields.push(normalizeCallerField(key, {}, param, Boolean(param.required)));
+    fields.push(withPageDateDefault(normalizeCallerField(key, {}, param, Boolean(param.required)), write));
     seen.add(key);
   }
   return fields;
+}
+
+function withPageDateDefault(field, write) {
+  if (write && field.type === "date" && !Object.prototype.hasOwnProperty.call(field, "default")) {
+    field.page_default = "today";
+  }
+  return field;
 }
 
 function normalizeCallerField(key, spec, param, required) {
@@ -134,6 +142,55 @@ function normalizeCallerField(key, spec, param, required) {
   return field;
 }
 
+function coerceWireValue(type, raw) {
+  let text = String(raw ?? "").trim();
+  if ((text.startsWith("\"") && text.endsWith("\"")) || (text.startsWith("'") && text.endsWith("'"))) {
+    text = text.slice(1, -1);
+  }
+  if (type === "number" || type === "integer") {
+    const n = Number(text);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  if (type === "boolean") return text === "true" || text === "1";
+  if (type === "array") {
+    if (text === "[]" || /空数组/i.test(text)) return [];
+    return undefined;
+  }
+  return text || undefined;
+}
+
+function valueFromCapabilityReason(param) {
+  const reason = String(param?.reason || "");
+  const key = String(param?.key || "");
+  const type = String(param?.type || "");
+  if (!reason) return undefined;
+  if (type === "array" && /空数组|empty array|\[\s*\]/i.test(reason)) return [];
+  if (key) {
+    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const keyed = reason.match(new RegExp(`${escaped}\\s*=\\s*(-?\\d+(?:\\.\\d+)?|"[^"]+"|'[^']+'|[A-Za-z0-9._-]+)`));
+    if (keyed) return coerceWireValue(type, keyed[1]);
+  }
+  const fixedNum = reason.match(/固定为\s*(-?\d+)/);
+  if (fixedNum && (type === "number" || type === "integer" || !type)) return Number(fixedNum[1]);
+  return undefined;
+}
+
+export function resolveSystemDefault(param) {
+  if (!param || typeof param !== "object") return { has: false };
+  if (Object.prototype.hasOwnProperty.call(param, "default_value") && param.default_value !== undefined) {
+    return { has: true, value: param.default_value };
+  }
+  for (const key of ["value", "constant_value", "const"]) {
+    if (param[key] !== undefined && param[key] !== "") return { has: true, value: param[key] };
+  }
+  if (String(param.source_kind || "") === "constant") {
+    const fromReason = valueFromCapabilityReason(param);
+    if (fromReason !== undefined) return { has: true, value: fromReason };
+    if (param.type === "array") return { has: true, value: [] };
+  }
+  return { has: false };
+}
+
 export function systemParams(cap, steps = []) {
   const callerKeys = new Set(callerParams(cap, steps).map((item) => item.id));
   return executeRef(cap, steps).params.filter((item) => isSystemParam(item) && !callerKeys.has(String(item.key))).map((item) => {
@@ -144,9 +201,8 @@ export function systemParams(cap, steps = []) {
       source_kind: item.source_kind,
       required: Boolean(item.required),
     };
-    if (Object.prototype.hasOwnProperty.call(item, "default_value")) {
-      out.default_value = item.default_value;
-    }
+    const resolved = resolveSystemDefault(item);
+    if (resolved.has) out.default_value = resolved.value;
     return out;
   });
 }
@@ -247,7 +303,11 @@ function howToFill(field) {
   if (field.enums.length) return `按合同枚举选 id：${enumText(field)}`;
   if (field.source_kind === "selected_record_identity") return "填本对话已确认的选中记录 id；不要编造";
   if (field.source_kind === "previous_response") return "用本对话上一步已确认结果里的同名字段";
-  if (field.type === "date") return "按 yyyy-MM-dd 向用户收集真实日期";
+  if (field.type === "date") {
+    return field.page_default === "today"
+      ? "按 yyyy-MM-dd 填写；页面日期控件默认当日，可改"
+      : "按 yyyy-MM-dd 向用户收集真实周期";
+  }
   if (field.type === "array") {
     const cols = Object.entries(field.itemProperties).map(([key, item]) => `\`${key}\` ${item.title || key}`);
     const sections = Object.keys(field.sections);
@@ -279,7 +339,9 @@ function allowedDefaultText(field) {
     parts.push("可用本对话上一步已确认结果中的同名字段");
   }
   if (field.type === "date") {
-    parts.push("日期格式 yyyy-MM-dd，不能编造今天");
+    parts.push(field.page_default === "today"
+      ? "页面日期控件默认当日，可改；格式 yyyy-MM-dd"
+      : "日期格式 yyyy-MM-dd，必须向用户收集真实周期");
   }
   if (field.type === "array") {
     const cols = Object.entries(field.itemProperties).map(([key, item]) => item.title || key);
@@ -289,6 +351,7 @@ function allowedDefaultText(field) {
     parts.push("行内容必须向用户收集");
   }
   const usable = Object.prototype.hasOwnProperty.call(field, "default")
+    || field.page_default === "today"
     || field.enums.length
     || field.dataSource
     || field.source_kind === "selected_record_identity"
@@ -304,6 +367,53 @@ function allowedDefaultText(field) {
 
 function fieldFillRow(field) {
   return `| \`${field.id}\` | ${field.title} | ${field.required ? "是" : "否"} | ${fieldControl(field)} | ${howToFill(field)} | ${allowedDefaultText(field)} |`;
+}
+
+function askInputType(field) {
+  const control = fieldControl(field);
+  return control === "number" ? "text" : control;
+}
+
+function askQuestion(field) {
+  const parts = [`${field.title}。${howToFill(field)}`];
+  if (field.required) parts.push("必填，填真实内容，不要用占位句");
+  else parts.push("可选；没有就留空，不要填占位句");
+  if (field.page_default === "today") parts.push("调用时把 today 换成当天 yyyy-MM-dd，用户可改");
+  if (field.type === "array") parts.push("保持 table，不要改成自由文本");
+  return parts.join("。");
+}
+
+export function fieldAskSpec(field) {
+  const spec = {
+    id: field.id,
+    question: askQuestion(field),
+    inputType: askInputType(field),
+    required: field.required,
+  };
+  if (field.enums.length) spec.options = field.enums.map(enumOption);
+  if (field.dataSource) spec.dataSource = field.dataSource;
+  if (field.type === "date") spec.dateFormat = "yyyy-MM-dd";
+  if (Object.prototype.hasOwnProperty.call(field, "default")) spec.default = field.default;
+  else if (field.page_default === "today") spec.default = "today";
+  if (field.type === "array") {
+    const columns = Object.entries(field.itemProperties).map(([key, item]) => ({
+      id: key,
+      label: item.title || key,
+      ...(item.type ? { type: String(item.type) } : {}),
+    }));
+    spec.columns = columns;
+    if (Object.keys(field.sections).length) {
+      spec.sections = Object.entries(field.sections).map(([title]) => ({ title, columns }));
+    }
+  }
+  return spec;
+}
+
+export function frozenAskForm(cap) {
+  return {
+    title: cap.name || cap.capability_id,
+    questions: (cap.caller_fields || []).map(fieldAskSpec),
+  };
 }
 
 function nestedFillRows(field) {
@@ -326,7 +436,8 @@ function systemFillText(param) {
   if (Object.prototype.hasOwnProperty.call(param, "default_value")) {
     return `合同值 ${JSON.stringify(param.default_value)}；不要向用户要`;
   }
-  if (param.source_kind === "constant") return "合同常量；不要向用户要";
+  if (param.source_kind === "constant") return "合同常量；必须带 default_value，由 runtime 自动填";
+  if (String(param.key) === "createTime") return "运行时生成当前时间；不要向用户要";
   return `${param.source_kind || "system"}；不要向用户要`;
 }
 
@@ -349,26 +460,7 @@ export function renderInputForms(contract) {
     lines.push("");
     for (const field of cap.caller_fields) {
       lines.push(`### ${field.title}（\`${field.id}\`）`, "");
-      const spec = {
-        id: field.id,
-        question: field.title,
-        inputType: fieldControl(field),
-        required: field.required,
-      };
-      if (field.enums.length) spec.options = field.enums.map(enumOption);
-      if (field.dataSource) spec.dataSource = field.dataSource;
-      if (field.type === "date") spec.dateFormat = "yyyy-MM-dd";
-      if (Object.prototype.hasOwnProperty.call(field, "default")) spec.default = field.default;
-      if (field.type === "array") {
-        const columns = Object.entries(field.itemProperties).map(([key, item]) => ({
-          id: key,
-          label: item.title || key,
-        }));
-        spec.columns = columns;
-        if (Object.keys(field.sections).length) {
-          spec.sections = Object.entries(field.sections).map(([title]) => ({ title, columns }));
-        }
-      }
+      const spec = fieldAskSpec(field);
       lines.push(`可用默认值：${allowedDefaultText(field)}`, "");
       lines.push("```json", JSON.stringify(spec, null, 2), "```", "");
       if (field.type === "array" && Object.keys(field.sections).length) {
@@ -459,10 +551,27 @@ export function renderSkillMd(contract) {
     "",
     "## 立刻办理",
     "",
-    "读完本文件后按「选择工作流」选路线，立刻按该能力全部 `caller_fields` 向用户收集。",
-    "禁止 ls，禁止先读 `references/`，禁止先翻 `CONTRACT.json`，禁止先跑脚本探路。",
-    "每个字段怎么填、哪些默认能用，以本文件「执行协议」表格为准。能力 `input_schema` 和调用方 params 一个都不能漏。",
+    "读完后立刻按选中路线，用下面「冻结提问」JSON 调用 `ask_user_question` 一次问完整表单。不要先 ls、不要先读 references、不要先跑脚本探路。",
+    "用户说法对上某能力 name / intent（填写、新增、提交等同义）走该原子路线，对不上走 default。不要为某个业务口令写死 capability_id。",
+    "一次一张完整表单，不要拆成多轮问卷，不要把 table 改成自由文本。",
+    "日期 default 为 `today` 时，调用前换成当天 yyyy-MM-dd，这是页面日期控件的默认，用户可改。",
+    "没有 default 的正文不要编「请填写」「暂无」「请审批」。用户交回这类占位句视为未填，按同一张表再问。",
+    "系统字段由 `scripts/runtime.py` 按合同自动填，不要向用户要，不要让用户去补合同缺省。",
     "",
+    "## 冻结提问",
+    "",
+    "`default` 路线按默认链依次使用各能力自己的 JSON；原子路线只用该能力这一份。原样复制，不要自编表单。",
+    "",
+  ];
+  for (const cap of contract.capabilities) {
+    lines.push(`### \`${cap.capability_id}\``, "");
+    if ((cap.caller_fields || []).length) {
+      lines.push("```json", JSON.stringify(frozenAskForm(cap), null, 2), "```", "");
+    } else {
+      lines.push("（无调用方字段，本能力不用提问。）", "");
+    }
+  }
+  lines.push(
     "## 默认值规则",
     "",
     "只允许下面这些默认值，其它一律不准用：",
@@ -472,11 +581,12 @@ export function renderSkillMd(contract) {
     "3. 枚举字段：只能用合同列出的 id",
     "4. 动态字段：只能用本次 `python3 scripts/flow.py --list-options <capability_id> <field>` 返回并被用户选中的 id",
     "",
-    "没有可用默认值的字段必须向用户收集真实内容。禁止编造「无」「示例」「今天」「请审批」。",
+    "没有可用默认值的字段必须向用户收集真实内容。禁止编造「无」「示例」「请审批」。日期页面默认当日不算编造。",
+    "系统常量必须带合同值，由 runtime 自动填。",
     "",
     "## 适用场景",
     "",
-  ];
+  );
   if (names.length) {
     for (const cap of contract.capabilities) {
       lines.push(`- ${cap.name || cap.capability_id}${cap.intent ? `：${cap.intent}` : ""}`);
@@ -544,7 +654,7 @@ export function renderSkillMd(contract) {
       lines.push("- （无调用方字段）");
     }
     if (cap.system_params.length) {
-      lines.push("", "系统字段（不要向用户要，运行时按能力合同填充）:", "");
+      lines.push("", "系统字段（不要向用户要，runtime 按能力自动填）:", "");
       lines.push("| 字段 | 来源 | 可用默认值 |", "|---|---|---|");
       for (const param of cap.system_params) {
         lines.push(`| \`${param.key}\` | ${param.source_kind || "system"} | ${systemFillText(param)} |`);
@@ -618,21 +728,26 @@ export function materializePackageTexts(draft) {
 
 export function handbookIsFaithful(text, contract) {
   if (!text) return false;
-  for (const section of ["立刻办理", "选择工作流", "执行协议", "按需读取资源", "鉴权"]) {
+  for (const section of ["立刻办理", "冻结提问", "选择工作流", "执行协议", "按需读取资源", "鉴权"]) {
     if (!text.includes(section)) return false;
   }
   if (!text.includes("可用默认值")) return false;
+  if (!text.includes("冻结提问") || !text.includes("ask_user_question")) return false;
   if (/字段以 references\/CONTRACT|先阅读全部 references/.test(text)) return false;
   for (const cap of contract.capabilities || []) {
     if (!text.includes(cap.capability_id)) return false;
     for (const field of cap.caller_fields || []) {
       if (!text.includes(`\`${field.id}\``)) return false;
+      if (!text.includes(`"id": "${field.id}"`) && !text.includes(`"id":"${field.id}"`)) return false;
       for (const key of Object.keys(field.itemProperties || {})) {
         if (!text.includes(`${field.id}.${key}`) && !text.includes(`\`${key}\``)) return false;
       }
     }
     for (const param of cap.system_params || []) {
       if (param.key && !text.includes(String(param.key))) return false;
+      if (Object.prototype.hasOwnProperty.call(param, "default_value")) {
+        if (!text.includes(`合同值 ${JSON.stringify(param.default_value)}`)) return false;
+      }
     }
     for (const key of schemaPropertyKeys(cap)) {
       if (!text.includes(key)) return false;
@@ -689,6 +804,16 @@ export function contractFidelityIssues(packageContract, sourceDraft) {
     const exec = executeRef(cap, sourceDraft.steps);
     if (exec.path && String(got.execute?.path || "") !== exec.path) {
       issues.push(`${id} 执行路径不一致`);
+    }
+    const expectedSys = systemParams(cap, sourceDraft.steps);
+    const seenSys = new Map(asList(got.system_params).map((item) => [item.key, item]));
+    for (const param of expectedSys) {
+      const gotParam = seenSys.get(param.key);
+      if (!gotParam) issues.push(`${id} 缺少系统字段 ${param.key}`);
+      else if (Object.prototype.hasOwnProperty.call(param, "default_value")
+        && !Object.prototype.hasOwnProperty.call(gotParam, "default_value")) {
+        issues.push(`${id} 系统常量 ${param.key} 缺少 default_value`);
+      }
     }
   }
   return issues;

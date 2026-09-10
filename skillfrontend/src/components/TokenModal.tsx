@@ -33,12 +33,21 @@ export default function TokenModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, subsystem]);
 
+  function stripBearerPrefix(value: string) {
+    let text = value.trim();
+    while (/^bearer\s+/i.test(text)) {
+      text = text.replace(/^bearer\s+/i, "").trim();
+    }
+    return text;
+  }
+
   async function save() {
-    if (!token.trim()) { message.error("粘贴新 token 再保存"); return; }
+    const pasted = stripBearerPrefix(token);
+    if (!pasted) { message.error("粘贴新 token 再保存"); return; }
     setSaving(true);
     try {
       const saved = await saveRuntimeToken({
-        tenant, subsystem, token: token.trim(),
+        tenant, subsystem, token: pasted,
         header_name: headerName.trim() || "Authorization",
         token_prefix: prefix,   // 允许空前缀(有些系统直接放裸 token)
         out_dir: (outDir || rememberedExportDir()).trim(),
@@ -101,7 +110,7 @@ export default function TokenModal({
       <Input.TextArea
         value={token}
         onChange={(e) => setToken(e.target.value)}
-        placeholder="粘贴新 token(只填 token 本身,如 4d6f9993...;系统会按下面的头名+前缀拼好)"
+        placeholder="粘贴新 token（只填 token 本身，如 4d6f9993...；若误带 Bearer 会自动去掉，避免写成 Bearer Bearer）"
         autoSize={{ minRows: 2, maxRows: 4 }}
         style={{ marginBottom: 8, fontFamily: "monospace" }}
       />

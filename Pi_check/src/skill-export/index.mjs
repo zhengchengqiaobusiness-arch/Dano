@@ -40,4 +40,5 @@ export {
   contractFidelityIssues,
   handbookIsFaithful,
   chooseHandbook,
+  resolveSystemDefault,
 } from "./contract-materialize.mjs";

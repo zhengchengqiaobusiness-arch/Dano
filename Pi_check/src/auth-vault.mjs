@@ -26,7 +26,7 @@ export function usableAuthHeaders(raw) {
     const name = canonicalHeaderName(key);
     const text = String(value ?? "").trim();
     if (!name || isSealedHeaderValue(text)) continue;
-    headers[name] = text;
+    headers[name] = /^authorization$/i.test(name) ? asAuthorization(text) || text : text;
   }
   return headers;
 }
@@ -41,10 +41,28 @@ export function canonicalHeaderName(name) {
 }
 
 export function asAuthorization(value) {
-  const text = String(value ?? "").trim();
+  let text = String(value ?? "").trim();
   if (!text || isSealedHeaderValue(text)) return "";
-  if (/^bearer\s+/i.test(text)) return `Bearer ${text.replace(/^bearer\s+/i, "").trim()}`;
-  return `Bearer ${text}`;
+  while (/^bearer\s+/i.test(text)) {
+    text = text.replace(/^bearer\s+/i, "").trim();
+  }
+  return text ? `Bearer ${text}` : "";
+}
+
+export function composeAuthHeader(headerName, prefix, token) {
+  const name = canonicalHeaderName(headerName) || String(headerName || "Authorization");
+  let raw = String(token ?? "").trim();
+  if (!raw) return "";
+  if (/^authorization$/i.test(name)) {
+    while (/^bearer\s+/i.test(raw)) {
+      raw = raw.replace(/^bearer\s+/i, "").trim();
+    }
+    if (!String(prefix ?? "Bearer ").trim()) return raw;
+    return asAuthorization(raw);
+  }
+  const pref = String(prefix ?? "");
+  if (pref && raw.toLowerCase().startsWith(pref.trim().toLowerCase())) return raw;
+  return `${pref}${raw}`;
 }
 
 export function unwrapStorageValue(raw) {
@@ -97,7 +115,7 @@ export function unsealHeaders(raw, vault) {
       continue;
     }
     if (isSealedHeaderValue(text)) continue;
-    headers[name] = text;
+    headers[name] = /^authorization$/i.test(name) ? asAuthorization(text) || text : text;
   }
   return headers;
 }

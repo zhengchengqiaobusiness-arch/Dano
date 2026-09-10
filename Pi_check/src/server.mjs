@@ -33,6 +33,7 @@ import {
   readExportDirectory,
   writeExportDirectory,
 } from "./skill-export/index.mjs";
+import { composeAuthHeader } from "./auth-vault.mjs";
 
 assertNeverStartLegacy();
 
@@ -306,7 +307,8 @@ const server = createServer(async (req, res) => {
       const body = await readBody(req);
       const headers = { ...(body.headers || {}) };
       if (!Object.keys(headers).length && body.token) {
-        headers[String(body.header_name || "Authorization")] = `${body.token_prefix ?? "Bearer "}${body.token}`;
+        const headerName = String(body.header_name || "Authorization");
+        headers[headerName] = composeAuthHeader(headerName, body.token_prefix ?? "Bearer ", body.token);
       }
       const rec = await writeTokenRecord(body.tenant || "", body.subsystem || "", headers, { source: "manual" });
       const catalog = await listExportedSkills(files);

@@ -14,6 +14,7 @@ export interface SkillManifest {
   verification_basis?: string;
   recording_mode?: string;
   created_at?: string;
+  updated_at?: string;
   lifecycle_state?: string;
   frozen?: boolean;
   recording_id?: string;

@@ -37,11 +37,10 @@
 
 每次模型响应最多原生调用一次 `ask_user_question`。需要多个相关答案时，必须
 使用一个 `title + questions[]` 分组表单。`default` 只允许来自合同已给出的
-`default` / `default_value`，或当前对话里用户已经确认的值。合同
-`caller_fields` 没有默认值时，不要编造「无」「示例」「今天」等值，必须向
+`default` / `default_value`、当前对话里用户已经确认的值，或写操作日期控件的页面默认 `today`（调用前换成当天 yyyy-MM-dd）。合同
+`caller_fields` 没有默认值时，不要编造「无」「示例」「请填写」「请审批」，必须向
 用户收集正确内容后再执行。成品 `SKILL.md` 必须完全基于能力：列出该能力 `input_schema` 全部字段和
-调用方 params，写清「怎么填」和「可用默认值」：合同 `default`、用户已确认值、合同枚举
-id、本次 `--list-options` 选中的 id。没有这四类就写无可用默认值。禁止漏字段。
+调用方 params，写清「怎么填」和「可用默认值」。系统常量必须带实际合同值，由 runtime 自动填。禁止漏字段。
 `required` 只决定用户能否清空或省略答案。
 
 ## 三种调用形状
@@ -323,7 +322,7 @@ id、本次 `--list-options` 选中的 id。没有这四类就写无可用默认
         "default": { "$ref": "#/$defs/defaultValue" }
       },
       "allOf": [{ "$ref": "#/$defs/controlShape" }],
-      "required": ["id", "question", "default"]
+      "required": ["id", "question"]
     },
     "singleQuestion": {
       "type": "object",
@@ -356,7 +355,7 @@ id、本次 `--list-options` 选中的 id。没有这四类就写无可用默认
         "default": { "$ref": "#/$defs/defaultValue" }
       },
       "allOf": [{ "$ref": "#/$defs/controlShape" }],
-      "required": ["question", "default"]
+      "required": ["question"]
     },
     "groupedForm": {
       "type": "object",
@@ -1826,26 +1825,24 @@ E09 和 E10 均在同一 Assistant Turn 中已提交。
 
 需要用户补充字段时必须原生调用 `ask_user_question`，禁止在普通文本、Markdown 或 `<question>` 标签中模拟工具调用。
 
-- 同一能力的相关字段尽量合并为一次 `{title, questions[]}`。
-- 每个 question 必须包含唯一 `id`、业务化 `question`/label、正确 `inputType`、`required` 和非空 `default`。
+- 同一能力的相关字段必须合并为一次 `{title, questions[]}`，对上页面的一张完整表单，不要拆成多轮问卷。
+- 每个 question 必须包含唯一 `id`、业务化 `question`/label、正确 `inputType`、`required`。只有合同 default、用户已确认值或写操作日期的页面默认 `today` 时才写 `default`。
 - `id` 必须与 capability 的调用方字段名逐字一致。
-- 长文本使用 `textarea`；日期使用 `date` 和正确 `dateFormat`；枚举使用 `select`/`radio`；多选使用 `multiple: true`。
+- 长文本使用 `textarea`；日期使用 `date` 和正确 `dateFormat`；枚举使用 `select`/`radio`；多选使用 `multiple: true`；明细使用 `table`，不要收成自由文本。
 - 动态候选必须使用 `dataSource`，并完整声明 endpoint、method、params、resultPath、idField 和 labelField；用户看到 label，接口接收稳定 id 或合同声明的值。助手先运行 `python scripts/flow.py --list-options <capability_id> <field>`，不要让问句自己裸打选项接口。
-- 固定值、会话值、运行时生成值、计算值和上游响应不得向用户提问。
+- 固定值、会话值、运行时生成值、计算值和上游响应不得向用户提问。系统常量按合同值由 runtime 自动填。
 
 ## 4. 默认值
 
-生成到文档中的 default 只能描述运行时推荐规则，不能复制录制时用户填写的样本。
+生成到文档中的 default 只能来自能力合同，不能复制录制样本，也不能编业务占位句。
 
-真正调用 `ask_user_question` 前，执行者必须结合当前用户意图、当前日期、实时候选和字段合同生成合适的非空推荐值：
+- 合同已写出 `default` / `default_value`：原样使用。
+- 写操作日期控件：页面默认 `today`，调用前换成当天 `yyyy-MM-dd`，用户可改。查询类日期没有页面默认，必须向用户收集真实周期。
+- 枚举和动态选项：只用合同 id 或本次 `--list-options` 用户选中的 id。
+- 正文、备注、意见：没有合同 default 就不写 default，不要编「请填写」「暂无」「请审批」。
+- 系统常量：写入合同值，由 runtime 自动填，不要向用户要，不要因为缺 default_value 让用户修合同。
 
-- 文本和 textarea：从当前请求生成简洁、可编辑的业务内容。
-- 日期时间：从当前请求和当前时间推导，并转换到 `dateFormat`。
-- 枚举和动态选项：按当前语义选择有效候选的稳定 id；无证据时不猜内部值。
-- 数字：从当前语义提取，不得任意使用 0。
-- 数组和对象：生成满足 JSON schema 的合法 JSON，不得把字符串伪装成对象。
-
-规则占位符必须在工具调用前替换，不能原样显示给用户或传入业务接口。
+规则占位符 `today` 必须在工具调用前替换成真实日期。用户交回占位句视为未填，按同一张冻结表再问。
 
 ## 5. 类型转换与单字段纠错
 

@@ -1002,7 +1002,7 @@ export class LivePiSession {
       `1. read_generator_guides，读完返回的全部文件\n` +
       `2. read_export_contract，只认五块合同\n` +
       `3. read_skill_artifact("SKILL.md") 看运输层骨架；骨架不是成品\n` +
-      `4. 按本 Skill 与 doc/ 覆盖 SKILL.md：完全基于能力。每个能力 input_schema 全部字段 + 调用方 params 写成填写表，写清怎么填和可用默认值（只允许合同 default、用户已确认值、枚举 id、本次 --list-options 选中 id）。不准漏字段，禁止把能力字段改成系统后删掉，禁止编造\n` +
+      `4. 按本 Skill 与 doc/ 覆盖 SKILL.md：完全基于能力。每个能力必须有冻结提问 JSON。调用方字段写成一次完整表单。系统常量必须写出实际合同值，由 runtime 自动填。无合同 default 的正文不编占位句。写操作日期可用 today。不准漏字段，禁止把能力字段改成系统后删掉\n` +
       `5. project_contract_to_request + validate_skill_package\n` +
       `6. 校验通过立刻 submit_skill_export({ok:true})，不要反复隔离跑\n` +
       `失败带 issues 调用 submit_skill_export({ok:false, errors:[...]})，不要假装发布。`

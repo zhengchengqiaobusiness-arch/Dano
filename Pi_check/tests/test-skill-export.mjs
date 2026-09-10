@@ -13,11 +13,11 @@ import { readGeneratorGuides, REQUIRED_GUIDE_FILES } from "../src/skill-export/r
 import { validateSkillPackageDir } from "../src/skill-export/validator.mjs";
 import { createExportToolHost, describeExportPiTools, describePiTools } from "../src/pi-tools.mjs";
 import { packSkill4Artifacts } from "../src/skill-export/pack.mjs";
-import { consumerContract, renderSkillMd, handbookIsFaithful, chooseHandbook } from "../src/skill-export/contract-materialize.mjs";
+import { consumerContract, renderSkillMd, handbookIsFaithful, chooseHandbook, frozenAskForm } from "../src/skill-export/contract-materialize.mjs";
 import { extractAuthHeadersFromEvidence, resolveExportAuth } from "../src/skill-export/auth-resolve.mjs";
 import { writeTokenRecord, writebackExportedPackages, writeAuthLocalFile } from "../src/skill-export/token-store.mjs";
 import { hydrateAuthFromRecordings } from "../src/skill-export/start-export-session.mjs";
-import { writeAuthVault, vaultFilePath, usableAuthHeaders } from "../src/auth-vault.mjs";
+import { writeAuthVault, vaultFilePath, usableAuthHeaders, asAuthorization } from "../src/auth-vault.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -214,6 +214,9 @@ const HANDBOOK = `# 日报填报
 ## 立刻办理
 读完本文件立刻提问。禁止 ls。Skill4已核对手册。
 
+## 冻结提问
+第一次工具调用必须是 ask_user_question。
+
 ## 默认值规则
 可用默认值只允许合同 default、用户已确认值、枚举 id、本次 --list-options 选中 id。
 
@@ -240,6 +243,8 @@ function coveringSkill4Handbook(draft, extra = "") {
     "## 立刻办理",
     "读完立刻提问。",
     extra,
+    "## 冻结提问",
+    "第一次工具调用必须是 ask_user_question。",
     "## 默认值规则",
     "可用默认值只允许合同 default、用户已确认值、枚举 id、本次 --list-options 选中 id。",
     "## 选择工作流",
@@ -248,8 +253,16 @@ function coveringSkill4Handbook(draft, extra = "") {
   ];
   for (const cap of contract.capabilities) {
     lines.push(`- \`${cap.capability_id}\``);
+    if ((cap.caller_fields || []).length) {
+      lines.push("```json", JSON.stringify(frozenAskForm(cap), null, 2), "```");
+    }
     for (const field of cap.caller_fields || []) lines.push(`- \`${field.id}\``);
-    for (const param of cap.system_params || []) lines.push(`- \`${param.key}\``);
+    for (const param of cap.system_params || []) {
+      lines.push(`- \`${param.key}\``);
+      if (Object.prototype.hasOwnProperty.call(param, "default_value")) {
+        lines.push(`合同值 ${JSON.stringify(param.default_value)}`);
+      }
+    }
   }
   lines.push("## 按需读取资源", "默认不要读其它文件。", "## 鉴权", "先用 auth.local.json。");
   for (const item of contract.routes) lines.push(`路线 \`${item.route_id}\``);
@@ -536,6 +549,8 @@ test("sealed 不算有证，登录响应写出完整 token", async () => {
   assert.equal(headers.Authorization, "Bearer real-token-value-aaa");
   assert.equal(headers["tenant-id"], "1");
   assert.deepEqual(usableAuthHeaders({ authorization: "[sealed:auth_ref_abc]" }), {});
+  assert.equal(asAuthorization("Bearer Bearer abc"), "Bearer abc");
+  assert.equal(usableAuthHeaders({ Authorization: "Bearer Bearer xyz" }).Authorization, "Bearer xyz");
 
   const stored = await writeTokenRecord("acme", "oa", {
     authorization: "[sealed:auth_ref_abc]",
@@ -685,6 +700,8 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
   assert.equal(create.execute.path, "/admin-api/oa/work-report/submit");
   assert.ok(create.system_params.some((item) => item.key === "creator" && item.source_kind === "current_user"));
   assert.ok(create.system_params.some((item) => item.key === "processStatus" && item.default_value === -1));
+  assert.ok(create.system_params.some((item) => item.key === "reportType" && item.default_value === 1));
+  assert.ok(create.system_params.some((item) => item.key === "attachments" && Array.isArray(item.default_value) && item.default_value.length === 0));
 
   const root = await mkdtemp(path.join(os.tmpdir(), "dano-materialize-"));
   const files = new RecordingFiles(root);
@@ -709,7 +726,8 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
   assert.match(forms, /childrenField/);
   const handbook = await readFile(path.join(packed.export_path, "SKILL.md"), "utf8");
   assert.match(handbook, /立刻办理/);
-  assert.match(handbook, /禁止 ls/);
+  assert.match(handbook, /冻结提问/);
+  assert.match(handbook, /ask_user_question/);
   assert.match(handbook, /python3 scripts\/flow\.py/);
   assert.match(handbook, /cap_daily_report_create_submit/);
   assert.match(handbook, /startDate/);
@@ -722,14 +740,17 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
   assert.match(handbook, /approvalOpinion/);
   assert.match(handbook, /items\.content|`content`/);
   assert.match(handbook, /items\.progress|`progress`/);
+  assert.match(handbook, /合同值 1/);
+  assert.match(handbook, /合同值 \[\]/);
   assert.match(forms, /可用默认值/);
   assert.doesNotMatch(handbook, /字段以 references\/CONTRACT/);
   assert.doesNotMatch(handbook, /不要先查/);
+  assert.doesNotMatch(handbook, /请填写今日工作总结/);
   const askForm = renderSkillMd(contract);
   assert.match(askForm, /`todayContent`/);
-  assert.match(askForm, /无可用默认值|必须向用户收集/);
-  assert.doesNotMatch(askForm, /"id": "todayContent"/);
-  assert.doesNotMatch(askForm, /ask_user_question/);
+  assert.match(askForm, /"id": "todayContent"/);
+  assert.match(askForm, /ask_user_question/);
+  assert.match(askForm, /无可用默认值|必须向用户收集|页面日期控件默认当日/);
   const help = await new Promise((resolve) => {
     const child = spawn("python", [path.join(packed.export_path, "scripts", "flow.py"), "--help"], {
       cwd: packed.export_path,
@@ -828,7 +849,7 @@ test("目录快速导出不开 Skill 4、不校验，只写文件和 token", asy
   const dest = outcome.written[0];
   const skillMd = await readFile(path.join(dest, "SKILL.md"), "utf8");
   assert.match(skillMd, /立刻办理/);
-  assert.match(skillMd, /禁止 ls/);
+  assert.match(skillMd, /不要先 ls|禁止 ls/);
   const auth = JSON.parse(await readFile(path.join(dest, "config", "auth.local.json"), "utf8"));
   assert.equal(auth.headers.Authorization, "Bearer dump-token-value-12345");
   const rows = await listExportedSkills(files);
