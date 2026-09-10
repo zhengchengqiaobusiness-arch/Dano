@@ -1828,7 +1828,8 @@ E09 和 E10 均在同一 Assistant Turn 中已提交。
 - 同一能力的相关字段必须合并为一次 `{title, questions[]}`，对上页面的一张完整表单，不要拆成多轮问卷。
 - 每个 question 必须包含唯一 `id`、业务化 `question`/label、正确 `inputType`、`required`。只有合同 default、用户已确认值或写操作日期的页面默认 `today` 时才写 `default`。
 - `id` 必须与 capability 的调用方字段名逐字一致。
-- 长文本使用 `textarea`；日期使用 `date` 和正确 `dateFormat`；枚举使用 `select`/`radio`；多选使用 `multiple: true`；明细使用 `table`，不要收成自由文本。
+- 长文本使用 `textarea`；日期使用 `date` 和正确 `dateFormat`；枚举使用 `select`/`radio`；多选使用 `multiple: true`。
+- 明细在能力层仍是 table。冻结提问必须是当前宿主可执行的控件。Dano 宿主支持 `text` / `textarea` / `date` / `radio` / `checkbox` / `select` / `treeSelect`，没有 `table`。因此对象数组冻结为同一字段 id 的 `textarea`（每行 `分区标题|||列值` 或 JSON 数组），由 runtime 组装回数组。禁止在冻结提问写 `inputType: table`，禁止改字段 id，禁止拆成多轮问卷。
 - 动态候选必须使用 `dataSource`，并完整声明 endpoint、method、params、resultPath、idField 和 labelField；用户看到 label，接口接收稳定 id 或合同声明的值。助手先运行 `python scripts/flow.py --list-options <capability_id> <field>`，不要让问句自己裸打选项接口。
 - 固定值、会话值、运行时生成值、计算值和上游响应不得向用户提问。系统常量按合同值由 runtime 自动填。
 

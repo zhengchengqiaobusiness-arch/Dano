@@ -25,6 +25,9 @@ function stripSamples(value) {
 }
 
 const SYSTEM_KINDS = new Set(["constant", "current_user", "unresolved"]);
+const HOST_ASK_INPUT_TYPES = new Set([
+  "text", "textarea", "date", "radio", "checkbox", "select", "treeSelect",
+]);
 
 export function capabilityId(cap) {
   return String(cap?.capability_id || cap?.id || "").trim();
@@ -314,6 +317,7 @@ function howToFill(field) {
     const bits = [];
     if (sections.length) bits.push(`分区 ${sections.join(" / ")}`);
     if (cols.length) bits.push(`每行列 ${cols.join(" / ")}`);
+    bits.push("提问用 textarea 收同一字段 id，行格式见冻结提问；runtime 组装回数组");
     bits.push("行内容必须向用户收集");
     return bits.join("；");
   }
@@ -371,16 +375,43 @@ function fieldFillRow(field) {
 
 function askInputType(field) {
   const control = fieldControl(field);
-  return control === "number" ? "text" : control;
+  if (control === "number") return "text";
+  if (control === "table") return "textarea";
+  if (/文本域|textarea/i.test(String(field.reason || ""))) return "textarea";
+  return HOST_ASK_INPUT_TYPES.has(control) ? control : "text";
+}
+
+function arrayLineRecipe(field) {
+  const cols = Object.keys(field.itemProperties || {});
+  const sections = Object.keys(field.sections || {});
+  if (sections.length && cols.length) {
+    return `每行一条：分区标题|||${cols.join("|||")}；分区只能是 ${sections.join(" / ")}`;
+  }
+  if (cols.length) return `每行一条：${cols.join("|||")}`;
+  return "每行一条，或提交 JSON 数组";
 }
 
 function askQuestion(field) {
-  const parts = [`${field.title}。${howToFill(field)}`];
-  if (field.required) parts.push("必填，填真实内容，不要用占位句");
-  else parts.push("可选；没有就留空，不要填占位句");
-  if (field.page_default === "today") parts.push("调用时把 today 换成当天 yyyy-MM-dd，用户可改");
-  if (field.type === "array") parts.push("保持 table，不要改成自由文本");
-  return parts.join("。");
+  const parts = [field.title];
+  if (field.type === "array") {
+    parts.push("能力层是分区表，宿主 ask_user_question 没有 table，本字段用 textarea 收同一 id");
+    parts.push(arrayLineRecipe(field));
+    parts.push("也可提交 JSON 数组。没有行则留空。不要改 id，不要拆多轮");
+  } else if (field.dataSource) {
+    parts.push("从本次 `--list-options` 返回的候选里选 id，不要编造");
+  } else if (field.enums.length) {
+    parts.push(`按合同枚举选 id：${enumText(field)}`);
+  } else if (field.type === "date") {
+    parts.push(field.page_default === "today"
+      ? "按 yyyy-MM-dd 填写；页面日期控件默认当日，可改"
+      : "按 yyyy-MM-dd 填写真实周期");
+  } else if (field.reason) {
+    parts.push(String(field.reason).replace(/。+$/, ""));
+  } else {
+    parts.push("向用户收集真实内容，禁止编造");
+  }
+  parts.push(field.required ? "必填，不要占位句" : "可选；没有就留空，不要占位句");
+  return `${parts.join("。")}。`;
 }
 
 export function fieldAskSpec(field) {
@@ -391,21 +422,9 @@ export function fieldAskSpec(field) {
     required: field.required,
   };
   if (field.enums.length) spec.options = field.enums.map(enumOption);
-  if (field.dataSource) spec.dataSource = field.dataSource;
   if (field.type === "date") spec.dateFormat = "yyyy-MM-dd";
   if (Object.prototype.hasOwnProperty.call(field, "default")) spec.default = field.default;
-  else if (field.page_default === "today") spec.default = "today";
-  if (field.type === "array") {
-    const columns = Object.entries(field.itemProperties).map(([key, item]) => ({
-      id: key,
-      label: item.title || key,
-      ...(item.type ? { type: String(item.type) } : {}),
-    }));
-    spec.columns = columns;
-    if (Object.keys(field.sections).length) {
-      spec.sections = Object.entries(field.sections).map(([title]) => ({ title, columns }));
-    }
-  }
+  if (spec.inputType === "textarea") spec.fieldAssist = true;
   return spec;
 }
 
@@ -461,6 +480,7 @@ export function renderInputForms(contract) {
     for (const field of cap.caller_fields) {
       lines.push(`### ${field.title}（\`${field.id}\`）`, "");
       const spec = fieldAskSpec(field);
+      if (field.dataSource) spec.dataSource = field.dataSource;
       lines.push(`可用默认值：${allowedDefaultText(field)}`, "");
       lines.push("```json", JSON.stringify(spec, null, 2), "```", "");
       if (field.type === "array" && Object.keys(field.sections).length) {
@@ -551,16 +571,18 @@ export function renderSkillMd(contract) {
     "",
     "## 立刻办理",
     "",
-    "读完后立刻按选中路线，用下面「冻结提问」JSON 调用 `ask_user_question` 一次问完整表单。不要先 ls、不要先读 references、不要先跑脚本探路。",
+    "读完立刻按选中路线办理。禁止 ls，禁止 cat，禁止先读 `references/`，禁止改 `inputType`，禁止增删字段，禁止自己补 `default`，禁止拆成多轮问卷。",
+    "该路线若有动态字段（执行协议写了 `--list-options`）：先且只跑 `cd <本 SKILL.md 所在目录> && python3 scripts/flow.py --list-options <capability_id> <field>`，把返回的 `options`（已展平的 id/label）写进该字段，再复制冻结 JSON 调用 `ask_user_question`。",
+    "不要把 dataSource 放进 ask_user_question。宿主会打聊天站点相对路径，拉不到业务树。INPUT_FORMS 里的 dataSource 只给脚本用。",
+    "没有动态字段时，第一次工具就是冻结提问。",
     "用户说法对上某能力 name / intent（填写、新增、提交等同义）走该原子路线，对不上走 default。不要为某个业务口令写死 capability_id。",
-    "一次一张完整表单，不要拆成多轮问卷，不要把 table 改成自由文本。",
-    "日期 default 为 `today` 时，调用前换成当天 yyyy-MM-dd，这是页面日期控件的默认，用户可改。",
-    "没有 default 的正文不要编「请填写」「暂无」「请审批」。用户交回这类占位句视为未填，按同一张表再问。",
+    "这份 JSON 已经按宿主控件投影。能力层的 table 在提问里是同一字段 id 的 textarea；答案由 runtime 组装回数组。",
+    "JSON 里没有 `default` 就不要加。不要编「请填写」「暂无」「请审批」。用户交回占位句视为未填，按同一张冻结表再问。",
     "系统字段由 `scripts/runtime.py` 按合同自动填，不要向用户要，不要让用户去补合同缺省。",
     "",
     "## 冻结提问",
     "",
-    "`default` 路线按默认链依次使用各能力自己的 JSON；原子路线只用该能力这一份。原样复制，不要自编表单。",
+    "`default` 路线按默认链依次提问并执行；原子路线只用该能力这一份。字段 id / inputType 原样复制；动态字段的 options 必须是本次 `--list-options` 返回值，不要自编表单，不要带 dataSource。",
     "",
   ];
   for (const cap of contract.capabilities) {
@@ -630,10 +652,11 @@ export function renderSkillMd(contract) {
     "只通过本包脚本调用，禁止助手自己拼 HTTP，禁止改 `scripts/runtime.py` / `scripts/flow.py` / `scripts/client.py`。",
     "",
     "```text",
-    "python3 scripts/flow.py --route <route_id> --input-json '{...}' --confirm",
-    "python3 scripts/flow.py --list-options <capability_id> <field>",
+    "cd <本 SKILL.md 所在目录> && python3 scripts/flow.py --route <route_id> --input-json '{...}' --confirm",
+    "cd <本 SKILL.md 所在目录> && python3 scripts/flow.py --list-options <capability_id> <field>",
     "```",
     "",
+    "工作目录不是本包。确认后立刻 `cd` 到本 SKILL.md 所在目录再跑脚本。禁止 ls / cat / 探路。",
     "没有 `python3` 再用 `python`。字段收齐并确认后再执行。",
     "",
   );
@@ -669,7 +692,7 @@ export function renderSkillMd(contract) {
     "## 成功、失败与停止",
     "",
     "- 任一步失败即停",
-    "- 没有本包凭证或 401 / 账号未登录 → 停问一次 token，用 `DANO_AUTH_HEADERS` 覆盖后再执行同一条命令；不要改文件，不要再问第二次",
+    "- 没有本包凭证或 401 / 账号未登录 → 停问一次 token。提问只用 `{\"questions\":[{\"id\":\"token\",\"question\":\"请粘贴新的访问令牌\",\"inputType\":\"text\",\"required\":true}]}`，不要加 title，不要自己补 default。拿到后用 `DANO_AUTH_HEADERS` 覆盖再跑同一条命令；不要改文件，不要再问第二次",
     "- 选项失败或空列表 → 停问",
     "",
     "## 按需读取资源",
@@ -681,7 +704,7 @@ export function renderSkillMd(contract) {
     "## 鉴权",
     "",
     "- 先用本包 `config/auth.local.json` 直接执行",
-    "- 过期时停问一次 token，然后：",
+    "- 过期时停问一次 token（只要 questions 数组，不要同时传 title 和 question），然后：",
     "",
     "```text",
     "DANO_AUTH_HEADERS='{\"Authorization\":\"Bearer <token>\"}' python3 scripts/flow.py --route <route_id> --input-json '{...}' --confirm",
@@ -733,6 +756,7 @@ export function handbookIsFaithful(text, contract) {
   }
   if (!text.includes("可用默认值")) return false;
   if (!text.includes("冻结提问") || !text.includes("ask_user_question")) return false;
+  if (/"inputType"\s*:\s*"table"/.test(text)) return false;
   if (/字段以 references\/CONTRACT|先阅读全部 references/.test(text)) return false;
   for (const cap of contract.capabilities || []) {
     if (!text.includes(cap.capability_id)) return false;
@@ -758,6 +782,8 @@ export function handbookIsFaithful(text, contract) {
   }
   if ((contract.capabilities || []).some((cap) => (cap.caller_fields || []).some((field) => field.dataSource))) {
     if (!text.includes("--list-options")) return false;
+    if (!text.includes("不要把 dataSource 放进 ask")) return false;
+    if (/"dataSource"\s*:/.test(text)) return false;
   }
   return true;
 }

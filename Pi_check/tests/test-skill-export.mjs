@@ -268,6 +268,7 @@ function coveringSkill4Handbook(draft, extra = "") {
   for (const item of contract.routes) lines.push(`路线 \`${item.route_id}\``);
   if (contract.capabilities.some((cap) => (cap.caller_fields || []).some((field) => field.dataSource))) {
     lines.push("python3 scripts/flow.py --list-options cap field");
+    lines.push("不要把 dataSource 放进 ask_user_question。先 --list-options 再提问。");
   }
   return `${lines.filter((line) => line !== "").join("\n")}\n`;
 }
@@ -746,11 +747,26 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
   assert.doesNotMatch(handbook, /字段以 references\/CONTRACT/);
   assert.doesNotMatch(handbook, /不要先查/);
   assert.doesNotMatch(handbook, /请填写今日工作总结/);
+  assert.doesNotMatch(handbook, /"inputType": "table"/);
+  assert.doesNotMatch(handbook, /"dataSource"\s*:/);
+  assert.match(handbook, /不要把 dataSource 放进 ask/);
+  const queryAsk = frozenAskForm(query);
+  assert.equal(queryAsk.questions.find((item) => item.id === "deptId").inputType, "treeSelect");
+  assert.equal(queryAsk.questions.find((item) => item.id === "deptId").dataSource, undefined);
   const askForm = renderSkillMd(contract);
   assert.match(askForm, /`todayContent`/);
   assert.match(askForm, /"id": "todayContent"/);
   assert.match(askForm, /ask_user_question/);
   assert.match(askForm, /无可用默认值|必须向用户收集|页面日期控件默认当日/);
+  assert.match(askForm, /"id": "items"/);
+  assert.match(askForm, /"inputType": "textarea"/);
+  assert.doesNotMatch(askForm, /"inputType": "table"/);
+  const createAsk = frozenAskForm(create);
+  assert.equal(createAsk.questions.find((item) => item.id === "items").inputType, "textarea");
+  assert.ok(!Object.prototype.hasOwnProperty.call(createAsk.questions.find((item) => item.id === "startDate"), "default"));
+  assert.ok(handbookIsFaithful(askForm, contract));
+  assert.ok(!handbookIsFaithful(`${askForm}\n{"inputType": "table"}\n`, contract));
+  assert.ok(!handbookIsFaithful(`${askForm}\n{"dataSource": {"type":"api"}}\n`, contract));
   const help = await new Promise((resolve) => {
     const child = spawn("python", [path.join(packed.export_path, "scripts", "flow.py"), "--help"], {
       cwd: packed.export_path,
@@ -779,6 +795,22 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
   assert.deepEqual(JSON.parse(flatten.stdout), [
     { id: 1, label: "总" },
     { id: 2, label: "子" },
+  ]);
+
+  const assembled = await new Promise((resolve) => {
+    const scriptsDir = path.join(packed.export_path, "scripts");
+    const code = `import sys, json; sys.path.insert(0, ${JSON.stringify(scriptsDir)}); import runtime; field = {"sections": {"已完成工作": "x", "工作计划": "y"}, "itemProperties": {"content": {"type": "string"}, "progress": {"type": "number"}}}; print(json.dumps(runtime._parse_caller_array(field, "已完成工作|||写日报|||80\\n工作计划|||明天评审"), ensure_ascii=False))`;
+    const child = spawn("python", ["-c", code], { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+  assert.equal(assembled.code, 0, assembled.stderr);
+  assert.deepEqual(JSON.parse(assembled.stdout), [
+    { content: "写日报", progress: 80, itemType: 1 },
+    { content: "明天评审", itemType: 2 },
   ]);
 });
 

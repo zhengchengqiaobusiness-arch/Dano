@@ -56,8 +56,8 @@ frontmatter 仅非空 `name` + `description`。不要写 `version`、`compatibil
 
 正文必须有：`立刻办理`、`冻结提问`、`适用场景`、`不适用场景`、`选择工作流`、`组合与交接规则`、`执行协议`、`成功、失败与停止`、`按需读取资源`、`鉴权`。
 
-- `立刻办理`：读完立刻用「冻结提问」JSON 一次问完整表单。不要先 ls、不要先读 `references/`、不要先跑脚本探路。系统字段由 runtime 按合同自动填，不要向用户要，不要让用户补合同缺省。
-- `冻结提问`：每个能力一份 `ask_user_question` JSON，从该能力 `caller_fields` 原样投影。一次一张完整表单，不要拆多轮，不要把 table 改成自由文本。无合同 default 的正文不写 `default`，不要编「请填写 / 暂无 / 请审批」。写操作日期可写 `today`，调用前换成当天 yyyy-MM-dd，这是页面日期控件默认。
+- `立刻办理`：读完立刻原样复制「冻结提问」JSON 一次问完整表单。不要先 ls、不要先读 `references/`、不要先跑脚本探路、不要改 `inputType`、不要自己补 `default`。系统字段由 runtime 按合同自动填，不要向用户要，不要让用户补合同缺省。
+- `冻结提问`：每个能力一份宿主可执行的 `ask_user_question` JSON，字段 id 与 `caller_fields` 一致。一次一张完整表单，不要拆多轮。Dano 宿主没有 `table`：对象数组在提问里投影为同一 id 的 `textarea`，由 runtime 组装回数组。禁止写 `inputType: table`。无合同 default 的字段不写 `default`，不要编「请填写 / 暂无 / 请审批」。写操作日期在问句里说明页面默认当日，不要把 `today` 写进 JSON default。
 - `description` 是路由触发：用合同里各能力的 `name` / `intent` 说明什么用户请求走哪条路线。用户意图对上某条能力就走该原子路线，对不上走 `default`。禁止为某个业务口令写死 `capability_id`。不要写「字段以 CONTRACT.json 为准」。
 - `适用场景` 不复读 description。
 - `选择工作流` 第一行 = 默认完整办理。禁止写「每次只执行一项」「不得自行串联」「一页面对应一个 Skill」。
@@ -67,7 +67,7 @@ frontmatter 仅非空 `name` + `description`。不要写 `version`、`compatibil
 - `按需读取资源` 写「默认不要读其它文件；只有提问失败或脚本报错才读 INPUT_FORMS」。禁止「先阅读全部 references」。
 - `鉴权`：先用本包 `auth.local.json` 执行。401 / 账号未登录停问一次 token，再用 `DANO_AUTH_HEADERS` 覆盖本地过期头后重跑同一条命令。不要改文件，不要再问第二次，不要写具体 token。
 
-调用方字段、控件、dataSource、路线以运输层物化结果为准。不要自己另写一份更瘦的表单，不要按某个页面特例改路线。动态字段先 `--list-options` 再提问，但 INPUT_FORMS 必须保留 dataSource。
+调用方字段、控件、dataSource、路线以运输层物化结果为准。不要自己另写一份更瘦的表单，不要按某个页面特例改路线。动态字段先 `--list-options` 再提问，把返回的 options 写进 ask；不要把 dataSource 放进 ask_user_question。INPUT_FORMS 必须保留 dataSource。
 
 消费者正文禁止出现：`本页面的实际操作流程`、`能力录制`、`录制结果`、`阶段1`–`阶段8`、`FlowSpec`、`fingerprint`、`x-dano`、`规划依据`、`一页面对应一个 Skill`、`原样来自`、`生成器`、`generator-guides`。
 

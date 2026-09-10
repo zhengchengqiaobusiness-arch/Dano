@@ -82,6 +82,79 @@ def _system_value(param, user):
     return None
 
 
+_PLACEHOLDERS = {"", "无", "暂无", "没有", "请填写", "请审批", "n/a", "none", "null"}
+
+
+def _is_placeholder(value):
+    return str(value or "").strip().lower() in _PLACEHOLDERS
+
+
+def _cell_value(spec, raw):
+    text = str(raw or "").strip()
+    if _is_placeholder(text):
+        return None
+    kind = str((spec or {}).get("type") or "")
+    if kind in ("number", "integer"):
+        try:
+            number = float(text)
+        except ValueError:
+            return text
+        return int(number) if kind == "integer" or number.is_integer() else number
+    return text
+
+
+def _rows_from_lines(field, text):
+    cols = list((field.get("itemProperties") or {}).keys()) or ["content"]
+    sections = list((field.get("sections") or {}).keys())
+    props = field.get("itemProperties") or {}
+    rows = []
+    for line in str(text or "").splitlines():
+        raw = line.strip()
+        if not raw or _is_placeholder(raw):
+            continue
+        parts = [part.strip() for part in raw.split("|||")]
+        row = {}
+        if sections and parts and parts[0] in sections:
+            row["section"] = parts[0]
+            parts = parts[1:]
+        for index, key in enumerate(cols):
+            if index >= len(parts):
+                break
+            value = _cell_value(props.get(key), parts[index])
+            if value is not None:
+                row[key] = value
+        if any(key != "section" and row.get(key) not in (None, "") for key in row):
+            rows.append(row)
+    return rows
+
+
+def _parse_caller_array(field, value):
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or _is_placeholder(text):
+            return None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            value = parsed
+        elif isinstance(parsed, dict):
+            value = [parsed]
+        else:
+            value = _rows_from_lines(field, text)
+    if not isinstance(value, list):
+        return value
+    cleaned = []
+    for row in value:
+        if not isinstance(row, dict):
+            continue
+        if _is_placeholder(row.get("content")):
+            continue
+        cleaned.append(row)
+    return _assemble_items(field, cleaned)
+
+
 def _assemble_items(field, value):
     sections = list((field.get("sections") or {}).keys())
     if not sections or not isinstance(value, list):
@@ -115,7 +188,11 @@ def build_request(cap, inputs, user):
         if value in (None, ""):
             continue
         if field.get("type") == "array":
-            value = _assemble_items(field, value)
+            value = _parse_caller_array(field, value)
+            if value in (None, "", []):
+                if field.get("required"):
+                    required.append(key)
+                continue
         slot, name = _payload_slot(field.get("path"), method)
         target = query if slot == "query" else body
         target[name or key] = value
