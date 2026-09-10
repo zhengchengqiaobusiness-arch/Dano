@@ -85,7 +85,10 @@ dynamic enumerations, dictionary decoding and todo query. Authentication now
 uses Dano rather than a hand-edited token. The original fixture contains only a
 token placeholder.
 
-Through the in-app Browser, log in to the target Dano deployment and ask it to
+Deploy the current implementation locally through the shipped Podman/Compose
+path, with isolated named runtime volumes and real OA client configuration.
+Configure the local HTTPS callback in both Dano and the OA client; no production
+deployment is required. Through the in-app Browser, log in and ask Dano to
 run the adapted Skill's `doctor`, then `query --page 1 --page-size 1`. Acceptance
 requires doctor exit 0, HTTP 200 and business code 0 for all four endpoints,
 plus valid query results (including a genuinely empty page). Record the actual
