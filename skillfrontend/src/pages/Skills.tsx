@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
-import { Table, Tag, Button, Space, Typography, message, Empty, Modal, Input, Alert, Popconfirm, Select, Pagination } from "antd";
+import { Table, Tag, Button, Space, Typography, message, Empty, Modal, Input, Alert, Popconfirm, Pagination } from "antd";
 import { useNavigate } from "react-router-dom";
 import { ReloadOutlined, ExportOutlined, DeleteOutlined, KeyOutlined, PauseCircleOutlined, CheckCircleOutlined } from "@ant-design/icons";
-import { listSkillsPage, exportAgentSkills, getExportDirectory, saveExportDirectory, deleteSkill, freezeSkill, resumeSkill, SkillManifest, SkillExportMode } from "../api/skills";
+import { listSkillsPage, exportAgentSkills, getExportDirectory, saveExportDirectory, deleteSkill, freezeSkill, resumeSkill, SkillManifest } from "../api/skills";
 import TokenModal from "../components/TokenModal";
 import { TENANT_NAME } from "../api/client";
 import { rememberExportDir, rememberedExportDir } from "../api/recording";
-import { observeSkillCatalogChanges, skillDisplayId } from "../api/skillCatalog";
+import { notifySkillCatalogChanged, observeSkillCatalogChanges, skillDisplayId } from "../api/skillCatalog";
 
 const RISK_COLOR: Record<string, string> = { L1: "default", L2: "default", L3: "orange", L4: "red", L5: "red" };
 const INTEG_LABEL: Record<string, string> = { workflow: "复合流程", api: "接口", page: "页面" };
@@ -49,7 +49,6 @@ export default function Skills() {
   const [loading, setLoading] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportDir, setExportDir] = useState("");
-  const [exportMode, setExportMode] = useState<SkillExportMode>("package");
   const [exporting, setExporting] = useState(false);
   const [tokenSub, setTokenSub] = useState<string | null>(null);
   const [page, setPage] = useState(1);
@@ -91,15 +90,21 @@ export default function Skills() {
     if (outDir) await persistExportDir(outDir);
     setExporting(true);
     try {
-      const r = await exportAgentSkills(outDir, exportMode);
+      const r = await exportAgentSkills(outDir, tenant);
       if (r.out_dir) {
         rememberExportDir(r.out_dir);
         setExportDir(r.out_dir);
       }
-      message.success(`已导出 ${r.count} 个 skill 到 ${r.out_dir}`);
+      notifySkillCatalogChanged();
+      if (r.errors?.length) {
+        message.warning(`已导出 ${r.count} 个 skill，另有 ${r.errors.length} 条未完成`);
+      } else {
+        message.success(`已按最新能力导出 ${r.count} 个 skill 到 ${r.out_dir}`);
+      }
       setExportOpen(false);
+      void load(page, pageSize);
     } catch (e: any) {
-      message.error("导出失败:" + (e?.response?.data?.detail || e.message));
+      message.error("导出失败:" + (e?.response?.data?.detail || e?.response?.data?.errors?.[0] || e.message));
     } finally {
       setExporting(false);
     }
@@ -108,7 +113,7 @@ export default function Skills() {
   async function doDelete(skill: SkillManifest) {
     try {
       const r = await deleteSkill(skill.name);
-      message.success(`已删除 ${skillDisplayId(skill)}(${r.deleted} 条资产,清理 ${r.removed_folders?.length || 0} 个文件夹)`);
+      message.success(`已删除 ${skillDisplayId(skill)}`);
       const nextPage = data.length <= 1 && page > 1 ? page - 1 : page;
       if (nextPage !== page) setPage(nextPage);
       else void load(page, pageSize);
@@ -146,7 +151,7 @@ export default function Skills() {
       setPage(Number(result.page) || nextPage);
       setPageSize(Number(result.page_size) || nextSize);
     } catch (e: any) {
-      message.error("加载失败:" + (e?.response?.data?.detail || e.message));
+      message.error("加载失败:" + (e?.response?.data?.detail || e?.response?.data?.errors?.[0] || e.message));
     } finally {
       setLoading(false);
     }
@@ -179,8 +184,8 @@ export default function Skills() {
           <Empty
             description={(
               <Space direction="vertical" size={8}>
-                <span>本租户暂无已发布 Skill,先去接入系统生成</span>
-                <Button type="link" onClick={() => nav("/onboard")}>去接入系统(API)</Button>
+                <span>本租户暂无已导出 Skill，先去页面录制并产出 Skill</span>
+                <Button type="link" onClick={() => nav("/recording")}>去录制页面</Button>
               </Space>
             )}
           />
@@ -224,12 +229,12 @@ export default function Skills() {
                     <Button size="small" icon={<KeyOutlined />} onClick={() => setTokenSub(r.subsystem)}>凭证</Button>
                   )}
                   {!r.frozen && (
-                    <Popconfirm title={`冻结 ${skillDisplayId(r)}?`} description="只清理已导出的文件夹,保留数据库资产;冻结后不会再导出。" okText="冻结" cancelText="取消" onConfirm={() => doFreeze(r)}>
+                    <Popconfirm title={`冻结 ${skillDisplayId(r)}?`} description="只清理已导出的文件夹，保留目录记录；冻结后目录重导会跳过。" okText="冻结" cancelText="取消" onConfirm={() => doFreeze(r)}>
                       <Button size="small" icon={<PauseCircleOutlined />}>冻结</Button>
                     </Popconfirm>
                   )}
                   {r.frozen && (
-                    <Popconfirm title={`恢复 ${skillDisplayId(r)}?`} description="恢复后会在下次导出时重新写出文件夹。" okText="恢复" cancelText="取消" onConfirm={() => doResume(r)}>
+                    <Popconfirm title={`恢复 ${skillDisplayId(r)}?`} description="恢复后下次导出会按最新 Skill 4 重写。" okText="恢复" cancelText="取消" onConfirm={() => doResume(r)}>
                       <Button size="small" icon={<CheckCircleOutlined />}>恢复</Button>
                     </Popconfirm>
                   )}
@@ -273,8 +278,8 @@ export default function Skills() {
         confirmLoading={exporting}
       >
         <Alert
-          type="warning" showIcon style={{ marginBottom: 12 }}
-          message="由 Dano 后端进程写文件,目录必须在「后端所在机器」上。Windows 本地后端写不进 Linux 路径。"
+          type="info" showIcon style={{ marginBottom: 12 }}
+          message="与录制页「产出 Skill」同一套逻辑：按最新能力重开 Skill 4，覆盖同一条目录记录。"
         />
         <Typography.Paragraph type="secondary" style={{ marginBottom: 6 }}>目标目录:</Typography.Paragraph>
         <Input
@@ -284,20 +289,6 @@ export default function Skills() {
           placeholder="默认读取后端导出目录配置"
           onPressEnter={doExport}
         />
-        <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 6 }}>导出模式:</Typography.Paragraph>
-        <Select<SkillExportMode>
-          value={exportMode}
-          onChange={setExportMode}
-          style={{ width: "100%" }}
-          options={[
-            { value: "both", label: "代理包 + 自包含包" },
-            { value: "package", label: "仅自包含包（直连业务 API）" },
-            { value: "proxy", label: "仅代理包（调用 Dano）" },
-          ]}
-        />
-        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 10, marginBottom: 0 }}>
-          自包含包按 DANO_TENANT_KEYS_JSON 向后台取最新令牌；DANO_AUTH_HEADERS 仅作显式覆盖。代理包使用 DANO_URL 与租户密钥。
-        </Typography.Paragraph>
       </Modal>
     </div>
   );

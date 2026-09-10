@@ -4,6 +4,10 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { RecordingFiles, parseLeadingJson } from "../src/fs-store.mjs";
 import { ResultsCatalog } from "../src/results-catalog.mjs";
 import {
   displayTitleFromResult,
@@ -44,4 +48,38 @@ test("目录写入时不用证据条数冒充请求数", async () => {
   assert.equal(summary.title, "创建请假");
   assert.equal(summary.request_count, 1);
   assert.notEqual(summary.request_count, 955);
+  assert.equal(summary.recording_id, "rec_demo");
+});
+
+test("已交能力从磁盘列出，导出进程也能打开", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dano-disk-results-"));
+  const files = new RecordingFiles(root);
+  const recordingId = "rec_disk_list";
+  await files.writeDraft(recordingId, {
+    recording_id: recordingId,
+    saved_at: "2026-09-10T10:00:00.000Z",
+    title: "招聘计划",
+    draft: {
+      title: "招聘计划",
+      capabilities: [
+        { capability_id: "search", name: "查询", title: "查询招聘计划" },
+        { capability_id: "create", name: "新增", title: "新增招聘计划" },
+      ],
+      steps: [{ step_id: "s1", method: "GET", path: "/api/list" }],
+    },
+  });
+  const catalog = new ResultsCatalog(files);
+  const rows = await catalog.listPublished("oa");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].id, recordingId);
+  assert.equal(rows[0].recording_id, recordingId);
+  assert.equal(rows[0].capability_count, 2);
+  const detail = await catalog.detailOf(recordingId);
+  assert.equal(detail.draft.capabilities.length, 2);
+  assert.equal(detail.recording_id, recordingId);
+});
+
+test("草稿多段 JSON 只读第一段", () => {
+  const parsed = parseLeadingJson("{\"title\":\"招聘计划\",\"capabilities\":[1]}\n{}");
+  assert.equal(parsed.title, "招聘计划");
 });

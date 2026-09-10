@@ -430,8 +430,10 @@ def recording_result_summary(draft: AssetDraft) -> dict[str, Any]:
     created = draft.created_at.isoformat() if draft.created_at else str(body.get("created_at") or "")
     checkpoint = body.get("stage_seven") if isinstance(body.get("stage_seven"), dict) else {}
     spec = body.get("flow_spec") if isinstance(body.get("flow_spec"), dict) else body
+    spec_meta = spec.get("meta") if isinstance(spec.get("meta"), dict) else {}
     return {
         "id": str(draft.asset_draft_id),
+        "recording_id": str(body.get("recording_id") or spec_meta.get("recording_id") or ""),
         "action": str(body.get("action") or draft.asset_key.removeprefix(RECORDING_RESULT_KEY_PREFIX)),
         "title": recording_display_title(
             user_title=str(body.get("title") or ""),

@@ -1,17 +1,38 @@
 /**
- * Skill 4 运输：写产物、校验、隔离运行。不认业务。
+ * Skill 4 运输：写产物、隔离运行。校验在 skill-export/validator.mjs。不认业务，不引用 back。
  */
 
-import { mkdir, writeFile, cp, rm } from "node:fs/promises";
+import { mkdir, writeFile, cp, rm, readFile } from "node:fs/promises";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { validateSkillPackageDir } from "./skill-export/validator.mjs";
 
-const BACK_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "back");
+const ARTIFACT_TOP = new Set(["SKILL.md", "config", "scripts", "references"]);
+const FROZEN_RELS = new Set([
+  "scripts/client.py",
+  "scripts/wire_format.py",
+  "scripts/runtime.py",
+  "scripts/flow.py",
+  "scripts/format_list.py",
+  "references/CONTRACT.json",
+  "references/INPUT_FORMS.md",
+  "references/CAPABILITIES.md",
+  "references/OPTIONS.md",
+  "config/auth.local.json",
+  "config/runtime.json",
+]);
 
 function safeRel(rel) {
   const text = String(rel || "").replace(/\\/g, "/").replace(/^\/+/, "");
   if (!text || text.includes("..")) throw new Error("非法产物路径");
+  const top = text.split("/")[0];
+  if (!ARTIFACT_TOP.has(top)) {
+    throw new Error(`只写包根约定路径，禁止另开子包: ${text}`);
+  }
+  if (/\/SKILL\.md$/i.test(text)) {
+    throw new Error(`禁止在子目录再写 SKILL.md: ${text}`);
+  }
   return text;
 }
 
@@ -21,17 +42,27 @@ export function artifactRoot(files, recordingId) {
 
 export async function writeSkillArtifact(files, recordingId, rel, content) {
   const root = artifactRoot(files, recordingId);
-  const target = path.join(root, safeRel(rel));
+  const normalized = safeRel(rel);
+  if (FROZEN_RELS.has(normalized)) {
+    throw new Error(`冻结文件由运输层按合同物化，禁止重写: ${normalized}`);
+  }
+  const target = path.join(root, normalized);
   await mkdir(path.dirname(target), { recursive: true });
   await writeFile(target, String(content ?? ""), "utf8");
-  return { saved: true, path: safeRel(rel) };
+  return { saved: true, path: normalized };
+}
+
+export async function readSkillArtifact(files, recordingId, rel) {
+  const normalized = safeRel(rel);
+  const target = path.join(artifactRoot(files, recordingId), normalized);
+  return { path: normalized, content: await readFile(target, "utf8") };
 }
 
 function runPython(args, { cwd, timeoutMs = 20000 } = {}) {
   return new Promise((resolve) => {
     const child = spawn("python", args, {
-      cwd: cwd || BACK_ROOT,
-      env: { ...process.env, PYTHONPATH: BACK_ROOT },
+      cwd: cwd || process.cwd(),
+      env: { ...process.env },
       windowsHide: true,
     });
     let stdout = "";
@@ -57,47 +88,58 @@ function runPython(args, { cwd, timeoutMs = 20000 } = {}) {
   });
 }
 
-export async function validateSkillPackage(files, recordingId) {
-  const root = artifactRoot(files, recordingId);
-  const script = [
-    "import json,sys",
-    "from pathlib import Path",
-    "from dano.export.skill_package.validator import validate_skill_package",
-    `print(json.dumps(validate_skill_package(Path(r'''${root}'''))))`,
-  ].join("; ");
-  const ran = await runPython(["-c", script], { cwd: BACK_ROOT });
-  if (!ran.ok) {
-    return { ok: false, issues: [{ severity: "error", code: "validator_failed", message: ran.stderr || ran.error || ran.stdout }] };
-  }
-  try {
-    return JSON.parse(ran.stdout.trim().split("\n").at(-1) || "{}");
-  } catch {
-    return { ok: false, issues: [{ severity: "error", code: "validator_parse", message: ran.stdout || ran.stderr }] };
-  }
+export async function validateSkillPackage(files, recordingId, { draft } = {}) {
+  const saved = draft || (await files.readDraft?.(recordingId).catch(() => null))?.draft || null;
+  return validateSkillPackageDir(artifactRoot(files, recordingId), { sourceDraft: saved });
 }
 
 export async function runIsolatedScript(files, recordingId, script, args = []) {
   const root = artifactRoot(files, recordingId);
   const rel = safeRel(script);
-  const work = path.join(root, ".isolated");
+  const work = path.join(files.directory(recordingId), `.isolated-run-${randomBytes(4).toString("hex")}`);
   await rm(work, { recursive: true, force: true });
   await mkdir(work, { recursive: true });
-  await cp(root, work, { recursive: true, filter: (src) => !src.includes(`${path.sep}.isolated`) });
+  await cp(root, work, { recursive: true });
   const target = path.join(work, rel);
-  const ran = await runPython([target, ...asStringArgs(args)], { cwd: work });
-  return {
-    ok: ran.ok,
-    code: ran.code,
-    stdout: String(ran.stdout || "").slice(0, 8000),
-    stderr: String(ran.stderr || "").slice(0, 4000),
-    error: ran.ok ? "" : (ran.error || ran.stderr || "isolated script failed"),
-  };
+  try {
+    const ran = await runPython([target, ...asStringArgs(args)], { cwd: work });
+    return {
+      ok: ran.ok,
+      code: ran.code,
+      stdout: String(ran.stdout || "").slice(0, 8000),
+      stderr: String(ran.stderr || "").slice(0, 4000),
+      error: ran.ok ? "" : (ran.error || ran.stderr || "isolated script failed"),
+    };
+  } finally {
+    await rm(work, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
-function asStringArgs(args) {
-  if (Array.isArray(args)) return args.map((item) => String(item));
+export function asStringArgs(args) {
   if (args == null) return [];
-  return [String(args)];
+  const items = Array.isArray(args) ? args : [args];
+  const out = [];
+  for (const item of items) {
+    if (item == null) continue;
+    if (typeof item === "string" || typeof item === "number") {
+      out.push(String(item));
+      continue;
+    }
+    if (typeof item === "object") {
+      for (const [key, value] of Object.entries(item)) {
+        if (value === false || value == null) continue;
+        if (key === "args" || key === "arg") {
+          out.push(...asStringArgs(value));
+          continue;
+        }
+        out.push(key);
+        if (value !== true) out.push(String(value));
+      }
+      continue;
+    }
+    out.push(String(item));
+  }
+  return out;
 }
 
 export async function readPageAsset({ evidence, recordingId, url, targetUrl = "" }) {

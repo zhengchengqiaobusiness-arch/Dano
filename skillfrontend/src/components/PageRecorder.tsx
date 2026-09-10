@@ -9,7 +9,6 @@ import {
   Input,
   List,
   Modal,
-  Radio,
   Select,
   Space,
   Spin,
@@ -31,7 +30,6 @@ import {
   ExclamationCircleOutlined,
   LoadingOutlined,
   MessageOutlined,
-  PlayCircleOutlined,
   RobotOutlined,
   SendOutlined,
   StopOutlined,
@@ -57,13 +55,15 @@ import {
   getRecordingResult,
   listRecordingResults,
   patchRecordingResult,
+  putRecordingDraft,
   rememberExportDir,
   rememberSkillExportDraft,
   rememberedExportDir,
   rememberedSkillExportDraft,
 } from "../api/recording";
 import { routeSummaryFromOutcome } from "../api/skillExportDraft";
-import { notifySkillCatalogChanged } from "../api/skillCatalog";
+import { historyLifecycleView } from "../api/skillLifecycle";
+import { applyExportedCatalog, notifySkillCatalogChanged } from "../api/skillCatalog";
 import {
   forgetRecordingResultId,
   rememberedRecordingResultId,
@@ -71,7 +71,7 @@ import {
   selectRecordingResultToResume,
 } from "../api/recordingResume";
 import type { SkillGenerationRequest } from "../api/recording";
-import { getExportDirectory, saveExportDirectory } from "../api/skills";
+import { getExportDirectory, listSkills, saveExportDirectory } from "../api/skills";
 import { clearTenant } from "../api/client";
 import Skills from "../pages/Skills";
 import StudioHeader from "../layout/StudioHeader";
@@ -559,7 +559,6 @@ function fmtHistoryTime(value?: string) {
   return date.toLocaleString();
 }
 
-const RESULT_STATUS_BOX_STYLE = { width: "100%", height: 420, boxSizing: "border-box" as const };
 const REPLAY_SKIP_HINTS = ["跳过回放取证", "仍无法登录", "录制会话登录态已过期", "请刷新凭证后重新点"];
 
 const LEGACY_RECORDING_GOAL_TEMPLATES = [
@@ -591,19 +590,9 @@ const STATUS_LABELS: Record<WorkflowStatus, string> = {
   processing: "分析中",
   waiting_operator: "等待确认",
   editable: "能力草稿待处理",
-  published: "能力已验证，Skill 未产出",
+  published: "已有能力，待产出 Skill",
   cancelled: "分析已终止",
   failed: "处理失败",
-};
-
-const SKILL_LIFECYCLE_LABELS: Record<string, { label: string; color: string }> = {
-  stage_six_done: { label: "阶段1—6已完成", color: "default" },
-  verifying: { label: "阶段7验证中", color: "processing" },
-  verified_not_exported: { label: "能力已验证，Skill 未产出", color: "blue" },
-  generating: { label: "Skill 生成中", color: "processing" },
-  exported: { label: "Skill 已导出", color: "success" },
-  export_failed: { label: "Skill 导出失败", color: "error" },
-  needs_reexport: { label: "能力已修改，Skill 需要重新产出", color: "warning" },
 };
 
 const ACTIVITY_STATUS: Record<string, { label: string; color?: string }> = {
@@ -671,7 +660,7 @@ function dedupeAnalysisActivities(activities: WorkflowActivity[]) {
 function analysisStatusView(status: WorkflowStatus, cancelling: boolean, _snapshot: WorkflowSnapshot | null) {
   if (cancelling && status !== "cancelled") return { color: "warning" as const, label: "正在终止" };
   if (status === "cancelled") return { color: "default" as const, label: "已终止" };
-  if (status === "published") return { color: "success" as const, label: "能力已验证，Skill 未产出" };
+  if (status === "published") return { color: "success" as const, label: "已有能力，待产出 Skill" };
   if (status === "failed") return { color: "error" as const, label: "失败" };
   if (status === "waiting_operator") return { color: "warning" as const, label: "需要确认" };
   if (status === "processing") return { color: "processing" as const, label: "分析中" };
@@ -742,24 +731,6 @@ function parseStorageState(value: string): Record<string, unknown> | undefined {
 function safeString(value: unknown) {
   if (value === null || value === undefined) return "";
   return typeof value === "string" ? value : JSON.stringify(value);
-}
-
-const SKILL_DESCRIPTION_PLACEHOLDER = [
-  "系统会根据已确认能力自动生成业务描述。请补充或改成：用户怎么开口、要按什么顺序办理、何时停问、怎样算完成。动态规划会把这段话编成工作流表中的一行。",
-].join("\n");
-
-function historyLifecycleView(item: RecordingResultSummary) {
-  const key = String(item.skill_lifecycle || "");
-  if (key === "exported" || item.published) {
-    return SKILL_LIFECYCLE_LABELS.stage_six_done;
-  }
-  if (SKILL_LIFECYCLE_LABELS[key]) return SKILL_LIFECYCLE_LABELS[key];
-  if (item.skill_needs_reexport) return SKILL_LIFECYCLE_LABELS.needs_reexport;
-  if (item.machine_verification_status === "verified") return SKILL_LIFECYCLE_LABELS.verified_not_exported;
-  if (["running", "waiting_operator"].includes(String(item.machine_verification_status || ""))) {
-    return SKILL_LIFECYCLE_LABELS.verifying;
-  }
-  return SKILL_LIFECYCLE_LABELS.stage_six_done;
 }
 
 function releaseUsedMachineVerification(release?: Record<string, unknown> | null) {
@@ -861,14 +832,8 @@ export default function PageRecorder({
   const [skillExporting, setSkillExporting] = useState(false);
   const [skillExportProgress, setSkillExportProgress] = useState("");
   const [skillExportOutcome, setSkillExportOutcome] = useState<SkillExportOutcome | null>(null);
-  const [skillClarifications, setSkillClarifications] = useState<string[]>([]);
   const [skillExportErrors, setSkillExportErrors] = useState<string[]>([]);
   const [skillTitle, setSkillTitle] = useState("");
-  const [skillDescription, setSkillDescription] = useState("");
-  const [skillPlanningMode, setSkillPlanningMode] = useState<"dynamic" | "fixed">("dynamic");
-  const [skillExampleRequests, setSkillExampleRequests] = useState("");
-  const [skillSuccessCriteria, setSkillSuccessCriteria] = useState("");
-  const [skillForbiddenActions, setSkillForbiddenActions] = useState("");
   const [skillOutDir, setSkillOutDir] = useState(rememberedExportDir);
   const [resultMeta, setResultMeta] = useState<RecordingResultDetail | null>(null);
 
@@ -918,30 +883,14 @@ export default function PageRecorder({
     || status === "waiting_operator"
     || isStageSevenProgress(snapshot?.progress)
     || stageSevenOpen;
-  const analysisMode = analysisSessionLive;
   const reachedStage = pageStage(status, resumeOnly, analysisSessionLive);
-  const stageSevenStatus = String(
-    snapshot?.machine_verification_status
-    || resultMeta?.machine_verification_status
-    || resultMeta?.stage_seven?.status
-    || "",
-  );
-  const stageSevenFingerprint = String(
-    resultMeta?.stage_seven_fingerprint
-    || resultMeta?.stage_seven?.working_fingerprint
-    || "",
-  );
-  const currentDraftFingerprint = String(
-    snapshot?.draft_fingerprint
-    || resultMeta?.draft_fingerprint
-    || "",
-  );
-  const stageSevenVerified = stageSevenStatus === "verified";
-  const fingerprintMatches = !stageSevenFingerprint || !currentDraftFingerprint
-    || stageSevenFingerprint === currentDraftFingerprint;
-  const stageSevenReady = stageSevenVerified && fingerprintMatches;
   const canProduceSkill = Boolean(
     (activeResultId || history.find((row) => row.action === (snapshot?.action || ""))?.id)
+    && (
+      String(snapshot?.run_id || "").startsWith("rec_")
+      || String(resultMeta?.recording_id || "").startsWith("rec_")
+      || history.some((row) => row.action === (snapshot?.action || "") && String(row.recording_id || "").startsWith("rec_"))
+    )
     && capabilities.length
     && !pendingEdits.length
     && !patchInFlightRef.current
@@ -950,13 +899,6 @@ export default function PageRecorder({
     && !cancelling
     && !skillExporting,
   );
-  const verificationButtonLabel = (
-    stageSevenStatus === "stale"
-    || stageSevenStatus === "running"
-    || stageSevenStatus === "waiting_operator"
-    || (stageSevenVerified && !fingerprintMatches)
-    || Boolean(resultMeta?.skill_needs_reexport && !stageSevenVerified)
-  ) ? "继续验证" : "开始机器验证";
 
   useEffect(() => {
     sessionStorage.setItem("dano.recording.setup", JSON.stringify({
@@ -1066,6 +1008,7 @@ export default function PageRecorder({
   function historyRowFromDetail(detail: RecordingResultDetail): RecordingResultSummary {
     return {
       id: detail.id,
+      recording_id: detail.recording_id,
       action: detail.action,
       title: detail.title,
       goal_summary: detail.goal_summary,
@@ -1082,10 +1025,6 @@ export default function PageRecorder({
       skill_export_status: detail.skill_export_status,
       skill_export_path: detail.skill_export_path,
       skill_export_title: detail.skill_export_title,
-      skill_export_description: detail.skill_export_description,
-      skill_export_description_origin: detail.skill_export_description_origin,
-      skill_export_description_fingerprint: detail.skill_export_description_fingerprint,
-      skill_export_description_stale: detail.skill_export_description_stale,
       skill_lifecycle: detail.skill_lifecycle,
       skill_needs_reexport: detail.skill_needs_reexport,
     };
@@ -1105,8 +1044,11 @@ export default function PageRecorder({
     }
     let cancelled = false;
     setHistoryLoading(true);
-    listRecordingResults(subsystem).then((rows) => {
-      if (!cancelled) setHistory(rows);
+    Promise.all([
+      listRecordingResults(subsystem),
+      listSkills().catch(() => []),
+    ]).then(([rows, catalog]) => {
+      if (!cancelled) setHistory(rows.map((row) => applyExportedCatalog(row, catalog)));
     }).catch(() => {
       if (!cancelled) setHistory([]);
     }).finally(() => {
@@ -1266,8 +1208,11 @@ export default function PageRecorder({
       await new Promise((resolve) => window.setTimeout(resolve, 2000));
       if (closingRef.current) return;
       try {
-        const rows = await listRecordingResults(subsystem);
-        setHistory(rows);
+        const [rows, catalog] = await Promise.all([
+          listRecordingResults(subsystem),
+          listSkills().catch(() => []),
+        ]);
+        setHistory(rows.map((row) => applyExportedCatalog(row, catalog)));
         if (rows.some((row) => row.action === action)) {
           finishRequestedRef.current = false;
           setFinishRequested(false);
@@ -1823,17 +1768,18 @@ export default function PageRecorder({
       || item.machine_verification_status
       || "",
     );
+    const recordingId = [detail?.recording_id, item.recording_id]
+      .map((value) => String(value || "").trim())
+      .find((value) => value.startsWith("rec_")) || "";
     const next: WorkflowSnapshot = {
-      run_id: "",
+      run_id: recordingId,
       action: item.action,
       title: item.title,
       revision: 0,
       status: "editable",
       progress: {
         step: "ready",
-        label: stageStatus === "verified"
-          ? "已打开录制结果"
-          : "已打开录制结果，尚未开始机器验证",
+        label: "已打开录制结果",
       },
       draft,
       draft_fingerprint: detail?.draft_fingerprint,
@@ -1869,7 +1815,7 @@ export default function PageRecorder({
     cancellingRef.current = false;
     setCancelling(false);
     setAnalysisRequested(false);
-    setStageSevenOpen(true);
+    setStageSevenOpen(false);
     closeRecordingSocket();
     setOpeningId(item.id);
     actionRef.current = item.action;
@@ -1890,9 +1836,11 @@ export default function PageRecorder({
     setSnapshot(null);
     try {
       const detail = await getRecordingResult(item.id);
-      const row = historyRowFromDetail(detail);
+      const catalog = await listSkills().catch(() => []);
+      const overlaid = applyExportedCatalog(detail, catalog);
+      const row = historyRowFromDetail(overlaid);
       upsertHistory(row);
-      applyViewedDraft(row, (detail.draft || null) as FlowSpec | null, detail);
+      applyViewedDraft(row, (overlaid.draft || detail.draft || null) as FlowSpec | null, overlaid);
     } catch {
       message.error("打开录制结果失败");
       setKeepResult(false);
@@ -1908,84 +1856,6 @@ export default function PageRecorder({
     return activeResultIdRef.current
       || history.find((row) => row.action === actionRef.current)?.id
       || "";
-  }
-
-  async function startAnalysis(item?: RecordingResultSummary) {
-    if (!tenant) {
-      message.error("请先选择租户");
-      return;
-    }
-    if (cancellingRef.current) return;
-    const socketLive = Boolean(wsRef.current && wsRef.current.readyState === WebSocket.OPEN);
-    if (processing && socketLive) return;
-    if (item) {
-      actionRef.current = item.action;
-      activeResultIdRef.current = item.id;
-      setActiveResultId(item.id);
-      resumeOnlyRef.current = true;
-      setResumeOnly(true);
-      machineVerificationRef.current = true;
-      setMachineVerification(true);
-      setKeepRecording(false);
-      setKeepResult(true);
-      setViewStage(2);
-      reachedStageRef.current = 2;
-    }
-    const resultId = item?.id || currentResultId();
-    if (!resultId) {
-      message.warning("没有可分析的录制结果，请先停止录制或从历史打开");
-      return;
-    }
-    activeResultIdRef.current = resultId;
-    setActiveResultId(resultId);
-    if (pendingEditsRef.current.length) {
-      const saved = await saveResultEdits();
-      if (!saved) return;
-    }
-    let latest: RecordingResultDetail | null = null;
-    try {
-      latest = await getRecordingResult(resultId);
-      upsertHistory(historyRowFromDetail(latest));
-      setResultMeta(latest);
-      if (latest.title) setTitle(latest.title);
-    } catch {
-      message.error("加载最新录制结果失败");
-      return;
-    }
-    disconnectNoticeRef.current = false;
-    closeRecordingSocket();
-    acceptNextSnapshotRef.current = true;
-    setStageSevenOpen(true);
-    const latestDraft = (latest.draft || snapshotRef.current?.draft || null) as FlowSpec | null;
-    const starting: WorkflowSnapshot = {
-      run_id: "",
-      action: latest.action || item?.action || actionRef.current,
-      title: latest.title || item?.title || title,
-      revision: 0,
-      status: "processing",
-      progress: { step: "verifying", label: "正在启动机器验证", round: 0 },
-      draft: latestDraft,
-      draft_fingerprint: latest.draft_fingerprint,
-      capture_frozen: true,
-      activity: [],
-      issues: [],
-    };
-    snapshotRef.current = starting;
-    setSnapshot(starting);
-    setAnalysisRequested(true);
-    setThoughts([]);
-    setExpandedTools({});
-    setConnecting(true);
-    socketInitRef.current = {
-      type: "resume_verification",
-      result_id: resultId,
-      tenant,
-      subsystem,
-      restart: false,
-      reset_stage_seven: false,
-      attempt_id: stageSevenAttemptIdRef.current || undefined,
-    };
-    openRecordingSocket(actionRef.current);
   }
 
   async function removeResult(item: RecordingResultSummary) {
@@ -2029,9 +1899,13 @@ export default function PageRecorder({
   async function refreshResultMeta(resultId = currentResultId()) {
     if (!resultId) return;
     try {
-      const detail = await getRecordingResult(resultId);
-      setResultMeta(detail);
-      upsertHistory(historyRowFromDetail(detail));
+      const [detail, catalog] = await Promise.all([
+        getRecordingResult(resultId),
+        listSkills().catch(() => []),
+      ]);
+      const overlaid = applyExportedCatalog(detail, catalog);
+      setResultMeta(overlaid);
+      upsertHistory(historyRowFromDetail(overlaid));
     } catch {
       // keep the last known meta
     }
@@ -2071,25 +1945,22 @@ export default function PageRecorder({
     );
   }
 
-  function persistSkillDraft(next: {
-    title?: string;
-    description?: string;
-    planningMode?: "dynamic" | "fixed";
-    exampleRequests?: string;
-    successCriteria?: string;
-    forbiddenActions?: string;
-  } = {}) {
+  function persistSkillDraft(next: { title?: string } = {}) {
     const resultId = currentResultId();
     if (!resultId) return;
     rememberSkillExportDraft(resultId, {
       title: next.title ?? skillTitle,
-      description: next.description ?? skillDescription,
-      sourceFingerprint: resultMeta?.draft_fingerprint || resultMeta?.skill_export_description_fingerprint,
-      planningMode: next.planningMode ?? skillPlanningMode,
-      exampleRequests: next.exampleRequests ?? skillExampleRequests,
-      successCriteria: next.successCriteria ?? skillSuccessCriteria,
-      forbiddenActions: next.forbiddenActions ?? skillForbiddenActions,
     });
+  }
+
+  function currentRecordingId() {
+    const fromSnap = String(snapshotRef.current?.run_id || snapshot?.run_id || "").trim();
+    if (fromSnap.startsWith("rec_")) return fromSnap;
+    const fromMeta = String(resultMeta?.recording_id || "").trim();
+    if (fromMeta.startsWith("rec_")) return fromMeta;
+    const fromId = currentResultId();
+    if (fromId.startsWith("rec_")) return fromId;
+    return "";
   }
 
   function openSkillExport() {
@@ -2098,40 +1969,23 @@ export default function PageRecorder({
     const saved = rememberedSkillExportDraft(resultId);
     const defaultTitle = (title || snapshot?.title || "").trim();
     setSkillTitle(saved.title?.trim() || resultMeta?.skill_export_title?.trim() || defaultTitle);
-    const currentFingerprint = resultMeta?.draft_fingerprint || resultMeta?.skill_export_description_fingerprint || "";
-    const savedDescription = (
-      !saved.sourceFingerprint
-      || !currentFingerprint
-      || saved.sourceFingerprint === currentFingerprint
-    ) ? saved.description?.trim() : "";
-    setSkillDescription(savedDescription || resultMeta?.skill_export_description?.trim() || "");
-    const savedMode = saved.planningMode ?? resultMeta?.skill_export_planning_mode;
-    setSkillPlanningMode(savedMode === "fixed" ? "fixed" : "dynamic");
-    const savedExamples = saved.exampleRequests?.trim()
-      || (Array.isArray(resultMeta?.skill_export_example_requests)
-        ? resultMeta.skill_export_example_requests.join("\n")
-        : String(resultMeta?.skill_export_example_requests || ""));
-    setSkillExampleRequests(savedExamples);
-    setSkillSuccessCriteria(saved.successCriteria?.trim() || resultMeta?.skill_export_success_criteria?.trim() || "");
-    setSkillForbiddenActions(saved.forbiddenActions?.trim() || resultMeta?.skill_export_forbidden_actions?.trim() || "");
     void loadSharedExportDir();
     setSkillExportOutcome(null);
-    setSkillClarifications([]);
     setSkillExportErrors([]);
     setSkillExportProgress("");
     setSkillExportOpen(true);
   }
 
   function skillExportRequest(): SkillGenerationRequest {
+    const latestDraft = (draft || resultMeta?.draft || null) as Record<string, unknown> | null;
     return {
       title: skillTitle.trim(),
-      business_description: skillDescription.trim(),
-      planning_mode: skillPlanningMode,
-      example_requests: skillExampleRequests.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
-      success_criteria: skillSuccessCriteria.trim(),
-      forbidden_actions: skillForbiddenActions.trim(),
       out_dir: skillOutDir.trim(),
-      require_stage_seven: false,
+      recording_id: currentRecordingId(),
+      draft: latestDraft,
+      skill_id: String(resultMeta?.skill_id || "").trim(),
+      tenant,
+      subsystem,
     };
   }
 
@@ -2146,14 +2000,13 @@ export default function PageRecorder({
       message.error("请填写 Skill 显示名称");
       return;
     }
-    if (!skillDescription.trim()) {
-      message.error("请填写业务描述");
+    if (!currentRecordingId()) {
+      message.error("缺少 recording_id，无法按最新能力导出");
       return;
     }
     if (skillExporting) return;
     setSkillExporting(true);
-    setSkillExportProgress("正在规划、校验并导出 Skill…");
-    setSkillClarifications([]);
+    setSkillExportProgress("正在按最新能力导出 Skill");
     setSkillExportErrors([]);
     if (resultMeta) {
       setResultMeta({ ...resultMeta, skill_lifecycle: "generating", skill_export_status: "generating" });
@@ -2166,14 +2019,6 @@ export default function PageRecorder({
       const outDir = skillOutDir.trim();
       if (outDir) await persistSharedExportDir(outDir);
       const outcome = await exportRecordingSkill(resultId, skillExportRequest());
-      if (outcome.status === "needs_clarification" || (outcome.clarification_questions || []).length) {
-        setSkillExportOutcome({ ...outcome, status: "needs_clarification" });
-        setSkillClarifications(outcome.clarification_questions || outcome.unresolved_branches || []);
-        setSkillExportProgress("");
-        message.warning("规划需要补充说明，请根据问题修改业务描述后再导出");
-        await refreshResultMeta(resultId);
-        return;
-      }
       if (outcome.status !== "exported") {
         setSkillExportErrors(outcome.errors || ["Skill 导出失败"]);
         setSkillExportProgress("");
@@ -2188,10 +2033,10 @@ export default function PageRecorder({
       await refreshResultMeta(resultId);
       message.success("Skill 已导出，目录已更新");
     } catch (error) {
-      const detail = (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      setSkillExportErrors([typeof detail === "string" ? detail : "Skill 导出失败"]);
+      const lines = describeExportFailure(error);
+      setSkillExportErrors(lines);
       setSkillExportProgress("");
-      message.error(typeof detail === "string" ? detail : "Skill 导出失败");
+      message.error(lines[0] || "Skill 导出失败");
       await refreshResultMeta(resultId);
     } finally {
       setSkillExporting(false);
@@ -2506,8 +2351,7 @@ export default function PageRecorder({
       machine_verification: machineVerificationRef.current,
     };
     if (send(payload)) return;
-    republishRequestedRef.current = true;
-    startAnalysis();
+    message.error("录制连接已断开，无法再次提交能力。请重新打开该结果后再点「结束并产出能力」。");
   }
 
   async function saveResultEdits() {
@@ -2545,6 +2389,14 @@ export default function PageRecorder({
       setResultMeta(detail);
       upsertHistory(historyRowFromDetail(detail));
       if (detail.title) setTitle(detail.title);
+      const recordingId = currentRecordingId();
+      if (recordingId && next.draft) {
+        try {
+          await putRecordingDraft(recordingId, next.draft as Record<string, unknown>, detail.title || current.title || "");
+        } catch {
+          // 出包请求仍会带当前页 draft；这里失败只影响目录重导读盘。
+        }
+      }
       setEditingResult(false);
       message.success("已保存修改");
       return true;
@@ -2754,7 +2606,7 @@ export default function PageRecorder({
                       setHistoryOpen(false);
                       void openResult(item);
                     }}
-                  >继续分析</Button>
+                  >打开</Button>
                   <Button
                     size="small"
                     danger
@@ -3468,8 +3320,8 @@ export default function PageRecorder({
             key: capability.capability_id || capability.name || String(index),
             label: (
               <Space wrap>
-                <Tag color={stageSevenVerified || status === "published" || capability.confirmed ? "success" : "processing"}>
-                  {stageSevenVerified || status === "published" ? "已验证" : capability.confirmed ? "已确认" : "分析结果"}
+                <Tag color={status === "published" || capability.confirmed ? "success" : "processing"}>
+                  {status === "published" || capability.confirmed ? "已确认" : "能力"}
                 </Tag>
                 <Tag color="blue">{capability.kind || "capability"}</Tag>
                 <Text strong>{capability.title || capability.name || `能力 ${index + 1}`}</Text>
@@ -3646,15 +3498,7 @@ export default function PageRecorder({
         >终止分析</Button>
       );
     }
-    if (!draft) return null;
-    return (
-      <Button
-        type="primary"
-        size={size}
-        icon={<PlayCircleOutlined />}
-        onClick={() => startAnalysis()}
-      >{verificationButtonLabel}</Button>
-    );
+    return null;
   }
 
   function renderVerificationLog() {
@@ -3872,7 +3716,7 @@ export default function PageRecorder({
             type="warning"
             style={{ marginBottom: 8 }}
             message="分析已终止"
-            description="草稿已保留，确认后可继续机器验证。"
+            description="草稿已保留。能力齐了就可以产出 Skill。"
           />
         ) : null}
         {replaySkipped && status !== "cancelled" ? (
@@ -3902,7 +3746,7 @@ export default function PageRecorder({
             />
           ) : status === "cancelled" ? null : processing ? (
             <Text type="secondary" style={{ display: "block", padding: "8px 0 4px" }}>
-              {snapshot?.progress.label || "正在启动机器验证"}
+              {snapshot?.progress.label || "分析中…"}
             </Text>
           ) : connecting || runBusy ? (
             <Text type="secondary" style={{ display: "block", padding: "8px 0 4px" }}>正在连接…</Text>
@@ -3915,10 +3759,23 @@ export default function PageRecorder({
   function renderResult() {
     return (
       <Card>
-        {analysisMode && (processing || connecting || cancelling || status === "cancelled" || status === "failed" || (snapshot?.activity || []).length || thoughts.length || snapshot?.question) ? (
-          <div style={RESULT_STATUS_BOX_STYLE}>
-            {renderVerificationLog()}
-          </div>
+        {status === "cancelled" ? (
+          <Alert
+            showIcon
+            type="warning"
+            style={{ marginBottom: 8 }}
+            message="分析已终止"
+            description="草稿已保留。能力齐了就可以产出 Skill。"
+          />
+        ) : null}
+        {status === "failed" && snapshot?.error ? (
+          <Alert
+            showIcon
+            type="error"
+            style={{ marginBottom: 8 }}
+            message="分析失败"
+            description={snapshot.error}
+          />
         ) : null}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, margin: "16px 0" }}>
           <Space>
@@ -3947,17 +3804,11 @@ export default function PageRecorder({
                 disabled={!canProduceSkill}
                 onClick={openSkillExport}
               >产出 Skill</Button>
-              {!stageSevenReady && draft && !analysisMode && !processing && !connecting && !cancelling ? (
-                <Button
-                  icon={<PlayCircleOutlined />}
-                  onClick={() => startAnalysis()}
-                >{verificationButtonLabel}</Button>
-              ) : null}
             </Space>
           )}
         </div>
         {renderCapabilities()}
-        {(resultMeta?.skill_lifecycle === "exported" || skillExportOutcome?.status === "exported") && skillExportOutcome?.status !== "needs_clarification" ? (
+        {(resultMeta?.skill_lifecycle === "exported" || skillExportOutcome?.status === "exported") ? (
           <Alert
             style={{ marginTop: 16 }}
             type="success"
@@ -4104,7 +3955,7 @@ export default function PageRecorder({
       </div>
       </div>
       <Modal
-        title={skillExportOutcome?.status === "exported" ? "Skill 已导出" : "配置并导出 Skill"}
+        title={skillExportOutcome?.status === "exported" ? "Skill 已导出" : "产出 Skill"}
         open={skillExportOpen}
         onCancel={() => {
           if (!skillExporting) setSkillExportOpen(false);
@@ -4115,14 +3966,14 @@ export default function PageRecorder({
           skillExportOutcome?.status === "exported" ? (
             <Space>
               <Button icon={<CopyOutlined />} onClick={() => copySkillDir()}>打开 Skill 目录</Button>
-              <Button onClick={() => { setSkillExportOutcome(null); setSkillClarifications([]); setSkillExportErrors([]); }}>重新产出 Skill</Button>
+              <Button onClick={() => { setSkillExportOutcome(null); setSkillExportErrors([]); }}>重新产出 Skill</Button>
               <Button type="primary" onClick={() => setSkillExportOpen(false)}>完成</Button>
             </Space>
           ) : (
             <Space>
               <Button disabled={skillExporting} onClick={() => setSkillExportOpen(false)}>取消</Button>
               <Button type="primary" loading={skillExporting} disabled={skillExporting} onClick={() => void submitSkillExport()}>
-                生成并导出 Skill
+                产出 Skill
               </Button>
             </Space>
           )
@@ -4137,20 +3988,7 @@ export default function PageRecorder({
           </Space>
         ) : (
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
-            {skillExporting ? <Alert type="info" showIcon message={skillExportProgress || "正在规划和导出 Skill…"} /> : null}
-            {skillExportOutcome?.status === "needs_clarification"
-              ? renderSkillRouteSummary(skillExportOutcome)
-              : null}
-            {skillClarifications.length ? (
-              <Alert
-                type="warning"
-                showIcon
-                message="需要补充说明"
-                description={(
-                  <List size="small" dataSource={skillClarifications} renderItem={(item) => <List.Item>{item}</List.Item>} />
-                )}
-              />
-            ) : null}
+            {skillExporting ? <Alert type="info" showIcon message={skillExportProgress || "正在按最新能力导出 Skill"} /> : null}
             {skillExportErrors.length ? (
               <Alert
                 type="error"
@@ -4175,98 +4013,6 @@ export default function PageRecorder({
                 disabled={skillExporting}
               />
             </div>
-            <div>
-              <Text strong>业务描述（已根据能力自动生成，可修改）</Text>
-              {resultMeta?.skill_export_description_stale ? (
-                <Alert
-                  style={{ marginTop: 6 }}
-                  type="warning"
-                  showIcon
-                  message="能力已经变化，请核对业务描述后再导出"
-                />
-              ) : null}
-              <Input.TextArea
-                style={{ marginTop: 6 }}
-                value={skillDescription}
-                onChange={(event) => {
-                  const next = event.target.value;
-                  setSkillDescription(next);
-                  persistSkillDraft({ description: next });
-                }}
-                autoSize={{ minRows: 6, maxRows: 12 }}
-                disabled={skillExporting}
-                placeholder={SKILL_DESCRIPTION_PLACEHOLDER}
-              />
-            </div>
-            <div>
-              <Text strong>规划方式</Text>
-              <Radio.Group
-                style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}
-                value={skillPlanningMode}
-                onChange={(event) => {
-                  const next = event.target.value;
-                  setSkillPlanningMode(next);
-                  persistSkillDraft({ planningMode: next });
-                }}
-                disabled={skillExporting}
-              >
-                <Radio value="dynamic">按用户需求动态选择（推荐）：按请求选一条已规划路线</Radio>
-                <Radio value="fixed">固定业务步骤：按描述生成一条主路线</Radio>
-              </Radio.Group>
-            </div>
-            <Collapse
-              items={[{
-                key: "more",
-                label: "更多设置",
-                children: (
-                  <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                    <div>
-                      <Text strong>用户请求示例</Text>
-                      <Input.TextArea
-                        style={{ marginTop: 6 }}
-                        value={skillExampleRequests}
-                        onChange={(event) => {
-                          const next = event.target.value;
-                          setSkillExampleRequests(next);
-                          persistSkillDraft({ exampleRequests: next });
-                        }}
-                        autoSize={{ minRows: 3, maxRows: 6 }}
-                        placeholder="一行一个，例如：帮我查鲜生的单"
-                        disabled={skillExporting}
-                      />
-                    </div>
-                    <div>
-                      <Text strong>成功条件</Text>
-                      <Input.TextArea
-                        style={{ marginTop: 6 }}
-                        value={skillSuccessCriteria}
-                        onChange={(event) => {
-                          const next = event.target.value;
-                          setSkillSuccessCriteria(next);
-                          persistSkillDraft({ successCriteria: next });
-                        }}
-                        autoSize={{ minRows: 2, maxRows: 4 }}
-                        disabled={skillExporting}
-                      />
-                    </div>
-                    <div>
-                      <Text strong>禁止或限制的操作</Text>
-                      <Input.TextArea
-                        style={{ marginTop: 6 }}
-                        value={skillForbiddenActions}
-                        onChange={(event) => {
-                          const next = event.target.value;
-                          setSkillForbiddenActions(next);
-                          persistSkillDraft({ forbiddenActions: next });
-                        }}
-                        autoSize={{ minRows: 2, maxRows: 4 }}
-                        disabled={skillExporting}
-                      />
-                    </div>
-                  </Space>
-                ),
-              }]}
-            />
             <div>
               <Text strong>目标目录</Text>
               <Input

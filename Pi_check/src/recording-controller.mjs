@@ -20,6 +20,7 @@ import { capabilityCountFromPiResult } from "./capability-presence.mjs";
 import { thoughtFromEvidence } from "./pi-trace.mjs";
 import { resolveInteractionActor, shouldSteerHumanAct } from "./browser-actions.mjs";
 import { isEmptySpinError, readRequiredSkills } from "./pi-session.mjs";
+import path from "node:path";
 
 export class RecordingController {
   constructor({
@@ -385,6 +386,7 @@ export class RecordingController {
           viewport,
         },
         appendEvidence,
+        authVaultPath: path.join(this.files.directory(session.id), "auth-vault.json"),
       });
       slot.browser = browser;
       await this.evidence.setStatus(session.id, {

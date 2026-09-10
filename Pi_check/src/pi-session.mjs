@@ -8,18 +8,31 @@ import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PiRequiredError, PI_ONLY_NOTICE, assertNeverStartLegacy, logPiOnly } from "./policy.mjs";
-import { wrapPiToolsForSdk } from "./pi-tools.mjs";
+import { describeExportPiTools, wrapPiToolsForSdk } from "./pi-tools.mjs";
 import { applyPiModelConfig } from "./pi-model.mjs";
 import { installOpenAIToolCallStreamCompatibility } from "./openai-stream-compat.mjs";
 import { createPiTrace } from "./pi-trace.mjs";
 import { HUMAN_STEER_MS, isUsefulAssistantThought } from "./browser-actions.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-export const REQUIRED_SKILL_FILES = [
+
+export function recordingPiAgentDir() {
+  return path.join(ROOT, "runtime", "pi-agent");
+}
+
+export function exportPiAgentDir() {
+  return path.join(ROOT, "runtime", process.env.PI_EXPORT_AGENT_DIR || "pi-agent-export");
+}
+
+export const RECORDING_SKILL_FILES = [
   "BUSINESS_SKILL_INVESTIGATOR.md",
   "CONTROL_IN_APP_BROWSER.md",
   "INFER_BUSINESS_CONTRACT.md",
-  "BUILD_AND_VALIDATE_DEDICATED_SKILL.md",
+];
+export const EXPORT_SKILL_FILE = "BUILD_AND_VALIDATE_DEDICATED_SKILL.md";
+export const REQUIRED_SKILL_FILES = [
+  ...RECORDING_SKILL_FILES,
+  EXPORT_SKILL_FILE,
 ];
 
 export async function readRequiredSkills(skillDir = path.join(ROOT, "skill")) {
@@ -49,9 +62,10 @@ export function buildPiInstructions(skills = []) {
   }).filter(Boolean);
   return `${PI_ONLY_NOTICE}
 
-你是 Business Skill Investigator。动手按 Control In App Browser，认产物按 Infer Business Contract，出包按 Build and Validate Dedicated Skill。
+你是 Business Skill Investigator。动手按 Control In App Browser，认产物按 Infer Business Contract。
 人同时也可以点预览。不要锁死预览。
 没有非空 capabilities，就等于没有产物。代码不会替你编造能力。
+台账齐了就 submit_recording_result 交出能力并停止。禁止写消费者 Skill 包。出包由用户在页面点击「产出 Skill」后另开 Skill 4 会话完成。
 
 ${bodies.join("\n\n")}
 
@@ -69,22 +83,44 @@ ${bodies.join("\n\n")}
 - read_screenshot
 - get_recording_freeze_state
 - submit_recording_capability
-- write_skill_artifact
-- validate_skill_package
-- project_contract_to_request
-- run_isolated_script
 - submit_recording_result
 `;
 }
 
-export const PI_INSTRUCTIONS = buildPiInstructions(await readRequiredSkills());
+export function buildExportPiInstructions(skillText = "") {
+  return `${PI_ONLY_NOTICE}
+
+你是 Build and Validate Dedicated Skill。不要点页面，不要交能力，不要 submit_recording_result。
+唯一输入是 read_export_contract 返回的合同五块。
+运输层已按合同物化整包。禁止重写 client/runtime/flow/CONTRACT/INPUT_FORMS。
+写包前必须 read_generator_guides，读完返回的全部文件。
+通过验证后 submit_skill_export。
+
+${String(skillText || "").trim()}
+
+可用工具：
+- read_generator_guides
+- read_export_contract
+- read_skill_artifact
+- write_skill_artifact
+- validate_skill_package
+- project_contract_to_request
+- run_isolated_script
+- submit_skill_export
+`;
+}
+
+const ALL_REQUIRED_SKILLS = await readRequiredSkills();
+export const PI_INSTRUCTIONS = buildPiInstructions(
+  ALL_REQUIRED_SKILLS.filter((item) => RECORDING_SKILL_FILES.includes(item.name)),
+);
 
 export function buildUserSteerPrompt(text, { finalizing = false } = {}) {
   const body = String(text || "").trim();
   if (finalizing) {
     return (
       `用户说：${body}\n` +
-      `先用一两句话回答用户。按 Skill 1 继续。已满足导出条件且已有草稿才 submit_recording_result({final:true, use_draft:true})。`
+      `先用一两句话回答用户。按 Skill 1 继续。台账齐了就 submit_recording_result({final:true, use_draft:true}) 交出能力。不要写消费者包。`
     );
   }
   return (
@@ -95,19 +131,19 @@ export function buildUserSteerPrompt(text, { finalizing = false } = {}) {
 
 export function buildLiveDrivePrompt({ targetUrl = "", goal = "" } = {}) {
   return (
-    `你是 Business Skill Investigator。按四份 Skill 协调。\n` +
+    `你是 Business Skill Investigator。按 Skill 1–3 交能力。\n` +
     `目标：${String(goal || "").trim() || "把该页独立业务动作做成可调用能力"}\n` +
     `入口：${String(targetUrl || "").trim()}\n` +
     `人也可以点预览。未接到用户结束，禁止 submit_recording_result。\n` +
-    `不要把完整 JSON 写在对话里。`
+    `不要写消费者包，不要调 Skill 4。不要把完整 JSON 写在对话里。`
   );
 }
 
 export function buildFinalAnalysisPrompt(latestSeq) {
   return (
     `用户已结束。证据已冻结，最新 seq=${Number(latestSeq) || 0}。\n` +
-    `按 Skill 1 对台账，Skill 3 认产物，Skill 4 验证后提交。\n` +
-    `未满足导出条件不要 submit_recording_result。不要把 JSON 写在对话里。`
+    `按 Skill 1 对台账，Skill 3 认产物。台账齐了就提交能力。不要写消费者包，不要调 Skill 4。\n` +
+    `未交出完整能力不要 submit_recording_result。不要把 JSON 写在对话里。`
   );
 }
 
@@ -948,6 +984,64 @@ export class LivePiSession {
     this.status = "submitted";
   }
 
+  async beginSkillExport({
+    title = "",
+    timeoutMs = 900000,
+    hasExport,
+  } = {}) {
+    if (!this.alive) throw new PiRequiredError("PI 会话已关闭");
+    this.status = "exporting";
+    const started = Date.now();
+    const deadline = Date.now() + Math.max(30_000, Number(timeoutMs) || 900000);
+    logPiOnly(`[出包] Skill4开始 title=${String(title || "本页办理").trim()} timeout_ms=${Math.max(30_000, Number(timeoutMs) || 900000)} session=${this.sessionId || "-"}`);
+    const kick = (
+      `你是 Build and Validate Dedicated Skill。不要点页面，不要交能力。\n` +
+      `标题：${String(title || "本页办理").trim()}\n` +
+      `运输层已按录制合同物化整包：CONTRACT、表单、路线、runtime.py、flow.py、client.py。\n` +
+      `禁止重写 client/runtime/flow/CONTRACT/INPUT_FORMS，禁止另开子包，禁止发明 client.request。\n` +
+      `1. read_generator_guides，读完返回的全部文件\n` +
+      `2. read_export_contract，只认五块合同\n` +
+      `3. read_skill_artifact("SKILL.md")；只有触发用语不够才覆盖 SKILL.md\n` +
+      `4. project_contract_to_request + validate_skill_package\n` +
+      `5. 校验通过立刻 submit_skill_export({ok:true})，不要反复隔离跑\n` +
+      `失败带 issues 调用 submit_skill_export({ok:false, errors:[...]})，不要假装发布。`
+    );
+    const nudge = "还没有 submit_skill_export。不要重写冻结执行器。校验通过立刻提交。";
+    const ready = async () => {
+      try {
+        return Boolean(await hasExport?.());
+      } catch {
+        return false;
+      }
+    };
+    logPiOnly(`[出包] Skill4准备发送启动指令 +${((Date.now() - started) / 1000).toFixed(1)}s`);
+    await this.#promptNow(kick);
+    logPiOnly(`[出包] Skill4启动指令已结束 +${((Date.now() - started) / 1000).toFixed(1)}s`);
+    if (await ready()) {
+      logPiOnly(`[出包] Skill4首轮已提交 +${((Date.now() - started) / 1000).toFixed(1)}s`);
+      this.status = "submitted";
+      return;
+    }
+    let nudgeCount = 0;
+    while (Date.now() < deadline) {
+      if (await ready()) {
+        logPiOnly(`[出包] Skill4已提交 nudges=${nudgeCount} +${((Date.now() - started) / 1000).toFixed(1)}s`);
+        this.status = "submitted";
+        return;
+      }
+      nudgeCount += 1;
+      logPiOnly(`[出包] Skill4催促第${nudgeCount}次 +${((Date.now() - started) / 1000).toFixed(1)}s`);
+      await this.#promptNow(nudge);
+    }
+    if (await ready()) {
+      logPiOnly(`[出包] Skill4截止前已提交 nudges=${nudgeCount} +${((Date.now() - started) / 1000).toFixed(1)}s`);
+      this.status = "submitted";
+      return;
+    }
+    logPiOnly(`[出包] Skill4超时 nudges=${nudgeCount} +${((Date.now() - started) / 1000).toFixed(1)}s`);
+    throw new Error("Skill 4 出包超时");
+  }
+
   async close() {
     const wasAlive = this.alive;
     this.alive = false;
@@ -987,7 +1081,7 @@ export class LivePiSession {
 
 export async function createLivePiSession({ recording, tools, onThought = null }) {
   assertNeverStartLegacy();
-  const agentDir = path.join(ROOT, "runtime", "pi-agent");
+  const agentDir = recordingPiAgentDir();
   const cwd = path.join(ROOT, "runtime", "pi-cwd", recording.id);
   await mkdir(agentDir, { recursive: true });
   await mkdir(cwd, { recursive: true });
@@ -1024,7 +1118,9 @@ export async function createLivePiSession({ recording, tools, onThought = null }
     onRepair: ({ toolCallCount }) => logPiOnly(`已补齐 OpenAI 兼容流的 finish_reason tool_calls=${toolCallCount}`),
   });
 
-  const instructions = buildPiInstructions(await readRequiredSkills());
+  const loaded = await readRequiredSkills();
+  const recordingSkills = loaded.filter((item) => RECORDING_SKILL_FILES.includes(item.name));
+  const instructions = buildPiInstructions(recordingSkills);
   const trace = createPiTrace({ onThought });
   const customTools = wrapPiToolsForSdk(tools, defineTool, Type, trace);
   const resourceLoader = new DefaultResourceLoader({
@@ -1058,10 +1154,6 @@ export async function createLivePiSession({ recording, tools, onThought = null }
         "read_screenshot",
         "get_recording_freeze_state",
         "submit_recording_capability",
-        "write_skill_artifact",
-        "validate_skill_package",
-        "project_contract_to_request",
-        "run_isolated_script",
         "read_page_asset",
         "submit_recording_result",
         "control_in_app_browser",
@@ -1076,6 +1168,89 @@ export async function createLivePiSession({ recording, tools, onThought = null }
 
   const sessionId = String(created.session?.sessionId || `pi_${recording.id}`);
   logPiOnly(`PI 会话初始化完成 session=${sessionId}`);
+  return new LivePiSession({
+    session: created.session,
+    sessionId,
+    dispose: () => created.session?.dispose?.(),
+    instructions,
+    onThought,
+    trace,
+  });
+}
+
+export async function createExportPiSession({ recording, tools, onThought = null }) {
+  assertNeverStartLegacy();
+  logPiOnly(`[出包] Skill4会话初始化 recording=${recording?.id || "-"}`);
+  const agentDir = exportPiAgentDir();
+  const cwd = path.join(ROOT, "runtime", "pi-cwd", `${recording.id}`);
+  await mkdir(agentDir, { recursive: true });
+  await mkdir(cwd, { recursive: true });
+
+  let createAgentSession;
+  let SessionManager;
+  let AuthStorage;
+  let ModelRegistry;
+  let DefaultResourceLoader;
+  let defineTool;
+  let Type;
+  try {
+    ({
+      createAgentSession,
+      SessionManager,
+      AuthStorage,
+      ModelRegistry,
+      DefaultResourceLoader,
+      defineTool,
+    } = await import("@mariozechner/pi-coding-agent"));
+    ({ Type } = await import("@sinclair/typebox"));
+  } catch (error) {
+    throw new PiRequiredError(`PI 无法启动：SDK 加载失败：${error.message}`, { cause: error });
+  }
+
+  const authStorage = AuthStorage.create(path.join(agentDir, "auth.json"));
+  const modelRegistry = ModelRegistry.create(authStorage, path.join(agentDir, "models.json"));
+  const resolved = applyPiModelConfig(authStorage, modelRegistry);
+  installOpenAIToolCallStreamCompatibility({
+    baseUrl: resolved.baseUrl,
+    onRepair: ({ toolCallCount }) => logPiOnly(`已补齐 OpenAI 兼容流的 finish_reason tool_calls=${toolCallCount}`),
+  });
+
+  const loaded = await readRequiredSkills();
+  const skill4 = loaded.find((item) => item.name === EXPORT_SKILL_FILE);
+  if (!skill4?.text) throw new Error("缺少 Skill 4");
+  const instructions = buildExportPiInstructions(`## ${EXPORT_SKILL_FILE.replace(/\.md$/i, "")}\n\n${skill4.text}`);
+  const trace = createPiTrace({ onThought });
+  const customTools = wrapPiToolsForSdk(tools, defineTool, Type, trace, describeExportPiTools());
+  const resourceLoader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    systemPromptOverride: () => instructions,
+  });
+  if (typeof resourceLoader.reload === "function") {
+    await resourceLoader.reload();
+  }
+
+  let created;
+  try {
+    created = await createAgentSession({
+      cwd,
+      agentDir,
+      authStorage,
+      modelRegistry,
+      model: resolved.model,
+      noTools: "builtin",
+      tools: describeExportPiTools().map((item) => item.name),
+      customTools,
+      resourceLoader,
+      sessionManager: SessionManager.inMemory(),
+    });
+  } catch (error) {
+    logPiOnly(`[出包] Skill4会话初始化失败 ${error.message || error}`);
+    throw new PiRequiredError(`出包 PI 初始化失败：${error.message}`, { cause: error });
+  }
+
+  const sessionId = String(created.session?.sessionId || `pi_export_${recording.id}`);
+  logPiOnly(`[出包] Skill4会话就绪 session=${sessionId} model=${resolved.model?.id || resolved.model || "-"}`);
   return new LivePiSession({
     session: created.session,
     sessionId,

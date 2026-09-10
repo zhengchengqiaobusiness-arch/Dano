@@ -10,6 +10,7 @@ import pytest
 from dano.gateway.app import record_ws
 from dano.onboarding.pi_check_sidecar import (
     RecordingBridgeContext,
+    export_sidecar_port,
     load_pi_check_session_state,
     pi_result_storage_body,
     record_ws_uses_legacy_gateway,
@@ -50,6 +51,14 @@ def test_orphan_health_is_not_adopted() -> None:
         own_process_alive=True,
         healthy=True,
     ) is True
+
+
+def test_export_helper_port_sits_beside_recording(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PI_CHECK_EXPORT_PORT", raising=False)
+    monkeypatch.setenv("PI_CHECK_PORT", "18080")
+    assert export_sidecar_port() == 18081
+    monkeypatch.setenv("PI_CHECK_EXPORT_PORT", "18090")
+    assert export_sidecar_port() == 18090
 
 
 def test_pytest_does_not_auto_start_sidecar() -> None:

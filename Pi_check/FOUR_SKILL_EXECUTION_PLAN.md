@@ -1,7 +1,7 @@
 # 四 Skill 运行约定
 
-对照仓库：`E:\python\try\Dano`（核心 `Pi_check/`，导出 `back/dano/export/`）  
-PI 只加载四个 Skill。Investigator 是唯一入口。代码只运输，不认业务。
+对照仓库：`E:\python\try\Dano`（核心 `Pi_check/`，出包运输在 `Pi_check/src/skill-export/`，禁止引用 `back/dano/export/`）  
+录制会话只加载 Skill 1–3。出包会话只加载 Skill 4。Investigator 是录制唯一入口。代码只运输，不认业务。
 
 以后换页、认错字段、handbook 不好、不该发布：默认只改四个 Skill 文件。不要改闸门、导出猜测、采集业务词。
 
@@ -17,18 +17,18 @@ PI 只加载四个 Skill。Investigator 是唯一入口。代码只运输，不�
 PI = Business Skill Investigator（唯一入口）
 ├── Control In App Browser          自动点、填、选、取证
 ├── Infer Business Contract         一项做完立刻交合同
-└── Build and Validate Dedicated Skill  台账齐了立刻出包并验证
         ↓
-submit_recording_result({final:true, use_draft:true})
+submit_recording_result({final:true, use_draft:true}) 交出能力并停
         ↓
-专用 Skill 包
+用户点击「产出 Skill」→ Skill 4 另开会话写专用包
 ```
 
 | 情况 | 谁做 |
 | --- | --- |
 | 打开入口、设查询条件、填表、点查询/保存/提交 | PI 自动做 |
 | 某一行已有真实 execute | 立刻交一项能力 |
-| 目标页与台账都齐了 | 立刻出包、验证、定稿 |
+| 目标页与台账都齐了 | 交出能力并停，不要写消费者包 |
+| 用户点击「产出 Skill」或 Skills 目录重导 | 新建 Skill 4 会话，按最新能力出包 |
 | 登录、验证码、授权写入 | 阻断，assist 这一处 |
 | 写不进、选项看不见、点了不发网、加行后仍无控件 | 阻断，assist 这一格 |
 | 「登录了 / 继续 / 好了」 | 阻断解除，自动接着做完并产出 |
@@ -44,19 +44,20 @@ submit_recording_result({final:true, use_draft:true})
 
 | 文件 | 负责 | 禁止 |
 | --- | --- | --- |
-| `skill/BUSINESS_SKILL_INVESTIGATOR.md` | 目标、台账、下一步、分诊、目标做完即出包定稿 | selector、source_kind、handbook |
+| `skill/BUSINESS_SKILL_INVESTIGATOR.md` | 目标、台账、下一步、分诊、目标做完即交能力并停 | selector、source_kind、handbook、写消费者包 |
 | `skill/CONTROL_IN_APP_BROWSER.md` | 点、填、选、快照、图像、同源前端 | 交能力、认来源 |
 | `skill/INFER_BUSINESS_CONTRACT.md` | 切能力、来源、绑定、信封 | 点页面、写消费者包、冻录制值 |
 | `skill/BUILD_AND_VALIDATE_DEDICATED_SKILL.md` | 写包、投影、隔离运行、能不能发布 | 回头猜页面、等用户结束 |
 
 每份开头三行：本文件只负责 X；禁止 Y；缺口只改本文件。
 
-导出条件**不要求**用户先说结束。同时满足即可定稿：
+录制定稿**不要求**用户先说结束，也不启动 Skill 4。同时满足即可交能力并停：
 
 1. 目标原文要求的每一页、每一行已经做完，或已写入 `unresolved`
 2. 台账每行有合同或 `unresolved`
 3. 写入行没有「未识别却当可执行」
-4. Skill 4 的投影、变化输入、隔离运行、`validate_skill_package` 通过
+
+出包另开会话。Skill 4 必须读完 `doc/` 四份规范，写出流程、鉴权槽位和活选项；运输层只注入冻结 client/auth 并写入 Skills 目录。禁止已有 SKILL.md 就复用。
 
 查询类可以带说明缺口的 `unresolved`。不完整写能力不得发布。
 
@@ -66,7 +67,7 @@ submit_recording_result({final:true, use_draft:true})
 
 代码执行动作、存证据、跑指定检查、原样打包。它不替 PI 认业务。
 
-入口提示只留协调句：Investigator、目标、入口、自动控制、只有阻断才 assist、目标做完就出包定稿。不要把字段细则写进 JS。
+入口提示只留协调句：Investigator、目标、入口、自动控制、只有阻断才 assist、目标做完就交能力。不要把字段细则写进 JS。
 
 用户主动停录时，才走「证据已冻结，按 Skill 1 对已完成行收口」。这是提前收口，不是默认前提。
 

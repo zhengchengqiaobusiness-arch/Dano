@@ -19,6 +19,7 @@ import {
   saveStorageState,
   silentLoginStorage,
 } from "./session-store.mjs";
+import { writeAuthVault, headersFromLoginPayload, headersFromStorageState, headersFromSealedMap } from "./auth-vault.mjs";
 
 const BLOB_THRESHOLD = 4096;
 const POINTER_MOVE_MIN_INTERVAL_MS = 50;
@@ -306,6 +307,8 @@ export class PlaywrightBrowser {
     this.pendingWrites = 0;
     this.requestIds = new WeakMap();
     this.sealed = {};
+    this.authVaultPath = "";
+    this._vaultTimer = null;
     this.lastPointerMoveAt = 0;
     this.lastHumanActAt = 0;
     this.lastActAt = 0;
@@ -361,7 +364,33 @@ export class PlaywrightBrowser {
     const state = await this.context.storageState();
     if (!looksLoggedIn(state)) return false;
     const url = this.livePage()?.url() || this.targetUrl;
+    await this.persistAuthVault({ headers: headersFromStorageState(state) }).catch(() => null);
     return saveStorageState(url, state);
+  }
+
+  scheduleAuthVaultPersist() {
+    if (!this.authVaultPath) return;
+    clearTimeout(this._vaultTimer);
+    this._vaultTimer = setTimeout(() => {
+      this.persistAuthVault().catch(() => null);
+    }, 80);
+  }
+
+  async persistAuthVault({ headers = {}, refs = this.sealed } = {}) {
+    if (!this.authVaultPath) return null;
+    return writeAuthVault(this.authVaultPath, {
+      headers: {
+        ...headersFromSealedMap(this.sealed),
+        ...headers,
+      },
+      refs,
+    });
+  }
+
+  async mergeLoginAuth(raw) {
+    const headers = headersFromLoginPayload(raw);
+    if (!Object.keys(headers).length) return;
+    await this.persistAuthVault({ headers });
   }
 
   async applySession({ localStorage: store = null, cookies = null, url = "" } = {}) {
@@ -1207,7 +1236,7 @@ export class PlaywrightBrowser {
   }
 }
 
-export async function createPlaywrightBrowser({ recording, appendEvidence }) {
+export async function createPlaywrightBrowser({ recording, appendEvidence, authVaultPath = "" }) {
   let chromium;
   try {
     ({ chromium } = await import("playwright"));
@@ -1250,8 +1279,10 @@ export async function createPlaywrightBrowser({ recording, appendEvidence }) {
   handle.viewport = viewport;
   handle.deviceScaleFactor = deviceScaleFactor;
   handle.appendEvidence = appendEvidence;
+  handle.authVaultPath = authVaultPath || "";
   if (storage && looksLoggedIn(storage)) {
     logPiOnly("已恢复上次登录态");
+    await handle.persistAuthVault({ headers: headersFromStorageState(storage) }).catch(() => null);
   }
 
   const append = async (kind, payload) => {
@@ -1511,6 +1542,7 @@ async function attachPage(page, handle, append, rememberBody) {
     const requestId = `req_${randomUUID().replaceAll("-", "")}`;
     handle.requestIds.set(request, requestId);
     const headers = isolateHeaders(request.headers(), handle.sealed);
+    handle.scheduleAuthVaultPersist();
     const resourceType = request.resourceType();
     let body = { stored: "omitted", byteLength: 0 };
     if (shouldStoreResponseBody(resourceType)) {
@@ -1537,6 +1569,7 @@ async function attachPage(page, handle, append, rememberBody) {
   page.on("response", async (response) => {
     const requestId = handle.requestIds.get(response.request()) || "";
     const headers = isolateHeaders(response.headers(), handle.sealed);
+    handle.scheduleAuthVaultPersist();
     const resourceType = response.request().resourceType();
     let body = { stored: "omitted", byteLength: 0 };
     if (shouldStoreResponseBody(resourceType)) {
@@ -1555,6 +1588,9 @@ async function attachPage(page, handle, append, rememberBody) {
       headers,
       body,
     });
+    if (/\/auth\/login(?:\?|$)/i.test(response.url()) && body?.stored === "inline" && body.text) {
+      await handle.mergeLoginAuth(body.text).catch(() => null);
+    }
   });
 
   page.on("requestfailed", async (request) => {

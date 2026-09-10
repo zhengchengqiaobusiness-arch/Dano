@@ -11,6 +11,11 @@ export function logPiOnly(message) {
   process.stdout.write(`[PI-only] ${message}\n`);
 }
 
+export function logExport(message, startedAt = 0) {
+  const elapsed = Number(startedAt) > 0 ? ` +${((Date.now() - startedAt) / 1000).toFixed(1)}s` : "";
+  logPiOnly(`[出包] ${message}${elapsed}`);
+}
+
 export const PI_ONLY_POLICY = Object.freeze({
   semanticAuthority: "pi",
   legacyRecordingMustNeverStart: true,

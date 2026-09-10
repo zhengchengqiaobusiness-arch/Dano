@@ -8,6 +8,14 @@
 能力、接口参数或字段映射。本文档中的参数名、JSON Schema、状态和错误 code
 保持实现中的英文原名，其余说明使用中文。
 
+出包前还须同时读完并遵守同目录另外三份规范，缺任何一份不得出包：
+
+- `skill-generator-auth-and-token.md`
+- `skill-generator-workflow.md`
+- `skill-generator-live-options.md`
+
+本文档的控件合同、schema 和示例不得回退。另外三份只补充鉴权、流程和活选项，不改这里的提问形状。
+
 ## 工具用途
 
 在已经确认 OA Skill 覆盖用户所需业务动作后，以下情况应原生调用
@@ -1817,7 +1825,7 @@ E09 和 E10 均在同一 Assistant Turn 中已提交。
 - 每个 question 必须包含唯一 `id`、业务化 `question`/label、正确 `inputType`、`required` 和非空 `default`。
 - `id` 必须与 capability 的调用方字段名逐字一致。
 - 长文本使用 `textarea`；日期使用 `date` 和正确 `dateFormat`；枚举使用 `select`/`radio`；多选使用 `multiple: true`。
-- 动态候选必须使用 `dataSource`，并完整声明 endpoint、method、params、resultPath、idField 和 labelField；用户看到 label，接口接收稳定 id 或合同声明的值。
+- 动态候选必须使用 `dataSource`，并完整声明 endpoint、method、params、resultPath、idField 和 labelField；用户看到 label，接口接收稳定 id 或合同声明的值。助手先运行 `python scripts/flow.py --list-options <capability_id> <field>`，不要让问句自己裸打选项接口。
 - 固定值、会话值、运行时生成值、计算值和上游响应不得向用户提问。
 
 ## 4. 默认值
@@ -1862,10 +1870,13 @@ E09 和 E10 均在同一 Assistant Turn 中已提交。
 
 ## 8. 自包含要求
 
-生成器在**生成期**可以阅读本文档和仓库内其它编写规范。最终给使用者的 Skill **不得携带** `references/generator-guides/`，也不得要求执行前先读生成规范。应保留本文档约束产生的行为，不把生成过程材料写进成品。
+生成器在**生成期**可以阅读本文档和仓库内其它编写规范（含鉴权、流程、活选项三份）。最终给使用者的 Skill **不得携带** `references/generator-guides/`，也不得要求执行前先读生成规范。应保留本文档约束产生的行为，不把生成过程材料写进成品。
 
-每个导出的 Skill 必须包含：
+每个导出的 Skill 必须包含（由运输层按录制合同物化，Skill 4 不准重写执行器或合同）：
 
+- `config/runtime.json`：tenant / subsystem / base_url，无密钥；
+- `config/auth.local.json`：`{"headers":{}}` 鉴权槽位，手册禁止明文 token；
+- `scripts/runtime.py` / `scripts/flow.py`：按 `CONTRACT.json` 执行默认办理；
 - `references/CONTRACT.json`：机器能力合同；
 - `references/CAPABILITIES.md`：业务能力索引（何时用、读/写、输入输出概况）；
 - `references/OPTIONS.md`：候选如何在运行时获得和处理；

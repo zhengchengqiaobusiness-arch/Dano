@@ -17,6 +17,19 @@ import { createLivePiSession } from "./pi-session.mjs";
 import { createPlaywrightBrowser } from "./browser-capture.mjs";
 import { ResultsCatalog } from "./results-catalog.mjs";
 import { attachFrontendBridge } from "./frontend-bridge.mjs";
+import {
+  exportRecordingSkill,
+  reexportCatalogSkills,
+  listExportedSkills,
+  getExportedSkill,
+  setExportedSkillFrozen,
+  removeExportedSkill,
+  readTokenRecord,
+  writeTokenRecord,
+  writebackExportedPackages,
+  maskHeaders,
+  hydrateAuthFromRecordings,
+} from "./skill-export/index.mjs";
 
 assertNeverStartLegacy();
 
@@ -32,7 +45,7 @@ const PUBLIC = path.join(ROOT, "src", "public");
 const PORT = Number(process.env.PI_CHECK_PORT || 18080);
 const listeners = new Map();
 
-const files = new RecordingFiles(path.join(ROOT, "data"));
+const files = new RecordingFiles(process.env.PI_CHECK_DATA_DIR || path.join(ROOT, "data"));
 const evidence = new EvidenceStore(files, {
   onEvent(recordingId, event) {
     const set = listeners.get(recordingId);
@@ -93,6 +106,16 @@ async function sendResult(res, recordingId) {
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
+    const quietGet = req.method === "GET" && (
+      url.pathname === "/health"
+      || url.pathname === "/api/health"
+      || url.pathname === "/v1/skills"
+      || url.pathname === "/v1/pi-recordings"
+      || url.pathname === "/v1/recording-results"
+    );
+    if (!quietGet) {
+      logPiOnly(`[HTTP] ${req.method} ${url.pathname}`);
+    }
     if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
       const html = await readFile(path.join(PUBLIC, "index.html"));
       res.writeHead(200, { "content-type": MIME[".html"] });
@@ -108,16 +131,16 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (req.method === "GET" && (url.pathname === "/api/health" || url.pathname === "/health")) {
-      json(res, 200, { ok: true, notice: PI_ONLY_NOTICE });
+      json(res, 200, { ok: true, notice: PI_ONLY_NOTICE, export_catalog: true });
       return;
     }
-    if (req.method === "GET" && url.pathname === "/v1/recording-results") {
-      json(res, 200, catalog.list(url.searchParams.get("subsystem") || ""));
+    if (req.method === "GET" && (url.pathname === "/v1/recording-results" || url.pathname === "/v1/pi-recordings")) {
+      json(res, 200, await catalog.listPublished(url.searchParams.get("subsystem") || ""));
       return;
     }
-    const oneResult = url.pathname.match(/^\/v1\/recording-results\/([^/]+)$/);
+    const oneResult = url.pathname.match(/^\/v1\/(?:recording-results|pi-recordings)\/([^/]+)$/);
     if (req.method === "GET" && oneResult) {
-      const detail = catalog.detail(oneResult[1]);
+      const detail = await catalog.detailOf(oneResult[1]);
       if (!detail) {
         json(res, 404, { error: "not found" });
         return;
@@ -128,6 +151,163 @@ const server = createServer(async (req, res) => {
     if (req.method === "DELETE" && oneResult) {
       catalog.remove(oneResult[1]);
       json(res, 200, { ok: true });
+      return;
+    }
+    const exportSkill = url.pathname.match(/^\/v1\/(?:recording-results|pi-recordings)\/([^/]+)\/export-skill$/);
+    if (req.method === "POST" && exportSkill) {
+      const body = await readBody(req);
+      const recordingId = String(body.recording_id || exportSkill[1] || "").trim();
+      const title = String(body.title || "");
+      const tenant = String(body.tenant || "");
+      const capCount = Array.isArray(body.draft?.capabilities) ? body.draft.capabilities.length : 0;
+      logPiOnly(`[出包] 收到请求 path=${url.pathname} recording_id=${recordingId || "-"} title=${title || "-"} tenant=${tenant || "-"} subsystem=${body.subsystem || "oa"} caps=${capCount} out_dir=${body.out_dir || "-"} existing_skill_id=${body.existing_skill_id || body.skill_id || "-"} overlay=${body.draft ? "yes" : "no"}`);
+      if (!recordingId.startsWith("rec_")) {
+        logPiOnly(`[出包] 拒绝 缺少 recording_id path_id=${exportSkill[1]}`);
+        json(res, 400, { status: "export_failed", errors: ["缺少 recording_id，无法按最新能力导出"] });
+        return;
+      }
+      const started = Date.now();
+      const outcome = await exportRecordingSkill({
+        files,
+        evidence,
+        recordingId,
+        resultId: String(body.result_id || exportSkill[1] || ""),
+        tenant,
+        subsystem: String(body.subsystem || "oa"),
+        title,
+        outDir: String(body.out_dir || ""),
+        draft: body.draft && typeof body.draft === "object" ? body.draft : null,
+        authHeaders: body.auth_headers || body.headers || null,
+        existingSkillId: String(body.existing_skill_id || body.skill_id || ""),
+      });
+      const elapsed = Date.now() - started;
+      if (outcome.status === "exported") {
+        logPiOnly(`[出包] 成功 recording_id=${recordingId} skill_id=${outcome.skill_id || "-"} version=${outcome.version || "-"} path=${outcome.export_path || "-"} ${elapsed}ms`);
+      } else {
+        logPiOnly(`[出包] 失败 recording_id=${recordingId} ${elapsed}ms errors=${JSON.stringify(outcome.errors || [])}`);
+      }
+      json(res, outcome.status === "exported" ? 200 : 409, outcome);
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/v1/skills") {
+      const includeFrozen = url.searchParams.get("include_frozen") !== "0";
+      const items = await listExportedSkills(files, { includeFrozen });
+      const page = Number(url.searchParams.get("page") || 0);
+      const pageSize = Number(url.searchParams.get("page_size") || 0);
+      if (page > 0 && pageSize > 0) {
+        const start = (page - 1) * pageSize;
+        json(res, 200, {
+          items: items.slice(start, start + pageSize),
+          total: items.length,
+          page,
+          page_size: pageSize,
+        });
+        return;
+      }
+      json(res, 200, items);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/v1/skills/export") {
+      const body = await readBody(req);
+      logPiOnly(`[出包] 收到目录重导 tenant=${body.tenant || "-"} out_dir=${body.out_dir || "-"} drafts=${body.drafts && typeof body.drafts === "object" ? Object.keys(body.drafts).length : 0}`);
+      const outcome = await reexportCatalogSkills({
+        files,
+        evidence,
+        outDir: String(body.out_dir || ""),
+        tenant: String(body.tenant || ""),
+        authHeaders: body.auth_headers || body.headers || null,
+        drafts: body.drafts && typeof body.drafts === "object" ? body.drafts : null,
+      });
+      json(res, outcome.errors?.length && !outcome.count ? 409 : 200, outcome);
+      return;
+    }
+    const putDraft = url.pathname.match(/^\/v1\/recording-results\/([^/]+)\/draft$/);
+    if (req.method === "PUT" && putDraft) {
+      const body = await readBody(req);
+      const recordingId = String(body.recording_id || putDraft[1] || "").trim();
+      const draft = body.draft && typeof body.draft === "object" ? body.draft : body;
+      if (!recordingId.startsWith("rec_")) {
+        json(res, 400, { error: "缺少 recording_id" });
+        return;
+      }
+      await files.writeDraft(recordingId, {
+        recording_id: recordingId,
+        saved_at: new Date().toISOString(),
+        draft,
+        title: String(body.title || draft.title || ""),
+      });
+      json(res, 200, { ok: true, recording_id: recordingId });
+      return;
+    }
+    const freezeSkill = url.pathname.match(/^\/v1\/skills\/([^/]+)\/freeze$/);
+    if (req.method === "POST" && freezeSkill) {
+      const item = await setExportedSkillFrozen(files, decodeURIComponent(freezeSkill[1]), true);
+      if (!item) {
+        json(res, 404, { error: "not found" });
+        return;
+      }
+      json(res, 200, { skill_id: item.name, state: "suspended" });
+      return;
+    }
+    const resumeSkill = url.pathname.match(/^\/v1\/skills\/([^/]+)\/resume$/);
+    if (req.method === "POST" && resumeSkill) {
+      const item = await setExportedSkillFrozen(files, decodeURIComponent(resumeSkill[1]), false);
+      if (!item) {
+        json(res, 404, { error: "not found" });
+        return;
+      }
+      json(res, 200, { skill_id: item.name, state: "published" });
+      return;
+    }
+    const oneSkill = url.pathname.match(/^\/v1\/skills\/([^/]+)$/);
+    if (req.method === "GET" && oneSkill) {
+      const item = await getExportedSkill(files, decodeURIComponent(oneSkill[1]));
+      if (!item) {
+        json(res, 404, { error: "not found" });
+        return;
+      }
+      json(res, 200, item);
+      return;
+    }
+    if (req.method === "DELETE" && oneSkill) {
+      const removed = await removeExportedSkill(files, decodeURIComponent(oneSkill[1]));
+      json(res, removed ? 200 : 404, { deleted: removed, skill_id: decodeURIComponent(oneSkill[1]) });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/v1/settings/token") {
+      const rec = await readTokenRecord(url.searchParams.get("tenant") || "", url.searchParams.get("subsystem") || "");
+      json(res, 200, {
+        tenant: rec.tenant,
+        subsystem: rec.subsystem,
+        has_token: rec.has_token,
+        headers: rec.headers,
+        source: rec.source,
+        updated_at: rec.updated_at,
+      });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/v1/settings/token") {
+      const body = await readBody(req);
+      const headers = { ...(body.headers || {}) };
+      if (!Object.keys(headers).length && body.token) {
+        headers[String(body.header_name || "Authorization")] = `${body.token_prefix ?? "Bearer "}${body.token}`;
+      }
+      const rec = await writeTokenRecord(body.tenant || "", body.subsystem || "", headers, { source: "manual" });
+      const catalog = await listExportedSkills(files);
+      const writeback = await writebackExportedPackages({
+        subsystem: rec.subsystem,
+        headers: rec.headers,
+        exportRoot: String(body.out_dir || ""),
+        catalogRows: catalog,
+      });
+      json(res, 200, {
+        ok: true,
+        tenant: rec.tenant,
+        subsystem: rec.subsystem,
+        headers: maskHeaders(rec.headers),
+        updated_at: rec.updated_at,
+        updated_packages: writeback.updated,
+      });
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/recordings") {
@@ -237,8 +417,10 @@ const server = createServer(async (req, res) => {
       json(res, 200, controller.view(one[1]));
       return;
     }
+    logPiOnly(`[HTTP] 404 ${req.method} ${url.pathname}`);
     json(res, 404, { error: "not found" });
   } catch (error) {
+    logPiOnly(`[HTTP] 500 ${req.method} ${req.url || ""} ${error?.stack || error?.message || error}`);
     json(res, 500, {
       error: error.message || String(error),
       publicMessage: publicFailureMessage(),
@@ -247,6 +429,10 @@ const server = createServer(async (req, res) => {
   }
 });
 
+server.requestTimeout = 0;
+server.headersTimeout = 0;
+server.timeout = 0;
+
 attachFrontendBridge(server, { controller, catalog });
 
 if (process.env.PI_CHECK_NO_LISTEN !== "1") {
@@ -254,6 +440,12 @@ if (process.env.PI_CHECK_NO_LISTEN !== "1") {
     logPiOnly(PI_ONLY_NOTICE);
     logPiOnly(`internal listener 127.0.0.1:${PORT}`);
     logPiOnly("existing PageRecorder still connects to the 8077 gateway; this process never starts the old recorder");
+    logPiOnly("[出包] 启动回写排队");
+    hydrateAuthFromRecordings({ files, evidence }).then((result) => {
+      logPiOnly(`[出包] 启动回写返回 updated=${result?.updated?.length || 0} recovered=${result?.recovered || 0}`);
+    }).catch((error) => {
+      logPiOnly(`[出包] 回写完整 token 失败 ${error?.message || error}`);
+    });
   });
 }
 

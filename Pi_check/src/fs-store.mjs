@@ -5,8 +5,26 @@
  * 禁止改写 PI 结果对象中的任何值。
  */
 
-import { appendFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+
+export function parseLeadingJson(text) {
+  const raw = String(text || "").replace(/^\uFEFF/, "");
+  if (!raw.trim()) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    const at = String(error?.message || "").match(/position\s+(\d+)/i);
+    if (at) {
+      try {
+        return JSON.parse(raw.slice(0, Number(at[1])));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
 
 function safeId(value) {
   const text = String(value ?? "");
@@ -57,6 +75,19 @@ export class RecordingFiles {
 
   directory(recordingId) {
     return path.join(this.root, safeId(recordingId));
+  }
+
+  async listRecordingIds() {
+    let entries = [];
+    try {
+      entries = await readdir(this.root, { withFileTypes: true });
+    } catch (error) {
+      if (error?.code === "ENOENT") return [];
+      throw error;
+    }
+    return entries
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith("rec_"))
+      .map((entry) => entry.name);
   }
 
   resultPath(recordingId) {
@@ -135,7 +166,7 @@ export class RecordingFiles {
 
   async readPiResult(recordingId) {
     try {
-      return JSON.parse(await readFile(this.resultPath(recordingId), "utf8"));
+      return parseLeadingJson(await readFile(this.resultPath(recordingId), "utf8"));
     } catch (error) {
       if (error?.code === "ENOENT") return null;
       throw error;
@@ -166,7 +197,7 @@ export class RecordingFiles {
 
   async readDraft(recordingId) {
     try {
-      return JSON.parse(await readFile(this.draftPath(recordingId), "utf8"));
+      return parseLeadingJson(await readFile(this.draftPath(recordingId), "utf8"));
     } catch (error) {
       if (error?.code === "ENOENT") return null;
       throw error;

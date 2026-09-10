@@ -265,12 +265,12 @@ python scripts/flow.py --route <默认路线> --input-json '{...}' --confirm
 
 只改这些，且只做运输：
 
-**`pack_skill4_artifacts`（`back/dano/onboarding/skill_generation/export.py`）**
+**`pack_skill4_artifacts`（已迁到 `Pi_check/src/skill-export/pack.mjs`；`back/.../export.py` 这条线作废，禁止再改 renderer/planner 出包）**
 
 - 复制 Skill 4 草稿后：
   - 注入冻结 `client.py` / `wire_format.py`（保持）
   - 从合同 execute step 填 `config/runtime.json` 的 `base_url`（不要再写空串）
-  - 从 `runtime_token`（tenant + subsystem）写入 `config/auth.local.json`；没有 token 则写 `{"headers":{}}` 并在打包日志记缺口，**不要发明 token**
+  - 从本机 token 或录制证据写入 `config/auth.local.json`；没有 token 则写 `{"headers":{}}` 并在打包日志记缺口，**不要发明 token**
 - 不要重写 Skill 4 的 `SKILL.md`、能力脚本、`flow.py`、`INPUT_FORMS.md`
 
 **冻结 `client.py` 模板（`renderer.py` 里 `_CLIENT_TEMPLATE`，因为打包注入的是它）**

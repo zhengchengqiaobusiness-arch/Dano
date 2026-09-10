@@ -2,26 +2,31 @@
 
 PI 加载且只加载四个 Skill。Investigator 是唯一入口。代码是冻住的运输层。
 
-自动控制。只有登录、验证码、写不进、点了不发网这类阻断才请人。目标页做完且台账齐了就出包定稿，不要等用户说结束。
+自动控制。只有登录、验证码、写不进、点了不发网这类阻断才请人。目标页做完且台账齐了就交出能力并停止。出包只在用户点击「产出 Skill」后另开 Skill 4 会话完成。
 
 ```text
 用户目标 + 入口 URL
         ↓
-PI = Business Skill Investigator
+    PI = Business Skill Investigator（录制会话，只加载 Skill 1–3）
 ├── Control In App Browser
 ├── Infer Business Contract
-└── Build and Validate Dedicated Skill
         ↓
-代码：执行动作 / 存证据 / 跑指定检查 / 原样打包
+submit_recording_result 交出能力并停
+        ↓
+用户点击「产出 Skill」
+        ↓
+Skill 4 出包会话（只加载 BUILD_AND_VALIDATE_DEDICATED_SKILL）
+        ↓
+代码：按录制合同物化整包、注入冻结 runtime/flow/client/auth、本目录保真校验、写入 Skills 目录
 ```
 
 | 文件 | 负责 | 禁止 |
 | --- | --- | --- |
-| `skill/BUSINESS_SKILL_INVESTIGATOR.md` | 目标、台账、下一步、分诊、目标做完即出包定稿 | 字段规则、selector、source_kind |
+| `skill/BUSINESS_SKILL_INVESTIGATOR.md` | 目标、台账、下一步、分诊、目标做完即交能力并停 | 字段规则、selector、source_kind、写消费者包 |
 | `skill/CONTROL_IN_APP_BROWSER.md` | 点、填、选、快照、图像、同源前端 | 交能力、认来源 |
 | `skill/INFER_BUSINESS_CONTRACT.md` | 切能力、来源、绑定、信封 | 点页面、写消费者包、冻录制值结案 |
-| `skill/BUILD_AND_VALIDATE_DEDICATED_SKILL.md` | 写包、投影、隔离运行、能不能发布 | 回头猜页面 |
-| `src/*` / 导出打包 | 动作、证据、形状闸门、指定检查、复制产物 | 认业务 |
+| `skill/BUILD_AND_VALIDATE_DEDICATED_SKILL.md` | 读 doc/、核对手册触发、投影、能不能提交出包 | 回头猜页面、重写执行器、录制期自动出包 |
+| `src/*` / 导出运输 | 开 Skill 4 会话、从录制五块投影整包、冻结 runtime/flow/client/auth、保真校验、目录同步 | 认业务、按页面猜字段、引用 back |
 
 缺口只改四份 Skill 之一。以后 diff 出现 `result-gate` / `visible-controls` / `renderer` / `computed.py` 认业务 = 方案作废。
 
@@ -40,7 +45,7 @@ PI = Business Skill Investigator
 
 | 现象 | 只改 |
 | --- | --- |
-| 目标理解错、该产出却空转、不该发布却定稿、分诊错 | Skill 1 |
+| 目标理解错、该产出却空转、不该交能力却提交、分诊错 | Skill 1 |
 | 点不到、选不上、该看图没看、没验证写上 | Skill 2 |
 | 切错能力、来源错、绑错、冻录制值、灰框进调用方、假 links、错挂 preflight、分区行不全 | Skill 3 |
 | 触发差、披露不对、执行器与合同不一致、不该发布 | Skill 4 |

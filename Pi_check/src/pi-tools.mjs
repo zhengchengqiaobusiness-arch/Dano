@@ -14,10 +14,12 @@ import { isNoiseNetworkPath } from "./browser-actions.mjs";
 import { projectContractToRequest } from "./contract-project.mjs";
 import {
   writeSkillArtifact,
+  readSkillArtifact,
   validateSkillPackage,
   runIsolatedScript,
   readPageAsset,
 } from "./skill-package-tools.mjs";
+import { readGeneratorGuides } from "./skill-export/read-guides.mjs";
 
 const SCREENSHOT_TEXT_ONLY_NOTE = "默认不把截图写入对话。需要看图时 screenshot/read_screenshot 设 as_image=true。";
 
@@ -331,7 +333,7 @@ export function createPiToolHost({
         final: false,
         capability_count: merged.capabilities.length,
         capability_ids: merged.capabilities.map((item) => item.capability_id),
-        next_action: "该项已保存。继续按 Skill 调查或交下一项已有真实 execute 形状的能力；台账齐了用 submit_recording_result({final:true, use_draft:true})。",
+        next_action: "该项已保存。继续按 Skill 调查或交下一项已有真实 execute 形状的能力；台账齐了用 submit_recording_result({final:true, use_draft:true})。不要写消费者包。",
       };
     },
     async control_in_app_browser({
@@ -467,19 +469,6 @@ export function createPiToolHost({
         url,
         targetUrl: typeof getTargetUrl === "function" ? getTargetUrl() : session.targetUrl,
       });
-    },
-    async write_skill_artifact({ path: rel, content }) {
-      return writeSkillArtifact(files, recordingId, rel, content);
-    },
-    async validate_skill_package() {
-      return validateSkillPackage(files, recordingId);
-    },
-    async project_contract_to_request({ capability_id, inputs = {} } = {}) {
-      const saved = await files.readDraft(recordingId);
-      return projectContractToRequest(saved?.draft || {}, capability_id, inputs);
-    },
-    async run_isolated_script({ script, args = [] } = {}) {
-      return runIsolatedScript(files, recordingId, script, args);
     },
     async [SUBMIT_RECORDING_RESULT]({ recording_id, final, result, use_draft = false }) {
       let session = evidence.snapshot(recordingId);
@@ -649,9 +638,151 @@ export function describePiTools() {
       },
     },
     {
+      name: "get_recording_freeze_state",
+      label: "冻结状态",
+      description: "查看当前录制是否已经冻结。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
+      name: SUBMIT_RECORDING_RESULT,
+      label: "最终结果",
+      description: "唯一最终提交。use_draft=true 定稿已交能力。细节看 Skill 1。",
+      parameters: {
+        type: "object",
+        properties: {
+          recording_id: { type: "string" },
+          final: { type: "boolean" },
+          result: { type: "object" },
+          use_draft: { type: "boolean" },
+        },
+        required: ["recording_id", "final"],
+        additionalProperties: false,
+      },
+    },
+  ];
+}
+
+export function createExportToolHost({
+  files,
+  recordingId,
+  draft,
+  onSubmit = null,
+}) {
+  const logTool = (name, detail) => {
+    logPiOnly(`[出包] Skill4工具 ${name} recording_id=${recordingId || "-"} ${detail}`);
+  };
+  return {
+    async read_generator_guides() {
+      const result = await readGeneratorGuides();
+      logTool("read_generator_guides", `ok=${result.ok} files=${result.files?.length || 0} error=${result.error || "-"}`);
+      return result;
+    },
+    async read_export_contract() {
+      const saved = draft || (await files.readDraft(recordingId))?.draft || {};
+      const payload = {
+        title: saved.title || "",
+        capabilities: Array.isArray(saved.capabilities) ? saved.capabilities : [],
+        steps: Array.isArray(saved.steps) ? saved.steps : [],
+        links: Array.isArray(saved.links) ? saved.links : [],
+        capability_relations: Array.isArray(saved.capability_relations) ? saved.capability_relations : [],
+        unresolved: Array.isArray(saved.unresolved) ? saved.unresolved : [],
+      };
+      logTool("read_export_contract", `caps=${payload.capabilities.length} steps=${payload.steps.length} links=${payload.links.length} unresolved=${payload.unresolved.length}`);
+      return payload;
+    },
+    async read_skill_artifact({ path: rel }) {
+      try {
+        const result = await readSkillArtifact(files, recordingId, rel);
+        logTool("read_skill_artifact", `path=${result.path} bytes=${String(result.content || "").length}`);
+        return result;
+      } catch (error) {
+        logTool("read_skill_artifact", `失败 path=${rel || "-"} ${error.message || error}`);
+        throw error;
+      }
+    },
+    async write_skill_artifact({ path: rel, content }) {
+      try {
+        const result = await writeSkillArtifact(files, recordingId, rel, content);
+        logTool("write_skill_artifact", `path=${result.path} bytes=${String(content ?? "").length}`);
+        return result;
+      } catch (error) {
+        logTool("write_skill_artifact", `失败 path=${rel || "-"} ${error.message || error}`);
+        throw error;
+      }
+    },
+    async validate_skill_package() {
+      const result = await validateSkillPackage(files, recordingId, { draft });
+      const errors = (result.issues || []).filter((item) => item.severity === "error");
+      logTool("validate_skill_package", `ok=${result.ok} errors=${errors.length} first=${errors[0]?.code || "-"}:${errors[0]?.message || "-"}`);
+      return result;
+    },
+    async project_contract_to_request({ capability_id, inputs = {} } = {}) {
+      const saved = draft || (await files.readDraft(recordingId))?.draft || {};
+      const result = projectContractToRequest(saved, capability_id, inputs);
+      logTool("project_contract_to_request", `capability_id=${capability_id || "-"} ok=${result.ok} missing=${(result.missing || []).join(",") || "-"} extra=${(result.extra || []).join(",") || "-"}`);
+      return result;
+    },
+    async run_isolated_script({ script, args = [] } = {}) {
+      const result = await runIsolatedScript(files, recordingId, script, args);
+      logTool("run_isolated_script", `script=${script || "-"} ok=${result.ok} code=${result.code ?? "-"} error=${result.error || "-"}`);
+      return result;
+    },
+    async submit_skill_export({
+      ok = false,
+      skill_id = "",
+      description = "",
+      routes = [],
+      errors = [],
+    } = {}) {
+      const payload = {
+        ok: Boolean(ok),
+        skill_id: String(skill_id || ""),
+        description: String(description || ""),
+        routes: Array.isArray(routes) ? routes : [],
+        errors: Array.isArray(errors) ? errors.map((item) => String(item)) : [],
+      };
+      logTool("submit_skill_export", `ok=${payload.ok} skill_id=${payload.skill_id || "-"} routes=${payload.routes.length} errors=${JSON.stringify(payload.errors)}`);
+      try {
+        onSubmit?.(payload);
+      } catch {
+        // 提交回调失败仍要把结果回给模型
+      }
+      return { accepted: true, ...payload };
+    },
+  };
+}
+
+export function describeExportPiTools() {
+  return [
+    {
+      name: "read_generator_guides",
+      label: "生成规范",
+      description: "读取 doc/ 下全部生成规范。写包前必须调用。缺目录或缺必需要文件则失败。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
+      name: "read_export_contract",
+      label: "出包合同",
+      description: "读取点击当下的最新合同五块：capabilities / steps / links / capability_relations / unresolved。禁止回头猜页面。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
+      name: "read_skill_artifact",
+      label: "读 Skill 产物",
+      description: "读取运输层已按合同物化的包根文件。先读再决定要不要改 SKILL.md。",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "write_skill_artifact",
       label: "写 Skill 产物",
-      description: "写入本场导出草稿文件。细节看 Skill 4。",
+      description: "只允许覆盖 SKILL.md 的触发用语。禁止重写 client/runtime/flow/CONTRACT/INPUT_FORMS/鉴权配置，禁止另开子包。",
       parameters: {
         type: "object",
         properties: {
@@ -697,33 +828,27 @@ export function describePiTools() {
       },
     },
     {
-      name: "get_recording_freeze_state",
-      label: "冻结状态",
-      description: "查看当前录制是否已经冻结。",
-      parameters: { type: "object", properties: {}, additionalProperties: false },
-    },
-    {
-      name: SUBMIT_RECORDING_RESULT,
-      label: "最终结果",
-      description: "唯一最终提交。use_draft=true 定稿已交能力。细节看 Skill 1。",
+      name: "submit_skill_export",
+      label: "提交出包",
+      description: "Skill 4 验证通过后提交。ok=false 表示失败，带上 errors。不要 submit_recording_result。",
       parameters: {
         type: "object",
         properties: {
-          recording_id: { type: "string" },
-          final: { type: "boolean" },
-          result: { type: "object" },
-          use_draft: { type: "boolean" },
+          ok: { type: "boolean" },
+          skill_id: { type: "string" },
+          description: { type: "string" },
+          routes: { type: "array" },
+          errors: { type: "array" },
         },
-        required: ["recording_id", "final"],
+        required: ["ok"],
         additionalProperties: false,
       },
     },
   ];
 }
 
-export function wrapPiToolsForSdk(host, defineTool, Type, trace = null) {
-  const specs = describePiTools();
-  return specs.map((spec) => defineTool({
+export function wrapPiToolsForSdk(host, defineTool, Type, trace = null, specs = describePiTools()) {
+  return specs.filter((spec) => typeof host[spec.name] === "function").map((spec) => defineTool({
     name: spec.name,
     label: spec.label,
     description: spec.description,

@@ -8,6 +8,8 @@ Investigator 叫你认一项产物时立刻工作。该项已按目标做完且�
 
 不要单独交没有 `request_refs` 的 relations-only 信封。顺序关系写在已有能力之后的 `capability_relations`，不能当成一项没有 execute 的能力。
 
+目标要求先 A 后 B：有值流写 `links`；没有值流也必须写 `capability_relations`（handoff）。页内典型链（查询→新增、查询→编辑、查询→删除、新增→提交）只要本场都做完，必须挂 relation。Skill 4 靠这些关系编默认办理路线，不要自己写消费者包。
+
 ## 禁止把未识别来源冻成录制常量
 
 禁止：

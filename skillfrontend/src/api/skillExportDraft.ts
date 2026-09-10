@@ -1,13 +1,5 @@
-export type SkillPlanningMode = "dynamic" | "fixed";
-
 export interface SkillExportDraft {
   title: string;
-  description: string;
-  sourceFingerprint?: string;
-  planningMode?: SkillPlanningMode;
-  exampleRequests: string;
-  successCriteria: string;
-  forbiddenActions: string;
 }
 
 export interface RouteSummary {
@@ -30,25 +22,10 @@ function asStringList(value: unknown): string[] {
     : [];
 }
 
-function asPlanningMode(value: unknown): SkillPlanningMode | undefined {
-  return value === "fixed" || value === "dynamic" ? value : undefined;
-}
-
 export function normalizeSkillExportDraft(row: unknown): SkillExportDraft {
   const src = asRecord(row);
-  const examples = Array.isArray(src.exampleRequests)
-    ? asStringList(src.exampleRequests).join("\n")
-    : typeof src.exampleRequests === "string"
-      ? src.exampleRequests
-      : "";
   return {
     title: typeof src.title === "string" ? src.title : "",
-    description: typeof src.description === "string" ? src.description : "",
-    sourceFingerprint: typeof src.sourceFingerprint === "string" ? src.sourceFingerprint : undefined,
-    planningMode: asPlanningMode(src.planningMode),
-    exampleRequests: examples,
-    successCriteria: typeof src.successCriteria === "string" ? src.successCriteria : "",
-    forbiddenActions: typeof src.forbiddenActions === "string" ? src.forbiddenActions : "",
   };
 }
 

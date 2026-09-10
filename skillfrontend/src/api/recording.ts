@@ -1,11 +1,13 @@
 import { api } from "./client";
+import { describeExportFailure } from "./exportError";
+import { mergeRecordingHistory } from "./skillCatalog";
 import {
   normalizeSkillExportDraft,
   serializeSkillExportDraft,
 } from "./skillExportDraft";
 import type { SkillExportDraft } from "./skillExportDraft";
 
-export type { SkillExportDraft, RouteSummary, SkillPlanningMode } from "./skillExportDraft";
+export type { SkillExportDraft, RouteSummary } from "./skillExportDraft";
 
 export const EXPORT_DIR_LS = "dano.exportDir";
 export const SKILL_EXPORT_DRAFT_LS = "dano.skillExportDrafts";
@@ -80,6 +82,7 @@ export interface RecordingResultSummary {
   stage_seven_attempt_id?: string;
   stage_seven_updated_at?: string;
   stage_seven_fingerprint?: string;
+  recording_id?: string;
   skill_id?: string;
   skill_version?: number;
   skill_export_status?: string;
@@ -87,19 +90,21 @@ export interface RecordingResultSummary {
   skill_lifecycle?: RecordingSkillLifecycle;
   skill_needs_reexport?: boolean;
   skill_export_title?: string;
-  skill_export_description?: string;
-  skill_export_description_origin?: "generated" | "manual" | string;
-  skill_export_description_fingerprint?: string;
-  skill_export_description_stale?: boolean;
-  skill_export_planning_mode?: "dynamic" | "fixed" | string;
-  skill_export_example_requests?: string[] | string;
-  skill_export_success_criteria?: string;
-  skill_export_forbidden_actions?: string;
+}
+
+export async function listPiRecordings(subsystem: string): Promise<RecordingResultSummary[]> {
+  const { data } = await api.get("/v1/pi-recordings", { params: { subsystem } });
+  return Array.isArray(data) ? data : [];
 }
 
 export async function listRecordingResults(subsystem: string): Promise<RecordingResultSummary[]> {
-  const { data } = await api.get("/v1/recording-results", { params: { subsystem } });
-  return Array.isArray(data) ? data : [];
+  const [gateway, pi] = await Promise.all([
+    api.get("/v1/recording-results", { params: { subsystem } })
+      .then(({ data }) => (Array.isArray(data) ? data : []))
+      .catch(() => []),
+    listPiRecordings(subsystem).catch(() => []),
+  ]);
+  return mergeRecordingHistory(gateway as RecordingResultSummary[], pi);
 }
 
 export interface RecordingStageSevenSummary {
@@ -112,11 +117,14 @@ export interface RecordingResultDetail extends RecordingResultSummary {
   draft?: Record<string, unknown> | null;
   draft_fingerprint?: string;
   stage_seven?: RecordingStageSevenSummary | null;
-  skill_plan?: Record<string, unknown> | null;
 }
 
 export async function getRecordingResult(id: string): Promise<RecordingResultDetail> {
-  const { data } = await api.get(`/v1/recording-results/${id}`);
+  const key = String(id || "").trim();
+  const path = key.startsWith("rec_")
+    ? `/v1/pi-recordings/${encodeURIComponent(key)}`
+    : `/v1/recording-results/${encodeURIComponent(key)}`;
+  const { data } = await api.get(path);
   return data as RecordingResultDetail;
 }
 
@@ -132,15 +140,28 @@ export async function patchRecordingResult(
   return data as RecordingResultDetail;
 }
 
+export async function putRecordingDraft(
+  recordingId: string,
+  draft: Record<string, unknown>,
+  title = "",
+): Promise<void> {
+  const id = String(recordingId || "").trim();
+  if (!id.startsWith("rec_")) return;
+  await api.put(`/v1/recording-results/${encodeURIComponent(id)}/draft`, {
+    recording_id: id,
+    title,
+    draft,
+  });
+}
+
 export interface SkillGenerationRequest {
   title: string;
-  business_description: string;
-  planning_mode: "dynamic" | "fixed";
-  example_requests?: string[];
-  success_criteria?: string;
-  forbidden_actions?: string;
   out_dir?: string;
-  require_stage_seven?: boolean;
+  recording_id?: string;
+  draft?: Record<string, unknown> | null;
+  skill_id?: string;
+  tenant?: string;
+  subsystem?: string;
 }
 
 export interface SkillExportOutcome {
@@ -148,25 +169,43 @@ export interface SkillExportOutcome {
   skill_id?: string;
   skill_name?: string;
   version?: number;
-  planning_mode?: string;
-  used_capabilities?: Array<Record<string, unknown>>;
-  unused_capabilities?: Array<Record<string, unknown>>;
   routes?: Array<Record<string, unknown>>;
   unresolved_branches?: string[];
   export_path?: string;
-  plan?: Record<string, unknown> | null;
-  clarification_questions?: string[];
   errors?: string[];
-  idempotent?: boolean;
+  catalog_item?: Record<string, unknown> | null;
+  token_missing?: boolean;
 }
+
+export { describeExportFailure } from "./exportError";
 
 export async function exportRecordingSkill(
   resultId: string,
   request: SkillGenerationRequest,
 ): Promise<SkillExportOutcome> {
-  const { data } = await api.post(
-    `/v1/recording-results/${encodeURIComponent(resultId)}/export-skill`,
-    request,
-  );
-  return data as SkillExportOutcome;
+  const recordingId = String(request.recording_id || resultId || "").trim();
+  const path = `/v1/pi-recordings/${encodeURIComponent(recordingId)}/export-skill`;
+  console.info("[dano-export] 开始", {
+    path,
+    resultId,
+    recording_id: recordingId,
+    title: request.title,
+    tenant: request.tenant,
+    caps: Array.isArray(request.draft?.capabilities) ? request.draft?.capabilities.length : 0,
+  });
+  if (!recordingId.startsWith("rec_")) {
+    const error = Object.assign(new Error("缺少 recording_id，无法按最新能力导出"), {
+      response: { data: { detail: "缺少 recording_id，无法按最新能力导出" } },
+    });
+    console.error("[dano-export] 未发出请求", describeExportFailure(error));
+    throw error;
+  }
+  try {
+    const { data } = await api.post(path, { ...request, recording_id: recordingId });
+    console.info("[dano-export] 响应", data);
+    return data as SkillExportOutcome;
+  } catch (error) {
+    console.error("[dano-export] 失败", describeExportFailure(error), error);
+    throw error;
+  }
 }

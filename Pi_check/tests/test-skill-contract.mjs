@@ -10,10 +10,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   REQUIRED_SKILL_FILES,
+  RECORDING_SKILL_FILES,
+  EXPORT_SKILL_FILE,
   readRequiredSkills,
   buildPiInstructions,
+  buildExportPiInstructions,
   buildLiveDrivePrompt,
   buildFinalAnalysisPrompt,
+  PI_INSTRUCTIONS,
 } from "../src/pi-session.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -26,12 +30,23 @@ test("PI 必须加载且只加载四份 Skill", async () => {
   for (const item of loaded) {
     assert.ok(item.text.length > 20, item.name);
   }
-  const instructions = buildPiInstructions(loaded);
+  const recording = loaded.filter((item) => RECORDING_SKILL_FILES.includes(item.name));
+  const instructions = buildPiInstructions(recording);
   assert.match(instructions, /Business Skill Investigator/);
   assert.match(instructions, /control_in_app_browser/);
-  assert.match(instructions, /project_contract_to_request/);
+  assert.match(instructions, /submit_recording_result/);
   assert.doesNotMatch(instructions, /RECORDING_CAPABILITY/);
   assert.doesNotMatch(instructions, /submit_recording_draft/);
+  assert.doesNotMatch(instructions, /write_skill_artifact/);
+  assert.doesNotMatch(instructions, /submit_skill_export/);
+  assert.doesNotMatch(PI_INSTRUCTIONS, /write_skill_artifact/);
+  const skill4 = loaded.find((item) => item.name === EXPORT_SKILL_FILE);
+  const exportInstructions = buildExportPiInstructions(skill4.text);
+  assert.match(exportInstructions, /write_skill_artifact/);
+  assert.match(exportInstructions, /read_skill_artifact/);
+  assert.match(exportInstructions, /read_generator_guides/);
+  assert.match(exportInstructions, /submit_skill_export/);
+  assert.doesNotMatch(exportInstructions, /control_in_app_browser/);
 });
 
 test("缺一份 Skill 文件不准开录", async () => {

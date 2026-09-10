@@ -16,6 +16,10 @@ export interface SkillManifest {
   created_at?: string;
   lifecycle_state?: string;
   frozen?: boolean;
+  recording_id?: string;
+  result_id?: string;
+  version?: number;
+  export_path?: string;
   call_metadata?: SkillCallMetadata;
   parameters: JSONSchema;  // 输入 JSON Schema
   output_schema?: Record<string, unknown>;
@@ -129,7 +133,8 @@ export async function regenerateBackupCodes(
 
 export async function listSkills(): Promise<SkillManifest[]> {
   const { data } = await api.get("/v1/skills");
-  return data;
+  if (Array.isArray(data)) return data;
+  return Array.isArray(data?.items) ? data.items : [];
 }
 
 export interface SkillListPage {
@@ -163,9 +168,6 @@ export async function resumeSkill(skillId: string): Promise<{ skill_id: string; 
   return data;
 }
 
-// 导出本租户已上架 Skill 为文件式 skill，后端就地写入 out_dir
-export type SkillExportMode = "proxy" | "package" | "both";
-
 export async function getExportDirectory(): Promise<string> {
   const { data } = await api.get("/export/directory");
   return String(data?.out_dir || "").trim();
@@ -176,8 +178,8 @@ export async function saveExportDirectory(out_dir: string): Promise<string> {
   return String(data?.out_dir || out_dir).trim();
 }
 
-export async function exportAgentSkills(out_dir: string, mode: SkillExportMode = "package"): Promise<{ out_dir: string; mode: SkillExportMode; count: number; written: string[]; removed_frozen_folders?: string[] }> {
-  const { data } = await api.post("/export/agent-skills", { out_dir, mode });
+export async function exportAgentSkills(out_dir: string, tenant = ""): Promise<{ out_dir: string; mode: string; count: number; written: string[]; errors?: string[]; removed_frozen_folders?: string[] }> {
+  const { data } = await api.post("/v1/skills/export", { out_dir, tenant });
   return data;
 }
 
@@ -186,7 +188,7 @@ export interface RuntimeToken {
   tenant: string;
   subsystem: string;
   has_token: boolean;
-  headers: Record<string, string>;   // 后端始终打码
+  headers: Record<string, string>;   // 完整鉴权头，调用方直接使用
   source?: string;                   // recording / manual / scheduled:*
   updated_at?: string;
 }

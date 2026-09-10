@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 import structlog
@@ -62,9 +62,25 @@ def load_pi_check_session_state(start_url: str) -> dict[str, Any] | None:
 
 
 def should_adopt_existing(*, explicit_url: bool, own_process_alive: bool, healthy: bool) -> bool:
+    """录制进程只要健康就可领养，缺目录接口时另开导出进程，不杀正在录的端口。"""
     if own_process_alive and healthy:
         return True
     return bool(explicit_url and healthy)
+
+
+def export_sidecar_port() -> int:
+    raw = os.environ.get("PI_CHECK_EXPORT_PORT") or ""
+    try:
+        port = int(raw)
+    except ValueError:
+        port = 0
+    if port > 0:
+        return port
+    return sidecar_port() + 1
+
+
+def export_sidecar_base_url() -> str:
+    return f"http://127.0.0.1:{export_sidecar_port()}"
 
 
 def explicit_sidecar_url() -> bool:
@@ -201,6 +217,7 @@ def adapt_pi_check_summary(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "machine_verification_required": False,
         "machine_verification_status": "",
         "skill_lifecycle": "stage_six_done",
+        "recording_id": str(row.get("recording_id") or row.get("id") or ""),
         "notice": PI_ONLY_NOTICE,
     }
 
@@ -384,10 +401,12 @@ class RecordingBridgeContext:
 class PiCheckSidecar:
     def __init__(self) -> None:
         self.process: asyncio.subprocess.Process | None = None
+        self.export_process: asyncio.subprocess.Process | None = None
         self.adopted = False
         self.ready = False
         self.last_error = ""
         self._log_task: asyncio.Task[None] | None = None
+        self._export_url = ""
 
     def status(self) -> dict[str, Any]:
         return {
@@ -398,6 +417,7 @@ class PiCheckSidecar:
             "url": sidecar_base_url(),
             "ws": sidecar_ws_url(),
             "pid": None if self.process is None else self.process.pid,
+            "export_url": self._export_url or sidecar_base_url(),
             "error": self.last_error,
         }
 
@@ -487,6 +507,38 @@ class PiCheckSidecar:
         except Exception:  # noqa: BLE001
             return False
 
+    async def has_export_catalog(self, base: str = "") -> bool:
+        root = str(base or sidecar_base_url()).rstrip("/")
+        try:
+            async with sidecar_http_client(2.0) as client:
+                health = await client.get(f"{root}/health")
+                if health.status_code == 200:
+                    payload = health.json() if health.content else {}
+                    if isinstance(payload, dict) and payload.get("export_catalog"):
+                        return True
+                skills = await client.get(f"{root}/v1/skills")
+            return skills.status_code == 200
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def ensure_export_api(self) -> str:
+        await self.ensure_started()
+        if await self.has_export_catalog():
+            self._export_url = sidecar_base_url()
+            return self._export_url
+        helper = export_sidecar_base_url()
+        if await self.has_export_catalog(helper):
+            self._export_url = helper
+            return helper
+        await self._spawn_export_helper()
+        deadline = asyncio.get_running_loop().time() + HEALTH_TIMEOUT_SEC
+        while asyncio.get_running_loop().time() < deadline:
+            if await self.has_export_catalog(helper):
+                self._export_url = helper
+                return helper
+            await asyncio.sleep(0.25)
+        raise RuntimeError(f"导出目录进程未就绪: {helper}")
+
     async def list_results(self, subsystem: str = "") -> list[dict[str, Any]]:
         if not self.ready:
             return []
@@ -519,6 +571,136 @@ class PiCheckSidecar:
             return response.status_code == 200
         except Exception:  # noqa: BLE001
             return False
+
+    async def export_skill(self, payload: dict[str, Any]) -> dict[str, Any]:
+        recording_id = str(payload.get("recording_id") or "").strip()
+        result_id = str(payload.get("result_id") or "").strip()
+        if not recording_id.startswith("rec_") and result_id.startswith("rec_"):
+            recording_id = result_id
+        if not recording_id.startswith("rec_"):
+            return {"status": "export_failed", "errors": ["缺少 recording_id"]}
+        payload = {**payload, "recording_id": recording_id}
+        base = await self.ensure_export_api()
+        async with sidecar_http_client(620.0) as client:
+            response = await client.post(
+                f"{base}/v1/recording-results/{quote(recording_id, safe='')}/export-skill",
+                json=payload,
+            )
+        data = response.json() if response.content else {}
+        if not isinstance(data, dict):
+            data = {"status": "export_failed", "errors": [str(data)]}
+        data.setdefault("status", "exported" if response.is_success else "export_failed")
+        if not response.is_success:
+            data.setdefault("errors", [str(data.get("error") or response.text or "导出失败")])
+        return data
+
+    async def list_exported_skills(self) -> list[dict[str, Any]]:
+        try:
+            base = await self.ensure_export_api()
+        except Exception:  # noqa: BLE001
+            return []
+        try:
+            async with sidecar_http_client(5.0) as client:
+                response = await client.get(f"{base}/v1/skills")
+            if response.status_code != 200:
+                return []
+            rows = response.json()
+        except Exception:  # noqa: BLE001
+            return []
+        return rows if isinstance(rows, list) else list((rows or {}).get("items") or [])
+
+    async def get_exported_skill(self, skill_id: str) -> dict[str, Any] | None:
+        key = str(skill_id or "").strip()
+        if not key:
+            return None
+        try:
+            base = await self.ensure_export_api()
+        except Exception:  # noqa: BLE001
+            return None
+        try:
+            async with sidecar_http_client(5.0) as client:
+                response = await client.get(f"{base}/v1/skills/{quote(key, safe='')}")
+            if response.status_code != 200:
+                return None
+            data = response.json()
+        except Exception:  # noqa: BLE001
+            return None
+        return data if isinstance(data, dict) else None
+
+    async def remove_exported_skill(self, skill_id: str) -> bool:
+        key = str(skill_id or "").strip()
+        if not key:
+            return False
+        try:
+            base = await self.ensure_export_api()
+        except Exception:  # noqa: BLE001
+            return False
+        try:
+            async with sidecar_http_client(5.0) as client:
+                response = await client.delete(f"{base}/v1/skills/{quote(key, safe='')}")
+            return response.status_code == 200
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def freeze_exported_skill(self, skill_id: str, frozen: bool = True) -> dict[str, Any] | None:
+        key = str(skill_id or "").strip()
+        if not key:
+            return None
+        try:
+            base = await self.ensure_export_api()
+        except Exception:  # noqa: BLE001
+            return None
+        action = "freeze" if frozen else "resume"
+        try:
+            async with sidecar_http_client(5.0) as client:
+                response = await client.post(f"{base}/v1/skills/{quote(key, safe='')}/{action}")
+            if response.status_code != 200:
+                return None
+            data = response.json()
+        except Exception:  # noqa: BLE001
+            return None
+        return data if isinstance(data, dict) else None
+
+    async def write_draft(self, recording_id: str, draft: dict[str, Any], title: str = "") -> bool:
+        key = str(recording_id or "").strip()
+        if not key.startswith("rec_") or not isinstance(draft, dict):
+            return False
+        try:
+            base = await self.ensure_export_api()
+        except Exception:  # noqa: BLE001
+            return False
+        try:
+            async with sidecar_http_client(8.0) as client:
+                response = await client.put(
+                    f"{base}/v1/recording-results/{quote(key, safe='')}/draft",
+                    json={"recording_id": key, "draft": draft, "title": title},
+                )
+            return response.status_code == 200
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def export_catalog(self, payload: dict[str, Any]) -> dict[str, Any]:
+        base = await self.ensure_export_api()
+        async with sidecar_http_client(620.0) as client:
+            response = await client.post(f"{base}/v1/skills/export", json=payload)
+        data = response.json() if response.content else {}
+        if not isinstance(data, dict):
+            raise RuntimeError("Pi_check 目录导出返回异常")
+        if not response.is_success:
+            raise RuntimeError(str((data.get("errors") or ["目录导出失败"])[0]))
+        return data
+
+    async def writeback_token(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            base = await self.ensure_export_api()
+        except Exception:  # noqa: BLE001
+            return {"ok": False}
+        try:
+            async with sidecar_http_client(8.0) as client:
+                response = await client.post(f"{base}/v1/settings/token", json=payload)
+            return response.json() if response.content else {"ok": response.is_success}
+        except Exception:  # noqa: BLE001
+            return {"ok": False}
 
     async def _spawn(self) -> None:
         if not PI_CHECK_ROOT.is_dir():
@@ -580,6 +762,34 @@ class PiCheckSidecar:
             status="started",
             summary="已启动 PI-only 录制进程",
             details={"pid": self.process.pid, "port": sidecar_port()},
+        )
+
+    async def _spawn_export_helper(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            raise RuntimeError("未找到 node，无法启动导出目录进程")
+        port = export_sidecar_port()
+        await asyncio.to_thread(free_listen_port, port)
+        env = sidecar_child_env()
+        env["PI_CHECK_PORT"] = str(port)
+        kwargs: dict[str, Any] = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        self.export_process = await asyncio.create_subprocess_exec(
+            node,
+            "src/server.mjs",
+            cwd=str(PI_CHECK_ROOT),
+            env=env,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            **kwargs,
+        )
+        emit_run_event(
+            "pi_check.export_helper",
+            stage="system",
+            status="started",
+            summary="录制进程没有目录接口，已另开导出进程",
+            details={"pid": self.export_process.pid, "port": port},
         )
 
     async def _wait_healthy(self) -> None:

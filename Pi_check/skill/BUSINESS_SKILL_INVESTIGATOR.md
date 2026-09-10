@@ -4,11 +4,11 @@
 禁止：写 selector 细则、判定 source_kind、写消费者 SKILL.md、阿里章节名、字段四问。  
 缺口只改本文件。
 
-你是本场调查的唯一入口。动手按 Control In App Browser，认产物按 Infer Business Contract，出包按 Build and Validate Dedicated Skill。不要本地写字段规则，不要套系统名或 URL。
+你是本场调查的唯一入口。动手按 Control In App Browser，认产物按 Infer Business Contract。不要本地写字段规则，不要套系统名或 URL。
 
-代码只执行动作、存证据、跑指定检查、打包。它不替你认业务，也不猜「先查后增」。
+代码只执行动作、存证据、跑指定检查。它不替你认业务，也不猜「先查后增」。
 
-出包细则以 Skill 4 为准，本文件不改那些规则。本文件保证：目标做完、每一项能力合同完整且正确、再交给 Skill 4。
+本文件保证：目标做完、每一项能力合同完整且正确、然后停止并交给页面展示。禁止写消费者 SKILL.md。出包由用户点击「产出 Skill」后另开的 Skill 4 会话完成。
 
 ## 默认自动控制，直接产出能力
 
@@ -17,7 +17,7 @@
 - 记下**完整目标原文**，不要压成短标题。立刻用 Skill 2 打开入口、观察、按目标把每一页做完。
 - 某一行已按目标做完且有真实 execute：立刻调 Skill 3 交该项。不要攒到最后，也不要等人点头。
 - Skill 3 交回来的合同若不完整（残缺 execute、未识别却当已解决、灰框进了调用方）：按返回的 `error` 或笔记里的缺口分诊，补证后再交。不要把残缺项标成已推断。
-- 目标要求的每一页、台账该交的每一行都齐、且每行合同完整：立刻调 Skill 4；通过后立刻 `submit_recording_result({final:true, use_draft:true})`。
+- 目标要求的每一页、台账该交的每一行都齐、且每行合同完整：立刻 `submit_recording_result({final:true, use_draft:true})` 交出能力并停止。不要调 Skill 4，不要写消费者包。
 - 「登录了 / 继续 / 好了」只表示阻断解除。解除后自动接着做完并产出。不要理解成「现在改由人指挥」，也不要再等一句「结束」。
 - 人也可以点预览。人点出的动作也要交。人没有点、也没有阻断时，不要停下来问人下一步。
 - 做完后禁止为「再验证一下」换页、重查、空转到超时。当前页目标已做完：离开这一页，不要再回来空转。超时只停自动点，不是失败；若台账已齐，仍应交齐能力并定稿。
@@ -78,8 +78,7 @@
 3. **请人点一下** → 仅阻断。Skill 2 `assist`。只写这一个控件要人做什么。协助之后必须停自动点，等人说继续后再自动接着做。
 4. **认一项产物** → Skill 3 + `submit_recording_capability`。该项必须已按目标做完，且有真实 execute。空表保存出来的请求不要交成完整能力。不要单独交没有 `request_refs` 的 relations-only 信封。
 5. **最小补证** → 再调 Skill 2。Infer 只建议，你决定是否动手。补完立刻再交，不要等结束。
-6. **出包验证** → Skill 4。目标页与台账该交的行都齐、每一行合同完整、写入没有「未识别却当可执行」时立刻走，不要等用户结束。出包怎么写以 Skill 4 为准。
-7. **定稿** → Skill 4 通过后立刻 `submit_recording_result({final:true, use_draft:true})`。
+6. **定稿能力** → 目标页与台账该交的行都齐、每一行合同完整、写入没有「未识别却当可执行」时立刻 `submit_recording_result({final:true, use_draft:true})`。不要等用户说结束。不要调 Skill 4。
 
 工具回 `transport_idle` 不是业务失败。台账已齐且合同完整就定稿；没齐且没有阻断就继续做；只有阻断才等用户。
 
@@ -98,7 +97,7 @@
 协助只针对这一格或这一钮。禁止一次 assist 把整张表交出去然后自己空转。  
 协助发出之后禁止再 click / fill / choose，直到用户说继续。人已经发出预期请求就停手，交给 Infer 认那条请求。
 
-不是阻断：人没有说话、人没有点预览、人没有说结束、你还想再确认一遍、你想换个页看看。
+不是阻断：人没有说话、人没有点预览、人没有说结束、你还想再确认一遍、你想换个页看看。选人、选部门、树选择器（含打开后的节点）也不是阻断：点开宿主，再 snapshot，按可见原文 `choose` / `text=`。
 
 ## 导出条件
 
@@ -107,8 +106,7 @@
 1. 目标原文要求的每一页、每一行已经做完，或已写入 `unresolved` 说明缺什么
 2. 台账每行有**完整**合同或 `unresolved`（残缺合同不算）
 3. 写入行没有「未识别却当可执行」
-4. Skill 4 的投影、变化输入、隔离运行、`validate_skill_package` 通过。没有 `validate_skill_package` 的 `ok:true`：禁止 `submit_recording_result`。
-5. 页内顺序已交给 Infer（有值流的 `links`，或没有值流的 `capability_relations`）。Skill 4 编不出默认办理路线时按 Skill 4 失败分诊，不要自己写包。
+4. 页内顺序已交给 Infer（有值流的 `links`，或没有值流的 `capability_relations`）。没有顺序时按能力在合同中的次序记账，仍可定稿能力；默认办理路线由之后的 Skill 4 出包会话编写。
 
 查询类可以带着说明缺口的 `unresolved`，但不能把缺口冻成可执行默认。不完整写能力不得发布。
 
@@ -119,7 +117,7 @@
 - 形状错（`fields`、字符串 refs、params 不是数组、重复 id、共用 execute、单独交 relations）→ Skill 3 重交信封
 - 缺依据 / 未识别当已解决 / 灰框进了调用方 / 假 links / 错挂 preflight → Skill 3
 - 证据不够、点不到、值没写上、少加了一种分区行 → Skill 2
-- handbook / 投影 / 隔离运行 / validator 失败 → Skill 4
+- 出包 handbook / 投影 / 隔离运行 / validator 失败 → 那是点击「产出 Skill」之后的 Skill 4 会话，本场不要自己写包
 - 点不动、图送不进、证据读丢、投影工具补了键 → 报程序故障，不要假装业务失败
 
 ## 调查环
@@ -131,7 +129,7 @@
 → 阻断才 assist；解除后自动继续
 → 该行做完且有真实 execute → 立刻 Skill 3 交一项完整合同
 → 不完整 → 补证或 unresolved，不要标已推断
-→ 目标页与台账齐了 → 立刻 Skill 4
+→ 目标页与台账齐了 → 立刻 submit_recording_result 交出能力
 → 失败按错误分诊，代码不自动修
-→ 通过 → 立刻 submit_recording_result
+→ 不要写消费者包
 ```

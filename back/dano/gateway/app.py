@@ -483,6 +483,17 @@ async def post_runtime_token(
     rec = await update_token_headers(req.tenant, req.subsystem, headers, source="manual")
     if not rec:
         raise HTTPException(status_code=500, detail="token 保存失败(DB 不可用?)")
+    try:
+        from dano.onboarding.pi_check_sidecar import get_sidecar
+
+        await get_sidecar().writeback_token({
+            "tenant": req.tenant,
+            "subsystem": req.subsystem,
+            "headers": headers,
+            "out_dir": _current_export_dir(),
+        })
+    except Exception:  # noqa: BLE001
+        pass
     return {"ok": True, "tenant": req.tenant, "subsystem": req.subsystem,
             "headers": mask_headers(rec.get("headers") or {}), "updated_at": rec.get("updated_at")}
 
@@ -1600,6 +1611,7 @@ async def patch_recording_result(
     from dano.onboarding.recording_results import (
         apply_recording_result_edits,
         is_recording_result_key,
+        latest_recording_spec,
         recording_result_detail,
     )
 
@@ -1628,18 +1640,151 @@ async def patch_recording_result(
     updated = await store.patch_recording_result_body(parsed, next_body)
     if updated is None:
         raise HTTPException(status_code=404, detail="录制结果不存在")
+    recording_id = _recording_id_from_body(next_body)
+    spec = latest_recording_spec(next_body)
+    if recording_id and isinstance(spec, dict):
+        try:
+            from dano.onboarding.pi_check_sidecar import get_sidecar
+
+            await get_sidecar().write_draft(
+                recording_id,
+                spec,
+                title=str(next_body.get("title") or ""),
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return recording_result_detail(updated)
 
 
 class ExportRecordingSkillReq(BaseModel):
     title: str = ""
+    out_dir: str = ""
+    recording_id: str = ""
+    subsystem: str = ""
+    draft: dict | None = None
+    auth_headers: dict | None = None
+    skill_id: str = ""
     business_description: str = ""
     planning_mode: Literal["dynamic", "fixed"] = "dynamic"
     example_requests: list[str] = Field(default_factory=list)
     success_criteria: str = ""
     forbidden_actions: str = ""
-    out_dir: str = ""
     require_stage_seven: bool | None = None
+
+
+def _looks_like_recording_id(value: str) -> bool:
+    return str(value or "").startswith("rec_")
+
+
+def _recording_id_from_body(body: dict, result_id: str = "") -> str:
+    meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+    flow = body.get("flow_spec") if isinstance(body.get("flow_spec"), dict) else {}
+    flow_meta = flow.get("meta") if isinstance(flow.get("meta"), dict) else {}
+    draft = body.get("draft") if isinstance(body.get("draft"), dict) else {}
+    draft_meta = draft.get("meta") if isinstance(draft.get("meta"), dict) else {}
+    for candidate in (
+        body.get("recording_id"),
+        meta.get("recording_id"),
+        flow_meta.get("recording_id"),
+        draft_meta.get("recording_id"),
+        result_id,
+    ):
+        text = str(candidate or "").strip()
+        if _looks_like_recording_id(text):
+            return text
+    return ""
+
+
+def _recording_id_from_draft(draft: dict | None) -> str:
+    if not isinstance(draft, dict):
+        return ""
+    meta = draft.get("meta") if isinstance(draft.get("meta"), dict) else {}
+    for candidate in (draft.get("recording_id"), meta.get("recording_id")):
+        text = str(candidate or "").strip()
+        if _looks_like_recording_id(text):
+            return text
+    return ""
+
+
+def _pi_catalog_to_manifest(item: dict) -> dict:
+    name = str(item.get("name") or item.get("skill_id") or "").strip()
+    return {
+        "name": name,
+        "subsystem": str(item.get("subsystem") or "oa"),
+        "action": str(item.get("action") or ""),
+        "title": str(item.get("title") or name),
+        "business": str(item.get("business") or ""),
+        "description": str(item.get("description") or ""),
+        "integration": str(item.get("integration") or "page"),
+        "risk_level": str(item.get("risk_level") or "L1"),
+        "created_at": str(item.get("updated_at") or item.get("created_at") or ""),
+        "lifecycle_state": "suspended" if item.get("frozen") else "published",
+        "frozen": bool(item.get("frozen")),
+        "recording_id": str(item.get("recording_id") or ""),
+        "source": str(item.get("source") or "pi_check_recording"),
+        "parameters": item.get("parameters") if isinstance(item.get("parameters"), dict) else {"type": "object", "properties": {}},
+    }
+
+
+def _merge_skill_manifests(pg_items: list[dict], pi_items: list[dict]) -> list[dict]:
+    by_name: dict[str, dict] = {}
+    recording_to_name: dict[str, str] = {}
+    for item in pg_items:
+        name = str(item.get("name") or "").strip()
+        if name:
+            by_name[name] = dict(item)
+    for raw in pi_items:
+        mapped = _pi_catalog_to_manifest(raw)
+        name = str(mapped.get("name") or "").strip()
+        recording_id = str(mapped.get("recording_id") or "").strip()
+        if recording_id and recording_id in recording_to_name:
+            by_name.pop(recording_to_name[recording_id], None)
+        if not name:
+            continue
+        by_name[name] = {**by_name.get(name, {}), **mapped}
+        if recording_id:
+            recording_to_name[recording_id] = name
+    return sorted(
+        by_name.values(),
+        key=lambda item: str(item.get("created_at") or ""),
+        reverse=True,
+    )
+
+
+def _remove_export_dir(export_path: str) -> list[str]:
+    target = Path(str(export_path or "").strip())
+    if not target.is_dir():
+        return []
+    shutil.rmtree(target, ignore_errors=True)
+    return [str(target)]
+
+
+async def _latest_flow_spec_for_catalog_item(tenant: str, item: dict) -> dict | None:
+    from dano.assets.drafts import DraftStore
+    from dano.onboarding.recording_results import latest_recording_spec
+
+    store = DraftStore()
+    result_id = str(item.get("result_id") or "").strip()
+    recording_id = str(item.get("recording_id") or "").strip()
+    if result_id:
+        try:
+            saved = await store.get_draft(uuid.UUID(result_id))
+        except ValueError:
+            saved = None
+        if saved is not None and saved.tenant == tenant:
+            spec = latest_recording_spec(dict(saved.body or {}))
+            if isinstance(spec, dict) and spec.get("capabilities"):
+                return spec
+    if not recording_id:
+        return None
+    for saved in await store.list_recording_results(tenant=tenant):
+        body = dict(saved.body or {})
+        if str(body.get("recording_id") or "") != recording_id:
+            continue
+        spec = latest_recording_spec(body)
+        if isinstance(spec, dict) and spec.get("capabilities"):
+            return spec
+    return None
 
 
 @app.post("/v1/recording-results/{result_id}/export-skill")
@@ -1648,117 +1793,100 @@ async def export_recording_result_skill(
     req: ExportRecordingSkillReq,
     x_tenant_key: str | None = Header(default=None),
 ) -> dict:
-    """阶段8：按用户业务描述规划、生成、发布并导出一个页面级 Skill。"""
+    """点「产出 Skill」后转发到 Pi_check Skill 4 出包会话。不走 back 规划器/renderer。"""
     tenant = await _auth_tenant(x_tenant_key)
     from dano.assets.drafts import DraftStore
     from dano.execution.page.sessions import save_export_dir
+    from dano.onboarding.pi_check_sidecar import get_sidecar
     from dano.onboarding.recording_results import is_recording_result_key
-    from dano.onboarding.skill_generation.export import SkillExportError, export_recording_skill
-    from dano.onboarding.skill_generation.models import SkillGenerationRequest
-    from dano.shared.enums import Subsystem
 
+    out_dir = str(req.out_dir or "").strip() or _current_export_dir()
+    draft = req.draft if isinstance(req.draft, dict) else None
+    recording_id = str(req.recording_id or "").strip()
+    body: dict = {}
+    store = None
+    parsed = None
     try:
         parsed = uuid.UUID(result_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="无效的录制结果 ID") from exc
-    store = DraftStore()
-    saved = await store.get_draft(parsed)
-    if (
-        saved is None
-        or saved.tenant != tenant
-        or not is_recording_result_key(saved.asset_key)
-    ):
-        raise HTTPException(status_code=404, detail="录制结果不存在")
-    request = SkillGenerationRequest.model_validate(req.model_dump())
-    request.out_dir = str(request.out_dir or "").strip() or _current_export_dir()
-    body = dict(saved.body or {})
-    bind_run_context(
-        run_id=f"skill-export-{parsed}",
-        recording_id=str(parsed),
-        action=str(body.get("action") or ""),
-        tenant=tenant,
-        subsystem=str(body.get("subsystem") or "oa"),
-        skill_id=str(body.get("skill_id") or ""),
-    )
+    except ValueError:
+        if _looks_like_recording_id(result_id):
+            recording_id = recording_id or result_id
+    if parsed is not None:
+        store = DraftStore()
+        saved = await store.get_draft(parsed)
+        if (
+            saved is None
+            or saved.tenant != tenant
+            or not is_recording_result_key(saved.asset_key)
+        ):
+            raise HTTPException(status_code=404, detail="录制结果不存在")
+        body = dict(saved.body or {})
+        recording_id = recording_id or _recording_id_from_body(body)
+        if draft is None and isinstance(body.get("flow_spec"), dict):
+            draft = body.get("flow_spec")
+    recording_id = recording_id or _recording_id_from_draft(draft)
+    if not _looks_like_recording_id(recording_id):
+        raise HTTPException(status_code=400, detail="缺少 recording_id，无法按最新能力导出")
+    sidecar = get_sidecar()
+    subsystem = str(req.subsystem or body.get("subsystem") or "oa")
+    from dano.infra.token_store import get_token_headers
+
+    auth_headers = dict(req.auth_headers or {}) if req.auth_headers else {}
+    if not auth_headers:
+        auth_headers = await get_token_headers(tenant, subsystem)
     emit_run_event(
         "skill.export.accepted",
         stage="export",
         status="started",
         summary="收到手动导出 Skill 请求",
-        details={
-            "result_id": str(parsed),
-            "title": request.title or str(body.get("title") or ""),
-            "planning_mode": str(request.planning_mode),
-            "out_dir": request.out_dir,
-            "description_chars": len(request.business_description or ""),
-            "description_preview": (request.business_description or "")[:240],
-            "capability_count": len((body.get("flow_spec") or {}).get("capabilities") or [])
-            if isinstance(body.get("flow_spec"), dict) else 0,
-        },
+        details={"result_id": result_id, "recording_id": recording_id, "title": req.title, "out_dir": out_dir},
     )
-
-    async def persist(next_body: dict) -> None:
-        await store.patch_recording_result_body(parsed, next_body)
-
-    async def publish(**kwargs):
-        from dano.onboarding.skill_generation.export import _default_publish
-
-        report = await _default_publish(**kwargs)
-        if report.get("ok"):
-            action = str(report.get("action") or "")
-            await _lifecycle_reconciler.register_or_defer(
-                skill_id=str(kwargs["skill_id"]),
-                subsystem=Subsystem(str(kwargs.get("subsystem") or "oa")),
-                action=action,
-                asset_version=int(report.get("asset_version") or 1),
-            )
-        return report
-
-    try:
-        outcome = await export_recording_skill(
-            result_id=parsed,
-            body=body,
-            tenant=tenant,
-            request=request,
-            persist=persist,
-            publish=publish,
-        )
-    except SkillExportError as exc:
+    outcome = await sidecar.export_skill({
+        "recording_id": recording_id,
+        "result_id": result_id,
+        "tenant": tenant,
+        "subsystem": subsystem,
+        "title": req.title,
+        "out_dir": out_dir,
+        "draft": draft,
+        "auth_headers": auth_headers or None,
+        "existing_skill_id": str(req.skill_id or body.get("skill_id") or ""),
+    })
+    if outcome.get("status") != "exported":
+        errors = [str(item) for item in (outcome.get("errors") or ["Skill 导出失败"])]
         emit_run_event(
             "skill.export.summary",
             stage="export",
             status="failed",
             level="error",
-            summary=exc.detail,
-            details={"result_id": str(parsed), "status_code": exc.status_code},
-            error={"code": "SKILL_EXPORT_ERROR", "type": "SkillExportError", "message": exc.detail},
+            summary=errors[0],
+            details={"result_id": result_id, "recording_id": recording_id, "errors": errors},
         )
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        raise HTTPException(status_code=409, detail="; ".join(errors))
+    if store is not None and parsed is not None:
+        await store.patch_recording_result_body(parsed, {
+            **body,
+            "recording_id": recording_id,
+            "published": True,
+            "skill_id": outcome.get("skill_id") or "",
+            "skill_version": int(outcome.get("version") or 1),
+            "skill_export_status": "exported",
+            "skill_export_path": outcome.get("export_path") or "",
+            "skill_export_title": outcome.get("skill_name") or req.title,
+            "skill_lifecycle": "exported",
+            "skill_needs_reexport": False,
+        })
+    if out_dir:
+        save_export_dir(out_dir)
     emit_run_event(
         "skill.export.summary",
         stage="export",
-        status="succeeded" if outcome.status == "exported" else "failed",
-        level="info" if outcome.status == "exported" else "error",
-        summary=(
-            "Skill 导出完成"
-            if outcome.status == "exported"
-            else "Skill 导出未完成"
-        ),
-        skill_id=outcome.skill_id,
-        details={
-            "result_id": str(parsed),
-            "status": outcome.status,
-            "skill_id": outcome.skill_id,
-            "export_path": outcome.export_path,
-            "version": outcome.version,
-            "idempotent": outcome.idempotent,
-            "errors": list(outcome.errors or []),
-            "clarification_questions": list(outcome.clarification_questions or []),
-        },
+        status="succeeded",
+        summary="Skill 导出完成",
+        skill_id=str(outcome.get("skill_id") or ""),
+        details={"result_id": result_id, "recording_id": recording_id, "export_path": outcome.get("export_path") or ""},
     )
-    if outcome.status == "exported" and request.out_dir:
-        save_export_dir(request.out_dir)
-    return outcome.model_dump(mode="json")
+    return outcome
 
 
 @app.get("/v1/skills")
@@ -1769,6 +1897,13 @@ async def list_skills(
 ) -> list[dict] | dict:
     tenant = await _auth_tenant(x_tenant_key)
     items = await _manifests_for_tenant(tenant)
+    from dano.onboarding.pi_check_sidecar import get_sidecar
+
+    try:
+        pi_items = await get_sidecar().list_exported_skills()
+    except Exception:  # noqa: BLE001
+        pi_items = []
+    items = _merge_skill_manifests(items, pi_items)
     if page_size is None:
         return items
     total = len(items)
@@ -1783,64 +1918,99 @@ async def list_skills(
 
 @app.delete("/v1/skills/{skill_id}")
 async def delete_skill(skill_id: str, x_tenant_key: str | None = Header(default=None)) -> dict:
-    """删除本租户的某个 skill:删 PG 资产各版本 + 生命周期记录 + 已导出文件夹。"""
+    """删除本租户的某个 skill:删 PG 资产、Pi_check 目录项和已导出文件夹。"""
     tenant = await _auth_tenant(x_tenant_key)
+    from dano.onboarding.pi_check_sidecar import get_sidecar
+
+    sidecar = get_sidecar()
+    pi_item = await sidecar.get_exported_skill(skill_id)
     sub_str, _, action = skill_id.partition(".")
-    if not action:
-        raise HTTPException(status_code=400, detail="skill_id 应为 {subsystem}.{action}")
-    manifests = await _manifests_for_tenant(tenant)
-    manifest = next((m for m in manifests if m["name"] == skill_id), None)
-    subsystem = Subsystem(sub_str)            # 系统标识开放:任意系统皆合法(不存在则下面按 0 行返回 404)
-    removed = _cleanup_known_export_folders(_export_slugs_for_manifest(manifest or {"name": skill_id}))
-    rows = await repo.delete_by_action(Scope(tenant=tenant, subsystem=subsystem), action)
-    lifecycle_rows = await _lifecycle.store.delete(skill_id)
-    if rows == 0:
+    rows = 0
+    lifecycle_rows = 0
+    removed: list[str] = []
+    manifest = None
+    if action:
+        manifests = await _manifests_for_tenant(tenant)
+        manifest = next((m for m in manifests if m["name"] == skill_id), None)
+        removed.extend(_cleanup_known_export_folders(_export_slugs_for_manifest(manifest or {"name": skill_id})))
+        try:
+            rows = await repo.delete_by_action(Scope(tenant=tenant, subsystem=Subsystem(sub_str)), action)
+            lifecycle_rows = await _lifecycle.store.delete(skill_id)
+        except Exception:  # noqa: BLE001
+            rows = 0
+    if pi_item and pi_item.get("export_path"):
+        removed.extend(_remove_export_dir(str(pi_item.get("export_path") or "")))
+    pi_removed = await sidecar.remove_exported_skill(skill_id)
+    if rows == 0 and not pi_removed and manifest is None:
         raise HTTPException(status_code=404, detail=f"本公司无此 Skill: {skill_id}")
-    return {"deleted": rows, "lifecycle_deleted": lifecycle_rows, "skill_id": skill_id, "removed_folders": removed}
+    return {
+        "deleted": rows or (1 if pi_removed else 0),
+        "lifecycle_deleted": lifecycle_rows,
+        "skill_id": skill_id,
+        "removed_folders": removed,
+    }
 
 
 @app.post("/v1/skills/{skill_id}/freeze")
 async def freeze_skill(skill_id: str, x_tenant_key: str | None = Header(default=None)) -> dict:
-    """冻结本租户 skill:只清理导出文件夹,保留资产库;后续导出/工具列表跳过该 skill。"""
+    """冻结本租户 skill:只清理已导出文件夹,保留目录记录。"""
     tenant = await _auth_tenant(x_tenant_key)
+    from dano.onboarding.pi_check_sidecar import get_sidecar
+
+    sidecar = get_sidecar()
+    pi_item = await sidecar.get_exported_skill(skill_id)
     sub_str, _, action = skill_id.partition(".")
-    if not action:
-        raise HTTPException(status_code=400, detail="skill_id 应为 {subsystem}.{action}")
     manifests = await _manifests_for_tenant(tenant)
     manifest = next((m for m in manifests if m["name"] == skill_id), None)
-    if manifest is None:
+    if manifest is None and pi_item is None:
         raise HTTPException(status_code=404, detail=f"本公司无此 Skill: {skill_id}")
-    subsystem = Subsystem(sub_str)
-    rec = await _lifecycle.store.get(skill_id)
-    if rec is None:
-        version = await _latest_skill_version(tenant, subsystem, action, manifest)
-        rec = await _lifecycle.register_published(skill_id, subsystem, action, version)
-    if rec.state != SkillState.SUSPENDED:
-        rec = await _lifecycle.suspend(skill_id)
-    removed = _cleanup_known_export_folders(_export_slugs_for_manifest(manifest))
-    return {"skill_id": skill_id, "state": rec.state.value if rec else SkillState.SUSPENDED.value,
-            "removed_folders": removed}
+    removed: list[str] = []
+    state = "suspended"
+    if manifest is not None and action:
+        subsystem = Subsystem(sub_str)
+        rec = await _lifecycle.store.get(skill_id)
+        if rec is None:
+            version = await _latest_skill_version(tenant, subsystem, action, manifest)
+            rec = await _lifecycle.register_published(skill_id, subsystem, action, version)
+        if rec.state != SkillState.SUSPENDED:
+            rec = await _lifecycle.suspend(skill_id)
+        state = rec.state.value if rec else SkillState.SUSPENDED.value
+        removed.extend(_cleanup_known_export_folders(_export_slugs_for_manifest(manifest)))
+    if pi_item is not None:
+        await sidecar.freeze_exported_skill(skill_id, True)
+        state = "suspended"
+        if pi_item.get("export_path"):
+            removed.extend(_remove_export_dir(str(pi_item.get("export_path") or "")))
+    return {"skill_id": skill_id, "state": state, "removed_folders": removed}
 
 
 @app.post("/v1/skills/{skill_id}/resume")
 async def resume_skill(skill_id: str, x_tenant_key: str | None = Header(default=None)) -> dict:
-    """恢复冻结的 skill:只恢复生命周期状态;不自动重建导出文件夹,下次导出时会重新写出。"""
+    """恢复冻结的 skill:只恢复目录状态;下次导出会按最新 Skill 4 重写。"""
     tenant = await _auth_tenant(x_tenant_key)
+    from dano.onboarding.pi_check_sidecar import get_sidecar
+
+    sidecar = get_sidecar()
+    pi_item = await sidecar.get_exported_skill(skill_id)
     sub_str, _, action = skill_id.partition(".")
-    if not action:
-        raise HTTPException(status_code=400, detail="skill_id 应为 {subsystem}.{action}")
     manifests = await _manifests_for_tenant(tenant)
-    if not any(m["name"] == skill_id for m in manifests):
+    manifest = next((m for m in manifests if m["name"] == skill_id), None)
+    if manifest is None and pi_item is None:
         raise HTTPException(status_code=404, detail=f"本公司无此 Skill: {skill_id}")
-    subsystem = Subsystem(sub_str)
-    rec = await _lifecycle.store.get(skill_id)
-    if rec is None:
-        manifest = next((m for m in manifests if m["name"] == skill_id), None)
-        version = await _latest_skill_version(tenant, subsystem, action, manifest)
-        rec = await _lifecycle.register_published(skill_id, subsystem, action, version)
-    elif rec.state == SkillState.SUSPENDED:
-        rec = await _lifecycle.resume_no_change(skill_id)
-    return {"skill_id": skill_id, "state": rec.state.value}
+    state = "published"
+    if manifest is not None and action:
+        subsystem = Subsystem(sub_str)
+        rec = await _lifecycle.store.get(skill_id)
+        if rec is None:
+            version = await _latest_skill_version(tenant, subsystem, action, manifest)
+            rec = await _lifecycle.register_published(skill_id, subsystem, action, version)
+        elif rec.state == SkillState.SUSPENDED:
+            rec = await _lifecycle.resume_no_change(skill_id)
+        state = rec.state.value
+    if pi_item is not None:
+        await sidecar.freeze_exported_skill(skill_id, False)
+        state = "published"
+    return {"skill_id": skill_id, "state": state}
 
 
 # ── 瘦执行(前端只给 skill_id + input;endpoint/凭证/断言后端取)──
@@ -1978,35 +2148,43 @@ async def put_export_directory(
 @app.post("/export/agent-skills")
 async def export_agent_skills_ep(req: ExportSkillsReq,
                                  x_tenant_key: str | None = Header(default=None)) -> dict:
-    """把本租户已上架 Skill 导出为文件式 skill，写入 out_dir。
-
-    后端与目标目录同机时直接写文件。真执行仍在 Dano 侧；导出的脚本调用能力级 invoke 端点。
-    """
+    """Skills 目录重导：与录制「产出 Skill」同一套 Pi_check Skill 4 会话。"""
     tenant = await _auth_tenant(x_tenant_key)
     from dano.execution.page.sessions import save_export_dir
-    from dano.export.agent_skills import write_exports
+    from dano.onboarding.pi_check_sidecar import get_sidecar
+
     out = str(req.out_dir or "").strip() or _current_export_dir()
-    frozen = await _frozen_skill_ids()
-    frozen_manifests = [m for m in await _manifests_for_tenant(tenant) if m["name"] in frozen]
+    sidecar = get_sidecar()
+    drafts: dict[str, dict] = {}
     try:
-        removed = []
-        for m in frozen_manifests:
-            removed.extend(_cleanup_export_folders(out, _export_slugs_for_manifest(m)))
-        written = await write_exports(
-            tenant,
-            out,
-            mode=req.mode,
-            exclude_skill_ids=frozen,
-        )
-    except OSError as e:
-        raise HTTPException(status_code=400, detail=f"写入目录失败:{e}") from e
-    save_export_dir(out)                                 # 记住此目录 → 录完自动发布落同一处
+        for item in await sidecar.list_exported_skills():
+            if item.get("frozen"):
+                continue
+            recording_id = str(item.get("recording_id") or "").strip()
+            if not recording_id:
+                continue
+            spec = await _latest_flow_spec_for_catalog_item(tenant, item)
+            if spec is not None:
+                drafts[recording_id] = spec
+        outcome = await sidecar.export_catalog({
+            "out_dir": out,
+            "tenant": tenant,
+            "drafts": drafts,
+        })
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=409, detail=str(exc) or "目录导出失败") from exc
+    save_export_dir(out)
+    errors = [str(item) for item in (outcome.get("errors") or [])]
+    count = int(outcome.get("count") or 0)
+    if errors and not count:
+        raise HTTPException(status_code=409, detail="; ".join(errors))
     return {
-        "out_dir": out,
-        "mode": req.mode,
-        "count": len(written),
-        "written": written,
-        "removed_frozen_folders": removed,
+        "out_dir": outcome.get("out_dir") or out,
+        "mode": "package",
+        "count": count,
+        "written": list(outcome.get("written") or []),
+        "errors": errors,
+        "removed_frozen_folders": [],
     }
 
 
