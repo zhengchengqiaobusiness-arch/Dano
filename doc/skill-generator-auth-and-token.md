@@ -47,11 +47,7 @@ config/auth.local.json
 3. 仍连着 Dano 时：`DANO_URL` + `/v1/settings/token/raw`
 4. 本机会话缓存
 
-都没有则停止，不要猜头、不要用录制样例里的 Authorization。  
-第 4 档只读 **当前** `runtime.json.tenant` + `subsystem` 对应的那一个会话文件，禁止扫描其它 tenant 的 `~/.dano/sessions/`。  
-不要用 Dano `provider_request` 打业务接口：那是登录代理，不是包内 client。
-
-消费沙箱可能没有 `httpx` 也没有 pip。冻结 `client.py` 在缺少 httpx 时用标准库 `urllib` 发同一套请求；执行者不要改 client、不要 `apt-get`/`pip install`。
+都没有则停止，不要猜头、不要用录制样例里的 Authorization。
 
 `python scripts/client.py --show-config` 只打印 `tenant`、`subsystem`、`base_url` 是否已配置、是否已有鉴权头。**不打印头的值。**
 

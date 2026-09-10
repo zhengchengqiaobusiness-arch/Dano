@@ -46,9 +46,6 @@
    使用唯一 `id`，所有字段配置都放在对应 item 内。
 3. **最终确认**：此前分组表单返回 `answered.formId` 后，在同一 Assistant Turn
    内调用 `confirm:true + formIds[]`。不要重复问题、答案、选项或字段配置。
-   `confirm` 必须是布尔 `true`，不能是字符串。`formIds` 必须列入**本写流程
-   全部**已回答分组表的 `formId`，不能只确认最后一张。可增行对象数组用
-   `inputType: table`，不要用换行文本或 `inputType: number`。
 
 普通句子或单个业务选择的确认使用 `radio` 单问题，不使用 `confirm:true`。
 `confirm:true` 只确认此前已提交的分组表单。

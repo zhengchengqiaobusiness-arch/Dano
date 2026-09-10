@@ -3464,15 +3464,10 @@ import os
 from pathlib import Path
 import re
 import time
-from urllib.parse import quote, urlencode, urljoin
+from urllib.parse import quote, urljoin
 from uuid import uuid4
-import urllib.error
-import urllib.request
 
-try:
-    import httpx
-except ModuleNotFoundError:
-    httpx = None
+import httpx
 from wire_format import apply_wire_formats, date_span_days
 
 CONFIG = json.loads(__CONFIG__)
@@ -3484,67 +3479,6 @@ _MISSING = object()
 
 def emit(payload):
     print(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str))
-
-
-class _StdlibResponse:
-    def __init__(self, status, url, raw, headers=None):
-        self.status_code = int(status)
-        self.url = url
-        self.headers = headers or {}
-        self.content = raw if isinstance(raw, (bytes, bytearray)) else str(raw or "").encode("utf-8")
-        self.text = self.content.decode("utf-8", errors="replace")
-
-    @property
-    def is_success(self):
-        return 200 <= self.status_code < 300
-
-    def json(self):
-        return json.loads(self.text)
-
-    def raise_for_status(self):
-        if not self.is_success:
-            raise RuntimeError(f"HTTP {self.status_code} for {self.url}")
-
-
-def _stdlib_request(method, url, *, params=None, headers=None, timeout=30, data=None, **kwargs):
-    target = str(url)
-    if params:
-        query = urlencode({key: value for key, value in params.items() if value is not None}, doseq=True)
-        if query:
-            target = f"{target}{'&' if '?' in target else '?'}{query}"
-    body = None
-    req_headers = {str(key): str(value) for key, value in (headers or {}).items()}
-    payload = kwargs.get("json")
-    if payload is not None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req_headers.setdefault("Content-Type", "application/json")
-    elif data is not None:
-        if isinstance(data, dict):
-            body = urlencode(data).encode("utf-8")
-            req_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
-        elif isinstance(data, (bytes, bytearray)):
-            body = data
-        else:
-            body = str(data).encode("utf-8")
-    request = urllib.request.Request(target, data=body, headers=req_headers, method=str(method or "GET").upper())
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as resp:
-            return _StdlibResponse(resp.status, resp.geturl(), resp.read(), dict(resp.headers))
-    except urllib.error.HTTPError as exc:
-        raw = exc.read() if hasattr(exc, "read") else b""
-        return _StdlibResponse(getattr(exc, "code", 0) or 0, target, raw, dict(exc.headers or {}))
-
-
-def _http_get(url, **kwargs):
-    if httpx is not None:
-        return httpx.get(url, **kwargs)
-    return _stdlib_request("GET", url, **kwargs)
-
-
-def _http_request(method, url, **kwargs):
-    if httpx is not None:
-        return httpx.request(method, url, **kwargs)
-    return _stdlib_request(method, url, **kwargs)
 
 
 def _json_object(raw, label):
@@ -3668,7 +3602,7 @@ def _live_headers():
     tenant_key = _tenant_key(tenant)
     if not dano_url or not tenant_key or not tenant:
         return {}
-    response = _http_get(
+    response = httpx.get(
         dano_url + "/v1/settings/token/raw",
         params={"tenant": tenant, "subsystem": CONFIG["subsystem"]},
         headers={"X-Tenant-Key": tenant_key}, timeout=20,
@@ -3694,10 +3628,7 @@ def auth_headers():
     cached = _cache_headers()
     if cached:
         return cached
-    raise RuntimeError(
-        "authentication unavailable: set config/auth.local.json or DANO_AUTH_HEADERS; "
-        "do not read other tenants' session files or call provider_request"
-    )
+    raise RuntimeError("authentication unavailable: set config/auth.local.json or DANO_AUTH_HEADERS")
 
 
 def get_path(node, path):
@@ -3784,7 +3715,7 @@ def http_json(method, path="", *, url="", query=None, body=None, content_type="a
             kwargs["data"] = body
         else:
             kwargs["json"] = body
-    response = _http_request(str(method or "GET").upper(), target, **kwargs)
+    response = httpx.request(str(method or "GET").upper(), target, **kwargs)
     try:
         data = response.json()
     except ValueError:
@@ -4208,7 +4139,7 @@ def _live_identity_profile(headers):
         return profile
     for url in probes:
         try:
-            response = _http_get(url, headers=headers, timeout=15)
+            response = httpx.get(url, headers=headers, timeout=15)
         except Exception:
             continue
         if not response.is_success:

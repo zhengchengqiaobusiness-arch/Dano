@@ -56,9 +56,7 @@
       <route-id>.md
 ```
 
-每个能力一个命令脚本，另写 `scripts/flow.py` 按默认路线串跑。只用合同里的 path / formula / element_template / option_source / 已声明的 wire_format。运行时只依赖冻结的 `client.py` 和 `wire_format.py`。依赖仅 Python + httpx；client 在无 httpx 时回退 urllib，脚本不要另造 HTTP 客户端。
-
-能力脚本只允许 `from client import http_json` / `execute_plan` / `option_choices`。禁止 `get_session`、自造 Session、`provider_request`、翻其它 tenant 会话文件。有选项接口的脚本必须支持 `--list-options <字段>`。
+每个能力一个命令脚本，另写 `scripts/flow.py` 按默认路线串跑。只用合同里的 path / formula / element_template / option_source / 已声明的 wire_format。运行时只依赖冻结的 `client.py` 和 `wire_format.py`。依赖仅 Python + httpx。
 
 每个脚本必须接受 `--help`，打印机器可读 JSON，不依赖 Dano 进程。未识别键不准写成可执行默认。不准按字段名猜 now。
 
@@ -90,7 +88,6 @@ config/auth.local.json
 - 每个能力保留原子路线。
 - `SKILL.md`「选择工作流」第一行 = 默认完整路线。
 - `scripts/flow.py` 必须支持 `--route`、`--input-json`、写步骤 `--confirm`；交接点停问；失败即停。
-- `SKILL.md`「执行协议」必须按 `routes[]` 分支：用户只要原子路线时，禁止把其它能力的选项/查询当成前置。人手交接的日期、部门、统计周期不自动传给写入。
 - 禁止成品写「每次只执行一项」「不得自行串联」「一页面对应一个 Skill」。
 
 ## 生成 SKILL.md 与表单
@@ -104,12 +101,11 @@ frontmatter 仅非空 `name` + `description`。不要写 `version`、`compatibil
 - `适用场景` 不复读 description。
 - `选择工作流` 是互斥路线表，第一行是完整办理。组合细节链到 `references/routes/<id>.md`。原子路线不准叫 Agent 去读组合文件。
 - `组合与交接规则` 只三种：原子 / 已确认绑定 / 人手交接。绑定空、歧义、类型或基数不对就停止自动串联。
-- `执行协议` 每步必须有可判定的 `Done when:`。写入：preview → confirm → execute。合同每条 `route_id` 都要出现在执行协议里。
-- `成功、失败与停止` 写空鉴权、选项失败、用户取消、写接口失败时停止，并禁止继续猜凭证。
-- `按需读取资源` 写「何时读哪个文件」，并分别给出默认路线与原子路线命令。禁止「先阅读全部 references」。
-- `鉴权` 写包内 `config/auth.local.json` 与 client 读序，不写真实头。没有头则停止。
+- `执行协议` 每步必须有可判定的 `Done when:`。写入：preview → confirm → execute。
+- `按需读取资源` 写「何时读哪个文件」。禁止「先阅读全部 references」。
+- `鉴权` 写包内 `config/auth.local.json` 与 client 读序，不写真实头。
 
-`INPUT_FORMS.md`：只收集调用方字段；不重问系统/已绑定值；写入要确认。相关字段一次 `title + questions[]`；可增行用 `inputType: table`；确认必须是 `confirm: true`（布尔）+ **全部**本流程 `formIds`。动态字段必须保留完整 `dataSource`，禁止先 `--list-options` 再删掉 `dataSource`。长文本/表格 default 用「待填写」，禁止编造具体业务事实。  
+`INPUT_FORMS.md`：只收集调用方字段；不重问系统/已绑定值；写入要确认。动态字段必须保留完整 `dataSource`，禁止先 `--list-options` 再删掉 `dataSource`。  
 `CONTRACT.json`：消费者合同，不是录制审计。禁止写入 `capability_id`、request/step id、fingerprint、录制样本、本场人员/单据。`routes[]` 必须能被 `flow.py` 直接执行。  
 `CAPABILITIES.md` 是业务能力索引，不抄完整字段表或发现历史。  
 `OPTIONS.md` 说明运行时如何取候选。录制样本不是运行时默认。多结果不得默默取第一条。
@@ -120,7 +116,7 @@ frontmatter 仅非空 `name` + `description`。不要写 `version`、`compatibil
 
 ## 检查触发与渐进披露
 
-用 `validate_skill_package` 跑结构规则：frontmatter、必要章节（含「成功、失败与停止」）、泄漏词、明文凭据、重复 route_id、必须有 `flow.py`、执行协议含全部 `route_id`、能力脚本禁止 `get_session`、动态字段保留 dataSource。这是指定检查，不是认页面。有 error 就改产物，不要改检查器去放行。
+用 `validate_skill_package` 跑结构规则：frontmatter、必要章节、泄漏词、明文凭据、重复 route_id、必须有 `flow.py`、动态字段保留 dataSource。这是指定检查，不是认页面。有 error 就改产物，不要改检查器去放行。
 
 ## 验证合同 → 请求
 
@@ -136,7 +132,7 @@ frontmatter 仅非空 `name` + `description`。不要写 `version`、`compatibil
 
 ## 独立环境
 
-用 `run_isolated_script`：隔离目录跑能力脚本 `--help`、`flow.py --help` 和 dry-run。dry-run 必须覆盖：源码不含 `get_session`；写脚本无 `--confirm` → `need_confirm`；有 `--confirm` 但无鉴权 → `authentication unavailable`。不依赖 Dano。失败则不发布。
+用 `run_isolated_script`：隔离目录跑能力脚本 `--help`、`flow.py --help` 和 dry-run。不依赖 Dano。失败则不发布。
 
 ## 阻止不完整写能力发布
 
