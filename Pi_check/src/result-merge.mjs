@@ -39,9 +39,10 @@ export function mergeCapabilityIntoDraft(draft, {
   capability,
   steps = [],
   links = [],
-  unresolved = [],
+  unresolved,
   capability_relations = [],
   title = "",
+  recording_goal = "",
 } = {}) {
   const next = draftObject(draft);
   const cap = asRecord(capability);
@@ -67,16 +68,14 @@ export function mergeCapabilityIntoDraft(draft, {
   if (incomingLinks.length) {
     next.links = next.links.concat(incomingLinks);
   }
-  const incomingUnresolved = asList(unresolved);
-  if (incomingUnresolved.length) {
-    next.unresolved = next.unresolved.concat(incomingUnresolved);
+  if (Array.isArray(unresolved)) {
+    next.unresolved = asList(unresolved);
   }
   const incomingRelations = asList(capability_relations).map((row) => asRecord(row));
   if (incomingRelations.length) {
     next.capability_relations = [...(next.capability_relations || []), ...incomingRelations];
   }
-  if (title && !next.recording_goal && !next.title) {
-    next.recording_goal = String(title);
-  }
+  const goal = String(recording_goal || "").trim();
+  if (goal) next.recording_goal = goal;
   return next;
 }

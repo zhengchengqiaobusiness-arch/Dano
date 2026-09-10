@@ -92,7 +92,7 @@
 - 登录、验证码、授权写入
 - 合法 selector 用尽仍点不到
 - 工具回 `not_writable` / `option_not_seen` / `ambiguous`（按区域仍分不清）/ `not_applied`（值没写上且随后请求没变）
-- 点了该动作自己的提交/查询钮却不发网
+- 点了该动作自己的提交/查询钮却不发网。编辑页「保存」点了仍没有 PUT/POST：编辑没做成，写入 `unresolved`，不要用占用图「保存并提交」冒充编辑，也不要空点到超时。
 - 加行后再 snapshot，这一列仍然没有可写控件
 
 协助只针对这一格或这一钮。禁止一次 assist 把整张表交出去然后自己空转。  
@@ -105,10 +105,10 @@
 
 同时满足才能定稿。**不要求用户先说结束。**
 
-1. 目标原文要求的每一页、每一行已经做完，或已写入 `unresolved` 说明缺什么。目标还列着新增/编辑/提交/撤回/删除时，只交了查询就定稿：失败。新增页是占用图且格子为 0：先选本页资源/日期，仍没有可预约格再去同菜单的时间配置或资源管理把依赖做成可用，然后回来约；站点配置接口失败必须写入 `unresolved`，禁止空定稿。
+1. 目标原文要求的每一页、每一行已经做完，或已写入 `unresolved` 说明缺什么。目标还列着新增/编辑/提交/撤回/删除时，只交了查询就定稿：失败。新增页是占用图且格子为 0：先选本页资源/日期，仍没有可预约格再去同菜单的时间配置或资源管理把依赖做成可用，然后回来约。配置读接口因「期望一条、查到多条」失败时，禁止再点该配置页的保存（会再插一条）。配置页没有删除钮不等于没有删除接口：用 list 找到多余 id，走站点已广告的 DELETE 清到一条，再回占用图。不要写「需要改数据库」然后定稿，也不要把旁路配置保存收成占用图申请的可执行能力。站点配置接口失败必须写入 `unresolved`，禁止空定稿。
 2. 台账每行有**完整**合同或 `unresolved`（残缺合同不算）
 3. 写入行没有「未识别却当可执行」
-4. Skill 4 的投影、变化输入、隔离运行、`validate_skill_package` 通过
+4. Skill 4 的投影、变化输入、隔离运行、`validate_skill_package` 通过。没有 `validate_skill_package` 的 `ok:true`：禁止 `submit_recording_result`。
 5. 页内顺序已交给 Infer（有值流的 `links`，或没有值流的 `capability_relations`）。Skill 4 编不出默认办理路线时按 Skill 4 失败分诊，不要自己写包。
 
 查询类可以带着说明缺口的 `unresolved`，但不能把缺口冻成可执行默认。不完整写能力不得发布。
@@ -120,7 +120,7 @@
 - 形状错（`fields`、字符串 refs、params 不是数组、重复 id、共用 execute、单独交 relations）→ Skill 3 重交信封
 - 缺依据 / 未识别当已解决 / 灰框进了调用方 / 假 links / 错挂 preflight → Skill 3
 - 证据不够、点不到、值没写上、少加了一种分区行 → Skill 2
-- handbook / 投影 / 隔离运行 / validator 失败 → Skill 4。`generator_guides_leaked`：成品里不能有 `references/generator-guides/`，删掉再校验，不要把生成规范写进消费者包。`skill_section` 报缺「执行协议」：校验按 `##+` 切章，`###` 会被当成新章，执行协议里只用编号步骤，不要用 `###`。INPUT_FORMS 的调用方字段必须写成 `` `field` ``，光加粗不算。`script_help` 且 `--help` 时发网 / KeyError / assert / 超时：创建请求和校验断言都不能写在模块顶层，必须进 `main()`；`--help` 只打印 JSON 并 exit 0，不要再 subprocess 调业务脚本，也不要 assert。每个能力脚本对应一个 `verify_<同名>.py`，不要写会卡住的 `verify_all.py`。`write_confirmation`：CONTRACT 是消费者合同，不要写 `capabilities[]` / `capability_id`；只写 `routes[]`。若坚持写 write 能力，每项必须同时有 `requires_confirmation` 与 `requires_human_confirm`，含写操作的路线也要 `requires_confirmation`。`input_form_invented_field`：CONTRACT 能力没有调用方字段时，INPUT_FORMS 不要给该项开带字段的 `## 标题` 节，或写「没有调用方字段」。`missing_route_file` / `route_pointer`：`operation_sequence` 长度 > 1 的每条路线必须有 `references/routes/<route_id>.md`，且 SKILL.md 正文直接出现该路径。`missing_flow`：有 `config/runtime.json` 就必须有 `scripts/flow.py`。`runtime_artifact`：不要把 `__pycache__` / `.pyc` 留在包里。`write_skill_artifact` 的 path 相对包根，写 `SKILL.md` / `scripts/query.py`，不要再加一层 `skill-artifacts/`，否则会嵌套出包根，校验找不到成品。`extra_route_file`：`references/routes/<id>.md` 必须对上 CONTRACT 里 `operation_sequence` 长度 > 1 的 `route_id`；对不上就删文件，不要用 `id` 代替 `route_id`，也不要给单能力路线单独建 md。
+- handbook / 投影 / 隔离运行 / validator 失败 → Skill 4。`generator_guides_leaked`：成品里不能有 `references/generator-guides/`，删掉再校验，不要把生成规范写进消费者包。`skill_section` 报缺「执行协议」：校验按 `##+` 切章，`###` 会被当成新章，执行协议里只用编号步骤，不要用 `###`。INPUT_FORMS 的调用方字段必须写成 `` `field` ``，光加粗不算。`script_help` 且 `--help` 时发网 / KeyError / assert / 超时：创建请求和校验断言都不能写在模块顶层，必须进 `main()`；`--help` 只打印 JSON 并 exit 0，不要再 subprocess 调业务脚本，也不要 assert。每个能力脚本对应一个 `verify_<同名>.py`，不要写会卡住的 `verify_all.py`。`write_confirmation`：CONTRACT 是消费者合同，不要写 `capabilities[]` / `capability_id`；只写 `routes[]`。若坚持写 write 能力，每项必须同时有 `requires_confirmation` 与 `requires_human_confirm`，含写操作的路线也要 `requires_confirmation`。`input_form_invented_field`：CONTRACT 能力没有调用方字段时，INPUT_FORMS 不要给该项开带字段的 `## 标题` 节，或写「没有调用方字段」。`missing_route_file` / `route_pointer`：`operation_sequence` 长度 > 1 的每条路线必须有 `references/routes/<route_id>.md`，且 SKILL.md 正文直接出现该路径。`missing_flow`：有 `config/runtime.json` 就必须有 `scripts/flow.py`。`runtime_artifact`：不要把 `__pycache__` / `.pyc` 留在包里。`write_skill_artifact` 的 path 相对包根，写 `SKILL.md` / `scripts/query.py`，不要再加一层 `skill-artifacts/`，否则会嵌套出包根，校验找不到成品。`extra_route_file`：`references/routes/<id>.md` 必须对上 CONTRACT 里 `operation_sequence` 长度 > 1 的 `route_id`；对不上就删文件，不要用 `id` 代替 `route_id`，也不要给单能力路线单独建 md。`packaged_generation_language` 报 `step_id`：成品里不要出现 `step_id` 这几个字；`operation_sequence` 写成能力 id 字符串数组。`route_pointer`：SKILL.md 正文单独写一行裸路径 `references/routes/<route_id>.md`，不要只放在表格链接里。`long_reference`：INPUT_FORMS.md 先加目录或压到约 100 行以内。
 - 点不动、图送不进、证据读丢、投影工具补了键 → 报程序故障，不要假装业务失败
 
 ## 调查环

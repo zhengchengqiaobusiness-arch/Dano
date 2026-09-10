@@ -575,7 +575,7 @@ export class PlaywrightBrowser {
         }
         const located = await this.#locateNow(page, token);
         if (located?.code === "ambiguous") return located;
-        const handle = located?.handle || located;
+        let handle = located?.handle || located;
         if (!handle || located?.ok === false) {
           return {
             ok: false,
@@ -606,6 +606,7 @@ export class PlaywrightBrowser {
         } else if (kind === "press") {
           await handle.press(String(text || "Enter"));
         } else {
+          handle = await this.#retargetLockedPicker(handle) || handle;
           await this.#mouseClick(handle);
         }
         this.lastActAt = Date.now();
@@ -684,6 +685,28 @@ export class PlaywrightBrowser {
     return null;
   }
 
+  async #retargetLockedPicker(handle) {
+    if (!handle) return handle;
+    try {
+      const picked = await handle.evaluateHandle((node) => {
+        const el = node.matches?.("input, textarea, select")
+          ? node
+          : node.querySelector?.("input, textarea, select");
+        const locked = Boolean(el && (el.readOnly || el.disabled || el.getAttribute?.("aria-disabled") === "true"));
+        const item = (el || node).closest?.(".el-form-item, .ant-form-item, .form-item");
+        if (!locked || !item) return null;
+        const link = [...item.querySelectorAll("a, button, [role='button']")].find((n) => (
+          /^(选择|选人|选部门|选组织)$/.test(String(n.innerText || n.textContent || "").replace(/\s+/g, "").trim())
+        ));
+        return link || null;
+      });
+      const element = picked && typeof picked.asElement === "function" ? picked.asElement() : null;
+      return element || handle;
+    } catch {
+      return handle;
+    }
+  }
+
   async #ambiguous(token, handles) {
     const candidates = [];
     for (const handle of handles.slice(0, 8)) {
@@ -698,7 +721,12 @@ export class PlaywrightBrowser {
             : node.closest?.("table, .el-table, .ant-table") ? "table"
               : ""
       )).catch(() => "");
-      candidates.push({ selector: token, region, label });
+      const section = await handle.evaluate((node) => {
+        const item = node.closest?.(".el-form-item, .ant-form-item, .form-item");
+        const lab = item?.querySelector?.(".el-form-item__label, .ant-form-item-label, label, .form-label");
+        return String(lab?.innerText || lab?.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40);
+      }).catch(() => "");
+      candidates.push({ selector: token, region, section, label });
     }
     return {
       ok: false,
@@ -1179,8 +1207,8 @@ export async function createPlaywrightBrowser({ recording, appendEvidence }) {
     delete contextOptions.storageState;
     context = await browser.newContext(contextOptions);
   }
-  context.setDefaultTimeout(4000);
-  context.setDefaultNavigationTimeout(12000);
+  context.setDefaultTimeout(15000);
+  context.setDefaultNavigationTimeout(20000);
   const page = await context.newPage();
   const handle = new PlaywrightBrowser({
     browser,
@@ -1245,14 +1273,19 @@ export async function createPlaywrightBrowser({ recording, appendEvidence }) {
     }
   }
   await page.waitForTimeout(400);
-  const shot = await page.screenshot(frameScreenshotOptions(deviceScaleFactor));
-  const blob = await rememberBody(shot);
-  await append("screenshot", {
-    page_id: "main",
-    url: page.url(),
-    reason: "page_ready",
-    image: blob,
-  });
+  const shot = await page.screenshot({
+    ...frameScreenshotOptions(deviceScaleFactor),
+    timeout: 15000,
+  }).catch(() => null);
+  if (shot) {
+    const blob = await rememberBody(shot);
+    await append("screenshot", {
+      page_id: "main",
+      url: page.url(),
+      reason: "page_ready",
+      image: blob,
+    });
+  }
   await snapshotVisibleControls(page, handle, append, "page_ready");
   handle.snapshotVisibleControls = (reason = "manual") => (
     snapshotVisibleControls(handle.livePage(), handle, append, reason)

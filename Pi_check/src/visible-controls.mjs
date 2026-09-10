@@ -675,16 +675,24 @@ export function collectPageFacts() {
       region: cell ? (dialogRoot(node) ? "dialog" : "table") : undefined,
     });
   }
-  for (const node of document.querySelectorAll("button, [role='button'], a.ant-btn, .el-button, input[type='button'], input[type='submit']")) {
+  for (const node of document.querySelectorAll("button, [role='button'], a, a.ant-btn, .el-button, input[type='button'], input[type='submit']")) {
     if (!snapshotVisible(node) || seenSnap.has(node) || inPagination(node) || inChrome(node)) continue;
-    const label = cleanLabel(
+    const raw = cleanLabel(
       node.getAttribute?.("aria-label")
       || node.innerText
       || node.textContent
       || node.getAttribute?.("name")
       || textOf(node),
     );
-    if (!isBusinessLabel(label)) continue;
+    if (!isBusinessLabel(raw)) continue;
+    const isBtn = Boolean(node.matches?.("button, [role='button'], a.ant-btn, .el-button, input[type='button'], input[type='submit']"));
+    const genericPicker = /^(选择|选人|选部门|选组织)$/.test(raw.replace(/\s+/g, ""));
+    if (!isBtn && !genericPicker) continue;
+    const near = cleanLabel(nearbyLabel(node));
+    const label = genericPicker && near ? near : raw;
+    const selector = genericPicker && near
+      ? `label=${near}`
+      : (isBtn ? `role=button[name="${raw}"]` : `text=${raw}`);
     seenSnap.add(node);
     const ref = `a${snapshotActions.length + 1}`;
     mark(node, ref);
@@ -693,7 +701,7 @@ export function collectPageFacts() {
       label,
       kind: "button",
       region: regionOf(node),
-      selector: `role=button[name="${label}"]`,
+      selector,
     });
   }
   const pickRowName = (text) => {
