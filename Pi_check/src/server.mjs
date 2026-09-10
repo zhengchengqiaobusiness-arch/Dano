@@ -9,6 +9,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PI_ONLY_NOTICE, assertNeverStartLegacy, logPiOnly, publicFailureMessage } from "./policy.mjs";
+import { readPiModelEnv } from "./pi-model.mjs";
 import { RecordingFiles } from "./fs-store.mjs";
 import { EvidenceStore } from "./evidence-store.mjs";
 import { ResultGate } from "./result-gate.mjs";
@@ -29,6 +30,8 @@ import {
   writebackExportedPackages,
   maskHeaders,
   hydrateAuthFromRecordings,
+  readExportDirectory,
+  writeExportDirectory,
 } from "./skill-export/index.mjs";
 
 assertNeverStartLegacy();
@@ -43,6 +46,8 @@ process.on("unhandledRejection", (error) => {
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PUBLIC = path.join(ROOT, "src", "public");
 const PORT = Number(process.env.PI_CHECK_PORT || 18080);
+const piBoot = readPiModelEnv();
+logPiOnly(`启动时 PI 凭证 key_set=${Boolean(piBoot.apiKey)} model=${piBoot.modelId || "(empty)"} baseUrl=${piBoot.baseUrl ? "set" : "(none)"} provider=${piBoot.provider || "(empty)"}`);
 const listeners = new Map();
 
 const files = new RecordingFiles(process.env.PI_CHECK_DATA_DIR || path.join(ROOT, "data"));
@@ -160,6 +165,7 @@ const server = createServer(async (req, res) => {
       const title = String(body.title || "");
       const tenant = String(body.tenant || "");
       const capCount = Array.isArray(body.draft?.capabilities) ? body.draft.capabilities.length : 0;
+      if (body.out_dir) await writeExportDirectory(body.out_dir);
       logPiOnly(`[出包] 收到请求 path=${url.pathname} recording_id=${recordingId || "-"} title=${title || "-"} tenant=${tenant || "-"} subsystem=${body.subsystem || "oa"} caps=${capCount} out_dir=${body.out_dir || "-"} existing_skill_id=${body.existing_skill_id || body.skill_id || "-"} overlay=${body.draft ? "yes" : "no"}`);
       if (!recordingId.startsWith("rec_")) {
         logPiOnly(`[出包] 拒绝 缺少 recording_id path_id=${exportSkill[1]}`);
@@ -209,7 +215,8 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/v1/skills/export") {
       const body = await readBody(req);
-      logPiOnly(`[出包] 收到目录重导 tenant=${body.tenant || "-"} out_dir=${body.out_dir || "-"} drafts=${body.drafts && typeof body.drafts === "object" ? Object.keys(body.drafts).length : 0}`);
+      if (body.out_dir) await writeExportDirectory(body.out_dir);
+      logPiOnly(`[出包] 收到目录快速导出 tenant=${body.tenant || "-"} out_dir=${body.out_dir || "-"} drafts=${body.drafts && typeof body.drafts === "object" ? Object.keys(body.drafts).length : 0}`);
       const outcome = await reexportCatalogSkills({
         files,
         evidence,
@@ -286,6 +293,15 @@ const server = createServer(async (req, res) => {
       });
       return;
     }
+    if (req.method === "GET" && (url.pathname === "/v1/export/directory" || url.pathname === "/export/directory")) {
+      json(res, 200, { out_dir: await readExportDirectory() });
+      return;
+    }
+    if ((req.method === "PUT" || req.method === "POST") && (url.pathname === "/v1/export/directory" || url.pathname === "/export/directory")) {
+      const body = await readBody(req);
+      json(res, 200, { out_dir: await writeExportDirectory(body.out_dir || body.directory || "") });
+      return;
+    }
     if (req.method === "POST" && url.pathname === "/v1/settings/token") {
       const body = await readBody(req);
       const headers = { ...(body.headers || {}) };
@@ -294,10 +310,11 @@ const server = createServer(async (req, res) => {
       }
       const rec = await writeTokenRecord(body.tenant || "", body.subsystem || "", headers, { source: "manual" });
       const catalog = await listExportedSkills(files);
+      const exportRoot = String(body.out_dir || "").trim() || await readExportDirectory();
       const writeback = await writebackExportedPackages({
         subsystem: rec.subsystem,
         headers: rec.headers,
-        exportRoot: String(body.out_dir || ""),
+        exportRoot,
         catalogRows: catalog,
       });
       json(res, 200, {
@@ -441,7 +458,7 @@ if (process.env.PI_CHECK_NO_LISTEN !== "1") {
     logPiOnly(`internal listener 127.0.0.1:${PORT}`);
     logPiOnly("existing PageRecorder still connects to the 8077 gateway; this process never starts the old recorder");
     logPiOnly("[出包] 启动回写排队");
-    hydrateAuthFromRecordings({ files, evidence }).then((result) => {
+    readExportDirectory().then((exportRoot) => hydrateAuthFromRecordings({ files, evidence, exportRoot })).then((result) => {
       logPiOnly(`[出包] 启动回写返回 updated=${result?.updated?.length || 0} recovered=${result?.recovered || 0}`);
     }).catch((error) => {
       logPiOnly(`[出包] 回写完整 token 失败 ${error?.message || error}`);

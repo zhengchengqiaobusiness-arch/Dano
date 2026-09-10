@@ -2,12 +2,13 @@ import { useEffect, useState } from "react";
 import { Modal, Input, Button, Space, Typography, Tag, message, Empty, Alert, Descriptions } from "antd";
 import { ReloadOutlined, SaveOutlined } from "@ant-design/icons";
 import { getRuntimeToken, saveRuntimeToken, RuntimeToken } from "../api/skills";
+import { rememberedExportDir } from "../api/recording";
 
-// 录制型 skill 运行期鉴权 token 的查看 / 刷新。token 按 (tenant, subsystem) 存在后端 PG。
-// 过期(401 账号未登录)时,粘贴一份新 token 保存即可恢复,无需重录整条流程。
+// 录制型 skill 运行期鉴权。token 按 (tenant, subsystem) 存在 Pi_check 本机仓库。
+// 保存后立刻回写已导出包的 auth.local.json；下次导出也用这一份。
 export default function TokenModal({
-  tenant, subsystem, open, onClose,
-}: { tenant: string; subsystem: string; open: boolean; onClose: () => void }) {
+  tenant, subsystem, open, onClose, outDir = "",
+}: { tenant: string; subsystem: string; open: boolean; onClose: () => void; outDir?: string }) {
   const [rec, setRec] = useState<RuntimeToken | null>(null);
   const [loading, setLoading] = useState(false);
   const [token, setToken] = useState("");
@@ -36,12 +37,14 @@ export default function TokenModal({
     if (!token.trim()) { message.error("粘贴新 token 再保存"); return; }
     setSaving(true);
     try {
-      await saveRuntimeToken({
+      const saved = await saveRuntimeToken({
         tenant, subsystem, token: token.trim(),
         header_name: headerName.trim() || "Authorization",
         token_prefix: prefix,   // 允许空前缀(有些系统直接放裸 token)
+        out_dir: (outDir || rememberedExportDir()).trim(),
       });
-      message.success("已更新 token,运行期立即生效(无需重录)");
+      const n = saved.updated_packages?.length || 0;
+      message.success(n ? `已更新 token，并回写 ${n} 个已导出包` : "已更新 token，下次导出会写入最新凭证");
       setToken("");
       await load();
     } catch (e: any) {
@@ -64,7 +67,7 @@ export default function TokenModal({
     >
       <Alert
         type="info" showIcon style={{ marginBottom: 14 }}
-        message="录制型 skill 运行期靠这组鉴权头调用目标系统。token 过期会报「账号未登录(401)」——这里粘贴一份新 token 保存即可恢复,不用重录。"
+        message="这里保存的 token 是正式凭证：立刻回写已导出包的 auth.local.json，之后导出也用这一份。过期报 401 时粘贴新 token 即可，不必重录。"
       />
 
       <Space style={{ marginBottom: 8, justifyContent: "space-between", width: "100%" }}>

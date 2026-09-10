@@ -13,7 +13,7 @@
    `skill-generator-workflow.md` / `skill-generator-live-options.md`
    → `submit_skill_export({ok:false, errors:[...]})`，停止。
 2. 调用 `read_export_contract`。唯一输入是五块：`capabilities` / `steps` / `links` / `capability_relations` / `unresolved`。禁止只扫 `capabilities[]`。禁止回头打开页面猜字段。
-3. 调用 `read_skill_artifact` 看运输层已物化的 `SKILL.md`、`references/CONTRACT.json`、`references/INPUT_FORMS.md`。
+3. 调用 `read_skill_artifact` 看运输层已物化的 `SKILL.md`、`references/CONTRACT.json`、`references/INPUT_FORMS.md`。运输层 `SKILL.md` 只是合同骨架，不是成品；必须按本文件和 `doc/` 覆盖 `SKILL.md`。
 4. 写入行仍有未识别来源、或合同声明不可执行：停止，不要出可执行写能力。
 
 ## 运输层已经写好的包
@@ -44,8 +44,8 @@
 `flow.py` 的入口：
 
 ```text
-python scripts/flow.py --route default --input-json '{...}' --confirm
-python scripts/flow.py --list-options <capability_id> <field>
+python3 scripts/flow.py --route default --input-json '{...}' --confirm
+python3 scripts/flow.py --list-options <capability_id> <field>
 ```
 
 ## 你只可以改 SKILL.md
@@ -54,16 +54,19 @@ frontmatter 仅非空 `name` + `description`。不要写 `version`、`compatibil
 
 `description` 是路由触发：做什么、哪些不同用户请求触发它、关键边界。不要用 action UUID、skill_id、接口路径当描述。
 
-正文必须有：`适用场景`、`不适用场景`、`选择工作流`、`组合与交接规则`、`执行协议`、`成功、失败与停止`、`按需读取资源`、`鉴权`。
+正文必须有：`立刻办理`、`适用场景`、`不适用场景`、`选择工作流`、`组合与交接规则`、`执行协议`、`成功、失败与停止`、`按需读取资源`、`鉴权`。
 
+- `立刻办理`：读完本文件立刻按合同字段向用户收集真实值。禁止 ls、禁止先读 `references/`、禁止先翻 `CONTRACT.json`、禁止先跑脚本探路。禁止编造字段值。
+- `description` 是路由触发：用合同里各能力的 `name` / `intent` 说明什么用户请求走哪条路线。用户意图对上某条能力就走该原子路线，对不上走 `default`。禁止为某个业务口令写死 `capability_id`。不要写「字段以 CONTRACT.json 为准」。
 - `适用场景` 不复读 description。
 - `选择工作流` 第一行 = 默认完整办理。禁止写「每次只执行一项」「不得自行串联」「一页面对应一个 Skill」。
 - `组合与交接规则` 只三种：原子 / 已确认绑定 / 人手交接。
-- `执行协议` 每步必须有可判定的 `Done when:`，并列出该能力全部 `caller_fields`。
-- `按需读取资源` 写「何时读哪个文件」。禁止「先阅读全部 references」。
-- `鉴权`：没有 `auth.local.json` 且没有环境凭证则停止，要求提供 token；401 / 账号未登录同样停问。不要写具体 token。
+- `执行协议` 每个能力一节，必须有可判定的 `Done when:`。产出完全基于能力：该能力 `input_schema.properties` 和调用方 params 一个都不能漏，做成填写表：字段 id、标题、必填、控件、**怎么填**、**可用默认值**。数组行内列写成 `数组字段.列名`。枚举写出合同全部 id/label；动态字段写出 `--list-options <capability_id> <field>`。系统字段另行列出「不要向用户要」和可用合同值。
+- **可用默认值**只允许写合同已给出的 `default`、本对话用户已确认的值、合同枚举 id、本次 `--list-options` 选中的 id。选中记录 / 上一步结果只能用本对话已确认的 id。没有这些就写「无可用默认值，必须向用户收集」。禁止编「无 / 示例 / 今天 / 请审批」。禁止因为 execute 标了系统就把能力 schema 字段删掉。
+- `按需读取资源` 写「默认不要读其它文件；只有提问失败或脚本报错才读 INPUT_FORMS」。禁止「先阅读全部 references」。
+- `鉴权`：先用本包 `auth.local.json` 执行。401 / 账号未登录停问一次 token，再用 `DANO_AUTH_HEADERS` 覆盖本地过期头后重跑同一条命令。不要改文件，不要再问第二次，不要写具体 token。
 
-调用方字段、控件、dataSource、路线以运输层物化结果为准。不要自己另写一份更瘦的表单。动态字段先 `--list-options` 再提问，但 INPUT_FORMS 必须保留 dataSource。
+调用方字段、控件、dataSource、路线以运输层物化结果为准。不要自己另写一份更瘦的表单，不要按某个页面特例改路线。动态字段先 `--list-options` 再提问，但 INPUT_FORMS 必须保留 dataSource。
 
 消费者正文禁止出现：`本页面的实际操作流程`、`能力录制`、`录制结果`、`阶段1`–`阶段8`、`FlowSpec`、`fingerprint`、`x-dano`、`规划依据`、`一页面对应一个 Skill`、`原样来自`、`生成器`、`generator-guides`。
 

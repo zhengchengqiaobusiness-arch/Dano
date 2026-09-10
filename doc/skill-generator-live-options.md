@@ -29,7 +29,7 @@
 助手必须先用本包鉴权拉候选，再提问。不要让问句自己裸打 dataSource。
 
 ```text
-python scripts/flow.py --list-options <capability_id> <field>
+python3 scripts/flow.py --list-options <capability_id> <field>
 ```
 
 选项接口和业务接口走同一套 `auth.local.json` / `DANO_AUTH_HEADERS`。401 按鉴权规范停问。

@@ -18,6 +18,8 @@ submit_recording_result 交出能力并停
 Skill 4 出包会话（只加载 BUILD_AND_VALIDATE_DEDICATED_SKILL）
         ↓
 代码：按录制合同物化整包、注入冻结 runtime/flow/client/auth、本目录保真校验、写入 Skills 目录
+
+Skills 页「导出为 pi 文件式 skill」另走快速原样导出：不开 Skill 4、不做校验；沿用已有 Skill 4 的 SKILL.md，按已有录制合同重写合同/脚本并写入当前 token。
 ```
 
 | 文件 | 负责 | 禁止 |
@@ -26,7 +28,7 @@ Skill 4 出包会话（只加载 BUILD_AND_VALIDATE_DEDICATED_SKILL）
 | `skill/CONTROL_IN_APP_BROWSER.md` | 点、填、选、快照、图像、同源前端 | 交能力、认来源 |
 | `skill/INFER_BUSINESS_CONTRACT.md` | 切能力、来源、绑定、信封 | 点页面、写消费者包、冻录制值结案 |
 | `skill/BUILD_AND_VALIDATE_DEDICATED_SKILL.md` | 读 doc/、核对手册触发、投影、能不能提交出包 | 回头猜页面、重写执行器、录制期自动出包 |
-| `src/*` / 导出运输 | 开 Skill 4 会话、从录制五块投影整包、冻结 runtime/flow/client/auth、保真校验、目录同步 | 认业务、按页面猜字段、引用 back |
+| `src/*` / 导出运输 | 录制页开 Skill 4 会话并保真校验；目录页沿用已有 Skill 4 手册快速写包（不开 Skill 4、不校验）；冻结 runtime/flow/client/auth；目录同步 | 认业务、按页面猜字段、用运输层手册顶替 Skill 4、引用 back |
 
 缺口只改四份 Skill 之一。以后 diff 出现 `result-gate` / `visible-controls` / `renderer` / `computed.py` 认业务 = 方案作废。
 

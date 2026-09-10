@@ -36,8 +36,13 @@
 - 想用普通文本、Markdown、XML 或 JSON 代码块模拟提问。
 
 每次模型响应最多原生调用一次 `ask_user_question`。需要多个相关答案时，必须
-使用一个 `title + questions[]` 分组表单。每个非确认问题都要提供来自当前业务
-上下文的非空推荐 `default`；`required` 只决定用户能否清空或省略答案。
+使用一个 `title + questions[]` 分组表单。`default` 只允许来自合同已给出的
+`default` / `default_value`，或当前对话里用户已经确认的值。合同
+`caller_fields` 没有默认值时，不要编造「无」「示例」「今天」等值，必须向
+用户收集正确内容后再执行。成品 `SKILL.md` 必须完全基于能力：列出该能力 `input_schema` 全部字段和
+调用方 params，写清「怎么填」和「可用默认值」：合同 `default`、用户已确认值、合同枚举
+id、本次 `--list-options` 选中的 id。没有这四类就写无可用默认值。禁止漏字段。
+`required` 只决定用户能否清空或省略答案。
 
 ## 三种调用形状
 

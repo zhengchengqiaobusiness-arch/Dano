@@ -4,9 +4,9 @@
 
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
-import { contractFidelityIssues } from "./contract-materialize.mjs";
+import { contractFidelityIssues, handbookIsFaithful } from "./contract-materialize.mjs";
 
-const REQUIRED_SECTIONS = ["选择工作流", "执行协议", "按需读取资源", "鉴权"];
+const REQUIRED_SECTIONS = ["立刻办理", "选择工作流", "执行协议", "按需读取资源", "鉴权"];
 const PROCESS_LEAK = [
   "generator-guides", "阶段1", "阶段 1", "阶段6", "阶段7", "阶段8",
   "FlowSpec", "fingerprint", "x-dano-", "一页面对应一个 Skill",
@@ -119,6 +119,9 @@ export async function validateSkillPackageDir(root, { sourceDraft = null } = {})
   const contract = await readJson(contractFile);
   if (contract.invalid) {
     issues.push(issue("invalid_json", "CONTRACT.json 不是合法 JSON", contractFile));
+  }
+  if (handbook && contract.value && !handbookIsFaithful(handbook, contract.value)) {
+    issues.push(issue("handbook_fields", "SKILL.md 未覆盖全部能力字段或未写清可用默认值", skillMd));
   }
   const capabilities = Array.isArray(contract.value?.capabilities) ? contract.value.capabilities : [];
   const routes = Array.isArray(contract.value?.routes) ? contract.value.routes : [];

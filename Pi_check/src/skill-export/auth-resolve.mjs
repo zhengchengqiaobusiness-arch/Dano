@@ -45,13 +45,16 @@ export async function resolveExportAuth({
   recordingId,
   tokenRoot,
 } = {}) {
+  const stored = await readTokenRecord(tenant, subsystem, tokenRoot);
   const fromRequest = usableAuthHeaders(requestHeaders);
+  if (stored.has_token && stored.source === "manual") {
+    logExport(`鉴权命中 store source=manual header_names=${Object.keys(stored.headers).join(",")} tenant=${tenant || "-"}`);
+    return { headers: stored.headers, source: "manual" };
+  }
   if (Object.keys(fromRequest).length) {
     logExport(`鉴权命中 request header_names=${Object.keys(fromRequest).join(",")} recording_id=${recordingId || "-"}`);
     return { headers: fromRequest, source: "request" };
   }
-
-  const stored = await readTokenRecord(tenant, subsystem, tokenRoot);
   if (stored.has_token) {
     logExport(`鉴权命中 store source=${stored.source || "store"} header_names=${Object.keys(stored.headers).join(",")} tenant=${tenant || "-"}`);
     return { headers: stored.headers, source: stored.source || "store" };

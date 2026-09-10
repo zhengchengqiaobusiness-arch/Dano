@@ -90,6 +90,30 @@ export async function writeAuthLocalFile(packageDir, headers) {
   return target;
 }
 
+export function exportDirFile(root = ROOT) {
+  return path.join(root, "data", "export-dir.json");
+}
+
+export async function readExportDirectory(root = ROOT) {
+  try {
+    const raw = JSON.parse(await readFile(exportDirFile(root), "utf8"));
+    return String(raw?.out_dir || "").trim();
+  } catch (error) {
+    if (error?.code === "ENOENT") return "";
+    throw error;
+  }
+}
+
+export async function writeExportDirectory(outDir, root = ROOT) {
+  const next = String(outDir || "").trim();
+  await mkdir(path.dirname(exportDirFile(root)), { recursive: true });
+  await writeFile(exportDirFile(root), `${JSON.stringify({
+    out_dir: next,
+    updated_at: new Date().toISOString(),
+  }, null, 2)}\n`, "utf8");
+  return next;
+}
+
 export async function writebackExportedPackages({
   subsystem,
   headers,

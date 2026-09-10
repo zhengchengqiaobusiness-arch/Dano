@@ -6,6 +6,8 @@ export {
   writebackExportedPackages,
   maskHeaders,
   normalizeHeaders,
+  readExportDirectory,
+  writeExportDirectory,
 } from "./token-store.mjs";
 export {
   packSkill4Artifacts,
@@ -30,10 +32,12 @@ export {
   removeExportedSkill,
   skillManifestFromExport,
 } from "./skill-catalog.mjs";
-export { exportRecordingSkill, reexportCatalogSkills, stableSkillId, hydrateAuthFromRecordings } from "./start-export-session.mjs";
+export { exportRecordingSkill, dumpRecordingSkill, reexportCatalogSkills, stableSkillId, hydrateAuthFromRecordings } from "./start-export-session.mjs";
 export {
   consumerContract,
   materializePackageTexts,
   writeMaterializedPackage,
   contractFidelityIssues,
+  handbookIsFaithful,
+  chooseHandbook,
 } from "./contract-materialize.mjs";

@@ -114,9 +114,10 @@ async function materializeExecutablePackage(dest, draft, { tenant, subsystem, ba
     throw new Error("没有可导出的能力，拒绝猜编译");
   }
   const texts = materializePackageTexts(draft);
-  const handbook = chooseHandbook(skill4Handbook, texts.files["SKILL.md"], texts.contract);
-  const usedSkill4 = Boolean(skill4Handbook) && handbook === skill4Handbook;
-  logExport(`物化 dest=${dest} caps=${texts.contract.capabilities.length} routes=${texts.contract.routes.length} files=${Object.keys(texts.files).length} handbook=${usedSkill4 ? "skill4" : "materialized"}`);
+  const candidates = (Array.isArray(skill4Handbook) ? skill4Handbook : [skill4Handbook]).filter(Boolean);
+  const handbook = chooseHandbook(candidates, texts.files["SKILL.md"], texts.contract);
+  const handbookSource = candidates.includes(handbook) ? "skill4" : "materialized";
+  logExport(`物化 dest=${dest} caps=${texts.contract.capabilities.length} routes=${texts.contract.routes.length} files=${Object.keys(texts.files).length} handbook=${handbookSource}`);
   await writeMaterializedPackage(dest, draft);
   await writeFile(
     path.join(dest, "SKILL.md"),
@@ -130,7 +131,7 @@ async function materializeExecutablePackage(dest, draft, { tenant, subsystem, ba
     base_url: baseUrl || "",
   }, null, 2)}\n`, "utf8");
   await injectFrozenScripts(dest, { tenant, subsystem, baseUrl });
-  return texts.contract;
+  return { contract: texts.contract, handbook_source: handbookSource };
 }
 
 export async function seedFrozenArtifacts(files, recordingId, { tenant, subsystem, baseUrl, draft } = {}) {
@@ -209,16 +210,26 @@ export async function packSkill4Artifacts({
   draft,
   authHeaders,
   baseUrl = "",
+  validate = true,
+  useSkill4Handbook = true,
+  existingHandbook = "",
+  existingHandbookPath = "",
 }) {
   if (!Array.isArray(draft?.capabilities) || !draft.capabilities.length) {
     logExport(`打包拒绝 没有可导出的能力 recording_id=${recordingId || "-"} skill_id=${skillId || "-"}`);
     throw new Error("没有可导出的能力，拒绝猜编译");
   }
   const src = artifactRoot(files, recordingId);
-  const skill4Handbook = await readText(path.join(src, "SKILL.md"));
+  const fromArtifacts = useSkill4Handbook ? await readText(path.join(src, "SKILL.md")) : "";
+  const fromPrevious = useSkill4Handbook
+    ? (existingHandbook || (existingHandbookPath ? await readText(path.join(existingHandbookPath, "SKILL.md")) : ""))
+    : "";
+  const skill4Handbook = useSkill4Handbook
+    ? [fromPrevious, fromArtifacts].filter(Boolean)
+    : [];
   const slug = packageSlug(skillId);
   const dest = path.join(String(outDir || "").trim() || src, slug);
-  logExport(`打包开始 recording_id=${recordingId} skill_id=${skillId} dest=${dest} skill4_md=${skill4Handbook ? "yes" : "no"} caps=${draft.capabilities.length}`);
+  logExport(`打包开始 recording_id=${recordingId} skill_id=${skillId} dest=${dest} skill4_md=${skill4Handbook.length ? "yes" : "no"} caps=${draft.capabilities.length} validate=${validate ? "yes" : "no"}`);
   if (path.resolve(dest) !== path.resolve(src)) {
     await mkdir(path.dirname(dest), { recursive: true });
     await rm(dest, { recursive: true, force: true });
@@ -228,7 +239,7 @@ export async function packSkill4Artifacts({
   }
   const resolvedBase = String(baseUrl || "").trim() || baseUrlFromContract(draft);
   const headers = usableAuthHeaders(authHeaders);
-  await materializeExecutablePackage(dest, draft, {
+  const packed = await materializeExecutablePackage(dest, draft, {
     tenant,
     subsystem,
     baseUrl: resolvedBase,
@@ -236,6 +247,18 @@ export async function packSkill4Artifacts({
   });
   await writeAuthLocalFile(dest, headers);
   await stripNestedSkillPackages(dest);
+  const tokenMissing = Object.keys(authLocalPayload(headers).headers).length === 0;
+  if (!validate) {
+    logExport(`打包跳过校验 dest=${dest} reason=catalog_dump handbook=${packed.handbook_source}`);
+    logExport(`打包完成 dest=${dest} token_missing=${tokenMissing} base_url=${resolvedBase || "-"} handbook=${packed.handbook_source}`);
+    return {
+      slug,
+      export_path: dest,
+      token_missing: tokenMissing,
+      base_url: resolvedBase,
+      handbook_source: packed.handbook_source,
+    };
+  }
   const checked = await validateSkillPackageDir(dest, { sourceDraft: draft });
   const errors = (checked.issues || []).filter((item) => item.severity === "error");
   const warnings = (checked.issues || []).filter((item) => item.severity !== "error");
@@ -247,12 +270,13 @@ export async function packSkill4Artifacts({
     const first = errors[0];
     throw new Error(first?.message || "validate_skill_package 失败");
   }
-  logExport(`打包完成 dest=${dest} token_missing=${Object.keys(authLocalPayload(headers).headers).length === 0} base_url=${resolvedBase || "-"}`);
+  logExport(`打包完成 dest=${dest} token_missing=${tokenMissing} base_url=${resolvedBase || "-"} handbook=${packed.handbook_source}`);
   return {
     slug,
     export_path: dest,
-    token_missing: Object.keys(authLocalPayload(headers).headers).length === 0,
+    token_missing: tokenMissing,
     base_url: resolvedBase,
+    handbook_source: packed.handbook_source,
   };
 }
 

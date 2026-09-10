@@ -30,6 +30,8 @@ export default defineConfig({
     proxy: {
       "/v1/skills": { target: piCheck, changeOrigin: true, ...longProxy },
       "/v1/settings/token": { target: piCheck, changeOrigin: true, ...longProxy },
+      "/v1/export/directory": { target: piCheck, changeOrigin: true },
+      "/export/directory": { target: piCheck, changeOrigin: true },
       "/v1/pi-recordings": { target: piCheck, changeOrigin: true, ...longProxy },
       "/v1/recording-results": {
         target: gateway,

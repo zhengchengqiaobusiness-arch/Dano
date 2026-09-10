@@ -1,6 +1,7 @@
 /**
- * 出包会话 B：每次点击都新建 Skill 4 会话，读最新能力和最新指令。
- * 禁止「磁盘上已有 SKILL.md 就复用」。改了代码或能力都必须重跑 Skill 4。
+ * 两条导出路径：
+ * 录制页「产出 Skill」每次新建 Skill 4 会话。禁止因磁盘已有 SKILL.md 而跳过 Skill 4。
+ * 目录页快速导出不开 Skill 4、不校验；沿用已发布或产物里的 Skill 4 手册，运输层只重写合同/脚本/token。
  */
 
 import { readdir, rm } from "node:fs/promises";
@@ -10,10 +11,10 @@ import { artifactRoot } from "../skill-package-tools.mjs";
 import { createExportToolHost } from "../pi-tools.mjs";
 import { createExportPiSession } from "../pi-session.mjs";
 import { readGeneratorGuides } from "./read-guides.mjs";
-import { packSkill4Artifacts, seedFrozenArtifacts, refreshPackageTransport } from "./pack.mjs";
+import { packSkill4Artifacts, seedFrozenArtifacts } from "./pack.mjs";
 import { resolveExportAuth, resolveExportBaseUrl, extractAuthHeadersFromEvidence } from "./auth-resolve.mjs";
 import { writeTokenRecord, writebackExportedPackages, readTokenRecord, tokenStoreDir } from "./token-store.mjs";
-import { skillManifestFromExport, upsertExportedSkill, listExportedSkills, getExportedSkillByRecording } from "./skill-catalog.mjs";
+import { skillManifestFromExport, upsertExportedSkill, listExportedSkills, getExportedSkill, getExportedSkillByRecording } from "./skill-catalog.mjs";
 import { logExport } from "../policy.mjs";
 import { usableAuthHeaders } from "../auth-vault.mjs";
 
@@ -120,10 +121,20 @@ export async function exportRecordingSkill({
     },
   });
   logExport(`6/9 开 Skill4 会话 timeout_ms=${timeoutMs}`, started);
-  const session = await createExportSession({
-    recording: { id: `${recordingId}-export-${Date.now()}` },
-    tools,
-  });
+  let session;
+  try {
+    session = await createExportSession({
+      recording: { id: `${recordingId}-export-${Date.now()}` },
+      tools,
+    });
+  } catch (error) {
+    logExport(`失败 Skill4 无法启动 ${error.message || error}`, started);
+    return {
+      status: "export_failed",
+      errors: [error.message || String(error)],
+      clarification_questions: [],
+    };
+  }
   logExport(`6/9 Skill4 会话已创建 session=${session.sessionId || "-"}`, started);
   try {
     await session.beginSkillExport({
@@ -214,6 +225,99 @@ export async function exportRecordingSkill({
   };
 }
 
+export async function dumpRecordingSkill({
+  files,
+  evidence,
+  recordingId,
+  resultId = "",
+  tenant = "",
+  subsystem = "oa",
+  title = "",
+  outDir = "",
+  draft: overlayDraft = null,
+  authHeaders = null,
+  existingSkillId = "",
+  packArtifacts = packSkill4Artifacts,
+} = {}) {
+  const started = Date.now();
+  logExport(`快速导出 开始 recording_id=${recordingId || "-"} title=${title || "-"} tenant=${tenant || "-"} subsystem=${subsystem || "-"} out_dir=${outDir || "-"}`, started);
+  const saved = await files.readDraft(recordingId);
+  const latest = contractEnvelope(overlayDraft || saved?.draft || saved || {});
+  const latestIds = latest.capabilities.map((item) => item.capability_id || item.id).filter(Boolean);
+  if (!latest.capabilities.length) {
+    logExport(`快速导出失败 没有可导出的能力 recording_id=${recordingId || "-"} disk_draft=${saved ? "yes" : "no"}`, started);
+    return { status: "export_failed", errors: ["没有可导出的能力"], clarification_questions: [] };
+  }
+  logExport(`快速导出 合同 caps=${latest.capabilities.length} ids=${latestIds.join(",") || "-"} source=${overlayDraft ? "overlay" : "disk"}`, started);
+  const auth = await resolveAuthHeaders({
+    tenant,
+    subsystem,
+    requestHeaders: authHeaders,
+    evidence,
+    recordingId,
+  });
+  const baseUrl = await resolveExportBaseUrl({ files, recordingId, draft: latest });
+  logExport(`快速导出 鉴权 source=${auth.source || "missing"} header_names=${Object.keys(auth.headers).join(",") || "-"} token=${Object.keys(auth.headers).length ? "full" : "empty"} base_url=${baseUrl || "-"}`, started);
+  if (tenant && Object.keys(auth.headers).length) {
+    await writeTokenRecord(tenant, subsystem, auth.headers, { source: auth.source || "recording" });
+  }
+  const previousRow = existingSkillId
+    ? await getExportedSkill(files, existingSkillId)
+    : await getExportedSkillByRecording(files, recordingId);
+  const previous = existingSkillId || previousRow?.name || "";
+  const skillId = stableSkillId({
+    subsystem,
+    recordingId,
+    title,
+    existing: previous,
+  });
+  let packed;
+  try {
+    packed = await packArtifacts({
+      files,
+      recordingId,
+      outDir: outDir || path.join(files.directory(recordingId), "exported"),
+      skillId,
+      tenant,
+      subsystem,
+      draft: latest,
+      authHeaders: auth.headers,
+      baseUrl,
+      validate: false,
+      useSkill4Handbook: true,
+      existingHandbookPath: previousRow?.export_path || previousRow?.package_dir || "",
+    });
+  } catch (error) {
+    logExport(`快速导出失败 打包 skill_id=${skillId} ${error.message || error}`, started);
+    return { status: "export_failed", errors: [error.message || String(error)], skill_id: skillId };
+  }
+  logExport(`快速导出 已写包 path=${packed.export_path} token_missing=${packed.token_missing} validate=no skill4_session=no handbook=${packed.handbook_source || "-"}`, started);
+  const manifest = await upsertExportedSkill(files, skillManifestFromExport({
+    skillId,
+    title: title || latest.title || previousRow?.title || skillId,
+    description: previousRow?.description || "",
+    tenant: tenant || previousRow?.tenant || "",
+    subsystem,
+    action: skillId.split(".").slice(1).join("."),
+    recordingId,
+    resultId: resultId || previousRow?.result_id || recordingId,
+    exportPath: packed.export_path,
+    draft: latest,
+  }));
+  logExport(`快速导出完成 skill_id=${skillId} version=${manifest.version || "-"} path=${packed.export_path}`, started);
+  return {
+    status: "exported",
+    skill_id: skillId,
+    skill_name: manifest.title,
+    version: manifest.version,
+    export_path: packed.export_path,
+    token_missing: packed.token_missing,
+    routes: [],
+    errors: [],
+    catalog_item: manifest,
+  };
+}
+
 export async function reexportCatalogSkills({
   files,
   evidence,
@@ -221,20 +325,20 @@ export async function reexportCatalogSkills({
   tenant,
   authHeaders,
   drafts = null,
-  exportOne = exportRecordingSkill,
+  exportOne = dumpRecordingSkill,
 } = {}) {
   const started = Date.now();
   const rows = await listExportedSkills(files, { includeFrozen: false });
   const overlay = drafts && typeof drafts === "object" && !Array.isArray(drafts) ? drafts : {};
-  logExport(`目录重导开始 count=${rows.length} tenant=${tenant || "-"} out_dir=${outDir || "-"} overlay=${Object.keys(overlay).length}`, started);
+  logExport(`目录快速导出开始 count=${rows.length} tenant=${tenant || "-"} out_dir=${outDir || "-"} overlay=${Object.keys(overlay).length}`, started);
   const written = [];
   const errors = [];
   for (const [index, row] of rows.entries()) {
     const recordingId = String(row.recording_id || "").trim();
-    logExport(`目录重导 ${index + 1}/${rows.length} name=${row.name || "-"} recording_id=${recordingId || "-"}`, started);
+    logExport(`目录快速导出 ${index + 1}/${rows.length} name=${row.name || "-"} recording_id=${recordingId || "-"}`, started);
     if (!recordingId) {
       errors.push(`${row.name}: 缺少 recording_id`);
-      logExport(`目录重导跳过 ${row.name} 缺少 recording_id`, started);
+      logExport(`目录快速导出跳过 ${row.name} 缺少 recording_id`, started);
       continue;
     }
     const latestDraft = overlay[recordingId] && typeof overlay[recordingId] === "object"
@@ -255,23 +359,23 @@ export async function reexportCatalogSkills({
     });
     if (outcome.status === "exported") {
       written.push(outcome.export_path);
-      logExport(`目录重导成功 ${row.name} path=${outcome.export_path}`, started);
+      logExport(`目录快速导出成功 ${row.name} path=${outcome.export_path}`, started);
     } else {
       errors.push(`${row.name}: ${(outcome.errors || []).join("; ") || "导出失败"}`);
-      logExport(`目录重导失败 ${row.name} errors=${(outcome.errors || []).join("; ") || "导出失败"}`, started);
+      logExport(`目录快速导出失败 ${row.name} errors=${(outcome.errors || []).join("; ") || "导出失败"}`, started);
     }
   }
-  logExport(`目录重导结束 written=${written.length} errors=${errors.length}`, started);
+  logExport(`目录快速导出结束 written=${written.length} errors=${errors.length}`, started);
   return {
     out_dir: outDir,
-    mode: "package",
+    mode: "dump",
     count: written.length,
     written,
     errors,
   };
 }
 
-export async function hydrateAuthFromRecordings({ files, evidence, exportRoot = "" } = {}) {
+export async function hydrateAuthFromRecordings({ files, evidence, exportRoot = "", tokenRoot } = {}) {
   const started = Date.now();
   const ev = evidence || { files };
   const ids = await files.listRecordingIds();
@@ -292,40 +396,47 @@ export async function hydrateAuthFromRecordings({ files, evidence, exportRoot = 
   logExport(`启动回写 目录 ${catalog.length} 条 有证=${found.length}`, started);
   const updated = [];
   for (const row of catalog) {
+    const tenant = String(row.tenant || "").trim();
+    const subsystem = row.subsystem || "oa";
+    const stored = tenant ? await readTokenRecord(tenant, subsystem, tokenRoot) : { has_token: false, headers: {}, source: "" };
+    if (stored.has_token) {
+      const written = await writebackExportedPackages({
+        subsystem,
+        headers: stored.headers,
+        exportRoot,
+        catalogRows: [row],
+      });
+      updated.push(...written.updated);
+      logExport(`启动回写用仓库 name=${row.name || "-"} source=${stored.source || "store"} dests=${written.updated.length}`, started);
+      continue;
+    }
     const hit = found.find((item) => item.recordingId === row.recording_id);
     if (!hit) {
       logExport(`启动回写跳过 无匹配录制 name=${row.name || "-"} recording_id=${row.recording_id || "-"}`, started);
       continue;
     }
-    const tenant = String(row.tenant || "").trim();
     if (tenant) {
-      await writeTokenRecord(tenant, row.subsystem || "oa", hit.headers, { source: "recording" });
+      await writeTokenRecord(tenant, subsystem, hit.headers, { source: "recording", root: tokenRoot });
     }
-    const dest = row.export_path || row.package_dir;
-    if (!dest) {
-      logExport(`启动回写跳过 无导出路径 name=${row.name || "-"}`, started);
-      continue;
-    }
-    logExport(`启动回写刷新 name=${row.name || "-"} dest=${dest}`, started);
-    await refreshPackageTransport(dest, {
-      tenant,
-      subsystem: row.subsystem,
-      baseUrl: hit.baseUrl,
-      authHeaders: hit.headers,
-      draft: hit.draft,
+    const written = await writebackExportedPackages({
+      subsystem,
+      headers: hit.headers,
+      exportRoot,
+      catalogRows: [row],
     });
-    updated.push(dest);
+    updated.push(...written.updated);
+    logExport(`启动回写用录制 name=${row.name || "-"} dests=${written.updated.length}`, started);
   }
   let tokenNames = [];
   try {
-    tokenNames = await readdir(tokenStoreDir());
+    tokenNames = await readdir(tokenStoreDir(tokenRoot));
   } catch {
     tokenNames = [];
   }
   for (const name of tokenNames) {
     const match = String(name).match(/^(.+)__(.+)\.json$/);
     if (!match) continue;
-    const rec = await readTokenRecord(match[1], match[2]);
+    const rec = await readTokenRecord(match[1], match[2], tokenRoot);
     if (rec.has_token) continue;
     const rows = catalog
       .filter((item) => String(item.subsystem || "oa") === match[2] && item.recording_id)
@@ -334,7 +445,7 @@ export async function hydrateAuthFromRecordings({ files, evidence, exportRoot = 
       .map((row) => found.find((item) => item.recordingId === row.recording_id))
       .find(Boolean) || found.at(-1);
     if (!hit) continue;
-    await writeTokenRecord(match[1], match[2], hit.headers, { source: "recording" });
+    await writeTokenRecord(match[1], match[2], hit.headers, { source: "recording", root: tokenRoot });
     logExport(`启动回写补仓库 token ${name}`, started);
   }
   logExport(`启动回写完成 updated=${updated.length} recovered=${found.length}`, started);

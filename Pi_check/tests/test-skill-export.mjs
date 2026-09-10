@@ -7,15 +7,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { RecordingFiles } from "../src/fs-store.mjs";
 import { writeSkillArtifact, runIsolatedScript, asStringArgs } from "../src/skill-package-tools.mjs";
-import { exportRecordingSkill, reexportCatalogSkills, stableSkillId } from "../src/skill-export/start-export-session.mjs";
+import { exportRecordingSkill, dumpRecordingSkill, reexportCatalogSkills, stableSkillId } from "../src/skill-export/start-export-session.mjs";
 import { upsertExportedSkill, listExportedSkills, skillManifestFromExport } from "../src/skill-export/skill-catalog.mjs";
 import { readGeneratorGuides, REQUIRED_GUIDE_FILES } from "../src/skill-export/read-guides.mjs";
 import { validateSkillPackageDir } from "../src/skill-export/validator.mjs";
 import { createExportToolHost, describeExportPiTools, describePiTools } from "../src/pi-tools.mjs";
 import { packSkill4Artifacts } from "../src/skill-export/pack.mjs";
-import { consumerContract } from "../src/skill-export/contract-materialize.mjs";
-import { extractAuthHeadersFromEvidence } from "../src/skill-export/auth-resolve.mjs";
-import { writeTokenRecord } from "../src/skill-export/token-store.mjs";
+import { consumerContract, renderSkillMd, handbookIsFaithful, chooseHandbook } from "../src/skill-export/contract-materialize.mjs";
+import { extractAuthHeadersFromEvidence, resolveExportAuth } from "../src/skill-export/auth-resolve.mjs";
+import { writeTokenRecord, writebackExportedPackages, writeAuthLocalFile } from "../src/skill-export/token-store.mjs";
+import { hydrateAuthFromRecordings } from "../src/skill-export/start-export-session.mjs";
 import { writeAuthVault, vaultFilePath, usableAuthHeaders } from "../src/auth-vault.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -210,18 +211,53 @@ test("目录重导沿用同一 skill_id，并使用 overlay 最新能力", async
 
 const HANDBOOK = `# 日报填报
 
+## 立刻办理
+读完本文件立刻提问。禁止 ls。Skill4已核对手册。
+
+## 默认值规则
+可用默认值只允许合同 default、用户已确认值、枚举 id、本次 --list-options 选中 id。
+
 ## 选择工作流
 默认完整办理：先查询再填报。
 
 ## 执行协议
 Done when: 填报成功。
+- \`query\`
+- \`create\`
 
 ## 按需读取资源
 需要字段时读 INPUT_FORMS.md。
 
 ## 鉴权
 没有 auth.local.json 则停止，要求提供 token。
+
+路线：\`default\` \`query\` \`create\`
 `;
+
+function coveringSkill4Handbook(draft, extra = "") {
+  const contract = consumerContract(draft);
+  const lines = [
+    "## 立刻办理",
+    "读完立刻提问。",
+    extra,
+    "## 默认值规则",
+    "可用默认值只允许合同 default、用户已确认值、枚举 id、本次 --list-options 选中 id。",
+    "## 选择工作流",
+    "默认完整办理。",
+    "## 执行协议",
+  ];
+  for (const cap of contract.capabilities) {
+    lines.push(`- \`${cap.capability_id}\``);
+    for (const field of cap.caller_fields || []) lines.push(`- \`${field.id}\``);
+    for (const param of cap.system_params || []) lines.push(`- \`${param.key}\``);
+  }
+  lines.push("## 按需读取资源", "默认不要读其它文件。", "## 鉴权", "先用 auth.local.json。");
+  for (const item of contract.routes) lines.push(`路线 \`${item.route_id}\``);
+  if (contract.capabilities.some((cap) => (cap.caller_fields || []).some((field) => field.dataSource))) {
+    lines.push("python3 scripts/flow.py --list-options cap field");
+  }
+  return `${lines.filter((line) => line !== "").join("\n")}\n`;
+}
 
 const CONTRACT = {
   capabilities: [
@@ -316,6 +352,7 @@ test("Skill 4 产物打包注入 auth 并重导同一条", async () => {
   assert.doesNotMatch(clientSrc, /JSON\.stringify\(JSON\.stringify/);
   const handbook = await readFile(path.join(first.export_path, "SKILL.md"), "utf8");
   assert.match(handbook, /默认完整办理/);
+  assert.match(handbook, /Skill4已核对手册/);
   assert.doesNotMatch(handbook, /test-token-value-12345/);
 
   const overlay = {
@@ -603,6 +640,22 @@ test("冻结 client 拒绝 sealed，且没有 request 别名", async () => {
   assert.match(live.stdout, /"has_auth_headers":\s*true/);
   assert.doesNotMatch(live.stdout, /live-token-value/);
   assert.doesNotMatch(src, /def request\s*\(/);
+
+  await writeFile(path.join(root, "config", "auth.local.json"), `${JSON.stringify({
+    headers: { Authorization: "Bearer stale-local-token", "tenant-id": "1" },
+  })}\n`, "utf8");
+  const overridden = await new Promise((resolve) => {
+    const scriptsDir = path.join(root, "scripts");
+    const code = `import json, os, sys; sys.path.insert(0, ${JSON.stringify(scriptsDir)}); os.environ["DANO_AUTH_HEADERS"] = json.dumps({"Authorization": "Bearer env-token-value"}); import client; h = client.auth_headers(); print(json.dumps({"auth": h.get("Authorization"), "tenant": h.get("tenant-id")}))`;
+    const child = spawn("python", ["-c", code], { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+  assert.equal(overridden.code, 0, overridden.stderr);
+  assert.deepEqual(JSON.parse(overridden.stdout), { auth: "Bearer env-token-value", tenant: "1" });
 });
 
 test("写冻结执行器被拒绝", async () => {
@@ -654,6 +707,29 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
   const forms = await readFile(path.join(packed.export_path, "references", "INPUT_FORMS.md"), "utf8");
   assert.match(forms, /dataSource/);
   assert.match(forms, /childrenField/);
+  const handbook = await readFile(path.join(packed.export_path, "SKILL.md"), "utf8");
+  assert.match(handbook, /立刻办理/);
+  assert.match(handbook, /禁止 ls/);
+  assert.match(handbook, /python3 scripts\/flow\.py/);
+  assert.match(handbook, /cap_daily_report_create_submit/);
+  assert.match(handbook, /startDate/);
+  assert.match(handbook, /todayContent/);
+  assert.match(handbook, /可用默认值/);
+  assert.match(handbook, /怎么填/);
+  assert.match(handbook, /禁止编造/);
+  assert.match(handbook, /reportType/);
+  assert.match(handbook, /deptId/);
+  assert.match(handbook, /approvalOpinion/);
+  assert.match(handbook, /items\.content|`content`/);
+  assert.match(handbook, /items\.progress|`progress`/);
+  assert.match(forms, /可用默认值/);
+  assert.doesNotMatch(handbook, /字段以 references\/CONTRACT/);
+  assert.doesNotMatch(handbook, /不要先查/);
+  const askForm = renderSkillMd(contract);
+  assert.match(askForm, /`todayContent`/);
+  assert.match(askForm, /无可用默认值|必须向用户收集/);
+  assert.doesNotMatch(askForm, /"id": "todayContent"/);
+  assert.doesNotMatch(askForm, /ask_user_question/);
   const help = await new Promise((resolve) => {
     const child = spawn("python", [path.join(packed.export_path, "scripts", "flow.py"), "--help"], {
       cwd: packed.export_path,
@@ -683,4 +759,222 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
     { id: 1, label: "总" },
     { id: 2, label: "子" },
   ]);
+});
+
+test("能力 schema 字段不得被系统标记丢掉，调用方 extras 必须留下", async () => {
+  const quit = JSON.parse(await readFile(path.join(ROOT, "data", "rec_3790796afb344b6a9c66848cd1fc1773", "pi-result.json"), "utf8"));
+  const quitContract = consumerContract(quit);
+  const submit = quitContract.capabilities.find((item) => item.capability_id === "cap_quit_submit");
+  assert.deepEqual(submit.caller_fields.map((item) => item.id), ["billType", "businessId"]);
+  assert.equal(submit.caller_fields.find((item) => item.id === "billType").enums.length, 1);
+  assert.equal(submit.system_params.length, 0);
+  const quitMd = renderSkillMd(quitContract);
+  assert.match(quitMd, /`billType`/);
+  assert.match(quitMd, /`businessId`/);
+  assert.match(quitMd, /staff_quit/);
+  assert.match(quitMd, /可用默认值/);
+  assert.match(quitMd, /怎么填/);
+
+  const plan = JSON.parse(await readFile(path.join(ROOT, "data", "rec_c8032cf2f57f40ac83a7c3672726a61d", "pi-result.json"), "utf8"));
+  const planContract = consumerContract(plan);
+  const create = planContract.capabilities.find((item) => item.capability_id === "cap_workplan_create");
+  assert.deepEqual(create.caller_fields.map((item) => item.id), ["title", "remark", "oaWorkPlanItemList"]);
+  assert.ok(create.system_params.some((item) => item.key === "billType"));
+  const planMd = renderSkillMd(planContract);
+  assert.match(planMd, /`oaWorkPlanItemList`/);
+  assert.match(planMd, /`billType`/);
+});
+
+test("目录快速导出不开 Skill 4、不校验，只写文件和 token", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dano-dump-"));
+  const files = new RecordingFiles(root);
+  const recordingId = "rec_dump_fast";
+  await files.writeDraft(recordingId, { draft: DRAFT, title: DRAFT.title });
+  await upsertExportedSkill(files, skillManifestFromExport({
+    skillId: "oa.rec_dump_fast",
+    title: DRAFT.title,
+    subsystem: "oa",
+    recordingId,
+    exportPath: path.join(root, "deleted-locally"),
+    draft: DRAFT,
+  }));
+  let started = 0;
+  let seenValidate;
+  const outcome = await reexportCatalogSkills({
+    files,
+    outDir: path.join(root, "out"),
+    tenant: "acme",
+    authHeaders: { Authorization: "Bearer dump-token-value-12345", "tenant-id": "1" },
+    exportOne: async (req) => {
+      started += 1;
+      return dumpRecordingSkill({
+        ...req,
+        createExportSession: async () => {
+          throw new Error("目录导出不应开 Skill 4");
+        },
+        packArtifacts: async (opts) => {
+          seenValidate = opts.validate;
+          assert.equal(opts.useSkill4Handbook, true);
+          assert.equal(opts.validate, false);
+          return packSkill4Artifacts(opts);
+        },
+      });
+    },
+  });
+  assert.equal(started, 1);
+  assert.equal(seenValidate, false);
+  assert.equal(outcome.mode, "dump");
+  assert.equal(outcome.count, 1, (outcome.errors || []).join("; "));
+  const dest = outcome.written[0];
+  const skillMd = await readFile(path.join(dest, "SKILL.md"), "utf8");
+  assert.match(skillMd, /立刻办理/);
+  assert.match(skillMd, /禁止 ls/);
+  const auth = JSON.parse(await readFile(path.join(dest, "config", "auth.local.json"), "utf8"));
+  assert.equal(auth.headers.Authorization, "Bearer dump-token-value-12345");
+  const rows = await listExportedSkills(files);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].name, "oa.rec_dump_fast");
+  assert.equal(rows[0].export_path, dest);
+});
+
+test("dumpRecordingSkill 默认不开 Skill 4，但沿用已有手册", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dano-dump-one-"));
+  const files = new RecordingFiles(root);
+  const recordingId = "rec_dump_one";
+  await files.writeDraft(recordingId, { draft: DRAFT, title: DRAFT.title });
+  let packedValidate;
+  let packedUseHandbook;
+  const outcome = await dumpRecordingSkill({
+    files,
+    recordingId,
+    title: DRAFT.title,
+    tenant: "acme",
+    subsystem: "oa",
+    existingSkillId: "oa.rec_dump_one",
+    outDir: path.join(root, "out"),
+    authHeaders: { Authorization: "Bearer dump-one-token", "tenant-id": "1" },
+    packArtifacts: async (opts) => {
+      packedValidate = opts.validate;
+      packedUseHandbook = opts.useSkill4Handbook;
+      assert.equal(opts.useSkill4Handbook, true);
+      assert.equal(opts.validate, false);
+      return {
+        export_path: path.join(root, "out", "skill"),
+        token_missing: false,
+        handbook_source: "skill4",
+      };
+    },
+  });
+  assert.equal(outcome.status, "exported");
+  assert.equal(outcome.skill_id, "oa.rec_dump_one");
+  assert.equal(packedValidate, false);
+  assert.equal(packedUseHandbook, true);
+});
+
+test("手册保真只认合同覆盖，不按文案丢掉 Skill 4", () => {
+  const contract = consumerContract(DRAFT);
+  const skill4 = coveringSkill4Handbook(DRAFT, "用户只要填写/新增/提交其中一项，不要先查。");
+  assert.equal(handbookIsFaithful(skill4, contract), true);
+  assert.equal(chooseHandbook(skill4, renderSkillMd(contract), contract), skill4);
+  assert.equal(handbookIsFaithful("# 残缺\n", contract), false);
+});
+
+test("目录导出沿用已发布的 Skill 4 手册", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dano-dump-keep-"));
+  const files = new RecordingFiles(root);
+  const recordingId = "rec_dump_keep";
+  await files.writeDraft(recordingId, { draft: DRAFT, title: DRAFT.title });
+  const prev = path.join(root, "prev-export");
+  await mkdir(prev, { recursive: true });
+  const skill4Text = coveringSkill4Handbook(DRAFT, "用户只要填写/新增/提交其中一项，不要先查。");
+  await writeFile(path.join(prev, "SKILL.md"), skill4Text, "utf8");
+  await upsertExportedSkill(files, skillManifestFromExport({
+    skillId: "oa.rec_dump_keep",
+    title: DRAFT.title,
+    subsystem: "oa",
+    recordingId,
+    exportPath: prev,
+    draft: DRAFT,
+  }));
+  const outcome = await dumpRecordingSkill({
+    files,
+    recordingId,
+    title: DRAFT.title,
+    tenant: "acme",
+    subsystem: "oa",
+    existingSkillId: "oa.rec_dump_keep",
+    outDir: path.join(root, "out"),
+    authHeaders: { Authorization: "Bearer dump-keep-token", "tenant-id": "1" },
+  });
+  assert.equal(outcome.status, "exported", (outcome.errors || []).join("; "));
+  const packed = await readFile(path.join(outcome.export_path, "SKILL.md"), "utf8");
+  assert.equal(packed, skill4Text);
+});
+
+test("页面保存的 token 优先于请求头，并回写已导出包", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dano-token-page-"));
+  await writeTokenRecord("acme", "oa", { Authorization: "Bearer page-new-token", "tenant-id": "1" }, {
+    source: "manual",
+    root,
+    merge: false,
+  });
+  const resolved = await resolveExportAuth({
+    tenant: "acme",
+    subsystem: "oa",
+    requestHeaders: { Authorization: "Bearer stale-recording-token" },
+    tokenRoot: root,
+  });
+  assert.equal(resolved.source, "manual");
+  assert.equal(resolved.headers.Authorization, "Bearer page-new-token");
+
+  const dest = path.join(root, "exported", "oa-skill");
+  await mkdir(path.join(dest, "config"), { recursive: true });
+  await writeFile(path.join(dest, "config", "runtime.json"), `${JSON.stringify({ subsystem: "oa" })}\n`, "utf8");
+  await writeAuthLocalFile(dest, { Authorization: "Bearer old-pack-token" });
+  const written = await writebackExportedPackages({
+    subsystem: "oa",
+    headers: resolved.headers,
+    catalogRows: [{ subsystem: "oa", export_path: dest }],
+  });
+  assert.equal(written.updated.length, 1);
+  const auth = JSON.parse(await readFile(path.join(dest, "config", "auth.local.json"), "utf8"));
+  assert.equal(auth.headers.Authorization, "Bearer page-new-token");
+});
+
+test("启动回写不得用录制旧头盖掉页面 token", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dano-hydrate-manual-"));
+  const files = new RecordingFiles(root);
+  const recordingId = "rec_hydrate_manual";
+  await files.initialize(recordingId, { id: recordingId, targetUrl: "https://oa.example.com/" });
+  await files.appendEvidence(recordingId, {
+    kind: "network_response",
+    payload: {
+      url: "https://oa.example.com/admin-api/system/auth/login",
+      body: {
+        stored: "inline",
+        text: JSON.stringify({ code: 0, data: { accessToken: "recording-old-token" } }),
+      },
+    },
+  });
+  const dest = path.join(root, "exported", "oa-skill");
+  await mkdir(path.join(dest, "config"), { recursive: true });
+  await writeFile(path.join(dest, "config", "runtime.json"), `${JSON.stringify({ subsystem: "oa" })}\n`, "utf8");
+  await writeAuthLocalFile(dest, { Authorization: "Bearer page-new-token" });
+  await upsertExportedSkill(files, skillManifestFromExport({
+    skillId: "oa.rec_hydrate_manual",
+    title: "回写",
+    tenant: "acme",
+    subsystem: "oa",
+    recordingId,
+    exportPath: dest,
+    draft: DRAFT,
+  }));
+  await writeTokenRecord("acme", "oa", { Authorization: "Bearer page-new-token" }, {
+    source: "manual",
+    root,
+    merge: false,
+  });
+  await hydrateAuthFromRecordings({ files, evidence: { files }, tokenRoot: root });
+  const auth = JSON.parse(await readFile(path.join(dest, "config", "auth.local.json"), "utf8"));
+  assert.equal(auth.headers.Authorization, "Bearer page-new-token");
 });

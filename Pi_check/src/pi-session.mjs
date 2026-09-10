@@ -1001,9 +1001,10 @@ export class LivePiSession {
       `禁止重写 client/runtime/flow/CONTRACT/INPUT_FORMS，禁止另开子包，禁止发明 client.request。\n` +
       `1. read_generator_guides，读完返回的全部文件\n` +
       `2. read_export_contract，只认五块合同\n` +
-      `3. read_skill_artifact("SKILL.md")；只有触发用语不够才覆盖 SKILL.md\n` +
-      `4. project_contract_to_request + validate_skill_package\n` +
-      `5. 校验通过立刻 submit_skill_export({ok:true})，不要反复隔离跑\n` +
+      `3. read_skill_artifact("SKILL.md") 看运输层骨架；骨架不是成品\n` +
+      `4. 按本 Skill 与 doc/ 覆盖 SKILL.md：完全基于能力。每个能力 input_schema 全部字段 + 调用方 params 写成填写表，写清怎么填和可用默认值（只允许合同 default、用户已确认值、枚举 id、本次 --list-options 选中 id）。不准漏字段，禁止把能力字段改成系统后删掉，禁止编造\n` +
+      `5. project_contract_to_request + validate_skill_package\n` +
+      `6. 校验通过立刻 submit_skill_export({ok:true})，不要反复隔离跑\n` +
       `失败带 issues 调用 submit_skill_export({ok:false, errors:[...]})，不要假装发布。`
     );
     const nudge = "还没有 submit_skill_export。不要重写冻结执行器。校验通过立刻提交。";

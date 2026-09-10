@@ -36,11 +36,11 @@
 
 ## client 读序
 
-冻结的 `scripts/client.py` 按这个顺序取头，先到先用：
+冻结的 `scripts/client.py` 按这个顺序取头：
 
-1. 包内 `config/auth.local.json` 的 `headers`
-2. 环境变量 `DANO_AUTH_HEADERS`（JSON 对象）
-3. 仍没有则抛 `AuthExpired`，停止，要求提供 token
+1. 若设置了环境变量 `DANO_AUTH_HEADERS`（JSON 对象），用它覆盖同名本地头
+2. 其余头用包内 `config/auth.local.json` 的 `headers`
+3. 两者都没有则抛 `AuthExpired`，停止，要求提供 token
 
 `--show-config` 只打印 tenant / subsystem / base_url / 是否已有鉴权头，**不打印头的值**。
 
@@ -66,4 +66,4 @@ HTTP 401，或响应声明账号未登录，同样抛 `AuthExpired`。调用方�
 
 ## 页面回写
 
-Dano 页面 Token 保存后，必须回写该 `subsystem` 已导出包的 `config/auth.local.json`。重新导出不是换 token 的前提。
+Dano 页面 Token 保存后，这份凭证就是正式源：写入本机 token 仓库，并立刻回写该 `subsystem` 已导出包的 `config/auth.local.json`。重新导出不是换 token 的前提；之后导出也必须用这一份，不得被录制旧头或启动回写盖掉。

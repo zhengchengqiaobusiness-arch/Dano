@@ -205,9 +205,10 @@ export interface SaveRuntimeTokenReq {
   header_name?: string;
   token_prefix?: string;
   headers?: Record<string, string>;  // 或整组覆盖
+  out_dir?: string;
 }
 
-export async function saveRuntimeToken(req: SaveRuntimeTokenReq): Promise<{ ok: boolean; headers: Record<string, string>; updated_at: string }> {
+export async function saveRuntimeToken(req: SaveRuntimeTokenReq): Promise<{ ok: boolean; headers: Record<string, string>; updated_at: string; updated_packages?: string[] }> {
   const { data } = await api.post("/v1/settings/token", req);
   return data;
 }

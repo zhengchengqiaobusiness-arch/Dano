@@ -62,13 +62,16 @@ def _local_headers():
 
 def auth_headers():
     local = _local_headers()
-    if local:
-        return local
     raw = os.environ.get("DANO_AUTH_HEADERS")
+    env_headers = {}
     if raw:
         env_headers = _usable_headers(_json_object(raw, "DANO_AUTH_HEADERS"))
-        if env_headers:
-            return env_headers
+    if env_headers:
+        merged = dict(local)
+        merged.update(env_headers)
+        return merged
+    if local:
+        return local
     raise AuthExpired("没有可用 token。请在页面更新凭证，或写入 config/auth.local.json")
 
 

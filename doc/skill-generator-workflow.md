@@ -13,15 +13,15 @@
 1. 用 `capability_relations` 和已确认 `links` 连成最长默认办理链，`route_id=default`。
 2. 只有 relation、没有值流：仍是主路线。交接点停问，不准猜传值，不准拆成两个 Skill。
 3. 都没有：按 `capabilities[]` 顺序做人手交接主路线，**仍然要有能跑的 default**。
-4. 每个能力另留原子路线，只服务「只要查一下 / 只要删这条」。
+4. 每个能力另留原子路线，只服务「用户意图对上该能力 name / intent」。禁止为某个业务口令写死 capability_id。
 
 `CONTRACT.json` 必须有 `routes[]`。合同里有 ≥2 个能力时，必须有一条多步默认路线。这些由运输层写出；你只核对，不要另编一份。
 
 ## 冻结入口
 
 ```text
-python scripts/flow.py --route default --input-json '{...}' --confirm
-python scripts/flow.py --list-options <capability_id> <field>
+python3 scripts/flow.py --route default --input-json '{...}' --confirm
+python3 scripts/flow.py --list-options <capability_id> <field>
 ```
 
 - `--route` 选择路线；缺省即 default。

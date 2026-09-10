@@ -99,7 +99,7 @@ export default function Skills() {
       if (r.errors?.length) {
         message.warning(`已导出 ${r.count} 个 skill，另有 ${r.errors.length} 条未完成`);
       } else {
-        message.success(`已按最新能力导出 ${r.count} 个 skill 到 ${r.out_dir}`);
+        message.success(`已快速写出 ${r.count} 个 skill 到 ${r.out_dir}`);
       }
       setExportOpen(false);
       void load(page, pageSize);
@@ -167,8 +167,8 @@ export default function Skills() {
     };
   }, [page, pageSize]);
   useEffect(() => {
-    if (exportOpen) void loadExportDir();
-  }, [exportOpen]);
+    if (exportOpen || tokenSub) void loadExportDir();
+  }, [exportOpen, tokenSub]);
 
   return (
     <div className="skill-catalog-page">
@@ -234,7 +234,7 @@ export default function Skills() {
                     </Popconfirm>
                   )}
                   {r.frozen && (
-                    <Popconfirm title={`恢复 ${skillDisplayId(r)}?`} description="恢复后下次导出会按最新 Skill 4 重写。" okText="恢复" cancelText="取消" onConfirm={() => doResume(r)}>
+                    <Popconfirm title={`恢复 ${skillDisplayId(r)}?`} description="恢复后下次目录导出会重新写出文件。" okText="恢复" cancelText="取消" onConfirm={() => doResume(r)}>
                       <Button size="small" icon={<CheckCircleOutlined />}>恢复</Button>
                     </Popconfirm>
                   )}
@@ -267,7 +267,7 @@ export default function Skills() {
           }}
         />
       </div>
-      <TokenModal tenant={tenant} subsystem={tokenSub || ""} open={!!tokenSub} onClose={() => setTokenSub(null)} />
+      <TokenModal tenant={tenant} subsystem={tokenSub || ""} open={!!tokenSub} onClose={() => setTokenSub(null)} outDir={exportDir || rememberedExportDir()} />
 
       <Modal
         title="导出为 pi 文件式 skill"
@@ -279,7 +279,7 @@ export default function Skills() {
       >
         <Alert
           type="info" showIcon style={{ marginBottom: 12 }}
-          message="与录制页「产出 Skill」同一套逻辑：按最新能力重开 Skill 4，覆盖同一条目录记录。"
+          message="快速原样导出：不开 Skill 4、不校验。沿用已有 Skill 4 手册，按录制合同重写合同与脚本，并写入当前 token。"
         />
         <Typography.Paragraph type="secondary" style={{ marginBottom: 6 }}>目标目录:</Typography.Paragraph>
         <Input

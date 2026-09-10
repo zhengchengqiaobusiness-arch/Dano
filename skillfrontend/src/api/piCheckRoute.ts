@@ -7,6 +7,7 @@ export function normalizePiCheckPath(pathname: string): string {
     path === "/skills"
     || path.startsWith("/skills/")
     || path === "/settings/token"
+    || path === "/export/directory"
     || path.startsWith("/recording-results/")
   ) {
     return `/v1${path}`;
@@ -19,6 +20,7 @@ export function shouldRouteToPiCheck(pathname: string, method = "GET"): boolean 
   const verb = String(method || "GET").toUpperCase();
   if (path === "/v1/skills" || path.startsWith("/v1/skills/")) return true;
   if (path === "/v1/settings/token") return true;
+  if (path === "/v1/export/directory" || path === "/export/directory") return true;
   if (path === "/v1/pi-recordings" || path.startsWith("/v1/pi-recordings/")) return true;
   if (path.includes("/export-skill")) return true;
   if ((verb === "PUT" || verb === "POST") && /^\/v1\/recording-results\/[^/]+\/draft$/.test(path)) return true;

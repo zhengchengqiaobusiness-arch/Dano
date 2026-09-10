@@ -17,8 +17,8 @@ def _print(payload, code=0):
 def _help():
     contract = runtime.load_contract()
     return {
-        "usage": "python scripts/flow.py --route <id> --input-json '{...}' [--confirm]",
-        "list_options": "python scripts/flow.py --list-options <capability_id> <field>",
+        "usage": "python3 scripts/flow.py --route <id> --input-json '{...}' [--confirm]",
+        "list_options": "python3 scripts/flow.py --list-options <capability_id> <field>",
         "routes": [
             {"id": item.get("route_id"), "title": item.get("title"), "steps": item.get("steps")}
             for item in contract.get("routes") or []
