@@ -42,8 +42,8 @@
 
 什么叫这一页、这一行已经做完：
 
-- **查询**：目标要求的可见条件已经设齐，再由该查询自己的触发点发出请求。首屏自动加载、误点、只改了一个下拉就离开，都不算做完。点了搜索但 `network_since` 里列表 URL/query 与首屏相同：没做完，不要交。目标写了多种条件取值（多种类型、多个周期），每一种都要真正发出该查询的 execute，不要只做第一种。入口已经标明单据族时，列表请求必须带上该族判别键；响应行若混进别的族，这一项没做完，不要把别的族单号冻进查询合同。
-- **新增 / 保存 / 提交**：目标要求填写的可见字段已经写上（排除项跳过）；目标要求加行的，**每一种加行**（不同分区的「添加××」）都已经点过，行内框也已经写上。随后那条写请求才是 execute。点新增或点进一行后，URL/标题/单据名/单号前缀丢掉入口类型、落到通用表或别族单据：不要在这张错表保存或当编辑，先回到带类型的新增页。列表行必须属于入口单据族才能拿来做编辑/删除/提交/撤回。提交/撤回/删除请求里的主键必须对上刚点的那一行单据编号；对不上就没做完，不要交。请求发出了不算做成：HTTP 非成功，或响应 JSON 的业务码不是成功（常见 `code` 不是 `200`）、`msg` 带「失败 / 错误」：这一项没做完，禁止交成已推断。站点明确拒绝（例如流程图未运行）写入 `unresolved`，不要假装提交成功。没提交成功就不要做撤回。
+- **查询**：目标要求的可见条件已经设齐，再由该查询自己的触发点发出请求。首屏自动加载、误点、只改了一个下拉就离开，都不算做完。目标写了多种条件取值（多种类型、多个周期），每一种都要真正发出该查询的 execute，不要只做第一种。
+- **新增 / 保存 / 提交**：目标要求填写的可见字段已经写上（排除项跳过）；目标要求加行的，**每一种加行**（不同分区的「添加××」）都已经点过，行内框也已经写上。随后那条写请求才是 execute。
 - 目标写「全字段」：当前表单上每个可改控件都要写上，灰框/排除项除外。不要只填标题就保存。
 - 目标要提交就点提交并走完确认，不要用保存换请求形状。目标只要求新增/保存：不要额外点提交去换另一条请求。
 - 表单还是空的、加行后行内框还没写，就去点保存：失败。
@@ -76,9 +76,9 @@
 1. **观察** → Skill 2 + `control_in_app_browser`：`snapshot` + `network_since`。必要时 `screenshot` 且 `as_image=true`。首屏自动请求先记下，不要当成已经查询。进了新表单或加了新分区行：再 snapshot **这一页**，不要拿上一页列表的控件去对字段。
 2. **按目标操作** → Skill 2：把该动作需要的可见条件/字段写上，再点该动作自己的查询/保存/提交。没有「搜索 / 查询」文案时，点已经出现的树或列表节点就是查询，不要为找搜索钮去点没文案的 `aN`。只点当前业务区。通知角标、头像、偏好、退出、外观不是业务。空状态提示是还没做成，不是按钮。灰框不要硬点。
 3. **请人点一下** → 仅阻断。Skill 2 `assist`。只写这一个控件要人做什么。协助之后必须停自动点，等人说继续后再自动接着做。
-4. **认一项产物** → Skill 3 + `submit_recording_capability`。该项必须已按目标做完，且有真实 **业务成功** 的 execute。**刚发出的查询或保存一旦业务成功，立刻交这一项**，不要攒到全部动作做完。发出了但响应失败码或失败文案：不要交，按站点拒绝写入 `unresolved` 或重做。空表保存出来的请求不要交成完整能力。不要单独交没有 `request_refs` 的 relations-only 信封。每次交信封必须带本场目标全文 `recording_goal`。看到被收成「查询列表」这类短标题，立刻让 Infer 改回全文再交，不要带着短标题继续出包。
+4. **认一项产物** → Skill 3 + `submit_recording_capability`。该项必须已按目标做完，且有真实 execute。空表保存出来的请求不要交成完整能力。不要单独交没有 `request_refs` 的 relations-only 信封。
 5. **最小补证** → 再调 Skill 2。Infer 只建议，你决定是否动手。补完立刻再交，不要等结束。
-6. **出包验证** → Skill 4。目标页与台账该交的行都齐、每一行合同完整、写入没有「未识别却当可执行」时立刻走，不要等用户结束。出包怎么写以 Skill 4 为准。隔离运行 `query.py` / 写脚本时，必须真正请求该项 execute；只打印 `ready` / `need_confirm`、不发网：包不可调用，不要定稿，让 Skill 4 重写脚本。
+6. **出包验证** → Skill 4。目标页与台账该交的行都齐、每一行合同完整、写入没有「未识别却当可执行」时立刻走，不要等用户结束。出包怎么写以 Skill 4 为准。
 7. **定稿** → Skill 4 通过后立刻 `submit_recording_result({final:true, use_draft:true})`。
 
 工具回 `transport_idle` 不是业务失败。台账已齐且合同完整就定稿；没齐且没有阻断就继续做；只有阻断才等用户。
@@ -96,8 +96,7 @@
 - 加行后再 snapshot，这一列仍然没有可写控件
 
 协助只针对这一格或这一钮。禁止一次 assist 把整张表交出去然后自己空转。  
-协助发出之后禁止再 click / fill / choose，直到用户说继续。人已经发出预期请求就停手，交给 Infer 认那条请求。  
-`assist` 前必须看**当前** snapshot：当前 URL/标题已经是目标业务页，就不要再 assist 登录或验证码。旧截图、上一轮阻断理由不能当这一轮的阻断证据。登录态被注入或人说「登录了」之后，先 snapshot 当前页再决定下一步。
+协助发出之后禁止再 click / fill / choose，直到用户说继续。人已经发出预期请求就停手，交给 Infer 认那条请求。
 
 不是阻断：人没有说话、人没有点预览、人没有说结束、你还想再确认一遍、你想换个页看看。
 
@@ -105,7 +104,7 @@
 
 同时满足才能定稿。**不要求用户先说结束。**
 
-1. 目标原文要求的每一页、每一行已经做完，或已写入 `unresolved` 说明缺什么。目标还列着新增/编辑/提交/撤回/删除时，只交了查询就定稿：失败。新增页是占用图且格子为 0：先选本页资源/日期，仍没有可预约格再去同菜单的时间配置或资源管理把依赖做成可用，然后回来约。配置读接口因「期望一条、查到多条」失败时，禁止再点该配置页的保存（会再插一条）。配置页没有删除钮不等于没有删除接口：用 list 找到多余 id，走站点已广告的 DELETE 清到一条，再回占用图。不要写「需要改数据库」然后定稿，也不要把旁路配置保存收成占用图申请的可执行能力。站点配置接口失败必须写入 `unresolved`，禁止空定稿。
+1. 目标原文要求的每一页、每一行已经做完，或已写入 `unresolved` 说明缺什么
 2. 台账每行有**完整**合同或 `unresolved`（残缺合同不算）
 3. 写入行没有「未识别却当可执行」
 4. Skill 4 的投影、变化输入、隔离运行、`validate_skill_package` 通过。没有 `validate_skill_package` 的 `ok:true`：禁止 `submit_recording_result`。
@@ -120,7 +119,7 @@
 - 形状错（`fields`、字符串 refs、params 不是数组、重复 id、共用 execute、单独交 relations）→ Skill 3 重交信封
 - 缺依据 / 未识别当已解决 / 灰框进了调用方 / 假 links / 错挂 preflight → Skill 3
 - 证据不够、点不到、值没写上、少加了一种分区行 → Skill 2
-- handbook / 投影 / 隔离运行 / validator 失败 → Skill 4。`generator_guides_leaked`：成品里不能有 `references/generator-guides/`，删掉再校验，不要把生成规范写进消费者包。`skill_section` 报缺「执行协议」：校验按 `##+` 切章，`###` 会被当成新章，执行协议里只用编号步骤，不要用 `###`。INPUT_FORMS 的调用方字段必须写成 `` `field` ``，光加粗不算。`script_help` 且 `--help` 时发网 / KeyError / assert / 超时：创建请求和校验断言都不能写在模块顶层，必须进 `main()`；`--help` 只打印 JSON 并 exit 0，不要再 subprocess 调业务脚本，也不要 assert。每个能力脚本对应一个 `verify_<同名>.py`，不要写会卡住的 `verify_all.py`。`write_confirmation`：CONTRACT 是消费者合同，不要写 `capabilities[]` / `capability_id`；只写 `routes[]`。若坚持写 write 能力，每项必须同时有 `requires_confirmation` 与 `requires_human_confirm`，含写操作的路线也要 `requires_confirmation`。`input_form_invented_field`：CONTRACT 能力没有调用方字段时，INPUT_FORMS 不要给该项开带字段的 `## 标题` 节，或写「没有调用方字段」。`missing_route_file` / `route_pointer`：`operation_sequence` 长度 > 1 的每条路线必须有 `references/routes/<route_id>.md`，且 SKILL.md 正文直接出现该路径。`missing_flow`：有 `config/runtime.json` 就必须有 `scripts/flow.py`。`runtime_artifact`：不要把 `__pycache__` / `.pyc` 留在包里。`write_skill_artifact` 的 path 相对包根，写 `SKILL.md` / `scripts/query.py`，不要再加一层 `skill-artifacts/`，否则会嵌套出包根，校验找不到成品。`extra_route_file`：`references/routes/<id>.md` 必须对上 CONTRACT 里 `operation_sequence` 长度 > 1 的 `route_id`；对不上就删文件，不要用 `id` 代替 `route_id`，也不要给单能力路线单独建 md。`packaged_generation_language` 报 `step_id`：成品里不要出现 `step_id` 这几个字；`operation_sequence` 写成能力 id 字符串数组。`route_pointer`：SKILL.md 正文单独写一行裸路径 `references/routes/<route_id>.md`，不要只放在表格链接里。`long_reference`：INPUT_FORMS.md 先加目录或压到约 100 行以内。
+- handbook / 投影 / 隔离运行 / validator 失败 → Skill 4
 - 点不动、图送不进、证据读丢、投影工具补了键 → 报程序故障，不要假装业务失败
 
 ## 调查环

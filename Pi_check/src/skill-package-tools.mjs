@@ -2,93 +2,15 @@
  * Skill 4 运输：写产物、校验、隔离运行。不认业务。
  */
 
-import { mkdir, writeFile, cp, rm, readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, writeFile, cp, rm } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const BACK_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "back");
-const REPO_ROOT = path.resolve(BACK_ROOT, "..");
-
-const REQUIRED_GENERATOR_GUIDES = [
-  "skill-generator-ask-user-question-guide.md",
-  "skill-generator-auth-and-token.md",
-  "skill-generator-workflow.md",
-  "skill-generator-live-options.md",
-];
-
-export function generatorGuideRoot() {
-  const configured = String(process.env.DANO_SKILL_REFERENCE_DIR || "doc").trim() || "doc";
-  const root = path.resolve(REPO_ROOT, configured);
-  const relative = path.relative(REPO_ROOT, root);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error("DANO_SKILL_REFERENCE_DIR 不得超出项目根目录");
-  }
-  return root;
-}
-
-async function listMarkdownFiles(root) {
-  const found = [];
-  async function walk(dir) {
-    let entries = [];
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        await walk(full);
-        continue;
-      }
-      if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
-        found.push(full);
-      }
-    }
-  }
-  await walk(root);
-  found.sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" }));
-  return found;
-}
-
-export async function readGeneratorGuides() {
-  const root = generatorGuideRoot();
-  let info;
-  try {
-    info = await stat(root);
-  } catch {
-    return { ok: false, error: `Skill 参考目录不存在: ${root}`, files: [] };
-  }
-  if (!info.isDirectory()) {
-    return { ok: false, error: `Skill 参考目录不是文件夹: ${root}`, files: [] };
-  }
-  const paths = await listMarkdownFiles(root);
-  if (!paths.length) {
-    return { ok: false, error: `Skill 参考目录中没有 Markdown 文件: ${root}`, files: [] };
-  }
-  const files = [];
-  for (const full of paths) {
-    const rel = path.relative(root, full).split(path.sep).join("/");
-    files.push({ path: rel, content: await readFile(full, "utf8") });
-  }
-  const names = new Set(files.map((item) => item.path.split("/").pop()));
-  const missing = REQUIRED_GENERATOR_GUIDES.filter((name) => !names.has(name));
-  if (missing.length) {
-    return {
-      ok: false,
-      error: `Skill 参考目录缺少必要规范: ${missing.join(", ")}`,
-      files,
-    };
-  }
-  return { ok: true, files };
-}
 
 function safeRel(rel) {
-  const text = String(rel || "")
-    .replace(/\\/g, "/")
-    .replace(/^\/+/, "")
-    .replace(/^(skill-artifacts\/)+/i, "");
+  const text = String(rel || "").replace(/\\/g, "/").replace(/^\/+/, "");
   if (!text || text.includes("..")) throw new Error("非法产物路径");
   return text;
 }
@@ -97,40 +19,12 @@ export function artifactRoot(files, recordingId) {
   return path.join(files.directory(recordingId), "skill-artifacts");
 }
 
-function isGeneratorGuideLeak(rel) {
-  return safeRel(rel).replace(/\\/g, "/").startsWith("references/generator-guides");
-}
-
 export async function writeSkillArtifact(files, recordingId, rel, content) {
-  const pathRel = safeRel(rel);
-  if (isGeneratorGuideLeak(pathRel)) {
-    return {
-      saved: false,
-      error: "禁止写入 references/generator-guides。那是生成规范，不能进消费者包。",
-    };
-  }
   const root = artifactRoot(files, recordingId);
-  const target = path.join(root, pathRel);
+  const target = path.join(root, safeRel(rel));
   await mkdir(path.dirname(target), { recursive: true });
   await writeFile(target, String(content ?? ""), "utf8");
-  return { saved: true, path: pathRel };
-}
-
-export async function deleteSkillArtifact(files, recordingId, rel) {
-  const pathRel = safeRel(rel);
-  const root = artifactRoot(files, recordingId);
-  const target = path.join(root, pathRel);
-  await rm(target, { recursive: true, force: true });
-  return { deleted: true, path: pathRel };
-}
-
-async function stripLeakedGeneratorGuides(root) {
-  const leaked = path.join(root, "references", "generator-guides");
-  await rm(leaked, { recursive: true, force: true });
-}
-
-async function stripNestedArtifactRoot(root) {
-  await rm(path.join(root, "skill-artifacts"), { recursive: true, force: true });
+  return { saved: true, path: safeRel(rel) };
 }
 
 function runPython(args, { cwd, timeoutMs = 20000 } = {}) {
@@ -165,8 +59,6 @@ function runPython(args, { cwd, timeoutMs = 20000 } = {}) {
 
 export async function validateSkillPackage(files, recordingId) {
   const root = artifactRoot(files, recordingId);
-  await stripLeakedGeneratorGuides(root);
-  await stripNestedArtifactRoot(root);
   const script = [
     "import json,sys",
     "from pathlib import Path",

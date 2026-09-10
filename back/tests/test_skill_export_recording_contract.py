@@ -33,7 +33,6 @@ from dano.onboarding.skill_generation.export import (
     build_export_skill_spec,
     export_recording_skill,
 )
-from tests.skill4_draft import write_skill4_draft
 from dano.onboarding.skill_generation.models import SkillGenerationRequest
 from dano.onboarding.skill_generation.planner import propose_deterministic_plan
 from dano.onboarding.skill_generation.validate import validate_skill_plan
@@ -214,25 +213,6 @@ async def test_recording_without_nodes_exports_a_skill_package(tmp_path: Path) -
     async def persist(next_body: dict) -> None:
         persisted.update(next_body)
 
-    artifacts = write_skill4_draft(
-        tmp_path / "artifacts",
-        **{
-            "references/CONTRACT.json": json.dumps(
-                {
-                    "capabilities": [
-                        {
-                            "capability_id": spec.capabilities[0].capability_id,
-                            "name": spec.capabilities[0].name,
-                            "title": spec.capabilities[0].title,
-                            "kind": spec.capabilities[0].kind,
-                            "input_schema": spec.capabilities[0].input_schema,
-                        }
-                    ]
-                },
-                ensure_ascii=False,
-            ),
-        },
-    )
     outcome = await export_recording_skill(
         result_id=UUID("22222222-2222-2222-2222-222222222222"),
         body={
@@ -240,7 +220,6 @@ async def test_recording_without_nodes_exports_a_skill_package(tmp_path: Path) -
             "action": action,
             "subsystem": "oa",
             "title": request.title,
-            "skill_artifacts_dir": str(artifacts),
         },
         tenant="test",
         request=request,
@@ -267,25 +246,6 @@ async def test_stage8_exports_without_description_or_model_review(tmp_path: Path
     async def publish(**_kwargs):  # noqa: ANN003
         return {"ok": True, "asset_version": 1, "asset_id": "asset-1"}
 
-    artifacts = write_skill4_draft(
-        tmp_path / "artifacts",
-        **{
-            "references/CONTRACT.json": json.dumps(
-                {
-                    "capabilities": [
-                        {
-                            "capability_id": spec.capabilities[0].capability_id,
-                            "name": spec.capabilities[0].name,
-                            "title": spec.capabilities[0].title,
-                            "kind": spec.capabilities[0].kind,
-                            "input_schema": spec.capabilities[0].input_schema,
-                        }
-                    ]
-                },
-                ensure_ascii=False,
-            ),
-        },
-    )
     outcome = await export_recording_skill(
         result_id=UUID("33333333-3333-3333-3333-333333333333"),
         body={
@@ -293,7 +253,6 @@ async def test_stage8_exports_without_description_or_model_review(tmp_path: Path
             "action": "action_33333333333333333333333333333333",
             "subsystem": "oa",
             "title": "业务办理",
-            "skill_artifacts_dir": str(artifacts),
         },
         tenant="test",
         request=SkillGenerationRequest(

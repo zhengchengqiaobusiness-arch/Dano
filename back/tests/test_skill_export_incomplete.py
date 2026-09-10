@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -14,7 +13,6 @@ from dano.onboarding.skill_generation.export import (
 from dano.onboarding.skill_generation.export_view import list_unconfirmed_write_fields
 from dano.onboarding.skill_generation.models import SkillGenerationRequest
 from dano.onboarding.skill_generation.planner import propose_deterministic_plan
-from tests.skill4_draft import MIN_FLOW_PY, write_skill4_draft
 
 
 def _spec_with_unknown_write() -> FlowSpec:
@@ -97,7 +95,6 @@ async def test_export_does_not_block_on_pi_unresolved(tmp_path: Path) -> None:
     async def persist(next_body: dict) -> None:
         persisted.update(next_body)
 
-    artifacts = write_skill4_draft(tmp_path / "artifacts")
     outcome = await export_recording_skill(
         result_id=uuid4(),
         body={
@@ -105,7 +102,6 @@ async def test_export_does_not_block_on_pi_unresolved(tmp_path: Path) -> None:
             "action": action,
             "subsystem": "oa",
             "title": "查询日报列表、新增日报并提交",
-            "skill_artifacts_dir": str(artifacts),
             "unresolved": [
                 "列表页在用户未显式点击「查询」按钮的情况下自动加载了默认数据。",
                 "POST /admin-api/oa/work-report/submit 请求体中未找到与提交意见对应的字段 key。",
@@ -126,40 +122,6 @@ async def test_export_does_not_block_on_pi_unresolved(tmp_path: Path) -> None:
     assert outcome.errors == []
     assert (tmp_path / package_slug(outcome.skill_id)).is_dir()
     assert persisted.get("skill_export_status") == "exported"
-
-
-@pytest.mark.asyncio
-async def test_export_refuses_without_skill4_artifacts(tmp_path: Path) -> None:
-    spec = _query_spec()
-
-    async def proposer(current_spec, current_request, verified, source_fingerprint):  # noqa: ANN001
-        return propose_deterministic_plan(
-            current_spec, current_request, verified, source_fingerprint,
-        )
-
-    async def publish(**_kwargs):  # noqa: ANN003
-        return {"ok": True, "asset_version": 1, "asset_id": "asset-1"}
-
-    with pytest.raises(SkillExportError) as caught:
-        await export_recording_skill(
-            result_id=uuid4(),
-            body={
-                "flow_spec": spec.model_dump(mode="json"),
-                "action": "action_export_no_skill4",
-                "subsystem": "oa",
-                "title": "查询日报",
-            },
-            tenant="test",
-            request=SkillGenerationRequest(
-                title="查询日报",
-                business_description="搜索日报。",
-                out_dir=str(tmp_path),
-            ),
-            proposer=proposer,
-            publish=publish,
-        )
-    assert caught.value.status_code == 409
-    assert "没有 Skill 4 产物" in caught.value.detail
 
 
 def test_export_keeps_unknown_write_unresolved() -> None:
@@ -206,21 +168,12 @@ async def test_export_blocks_unresolved_write_capability(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_export_packs_skill4_artifacts(tmp_path: Path, monkeypatch) -> None:
+async def test_export_packs_skill4_artifacts(tmp_path: Path) -> None:
     spec = _query_spec()
-    skill_md = "---\nname: demo\ndescription: 查询日报\n---\n\n# demo\nkept-handbook\n"
-    search_py = "print('ok')\n"
-    artifacts = write_skill4_draft(
-        tmp_path / "artifacts",
-        **{"SKILL.md": skill_md, "scripts/search.py": search_py, "scripts/flow.py": MIN_FLOW_PY},
-    )
-
-    async def fake_headers(tenant: str, subsystem: str, **_kwargs):  # noqa: ANN003
-        assert tenant == "test"
-        assert subsystem == "oa"
-        return {"Authorization": "Bearer packed-local-token"}
-
-    monkeypatch.setattr("dano.infra.token_store.get_token_headers", fake_headers)
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "scripts").mkdir(parents=True)
+    (artifacts / "SKILL.md").write_text("---\nname: demo\ndescription: 查询日报\n---\n\n# demo\n", encoding="utf-8")
+    (artifacts / "scripts" / "search.py").write_text("print('ok')\n", encoding="utf-8")
 
     async def proposer(current_spec, current_request, verified, source_fingerprint):  # noqa: ANN001
         return propose_deterministic_plan(
@@ -250,15 +203,7 @@ async def test_export_packs_skill4_artifacts(tmp_path: Path, monkeypatch) -> Non
     )
     assert outcome.status == "exported", outcome.errors
     packed = tmp_path / "out" / package_slug(outcome.skill_id)
-    assert (packed / "SKILL.md").read_text(encoding="utf-8") == skill_md
-    assert (packed / "scripts" / "search.py").read_text(encoding="utf-8") == search_py
-    assert (packed / "scripts" / "flow.py").read_text(encoding="utf-8") == MIN_FLOW_PY
+    assert (packed / "SKILL.md").is_file()
     assert (packed / "scripts" / "client.py").is_file()
     assert (packed / "scripts" / "wire_format.py").is_file()
-    runtime = json.loads((packed / "config" / "runtime.json").read_text(encoding="utf-8"))
-    assert runtime["base_url"] == "https://example.test"
-    assert runtime["tenant"] == "test"
-    assert runtime["subsystem"] == "oa"
-    auth = json.loads((packed / "config" / "auth.local.json").read_text(encoding="utf-8"))
-    assert auth["headers"]["Authorization"] == "Bearer packed-local-token"
-    assert not (packed / "references" / "generator-guides").exists()
+    assert (packed / "scripts" / "search.py").is_file()

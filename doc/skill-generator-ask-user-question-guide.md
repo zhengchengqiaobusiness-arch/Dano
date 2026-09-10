@@ -4,14 +4,6 @@
 可被 Dano 加载的 Skill；实际的 `ask_user_question` 调用发生在生成后的 Skill
 被 Dano 使用时，而不是 Skill 生成阶段。
 
-出包前必须同时阅读并遵守同目录下的另外三份生成规范，不得只读本文件：
-
-- `skill-generator-auth-and-token.md`
-- `skill-generator-workflow.md`
-- `skill-generator-live-options.md`
-
-动态选项字段必须按 live-options 规范保留完整 `dataSource`，不要从 question 里删掉。
-
 目标是让生成出的 Skill 只描述准确、规范、可执行的工具调用，不臆造 OA
 能力、接口参数或字段映射。本文档中的参数名、JSON Schema、状态和错误 code
 保持实现中的英文原名，其余说明使用中文。
@@ -1874,14 +1866,11 @@ E09 和 E10 均在同一 Assistant Turn 中已提交。
 
 每个导出的 Skill 必须包含：
 
-- `config/runtime.json`：tenant / subsystem / base_url；
-- `config/auth.local.json`：运行期鉴权头槽位（真实头由打包注入，不写进手册）；
 - `references/CONTRACT.json`：机器能力合同；
 - `references/CAPABILITIES.md`：业务能力索引（何时用、读/写、输入输出概况）；
 - `references/OPTIONS.md`：候选如何在运行时获得和处理；
 - `references/INPUT_FORMS.md`：逐能力原生表单、控件、默认规则和动态数据源；
 - `references/routes/<route-id>.md`：仅组合路线的逐步方法和完整示例；
-- `scripts/format_list.py`：稳定列表格式化脚本；
-- `scripts/flow.py`：按默认办理路线串跑合同中的能力。
+- `scripts/format_list.py`：稳定列表格式化脚本。
 
 执行时按 `SKILL.md` 的条件指针读取当前步骤真正需要的那一个文件，不要在开始前读取 references 下的全部文件。
