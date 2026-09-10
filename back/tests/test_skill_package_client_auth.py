@@ -476,3 +476,37 @@ def test_exported_client_does_not_fall_back_to_cache_after_forbidden_key(
         assert "forbidden" in str(exc)
         return
     raise AssertionError("wrong tenant key must not silently use the stale cache")
+
+
+def test_client_falls_back_to_stdlib_when_httpx_missing(tmp_path: Path, monkeypatch) -> None:
+    client = _load_client(_render_client(tmp_path))
+    monkeypatch.setattr(client, "httpx", None)
+    seen: dict[str, object] = {}
+
+    def fake_stdlib(method, url, **kwargs):  # noqa: ANN001
+        seen["method"] = method
+        seen["url"] = url
+        return client._StdlibResponse(200, url, b'{"code":0}')
+
+    monkeypatch.setattr(client, "_stdlib_request", fake_stdlib)
+    response = client._http_request("GET", "https://example.test/api")
+    assert seen["method"] == "GET"
+    assert seen["url"] == "https://example.test/api"
+    assert response.is_success is True
+    assert response.json() == {"code": 0}
+
+
+def test_auth_headers_stop_message_forbids_foreign_sessions(tmp_path: Path, monkeypatch) -> None:
+    client = _load_client(_render_client(tmp_path))
+    monkeypatch.delenv("DANO_URL", raising=False)
+    monkeypatch.delenv("DANO_AUTH_HEADERS", raising=False)
+    monkeypatch.setattr(client, "_local_auth_headers", lambda: {})
+    monkeypatch.setattr(client, "_live_headers", lambda: {})
+    monkeypatch.setattr(client, "_cache_headers", lambda: {})
+    try:
+        client.auth_headers()
+    except RuntimeError as exc:
+        assert "authentication unavailable" in str(exc)
+        assert "provider_request" in str(exc)
+        return
+    raise AssertionError("empty auth must stop")

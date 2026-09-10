@@ -379,6 +379,110 @@ def test_ask_user_question_guide_shapes_not_regressed() -> None:
     assert proto["cancel_behavior"].startswith("stop_current_workflow")
 
 
+def test_validator_rejects_get_session_and_unbranched_skill4_protocol(tmp_path: Path) -> None:
+    pkg = tmp_path / "pkg"
+    write_skill4_draft(
+        pkg,
+        **{
+            "SKILL.md": (
+                "---\nname: demo\ndescription: 查询汇报统计并新增工作日报\n---\n\n"
+                "## 适用场景\n\n- 查统计或填日报\n\n"
+                "## 选择工作流\n\n完整办理\n\n"
+                "## 执行协议\n\n1. 先加载组织机构树。**Done when:** 树返回。\n\n"
+                "## 按需读取资源\n\n- 读 INPUT_FORMS\n"
+            ),
+            "scripts/query_stats.py": (
+                "import json\nfrom client import get_session\n"
+                "print(json.dumps({'ok': True}))\n"
+            ),
+            "scripts/create_report.py": "import json\nprint(json.dumps({'ok': True}))\n",
+            "scripts/search.py": None,
+        },
+    )
+    (pkg / "scripts" / "search.py").unlink(missing_ok=True)
+    write_runtime_json(pkg, tenant="demo", subsystem="oa", base_url="https://example.test")
+    (pkg / "references").mkdir(exist_ok=True)
+    (pkg / "references" / "CONTRACT.json").write_text(
+        json.dumps({
+            "routes": [
+                {"route_id": "default", "operation_sequence": ["query_stats", "create_report"]},
+                {"route_id": "submit_only", "operation_sequence": ["create_report"]},
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    codes = _issue_codes(validate_skill_package(pkg))
+    assert "forbidden_client_api" in codes
+    assert "skill_section" in codes
+    assert "protocol_route_branch" in codes
+
+    (pkg / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: 查询汇报统计并新增工作日报\n---\n\n"
+        "## 适用场景\n\n- 查统计或填日报\n\n"
+        "## 选择工作流\n\n完整办理\n\n"
+        "## 执行协议\n\n"
+        "路线 submit_only\n\n1. 只收集日报字段。**Done when:** 已确认。\n\n"
+        "路线 default\n\n1. 先查询再交接。**Done when:** 查询完成。\n\n"
+        "## 成功、失败与停止\n\n空鉴权则停止。\n\n"
+        "## 按需读取资源\n\n- 读 INPUT_FORMS\n",
+        encoding="utf-8",
+    )
+    (pkg / "scripts" / "query_stats.py").write_text(
+        "from client import http_json\nimport json\nprint(json.dumps({'ok': True}))\n",
+        encoding="utf-8",
+    )
+    allowed = _issue_codes(validate_skill_package(pkg))
+    assert "forbidden_client_api" not in allowed
+    assert "protocol_route_branch" not in allowed
+    assert not any(
+        item.get("code") == "skill_section" and "成功、失败与停止" in str(item.get("message") or "")
+        for item in validate_skill_package(pkg).get("issues") or []
+    )
+
+
+def test_work_report_export_package_follows_consumer_contract() -> None:
+    import subprocess
+    import sys
+
+    pkg = REPO / "export" / "action_f55c9e2b7fd042a1a3cc5725ab670906"
+    result = validate_skill_package(pkg)
+    codes = _issue_codes(result)
+    assert result["ok"], result["issues"]
+    assert "forbidden_client_api" not in codes
+    assert "protocol_route_branch" not in codes
+    handbook = (pkg / "SKILL.md").read_text(encoding="utf-8")
+    assert "## 成功、失败与停止" in handbook
+    assert "submit_only" in handbook
+    assert "query_only" in handbook
+    forms = (pkg / "references" / "INPUT_FORMS.md").read_text(encoding="utf-8")
+    assert "inputType\": \"table\"" in forms or '"inputType": "table"' in forms
+    assert "dataSource" in forms
+    query = (pkg / "scripts" / "query_statistics.py").read_text(encoding="utf-8")
+    submit = (pkg / "scripts" / "submit_report.py").read_text(encoding="utf-8")
+    assert "from client import http_json" in query
+    assert "from client import http_json" in submit
+    assert "get_session" not in query
+    assert "get_session" not in submit
+    help_run = subprocess.run(
+        [sys.executable, str(pkg / "scripts" / "flow.py"), "--help"],
+        cwd=str(pkg / "scripts"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert help_run.returncode == 0, help_run.stderr
+    assert "submit_only" in help_run.stdout
+    verify = subprocess.run(
+        [sys.executable, str(pkg / "scripts" / "verify_submit_report.py")],
+        cwd=str(pkg / "scripts"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert verify.returncode == 0, verify.stdout + verify.stderr
+    assert json.loads(verify.stdout)["ok"] is True
+
+
 def test_task_book_stays_out_of_doc() -> None:
     assert not (REPO / "doc" / "CODEX_CONSUMER_SKILL_OUTPUT.md").exists()
     skill_dir = REPO / "Pi_check" / "skill"

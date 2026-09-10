@@ -230,6 +230,17 @@ def _check_scripts(scripts: Path, issues: list[dict], *, missing_as_warnings: bo
         )
         if script.name not in support_scripts and source and not (emits_json or delegates_emit):
             issues.append(_issue("json_stdout", "script must emit operational JSON", script))
+        if (
+            script.name not in support_scripts
+            and not script.name.startswith("verify_")
+            and source
+            and re.search(r"\bget_session\b", source)
+        ):
+            issues.append(_issue(
+                "forbidden_client_api",
+                f"{script.name} must call client.http_json or execute_plan, not get_session",
+                script,
+            ))
         try:
             completed = subprocess.run(
                 [sys.executable, str(script), "--help"],
@@ -878,6 +889,39 @@ def _check_input_forms_datasource(path: Path, text: str, issues: list[dict]) -> 
             return
 
 
+def _check_skill4_protocol_and_stops(root: Path, skill_text: str, issues: list[dict]) -> None:
+    """Skill 4 handbooks (有「适用场景」) must stop cleanly and branch by route."""
+    if not _section(skill_text, "适用场景"):
+        return
+    skill_path = root / "SKILL.md"
+    if not _section(skill_text, "成功、失败与停止"):
+        issues.append(_issue("skill_section", "SKILL.md requires section: 成功、失败与停止", skill_path))
+    contract_path = root / "references" / "CONTRACT.json"
+    if not contract_path.is_file():
+        return
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(contract, dict):
+        return
+    routes = [item for item in (contract.get("routes") or []) if isinstance(item, dict)]
+    if len(routes) < 2:
+        return
+    protocol = _section(skill_text, "执行协议")
+    missing = [
+        route_id
+        for route in routes
+        if (route_id := str(route.get("route_id") or "").strip()) and route_id not in protocol
+    ]
+    if missing:
+        issues.append(_issue(
+            "protocol_route_branch",
+            "执行协议 must branch by route_id: " + ", ".join(missing),
+            skill_path,
+        ))
+
+
 def _check_flow_and_default_route(root: Path, issues: list[dict]) -> None:
     if not (root / "config" / "runtime.json").is_file():
         return
@@ -1022,6 +1066,7 @@ def validate_skill_package(pkg_dir: Path, *, missing_as_warnings: bool = False) 
         reference = _read(reference_path, issues, missing_as_warnings=missing_as_warnings)
     if skill:
         _check_skill(skill_path, skill, issues)
+        _check_skill4_protocol_and_stops(root, skill, issues)
     if operations:
         _check_handbook_bans(operations_path, _doc_intro(operations), issues)
     forms_path = root / "references" / "INPUT_FORMS.md"
