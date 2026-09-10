@@ -113,7 +113,7 @@ function normalizeCallerField(key, spec, param, required) {
   const option = asRecord(spec["x-dano-option-source"]);
   const enums = asList(spec["x-enum-options"]).length ? asList(spec["x-enum-options"]) : asList(param.enum_options);
   const endpoint = String(option.source_url || source.source_url || "");
-  const childrenField = String(option.children_key || source.children_key || "");
+  const childrenField = String(option.children_key || source.children_key || (endpoint ? "children" : ""));
   const dataSource = endpoint ? {
     type: "api",
     endpoint,
@@ -137,12 +137,21 @@ function normalizeCallerField(key, spec, param, required) {
     source_kind: String(param.source_kind || spec["x-dano-source-kind"] || ""),
     reason: String(param.reason || spec.description || ""),
   };
+  const itemType = itemTypeFromReason(param.reason || spec.description);
+  if (itemType != null) field.itemType = itemType;
   if (Object.prototype.hasOwnProperty.call(param, "default_value") && param.default_value !== undefined && param.default_value !== "") {
     field.default = param.default_value;
   } else if (spec.default !== undefined && spec.default !== "") {
     field.default = spec.default;
   }
   return field;
+}
+
+function itemTypeFromReason(reason) {
+  const matched = String(reason || "").match(/itemType\s*=\s*(\d+)/i);
+  if (!matched) return undefined;
+  const value = Number(matched[1]);
+  return Number.isFinite(value) ? value : undefined;
 }
 
 function coerceWireValue(type, raw) {
@@ -394,7 +403,9 @@ function arrayLineRecipe(field) {
 function askQuestion(field) {
   const parts = [field.title];
   if (field.type === "array") {
-    parts.push("能力层是分区表，宿主 ask_user_question 没有 table，本字段用 textarea 收同一 id");
+    parts.push(Object.keys(field.sections || {}).length
+      ? "能力层是分区表，宿主 ask_user_question 没有 table，本字段用 textarea 收同一 id"
+      : "能力层是表格，宿主 ask_user_question 没有 table，本字段用 textarea 收同一 id");
     parts.push(arrayLineRecipe(field));
     parts.push("也可提交 JSON 数组。没有行则留空。不要改 id，不要拆多轮");
   } else if (field.dataSource) {

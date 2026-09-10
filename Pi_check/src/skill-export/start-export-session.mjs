@@ -8,8 +8,6 @@ import { readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { artifactRoot } from "../skill-package-tools.mjs";
-import { createExportToolHost } from "../pi-tools.mjs";
-import { createExportPiSession } from "../pi-session.mjs";
 import { readGeneratorGuides } from "./read-guides.mjs";
 import { packSkill4Artifacts, seedFrozenArtifacts } from "./pack.mjs";
 import { resolveExportAuth, resolveExportBaseUrl, extractAuthHeadersFromEvidence } from "./auth-resolve.mjs";
@@ -53,7 +51,7 @@ export async function exportRecordingSkill({
   draft: overlayDraft = null,
   authHeaders = null,
   existingSkillId = "",
-  createExportSession = createExportPiSession,
+  createExportSession = null,
   packArtifacts = packSkill4Artifacts,
   timeoutMs = Number(process.env.PI_EXPORT_TIMEOUT_MS || 900000),
 } = {}) {
@@ -111,7 +109,12 @@ export async function exportRecordingSkill({
   logExport("5/9 预置产物完成", started);
 
   let submitted = null;
-  const tools = createExportToolHost({
+  const toolMod = await import("../pi-tools.mjs");
+  if (typeof toolMod.createExportToolHost !== "function") {
+    logExport("失败 当前 sidecar 没有 createExportToolHost", started);
+    return { status: "export_failed", errors: ["当前 sidecar 没有 createExportToolHost"], clarification_questions: [] };
+  }
+  const tools = toolMod.createExportToolHost({
     files,
     recordingId,
     draft: latest,
@@ -123,6 +126,13 @@ export async function exportRecordingSkill({
   logExport(`6/9 开 Skill4 会话 timeout_ms=${timeoutMs}`, started);
   let session;
   try {
+    if (!createExportSession) {
+      const mod = await import("../pi-session.mjs");
+      createExportSession = mod.createExportPiSession;
+    }
+    if (typeof createExportSession !== "function") {
+      throw new Error("当前 sidecar 没有 createExportPiSession，无法开 Skill 4");
+    }
     session = await createExportSession({
       recording: { id: `${recordingId}-export-${Date.now()}` },
       tools,

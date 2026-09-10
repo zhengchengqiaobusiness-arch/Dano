@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -152,7 +153,41 @@ def _parse_caller_array(field, value):
         if _is_placeholder(row.get("content")):
             continue
         cleaned.append(row)
-    return _assemble_items(field, cleaned)
+    return _stamp_item_type(field, _assemble_items(field, cleaned))
+
+
+def _item_type(field):
+    raw = field.get("itemType") if isinstance(field, dict) else None
+    if raw not in (None, ""):
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    matched = re.search(r"itemType\s*=\s*(\d+)", str((field or {}).get("reason") or ""), re.I)
+    return int(matched.group(1)) if matched else None
+
+
+def _stamp_item_type(field, value):
+    wanted = _item_type(field)
+    if wanted is None or not isinstance(value, list):
+        return value
+    stamped = []
+    for row in value:
+        if not isinstance(row, dict):
+            continue
+        item = dict(row)
+        if item.get("itemType") in (None, ""):
+            item["itemType"] = wanted
+        stamped.append(item)
+    return stamped
+
+
+def _assign_payload(target, name, value):
+    key = name or ""
+    if key and isinstance(target.get(key), list) and isinstance(value, list):
+        target[key] = target[key] + value
+        return
+    target[key] = value
 
 
 def _assemble_items(field, value):
@@ -195,7 +230,7 @@ def build_request(cap, inputs, user):
                 continue
         slot, name = _payload_slot(field.get("path"), method)
         target = query if slot == "query" else body
-        target[name or key] = value
+        _assign_payload(target, name or key, value)
     if required:
         raise RuntimeError(f"缺少必填字段: {', '.join(required)}")
     for param in cap.get("system_params") or []:
@@ -207,7 +242,7 @@ def build_request(cap, inputs, user):
             continue
         slot, name = _payload_slot(param.get("path"), method)
         target = query if slot == "query" else body
-        target[name or key] = value
+        _assign_payload(target, name or key, value)
     return query, body
 
 

@@ -9,7 +9,7 @@ import { RecordingFiles } from "../src/fs-store.mjs";
 import { writeSkillArtifact, runIsolatedScript, asStringArgs } from "../src/skill-package-tools.mjs";
 import { exportRecordingSkill, dumpRecordingSkill, reexportCatalogSkills, stableSkillId } from "../src/skill-export/start-export-session.mjs";
 import { upsertExportedSkill, listExportedSkills, skillManifestFromExport } from "../src/skill-export/skill-catalog.mjs";
-import { readGeneratorGuides, REQUIRED_GUIDE_FILES } from "../src/skill-export/read-guides.mjs";
+import { readGeneratorGuides, REQUIRED_GUIDE_FILES, generatorGuideDir } from "../src/skill-export/read-guides.mjs";
 import { validateSkillPackageDir } from "../src/skill-export/validator.mjs";
 import { createExportToolHost, describeExportPiTools, describePiTools } from "../src/pi-tools.mjs";
 import { packSkill4Artifacts } from "../src/skill-export/pack.mjs";
@@ -99,6 +99,95 @@ test("doc/ 四份生成规范齐全", async () => {
   for (const name of REQUIRED_GUIDE_FILES) {
     assert.ok(names.has(name), name);
   }
+});
+
+test("相对规范目录按 DANO_SKILL_REFERENCE_ROOT 解析", () => {
+  const root = path.resolve(os.tmpdir(), "dano-skill-ref-root");
+  const dir = generatorGuideDir({
+    DANO_SKILL_REFERENCE_DIR: "doc",
+    DANO_SKILL_REFERENCE_ROOT: root,
+  });
+  assert.equal(path.normalize(dir), path.normalize(path.join(root, "doc")));
+});
+
+test("工作项和计划项投影为两个 caller 字段，并带上 itemType / 树 children", () => {
+  const contract = consumerContract({
+    capabilities: [
+      {
+        capability_id: "cap_report_statistics_query",
+        name: "查询汇报统计",
+        kind: "query",
+        step_ids: ["step_statistics_query"],
+        request_refs: [{ step_id: "step_statistics_query", usage: "execute" }],
+        input_schema: {
+          type: "object",
+          properties: {
+            deptId: { type: "number", title: "组织机构" },
+          },
+          required: ["deptId"],
+        },
+      },
+      {
+        capability_id: "cap_daily_report_create_submit",
+        name: "新增日报并提交",
+        kind: "write",
+        step_ids: ["step_create_submit"],
+        request_refs: [{ step_id: "step_create_submit", usage: "execute" }],
+        input_schema: {
+          type: "object",
+          properties: {
+            workItems: {
+              type: "array",
+              title: "已完成工作项",
+              items: { type: "object", properties: { content: { type: "string" }, progress: { type: "number" } } },
+            },
+            planItems: {
+              type: "array",
+              title: "工作计划项",
+              items: { type: "object", properties: { content: { type: "string" } } },
+            },
+          },
+          required: ["workItems"],
+        },
+      },
+    ],
+    steps: [
+      {
+        step_id: "step_statistics_query",
+        method: "GET",
+        path: "/admin-api/oa/work-report/statistics",
+        params: [{
+          key: "deptId",
+          path: "query.deptId",
+          source_kind: "api_option",
+          source: { source_method: "GET", source_url: "/admin-api/system/dept/simple-list", label_key: "name", value_key: "id" },
+        }],
+      },
+      {
+        step_id: "step_create_submit",
+        method: "POST",
+        path: "/admin-api/oa/work-report/submit",
+        params: [
+          { key: "workItems", path: "body.items", type: "array", reason: "系统组装成 body.items 数组，itemType=1 表示工作项。" },
+          { key: "planItems", path: "body.items", type: "array", reason: "系统组装成 body.items 数组，itemType=2 表示计划项。" },
+        ],
+      },
+    ],
+    capability_relations: [{
+      type: "suggested_call_chain",
+      from_capability: "cap_report_statistics_query",
+      to_capability: "cap_daily_report_create_submit",
+    }],
+  });
+  const query = contract.capabilities[0];
+  assert.equal(query.caller_fields[0].dataSource.childrenField, "children");
+  const create = contract.capabilities[1];
+  assert.equal(create.caller_fields.find((item) => item.id === "workItems").itemType, 1);
+  assert.equal(create.caller_fields.find((item) => item.id === "planItems").itemType, 2);
+  assert.deepEqual(contract.routes[0].steps, ["cap_report_statistics_query", "cap_daily_report_create_submit"]);
+  const ask = frozenAskForm(create);
+  assert.equal(ask.questions.find((item) => item.id === "workItems").inputType, "textarea");
+  assert.doesNotMatch(JSON.stringify(ask), /"inputType": "table"/);
 });
 
 test("缺少 SKILL.md 或鉴权节时校验失败", async () => {
@@ -811,6 +900,37 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
   assert.deepEqual(JSON.parse(assembled.stdout), [
     { content: "写日报", progress: 80, itemType: 1 },
     { content: "明天评审", itemType: 2 },
+  ]);
+
+  const merged = await new Promise((resolve) => {
+    const scriptsDir = path.join(packed.export_path, "scripts");
+    const code = `import sys, json; sys.path.insert(0, ${JSON.stringify(scriptsDir)}); import runtime
+cap = {
+  "execute": {"method": "POST"},
+  "caller_fields": [
+    {"id": "workItems", "type": "array", "path": "body.items", "itemType": 1, "itemProperties": {"content": {"type": "string"}, "progress": {"type": "number"}}},
+    {"id": "planItems", "type": "array", "path": "body.items", "itemType": 2, "itemProperties": {"content": {"type": "string"}}},
+  ],
+  "system_params": [{"key": "reportType", "path": "body.reportType", "source_kind": "constant", "default_value": 1, "required": True}],
+}
+print(json.dumps(runtime.build_request(cap, {"workItems": "完成模块开发|||100", "planItems": "继续联调"}, {}), ensure_ascii=False))`;
+    const child = spawn("python", ["-c", code], { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+  assert.equal(merged.code, 0, merged.stderr);
+  assert.deepEqual(JSON.parse(merged.stdout), [
+    {},
+    {
+      items: [
+        { content: "完成模块开发", progress: 100, itemType: 1 },
+        { content: "继续联调", itemType: 2 },
+      ],
+      reportType: 1,
+    },
   ]);
 });
 
