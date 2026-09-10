@@ -23,6 +23,12 @@ server-owned. OA HTTP/business failures must be handled by the caller; they are
 not always login failures. Broker authentication and validation errors raise
 `ProviderError` with its stable `code`.
 
+For this OA integration, configure `DANO_OAUTH_API_ORIGIN` to the OA page's
+origin. The authorization server's token and identity endpoints may use a
+different hostname; they do not determine the business API origin. Do not
+replace the Skill's original business hostname with the token endpoint hostname
+merely because both resolve to the same IP address.
+
 Dano prepends `dano_provider` to PYTHONPATH only while a bash call runs, preserving
 existing module directories. The client retains a configurable 15-second socket
 timeout; disconnecting cancels the corresponding Broker request. The client
@@ -87,5 +93,12 @@ counts; they are not fixed test expectations. Retain sanitized script/response
 and browser evidence and the implementation/Skill versions. Direct model
 `provider_request` calls, mocks, or manually populated tokens do not meet this
 gate. See Issue #456 for the required target and full acceptance contract.
+
+For Issue #456 specifically, the OA page and original Skill use
+`http://admin.dianshixinxi.com:90`; the deployed `DANO_OAUTH_API_ORIGIN` must use
+that origin before acceptance. The token and identity endpoints remain on their
+separately configured origin. Record the actual outbound business request origin
+in the sanitized acceptance evidence; success against `h5.dianshixinxi.com` does
+not fulfill this gate.
 
 No `ask_user_question` capability or model argument schema is changed.
