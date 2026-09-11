@@ -132,6 +132,10 @@ or registry settings remain separate from these runtime network settings.
 Production runs one OAuth confidential client and does not inject a fixed User
 or authentication Cookie. The required deployment values are:
 
+For the production OA client, exact endpoint mapping, `.env` template,
+deployment gate, and browser acceptance procedure, see
+[`生产环境 OA OAuth2 登录配置`](./生产环境-OA-OAuth2-登录配置.md).
+
 ```text
 DANO_OAUTH_ISSUER
 DANO_OAUTH_AUTHORIZATION_ENDPOINT
