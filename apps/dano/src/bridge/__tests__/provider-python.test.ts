@@ -635,7 +635,7 @@ it("records authentication evidence at final send rather than inferring binding 
   await withProviderPython(s.options, async (p, _redact, audit) => {
     expect(await urllibRequest(p, h.origin + "/business-denied")).toEqual({ status: 403 });
     expect(audit).toMatchObject([{
-      status: 403, loginSessionBound: true,
+      status: 403, businessCode: 403, loginSessionBound: true,
       sends: [{ targetMatched: true, authorizationMatched: true }],
     }]);
   });

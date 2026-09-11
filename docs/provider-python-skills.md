@@ -64,7 +64,8 @@ Real OA acceptance must retain the original business URL without that override.
 
 Require unchanged per-file hashes, doctor exit 0, all four HTTP 200/business
 code 0 results, query exit 0 and directly parsed list/total. Tool audit contains
-`providerRequests`: method, path without query, HTTP/error outcome, and `sends`
+`providerRequests`: method, path without query, HTTP/error outcome, optional numeric
+`businessCode` parsed from the actual JSON response, and `sends`
 with `targetMatched` and `authorizationMatched` evaluated at final server send.
 `loginSessionBound` is derived from those send checks, not the HTTP outcome.
 No raw credential, Login Session identifier or private business payload belongs

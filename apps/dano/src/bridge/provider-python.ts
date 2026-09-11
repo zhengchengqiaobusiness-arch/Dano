@@ -123,6 +123,17 @@ export async function withProviderPython<T>(
         AbortSignal.any([signal, connection.signal]),
         evidence => sends.push(evidence),
       ).finally(() => res.off("close", disconnected));
+      let businessCode: number | undefined;
+      if (response.ok) {
+        try {
+          const body = JSON.parse(response.body);
+          if (body && typeof body.code === "number" && Number.isFinite(body.code))
+            businessCode = body.code;
+        } catch {
+          // Non-JSON responses have no business-code evidence. Never retain an
+          // arbitrary string "code", response body or private payload in audit.
+        }
+      }
       requests.push({
         method: typeof input.method === "string" ? input.method : "",
         path: typeof input.path === "string" ? input.path.split("?")[0] : "",
@@ -130,6 +141,7 @@ export async function withProviderPython<T>(
           sends.length > 0 &&
           sends.every(send => send.authorizationMatched && send.targetMatched),
         sends,
+        ...(businessCode === undefined ? {} : { businessCode }),
         ...(response.ok
           ? { status: response.status }
           : { error: response.error.code }),
@@ -188,6 +200,7 @@ interface ProviderPythonRequest {
   path: string;
   loginSessionBound: boolean;
   sends: ProviderSendEvidence[];
+  businessCode?: number;
   status?: number;
   error?: string;
 }
