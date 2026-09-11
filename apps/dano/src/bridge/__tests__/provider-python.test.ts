@@ -81,7 +81,7 @@ it("a real Python request uses its Assistant Turn's Login Session without receiv
   ]);
 });
 
-it("the supplied PointLion Skill doctor and query succeed through Python and the Broker", async () => {
+it("the original PointLion ZIP stays byte-identical while its doctor and query use the login credential", async () => {
   const requests: string[] = [];
   const oa = createServer((req, res) => {
     if (req.headers.authorization !== "Bearer skill-token") {
@@ -126,14 +126,16 @@ it("the supplied PointLion Skill doctor and query succeed through Python and the
   emit({ type: "turn_start" } as AgentSessionEvent);
   const cwd = await mkdtemp(join(tmpdir(), "dano-pointlion-"));
   cleanup.push(() => rm(cwd, { recursive: true, force: true }));
-  const script = resolve(
-    "examples/skills/pointlion-todo-query/scripts/pointlion_todo.py",
-  );
+  const archive = resolve("apps/dano/src/bridge/__tests__/fixtures/pointlion-todo-query-token-inline.zip");
+  await execute("python3", ["-c", "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])", archive, cwd]);
+  const manifest = async () => (await execute("python3", ["-c", "import zipfile,sys,hashlib,pathlib,json; z=zipfile.ZipFile(sys.argv[1]); print(json.dumps({n:hashlib.sha256((pathlib.Path(sys.argv[2])/n).read_bytes()).hexdigest()==hashlib.sha256(z.read(n)).hexdigest() for n in z.namelist() if not n.endswith('/')}))", archive, cwd])).stdout;
+  expect(Object.values(JSON.parse(await manifest())).every(Boolean)).toBe(true);
+  const script = join(cwd, "pointlion-todo-query/scripts/pointlion_todo.py");
   for (const command of ["doctor", "query --page 1 --page-size 1"]) {
     const result = await withProviderPython(
       { broker, scope: "user", agentSessionId: "agent", cwd },
       prefix =>
-        execute("bash", ["-c", prefix + `python3 '${script}' ${command}`], {
+        execute("bash", ["-c", prefix + `python3 '${script}' --base-url http://127.0.0.1:${address.port} --token INVALID-ORIGINAL-TOKEN ${command}`], {
           cwd,
         }),
     );
@@ -151,6 +153,7 @@ it("the supplied PointLion Skill doctor and query succeed through Python and the
         enumWarning: null,
       });
   }
+  expect(Object.values(JSON.parse(await manifest())).every(Boolean)).toBe(true);
   expect(requests).toEqual([
     "/admin-api/bpm/category/simple-list",
     "/admin-api/bpm/process-definition/simple-list",
@@ -355,6 +358,7 @@ async function pythonHarness() {
     session,
     broker,
     cwd,
+    origin: `http://127.0.0.1:${address.port}`,
     refreshCount: () => refreshed,
     disableRefresh() {
       refreshAllowed = false;
@@ -604,4 +608,160 @@ it("the real Dano session retains Heimdall's fail-closed bash boundary on unsupp
   expect(result).toMatchObject({ role: "toolResult", isError: true });
   expect(JSON.stringify(result)).toContain("Protected Configuration");
   expect(h.observed).toHaveLength(0);
+});
+
+it("transparently replaces an unmodified urllib script's old Authorization at the OA receiver", async () => {
+  const h = await pythonHarness();
+  const s = h.session("user", "agent", "login-a");
+  const script = join(h.cwd, "original.py");
+  const source = `from urllib.request import Request, build_opener\nimport json\nreq = Request('${h.origin}/query', headers={'Authorization': 'Bearer original-old-token'})\nwith build_opener().open(req) as r:\n print(json.dumps({'status': r.status, 'body': json.load(r)}))\n`;
+  await writeFile(script, source);
+  const result = await withProviderPython(s.options, prefix =>
+    execute("bash", ["-c", prefix + `python3 '${script}'`], { cwd: h.cwd }),
+  );
+  expect(JSON.parse(result.stdout)).toMatchObject({ status: 200 });
+  expect(h.observed).toMatchObject([{ auth: "Bearer token-a", url: "/query" }]);
+  expect(await readFile(script, "utf8")).toBe(source);
+});
+
+async function urllibRequest(prefix: string, url: string, options = "") {
+  const result = await execute("bash", ["-c", prefix + `python3 - <<'PY'\nimport json\nfrom urllib.request import Request, build_opener\nfrom urllib.error import HTTPError, URLError\ntry:\n with build_opener().open(Request(${JSON.stringify(url)}, ${options || "headers={'Authorization':'Bearer original'}"}), timeout=2) as r:\n  print(json.dumps({'status':r.status,'body':r.read().decode()}))\nexcept HTTPError as e:\n print(json.dumps({'status':e.code}))\nexcept URLError as e:\n print(json.dumps({'error':str(e.reason)}))\nPY`]);
+  return JSON.parse(result.stdout);
+}
+
+it("records authentication evidence at final send rather than inferring binding from HTTP success", async () => {
+  const h = await pythonHarness();
+  const s = h.session("user", "agent", "login-a");
+  await withProviderPython(s.options, async (p, _redact, audit) => {
+    expect(await urllibRequest(p, h.origin + "/business-denied")).toEqual({ status: 403 });
+    expect(audit).toMatchObject([{
+      status: 403, loginSessionBound: true,
+      sends: [{ targetMatched: true, authorizationMatched: true }],
+    }]);
+  });
+});
+
+it("does not inject into different ports or hostnames, and preserves an anonymous script's own authentication", async () => {
+  const h = await pythonHarness();
+  const other = await pythonHarness();
+  const s = h.session("user", "agent", "login-a");
+  await withProviderPython(s.options, async p => {
+    expect(await urllibRequest(p, other.origin + "/other-port")).toMatchObject({ status: 200 });
+    expect(await urllibRequest(p, h.origin.replace("127.0.0.1", "localhost") + "/other-host")).toMatchObject({ status: 200 });
+  });
+  const guest = h.session("guest", "guest");
+  await withProviderPython(guest.options, p => urllibRequest(p, h.origin + "/guest"));
+  expect(other.observed.map(r => r.auth)).toEqual(["Bearer original"]);
+  expect(h.observed.map(r => r.auth)).toEqual(["Bearer original", "Bearer original"]);
+});
+
+it("transparent urllib cannot follow OA redirects or fall back to its old token after logout or a later Turn", async () => {
+  const h = await pythonHarness();
+  const s = h.session("user", "agent", "login-a");
+  let ended = "";
+  await withProviderPython(s.options, async p => {
+    ended = p;
+    expect(await urllibRequest(p, h.origin + "/redirect")).toEqual({ status: 302 });
+    h.credentials.delete("login-a");
+    expect(await urllibRequest(p, h.origin + "/query")).toMatchObject({ error: expect.stringContaining("authentication_required") });
+    s.settled(); s.turn("login-b");
+    expect(await urllibRequest(p, h.origin + "/query")).toMatchObject({ error: expect.stringContaining("authentication_required") });
+  });
+  // A surviving child still has its already-loaded hook; the expired endpoint
+  // must never instruct it to fall back. Exercise that while files still exist
+  // via cancellation in the separate lifetime test.
+  expect(ended).not.toBe("");
+  expect(h.observed.map(r => r.auth)).toEqual(["Bearer token-a"]);
+});
+
+it("keeps existing sitecustomize behavior and urllib JSON request semantics", async () => {
+  const h = await pythonHarness();
+  await writeFile(join(h.cwd, "sitecustomize.py"), "import os\nos.environ['EXISTING_SITE_CUSTOMIZATION'] = 'kept'\n");
+  vi.stubEnv("PYTHONPATH", h.cwd);
+  const s = h.session("user", "agent", "login-a");
+  const result = await withProviderPython(s.options, p => execute("bash", ["-c", p + `python3 - <<'PY'\nimport os\nfrom urllib.request import Request, urlopen\nassert os.environ.get('EXISTING_SITE_CUSTOMIZATION') == 'kept'\nwith urlopen(Request('${h.origin}/json', data=b'{"text":"hello"}', headers={'Content-Type':'application/json','Authorization':'Bearer old'})) as r:\n assert r.getcode() == 200\n print(r.read().decode())\nPY`], { cwd: tmpdir() }));
+  expect(JSON.parse(result.stdout)).toMatchObject({ code: 0 });
+  expect(h.observed).toMatchObject([{ method: "POST", body: '{"text":"hello"}', auth: "Bearer token-a" }]);
+});
+
+it("isolates transparent urllib calls across logins and refreshes without falling back to package credentials", async () => {
+  const h = await pythonHarness();
+  const sessions = [h.session("same-user", "a", "login-a"), h.session("same-user", "b", "login-b"), h.session("other-user", "c", "login-a")];
+  await Promise.all(sessions.map((s, i) => withProviderPython(s.options, p => urllibRequest(p, h.origin + `/parallel-${i}`, "headers={}"))));
+  expect(h.observed.map(r => [r.url, r.auth]).sort()).toEqual([
+    ["/parallel-0", "Bearer token-a"], ["/parallel-1", "Bearer token-b"], ["/parallel-2", "Bearer token-a"],
+  ]);
+  h.credentials.set("login-a", "expired");
+  await withProviderPython(sessions[0].options, async p => {
+    expect(await urllibRequest(p, h.origin + "/refresh")).toMatchObject({ status: 200 });
+    h.credentials.set("login-a", "expired"); h.disableRefresh();
+    expect(await urllibRequest(p, h.origin + "/refresh")).toMatchObject({ error: expect.stringContaining("reauth_required") });
+  });
+  expect(h.observed.slice(3).map(r => r.auth)).toEqual(["Bearer expired", "Bearer renewed", "Bearer expired"]);
+});
+
+it("does not send a credential resolved after its captured Assistant Turn has ended", async () => {
+  let resolveCredential!: (value: { accessToken: string }) => void;
+  let signalRead!: () => void;
+  const readStarted = new Promise<void>(resolve => { signalRead = resolve; });
+  const send = vi.fn<typeof fetch>();
+  const broker = new CredentialBroker({ providerApiOrigin: "https://oa.test", readCredential: () => {
+    signalRead(); return new Promise(resolve => { resolveCredential = resolve; });
+  }, fetch: send });
+  let emit!: (event: AgentSessionEvent) => void;
+  broker.observe("user", { sessionId: "agent", subscribe(listener) { emit = listener; return () => {}; } });
+  broker.queueAssistantTurn("user", "agent", "login");
+  emit({ type: "message_start", message: {role:"user",content:"go",timestamp:1} } as AgentSessionEvent);
+  emit({ type: "turn_start" } as AgentSessionEvent);
+  const cwd = await mkdtemp(join(tmpdir(), "dano-read-race-"));
+  cleanup.push(() => rm(cwd, { recursive: true, force: true }));
+  await withProviderPython({broker,scope:"user",agentSessionId:"agent",cwd}, async p => {
+    const pending = urllibRequest(p, "https://oa.test/query");
+    await readStarted;
+    emit({ type: "agent_settled" } as AgentSessionEvent);
+    resolveCredential({accessToken:"must-not-be-sent"});
+    expect(await pending).toMatchObject({error:expect.any(String)});
+  });
+  expect(send).not.toHaveBeenCalled();
+});
+
+it("preserves urllib request processors, default form headers, response processors and audit events", async () => {
+  const received: Record<string, string | string[] | undefined>[] = [];
+  const oa = createServer((req, res) => { received.push(req.headers); res.end('ok'); });
+  await new Promise<void>(resolve => oa.listen(0, '127.0.0.1', resolve));
+  cleanup.push(() => new Promise<void>(resolve => oa.close(() => resolve())));
+  const port = (oa.address() as {port:number}).port;
+  const broker = new CredentialBroker({providerApiOrigin:`http://127.0.0.1:${port}`,allowInsecureProviderApiOrigin:true,readCredential:async()=>({accessToken:'current'})});
+  let emit!: (event: AgentSessionEvent)=>void;
+  broker.observe('u',{sessionId:'a',subscribe(listener){emit=listener;return()=>{};}});
+  broker.queueAssistantTurn('u','a','login');
+  emit({type:'message_start',message:{role:'user',content:'go',timestamp:1}} as AgentSessionEvent);
+  emit({type:'turn_start'} as AgentSessionEvent);
+  const cwd = await mkdtemp(join(tmpdir(),'dano-handlers-'));
+  cleanup.push(()=>rm(cwd,{recursive:true,force:true}));
+  await withProviderPython({broker,scope:'u',agentSessionId:'a',cwd},p=>execute('bash',['-c',p+`python3 - <<'PY'\nimport sys\nfrom urllib.request import BaseHandler, Request, build_opener\naudits=[]\nsys.addaudithook(lambda event,args: audits.append(event))\nclass Business(BaseHandler):\n def http_request(self, req):\n  req.add_header('X-Tenant','tenant-1')\n  return req\n def http_response(self, req, response):\n  response.headers['X-Processed']='yes'\n  return response\nwith build_opener(Business()).open(Request('http://127.0.0.1:${port}/form',data=b'a=1')) as response:\n assert response.headers['X-Processed']=='yes'\nassert 'urllib.Request' in audits\nPY`]));
+  expect(received).toMatchObject([{'authorization':'Bearer current','x-tenant':'tenant-1','content-type':'application/x-www-form-urlencoded'}]);
+});
+
+it("stops Python before running the Skill if its authentication startup module cannot import", async () => {
+  const h = await pythonHarness();
+  const s = h.session("user", "agent", "login-a");
+  await withProviderPython(s.options, async p => {
+    const path = (await execute("bash", ["-c", p + 'printf %s "$PYTHONPATH"'])).stdout.split(":")[0];
+    await writeFile(join(path,"dano_provider.py"),'raise RuntimeError("broken module")\n');
+    await expect(urllibRequest(p,h.origin+'/must-not-run')).rejects.toThrow('Dano Python authentication initialization failed');
+  });
+  expect(h.observed).toHaveLength(0);
+});
+
+it("matches canonical default ports and hostname case without exposing duplicate Authorization headers", async () => {
+  const received: {url:string,headers:Headers}[]=[];
+  const broker=new CredentialBroker({providerApiOrigin:'https://oa.test',readCredential:async()=>({accessToken:'canonical-token'}),fetch:async(url,init)=>{received.push({url:String(url),headers:new Headers(init?.headers)});return new Response('{}',{status:200});}});
+  let emit!: (event:AgentSessionEvent)=>void;
+  broker.observe('u',{sessionId:'a',subscribe(listener){emit=listener;return()=>{};}});
+  broker.queueAssistantTurn('u','a','login');emit({type:'message_start',message:{role:'user',content:'go',timestamp:1}} as AgentSessionEvent);emit({type:'turn_start'} as AgentSessionEvent);
+  const cwd=await mkdtemp(join(tmpdir(),'dano-canonical-'));cleanup.push(()=>rm(cwd,{recursive:true,force:true}));
+  await withProviderPython({broker,scope:'u',agentSessionId:'a',cwd},p=>urllibRequest(p,'https://OA.TEST:443/query',"headers={'Authorization':'Bearer old','authorization':'Bearer duplicate'}"));
+  expect(received.map(r=>r.url)).toEqual(['https://oa.test/query']);
+  expect(received[0].headers.get('authorization')).toBe('Bearer canonical-token');
 });

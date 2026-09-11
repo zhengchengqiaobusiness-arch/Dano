@@ -42,3 +42,81 @@ def request(method, path, headers=None, body=None, timeout=15.0):
         raise ProviderError(error.get("code", "provider_request_failed"),
                             error.get("message", "Provider request failed."))
     return result
+
+
+def install_urllib():
+    """Intercept standard-library openers only; never place OA credentials here."""
+    import io
+    import socket
+    from email.message import Message
+    from http.client import responses
+    from urllib.request import BaseHandler, OpenerDirector
+    import urllib.request
+    from urllib.response import addinfourl
+
+    origin = os.environ.get("DANO_PROVIDER_ORIGIN")
+    if not origin:
+        return
+
+    def authority(url):
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or parsed.username is not None or parsed.password is not None:
+            return None
+        return (parsed.scheme, parsed.hostname, parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80))
+
+    expected = authority(origin)
+    class LoginHandler(BaseHandler):
+        # Request processors have already run; intercept before proxy or HTTP
+        # transport handlers, preserving urllib's request/response pipelines.
+        handler_order = 0
+
+        def http_open(self, req):
+            try:
+                matches = authority(req.full_url) == expected
+            except ValueError:
+                matches = False
+            if not matches:
+                return None
+            return send_with_login(req)
+
+        https_open = http_open
+
+    def send_with_login(req):
+        parsed = urlsplit(req.full_url)
+        path = (parsed.path or "/") + (("?" + parsed.query) if parsed.query else "")
+        body = req.data
+        if isinstance(body, bytes):
+            try:
+                body = body.decode("utf-8")
+            except UnicodeDecodeError:
+                raise URLError("Dano OA requests currently require a UTF-8 request body") from None
+        if body is not None and not isinstance(body, str):
+            raise URLError("Dano OA requests currently require a buffered UTF-8 request body")
+        try:
+            result = request(req.get_method(), path,
+                             headers=dict(req.header_items()), body=body,
+                             timeout=15.0 if req.timeout is socket._GLOBAL_DEFAULT_TIMEOUT else req.timeout)
+        except ProviderError as exc:
+            raise URLError("%s: %s" % (exc.code, exc)) from None
+        headers = Message()
+        for name, value in result["headers"].items():
+            headers[name] = value
+        status = result["status"]
+        stream = io.BytesIO(result["body"].encode("utf-8"))
+        # Broker requests never follow redirects. Do not let a new opener forward
+        # either the Skill's old identity or a Dano identity to a redirect target.
+        if not 200 <= status < 300:
+            raise HTTPError(req.full_url, status, responses.get(status, ""), headers, stream)
+        response = addinfourl(stream, headers, req.full_url, status)
+        response.msg = response.reason = responses.get(status, "")
+        return response
+
+    original_init = OpenerDirector.__init__
+
+    def init_with_login(self):
+        original_init(self)
+        self.add_handler(LoginHandler())
+
+    OpenerDirector.__init__ = init_with_login
+    if urllib.request._opener is not None:
+        urllib.request._opener.add_handler(LoginHandler())

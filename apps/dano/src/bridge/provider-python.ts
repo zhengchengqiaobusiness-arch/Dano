@@ -5,7 +5,11 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { CredentialBroker, ProviderRequest } from "./credential-broker.js";
+import type {
+  CredentialBroker,
+  ProviderRequest,
+  ProviderSendEvidence,
+} from "./credential-broker.js";
 
 interface ProviderPythonOptions {
   broker: CredentialBroker;
@@ -111,16 +115,21 @@ export async function withProviderPython<T>(
         return;
       }
       const connection = new AbortController();
+      const sends: ProviderSendEvidence[] = [];
       const disconnected = () => connection.abort();
       res.once("close", disconnected);
       const response = await request(
         input as ProviderRequest,
         AbortSignal.any([signal, connection.signal]),
+        evidence => sends.push(evidence),
       ).finally(() => res.off("close", disconnected));
       requests.push({
         method: typeof input.method === "string" ? input.method : "",
         path: typeof input.path === "string" ? input.path.split("?")[0] : "",
-        loginSessionBound: response.ok,
+        loginSessionBound:
+          sends.length > 0 &&
+          sends.every(send => send.authorizationMatched && send.targetMatched),
+        sends,
         ...(response.ok
           ? { status: response.status }
           : { error: response.error.code }),
@@ -133,9 +142,15 @@ export async function withProviderPython<T>(
     }
   });
   try {
-    await copyFile(
-      new URL("./python/dano_provider.py", import.meta.url),
-      join(directory, "dano_provider.py"),
+    for (const name of ["dano_provider.py", "sitecustomize.py"]) {
+      await copyFile(
+        new URL(`./python/${name}`, import.meta.url),
+        join(directory, name),
+      );
+    }
+    const origin = options.broker.pythonRequestOrigin(
+      options.scope,
+      options.agentSessionId,
     );
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -146,6 +161,7 @@ export async function withProviderPython<T>(
       throw new Error("Provider listener unavailable");
     if (signal.aborted) throw new Error("Provider execution cancelled");
     return await execute(
+      `export DANO_PROVIDER_ORIGIN=${shellQuote(origin ?? "")}; ` +
       `export DANO_PROVIDER_URL=${shellQuote(`http://127.0.0.1:${address.port}/request`)}; ` +
         `export DANO_PROVIDER_CAPABILITY=${shellQuote(capability)}; ` +
         `export PYTHONPATH=${shellQuote(directory)}"\${PYTHONPATH:+:$PYTHONPATH}"; `,
@@ -171,6 +187,7 @@ interface ProviderPythonRequest {
   method: string;
   path: string;
   loginSessionBound: boolean;
+  sends: ProviderSendEvidence[];
   status?: number;
   error?: string;
 }
@@ -183,7 +200,7 @@ export function wrapProviderBash(
     ...tool,
     promptGuidelines: [
       ...(tool.promptGuidelines ?? []),
-      "Python Skills can import dano_provider.request(method, relative_path, headers=None, body=None) inside bash to use the current login. Provider credentials stay in Dano; no token configuration is needed.",
+      "Python urllib requests to the configured OA origin automatically use the initiating login during bash execution. Run existing Skill scripts unchanged: do not edit their source, token configuration or URLs, and do not replace them with provider_request calls. Other HTTP clients and Python -S/-I/-E are not covered. Never print token configuration or credentials.",
     ],
     async execute(id, params, signal, onUpdate, context) {
       const executionSignal =

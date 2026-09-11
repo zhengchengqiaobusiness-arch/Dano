@@ -1,107 +1,93 @@
-# Python Skills with the current OA login
+# Existing OA Python Skills
 
-A Dano Login Session owns its Provider Credential. During each Heimdall `bash`
-execution Dano provides a local Python client, bound to the Login Session that
-started the Assistant Turn. Tokens remain in the Credential Broker.
+Run the original Skill unchanged inside Dano's controlled bash tool. During an
+authenticated Assistant Turn, standard Python `urllib.request` calls to the
+configured OA business origin are routed through the Credential Broker. Its
+server-side Authorization header replaces the script's old header. Scripts do
+not import a Dano library or receive the current OA access/refresh token.
 
-```python
-import json
-from dano_provider import request, ProviderError
+## Supported runtime
 
-try:
-    response = request("GET", "/admin-api/bpm/task/todo-page?pageNo=1&pageSize=1")
-    page = json.loads(response["body"])
-except ProviderError as error:
-    print(error.code)
-```
+Python 3.9+ with normal site initialization: `urlopen`, `build_opener` and
+`OpenerDirector.open`, including HTTP and HTTPS JSON/text APIs. Dano stages a
+`sitecustomize` module in a temporary execution directory and prepends it to
+PYTHONPATH. Existing site customization is retained. Skill files and the global
+Python installation are not modified.
 
-`request(method, path, headers=None, body=None, timeout=15.0)` returns the existing Broker
-response envelope (`ok`, HTTP `status`, sanitized `headers`, text `body`). For JSON
-writes, pass an object as `body`; the Broker serializes it. Relative paths retain
-query strings. The configured provider origin and Authorization header are
-server-owned. OA HTTP/business failures must be handled by the caller; they are
-not always login failures. Broker authentication and validation errors raise
-`ProviderError` with its stable `code`.
+Other HTTP clients (including requests, urllib3 and raw sockets), Python
+`-S`/`-I`/`-E`, and environments that remove or override the injected startup path
+are not covered. This is execution integration, not an OS-wide egress firewall.
+Requests currently require buffered UTF-8 bodies; streamed/binary request bodies
+fail explicitly rather than silently using the script's old identity. Responses
+are intended for OA JSON/text APIs.
 
-For this OA integration, configure `DANO_OAUTH_API_ORIGIN` to the OA page's
-origin. The authorization server's token and identity endpoints may use a
-different hostname; they do not determine the business API origin. Do not
-replace the Skill's original business hostname with the token endpoint hostname
-merely because both resolve to the same IP address.
+The implementation uses Python's documented [site customization](https://docs.python.org/3/library/site.html#sitecustomize)
+and [urllib opener](https://docs.python.org/3/library/urllib.request.html#openerdirector-objects)
+interfaces. Hooks run only inside Dano-controlled executions.
 
-Dano prepends `dano_provider` to PYTHONPATH only while a bash call runs, preserving
-existing module directories. The client retains a configurable 15-second socket
-timeout; disconnecting cancels the corresponding Broker request. The client
-uses a loopback HTTP listener with a random 256-bit execution capability. The
-capability is not an OA credential and cannot select an identity. The listener
-accepts at most 1 MiB per request and does not accept requests without that
-capability. The client ignores HTTP proxy environment variables and follows no
-redirects. No public listener, global user-token environment, or token export
-endpoint is introduced.
+## Target and identity
 
-This transport uses Node HTTP and Python urllib rather than a custom wire protocol
-or an additional RPC framework. A Unix-domain socket would avoid a TCP listener,
-but requires a custom urllib connection adapter and a socket mount through the
-existing sandbox. Loopback HTTP works with the shipped shared-network sandbox
-and both standard libraries. A general HTTP proxy would need a broader forwarding
-surface; this single endpoint retains the Broker's origin and header validation.
+Configure Dano's business API origin to match the OA page origin and the Skill's
+existing target. OAuth token and identity endpoints are independent settings.
+Compare parsed scheme, hostname and effective port exactly, not hostname
+substrings, DNS IP equality or arbitrary subdomains. Non-matching requests retain
+their ordinary behavior and never receive Dano credentials.
 
-The wrapper delegates execution to the existing Heimdall tool, preserving its
-command hooks and sandbox. The shipped sandbox shares the host network, allowing
-loopback access; a deployment that intentionally disables sandbox networking
-cannot use this client and must not silently weaken its policy. Each execution
-stages the Python module in a temporary directory in its Runtime Workspace and
-removes it with the listener on completion. The captured Assistant Turn must
-still be active; later turns, runtime disposal, cancellation and Login Session
-revocation cannot lend new authority to an old script. Already committed OA
-business actions cannot be undone by cancellation.
+An anonymous execution retains the original script's authentication behavior.
+A captured authenticated execution cannot switch to another Login Session or
+fall back to a package token when its binding expires. Credential refresh uses
+the existing Broker. OA redirects return an HTTP error to urllib; neither Dano
+credentials nor a restored package identity follow a redirect. HTTP error status
+and body are available through `HTTPError`; authentication/transport failures
+surface through `URLError` with a stable Broker error code.
 
-The per-execution capability and listener are an application boundary, not a
-sandbox against arbitrary hostile processes with access to the Dano host itself.
-The production sandbox hides host procfs. No access to other Runtime Workspaces
-is added by this feature.
+Per-execution local capability secrets are output-redacted and released when the
+bash invocation ends. They are not OA tokens. The existing `provider_request`
+model tool remains available, but is not a replacement for original-Skill tests.
 
-Streaming output is redacted before publication. Full-output artifact links are
-withheld while the underlying bash accumulator is writing, and those files are
-sanitized before the final result exposes them. The accumulator can temporarily
-hold raw output on the host during execution; this does not provide protection
-against other hostile processes with host access.
+## Original PointLion acceptance
 
-Bash results include `providerRequests`: method, query-free path, HTTP status or
-stable error, and whether the request was authenticated through the bound Login
-Session. They contain no Login Session identifier or token. These records, the
-script's exit status and real OA response codes support acceptance; a model's
-summary is not sufficient evidence.
-
-## PointLion acceptance fixture
-
-The user-supplied original ZIP is preserved under
-`apps/dano/src/bridge/__tests__/fixtures/pointlion-todo-query-token-inline.zip`.
-Its SHA-256 is
+Use the supplied `pointlion-todo-query-token-inline.zip` without modifying any
+original file. The repository fixture contains a rejected placeholder token,
+not a verified usable credential. Its SHA-256 is
 `2685a04b163adfe490740390dd351a02d297786e898ff7abb5181e2b58abf02a`.
-The adapted Skill is `examples/skills/pointlion-todo-query`; use its README and
-SKILL instructions. It preserves the supplied doctor's four real OA calls,
-dynamic enumerations, dictionary decoding and todo query. Authentication now
-uses Dano rather than a hand-edited token. The original fixture contains only a
-token placeholder.
 
-Deploy the current implementation locally through the shipped Podman/Compose
-path, with isolated named runtime volumes and real OA client configuration.
-Configure the local HTTPS callback in both Dano and the OA client; no production
-deployment is required. Through the in-app Browser, log in and ask Dano to
-run the adapted Skill's `doctor`, then `query --page 1 --page-size 1`. Acceptance
-requires doctor exit 0, HTTP 200 and business code 0 for all four endpoints,
-plus valid query results (including a genuinely empty page). Record the actual
-counts; they are not fixed test expectations. Retain sanitized script/response
-and browser evidence and the implementation/Skill versions. Direct model
-`provider_request` calls, mocks, or manually populated tokens do not meet this
-gate. See Issue #456 for the required target and full acceptance contract.
+The package validates its token before making requests. Use its existing
+`--token INVALID-ORIGINAL-TOKEN` CLI option to pass that local placeholder check.
+This marker is deliberately invalid; it is not the logged-in credential. Do not
+change its config, use a real token argument, or edit its request imports/URLs.
+Run `doctor` and `query --page 1 --page-size 1` in the logged-in Dano execution.
 
-For Issue #456 specifically, the OA page and original Skill use
-`http://admin.dianshixinxi.com:90`; the deployed `DANO_OAUTH_API_ORIGIN` must use
-that origin before acceptance. The token and identity endpoints remain on their
-separately configured origin. Record the actual outbound business request origin
-in the sanitized acceptance evidence; success against `h5.dianshixinxi.com` does
-not fulfill this gate.
+Automated tests use the package's existing `--base-url` option to target a local
+fake OA. This isolates tests from the real OA and is not real-domain acceptance.
+Real OA acceptance must retain the original business URL without that override.
 
-No `ask_user_question` capability or model argument schema is changed.
+Require unchanged per-file hashes, doctor exit 0, all four HTTP 200/business
+code 0 results, query exit 0 and directly parsed list/total. Tool audit contains
+`providerRequests`: method, path without query, HTTP/error outcome, and `sends`
+with `targetMatched` and `authorizationMatched` evaluated at final server send.
+`loginSessionBound` is derived from those send checks, not the HTTP outcome.
+No raw credential, Login Session identifier or private business payload belongs
+in public evidence. These are Dano-side observations; they do not claim an
+independent OA-side token comparison. Preserve sanitized evidence before cleanup.
+
+See the [full acceptance contract](specs/oa-skill-transparent-login-token.md).
+The earlier adapted example has been removed because modifying the Skill did
+not satisfy that contract.
+
+## Why this interception boundary
+
+Installing a global default opener alone misses Skills that call `build_opener`
+themselves. A standard `BaseHandler` is therefore added to each new
+`OpenerDirector` (and any existing default opener). Interception happens at its
+HTTP/HTTPS transport stage, after native/custom request processors; successful
+responses continue through the existing response processors and audit events.
+Only the constructor is wrapped to install that handler. Replacing `open` itself
+was rejected because it bypasses business headers and the normal handler chain.
+
+A process HTTP proxy alone cannot replace encrypted HTTPS headers. TLS
+interception would introduce an additional trust and deployment boundary, so it
+is not used. The handler routes matching requests to the existing server-side
+Broker instead. Normal HTTPS verification remains enabled. Startup import or
+hook installation failure terminates Python rather than reverting to an old
+package credential.
