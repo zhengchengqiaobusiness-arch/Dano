@@ -101,8 +101,8 @@ export function callerParams(cap, steps = []) {
   return fields;
 }
 
-function withPageDateDefault(field, write) {
-  if (write && field.type === "date" && !Object.prototype.hasOwnProperty.call(field, "default")) {
+function withPageDateDefault(field, _write) {
+  if (field.type === "date" && !Object.prototype.hasOwnProperty.call(field, "default")) {
     field.page_default = "today";
   }
   return field;
@@ -421,7 +421,11 @@ function askQuestion(field) {
   } else {
     parts.push("向用户收集真实内容，禁止编造");
   }
-  parts.push(field.required ? "必填，不要占位句" : "可选；没有就留空，不要占位句");
+  if (field.page_default === "today") {
+    parts.push("未选则按当天，不要因此卡住");
+  } else {
+    parts.push(field.required ? "必填，不要占位句" : "可选；没有就留空，不要占位句");
+  }
   return `${parts.join("。")}。`;
 }
 
@@ -430,7 +434,7 @@ export function fieldAskSpec(field) {
     id: field.id,
     question: askQuestion(field),
     inputType: askInputType(field),
-    required: field.required,
+    required: Boolean(field.required) && field.page_default !== "today",
   };
   if (field.enums.length) spec.options = field.enums.map(enumOption);
   if (field.type === "date") spec.dateFormat = "yyyy-MM-dd";
@@ -582,13 +586,18 @@ export function renderSkillMd(contract) {
     "",
     "## 立刻办理",
     "",
-    "读完立刻按选中路线办理。禁止 ls，禁止 cat，禁止先读 `references/`，禁止改 `inputType`，禁止增删字段，禁止自己补 `default`，禁止拆成多轮问卷。",
+    "只读这一节就能办。读完禁止再读本文件，禁止读 `references/`，禁止 ls / cat / 探路。",
+    "查询不要确认卡：表单提交后立刻执行。写操作才弹确认卡，确认后再 `--confirm`。",
+    "default：先查询（不确认）→ 只回统计概览 → 立刻问写表单（要确认）。中间不要重读，不要第二次 `--list-options`。",
+    "日期：口令里有就用口令；没选就按当天。runtime 会把未选日期填成当天，不要为日期卡住提交。",
+    "查询回复只要统计概览（应填 / 已填 / 未填 / 填写率）和已填写人员；未填写超过 8 人只报人数，除非用户要明细。",
+    "禁止改 `inputType`，禁止增删字段，禁止自己补非日期 `default`，禁止拆成多轮问卷。",
     "该路线若有动态字段（执行协议写了 `--list-options`）：先且只跑 `cd <本 SKILL.md 所在目录> && python3 scripts/flow.py --list-options <capability_id> <field>`，把返回的 `options`（已展平的 id/label）写进该字段，再复制冻结 JSON 调用 `ask_user_question`。",
     "不要把 dataSource 放进 ask_user_question。宿主会打聊天站点相对路径，拉不到业务树。INPUT_FORMS 里的 dataSource 只给脚本用。",
     "没有动态字段时，第一次工具就是冻结提问。",
     "用户说法对上某能力 name / intent（填写、新增、提交等同义）走该原子路线，对不上走 default。不要为某个业务口令写死 capability_id。",
     "这份 JSON 已经按宿主控件投影。能力层的 table 在提问里是同一字段 id 的 textarea；答案由 runtime 组装回数组。",
-    "JSON 里没有 `default` 就不要加。不要编「请填写」「暂无」「请审批」。用户交回占位句视为未填，按同一张冻结表再问。",
+    "除日期外，JSON 里没有 `default` 就不要加。不要编「请填写」「暂无」「请审批」。用户交回占位句视为未填，按同一张冻结表再问。",
     "系统字段由 `scripts/runtime.py` 按合同自动填，不要向用户要，不要让用户去补合同缺省。",
     "",
     "## 冻结提问",
@@ -667,8 +676,8 @@ export function renderSkillMd(contract) {
     "cd <本 SKILL.md 所在目录> && python3 scripts/flow.py --list-options <capability_id> <field>",
     "```",
     "",
-    "工作目录不是本包。确认后立刻 `cd` 到本 SKILL.md 所在目录再跑脚本。禁止 ls / cat / 探路。",
-    "没有 `python3` 再用 `python`。字段收齐并确认后再执行。",
+    "工作目录不是本包。选定路线后立刻 `cd` 到本 SKILL.md 所在目录再跑脚本。禁止 ls / cat / 探路。",
+    "没有 `python3` 再用 `python`。查询字段收齐后立刻执行，不要确认卡。写操作字段收齐后必须单独确认再执行。",
     "",
   );
   for (const cap of contract.capabilities) {
@@ -703,12 +712,13 @@ export function renderSkillMd(contract) {
     "## 成功、失败与停止",
     "",
     "- 任一步失败即停",
+    "- 查询成功只回统计概览和已填写人员，不要把未填写长名单整表贴进对话",
     "- 没有本包凭证或 401 / 账号未登录 → 停问一次 token。提问只用 `{\"questions\":[{\"id\":\"token\",\"question\":\"请粘贴新的访问令牌\",\"inputType\":\"text\",\"required\":true}]}`，不要加 title，不要自己补 default。拿到后用 `DANO_AUTH_HEADERS` 覆盖再跑同一条命令；不要改文件，不要再问第二次",
     "- 选项失败或空列表 → 停问",
     "",
     "## 按需读取资源",
     "",
-    "默认不要读本包其它文件。",
+    "默认不要读本包其它文件。读完本 SKILL.md 一次后禁止再读本文件。",
     "只有提问控件失败或脚本报错时，再读 `references/INPUT_FORMS.md`。",
     "禁止一开始就 ls、读 `CONTRACT.json` / `CAPABILITIES.md` / `OPTIONS.md`。",
     "",
@@ -802,6 +812,8 @@ export function handbookUnfaithfulReasons(text, contract) {
     if (!text.includes("不要把 dataSource 放进 ask")) reasons.push("缺少不要把 dataSource 放进 ask");
     if (/"dataSource"\s*:/.test(text)) reasons.push("SKILL.md 里写了 dataSource JSON");
   }
+  if (!/禁止再读本文件|不要再读本文件/.test(text)) reasons.push("缺少不要再读本文件");
+  if (!/确认卡/.test(text)) reasons.push("缺少确认卡规则");
   return reasons;
 }
 

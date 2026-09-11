@@ -308,7 +308,7 @@ test("目录重导沿用同一 skill_id，并使用 overlay 最新能力", async
 const HANDBOOK = `# 日报填报
 
 ## 立刻办理
-读完本文件立刻提问。禁止 ls。Skill4已核对手册。
+读完本文件立刻提问。禁止 ls。禁止再读本文件。查询不要确认卡，写操作才弹确认卡。Skill4已核对手册。
 
 ## 冻结提问
 第一次工具调用必须是 ask_user_question。
@@ -337,7 +337,7 @@ function coveringSkill4Handbook(draft, extra = "") {
   const contract = consumerContract(draft);
   const lines = [
     "## 立刻办理",
-    "读完立刻提问。",
+    "读完立刻提问。禁止再读本文件。查询不要确认卡，写操作才弹确认卡。",
     extra,
     "## 冻结提问",
     "第一次工具调用必须是 ask_user_question。",
@@ -864,7 +864,12 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
   assert.doesNotMatch(handbook, /"inputType": "table"/);
   assert.doesNotMatch(handbook, /"dataSource"\s*:/);
   assert.match(handbook, /不要把 dataSource 放进 ask/);
+  assert.match(handbook, /禁止再读本文件/);
+  assert.match(handbook, /查询不要确认卡/);
+  assert.match(handbook, /统计概览/);
+  assert.equal(query.caller_fields.find((item) => item.id === "startDate").page_default, "today");
   const queryAsk = frozenAskForm(query);
+  assert.equal(queryAsk.questions.find((item) => item.id === "startDate").required, false);
   assert.equal(queryAsk.questions.find((item) => item.id === "deptId").inputType, "treeSelect");
   assert.equal(queryAsk.questions.find((item) => item.id === "deptId").dataSource, undefined);
   const askForm = renderSkillMd(contract);
@@ -926,6 +931,21 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
     { content: "写日报", progress: 80, itemType: 1 },
     { content: "明天评审", itemType: 2 },
   ]);
+
+  const filledDates = await new Promise((resolve) => {
+    const scriptsDir = path.join(packed.export_path, "scripts");
+    const code = `import sys, json; sys.path.insert(0, ${JSON.stringify(scriptsDir)}); import runtime; print(json.dumps(runtime.fill_caller_defaults({"caller_fields":[{"id":"startDate","page_default":"today"},{"id":"deptId"}]}, {"deptId":"101"})))`;
+    const child = spawn("python", ["-c", code], { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+  assert.equal(filledDates.code, 0, filledDates.stderr);
+  const filledPayload = JSON.parse(filledDates.stdout);
+  assert.equal(filledPayload.deptId, "101");
+  assert.match(String(filledPayload.startDate || ""), /^\d{4}-\d{2}-\d{2}$/);
 
   const merged = await new Promise((resolve) => {
     const scriptsDir = path.join(packed.export_path, "scripts");
@@ -1067,6 +1087,15 @@ test("dumpRecordingSkill 默认不开 Skill 4，但沿用已有手册", async ()
   assert.equal(outcome.skill_id, "oa.rec_dump_one");
   assert.equal(packedValidate, false);
   assert.equal(packedUseHandbook, true);
+});
+
+test("查询日期未选按当天，旧手册缺确认卡即不保真", () => {
+  const contract = consumerContract(DRAFT);
+  const handbook = renderSkillMd(contract);
+  assert.match(handbook, /禁止再读本文件/);
+  assert.match(handbook, /查询不要确认卡/);
+  const reasons = handbookUnfaithfulReasons(handbook.replace(/确认卡/g, "确认"), contract);
+  assert.ok(reasons.some((item) => item.includes("确认卡")));
 });
 
 test("手册保真只认合同覆盖，不按文案丢掉 Skill 4", () => {

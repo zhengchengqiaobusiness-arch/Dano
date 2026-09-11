@@ -14,7 +14,7 @@
    → `submit_skill_export({ok:false, errors:[...]})`，停止。
 2. 调用 `read_export_contract`。唯一输入是五块：`capabilities` / `steps` / `links` / `capability_relations` / `unresolved`。禁止只扫 `capabilities[]`。禁止回头打开页面猜字段。
 3. 调用 `read_skill_artifact` 看运输层已物化的 `SKILL.md`、`references/CONTRACT.json`、`references/INPUT_FORMS.md`。先对现包跑 `validate_skill_package`。
-   - 已经 ok：禁止覆盖 `SKILL.md` 正文。只允许改 frontmatter 的 `name` / `description`；改完必须再 validate。通过后立刻 `submit_skill_export`。
+   - 已经 ok：禁止覆盖 `SKILL.md` 正文。只允许改 frontmatter 的 `name` / `description`；改完必须再 validate。通过后立刻 `submit_skill_export`。禁止为了「写得更清楚」加长或改瘦正文，禁止改查询确认规则。
    - 只有 handbook_fields 失败时才改 `SKILL.md`。必须保留运输层已有的字段表、冻结提问 JSON、可用默认值、`合同值`、`route_id`。禁止另写一份更瘦的表单。禁止把 `dataSource` 写进 `SKILL.md`。禁止写 `"inputType": "table"`。
    - 改写被拒绝或再次失败：不要继续改瘦。用运输层现包再 validate，通过就提交。
 4. 写入行仍有未识别来源、或合同声明不可执行：停止，不要出可执行写能力。
@@ -59,7 +59,7 @@ frontmatter 仅非空 `name` + `description`。不要写 `version`、`compatibil
 
 正文必须有：`立刻办理`、`冻结提问`、`适用场景`、`不适用场景`、`选择工作流`、`组合与交接规则`、`执行协议`、`成功、失败与停止`、`按需读取资源`、`鉴权`。
 
-- `立刻办理`：读完立刻原样复制「冻结提问」JSON 一次问完整表单。不要先 ls、不要先读 `references/`、不要先跑脚本探路、不要改 `inputType`、不要自己补 `default`。系统字段由 runtime 按合同自动填，不要向用户要，不要让用户补合同缺省。
+- `立刻办理`：读完立刻原样复制「冻结提问」JSON 一次问完整表单。不要先 ls、不要先读 `references/`、不要先跑脚本探路、不要改 `inputType`、不要自己补非日期 `default`。查询不要确认卡，写操作才确认。读完禁止再读本文件。系统字段由 runtime 按合同自动填，不要向用户要，不要让用户补合同缺省。
 - `冻结提问`：每个能力一份宿主可执行的 `ask_user_question` JSON，字段 id 与 `caller_fields` 一致。一次一张完整表单，不要拆多轮。Dano 宿主没有 `table`：对象数组在提问里投影为同一 id 的 `textarea`，由 runtime 组装回数组。禁止写 `inputType: table`。无合同 default 的字段不写 `default`，不要编「请填写 / 暂无 / 请审批」。写操作日期在问句里说明页面默认当日，不要把 `today` 写进 JSON default。
 - `description` 是路由触发：用合同里各能力的 `name` / `intent` 说明什么用户请求走哪条路线。用户意图对上某条能力就走该原子路线，对不上走 `default`。禁止为某个业务口令写死 `capability_id`。不要写「字段以 CONTRACT.json 为准」。
 - `适用场景` 不复读 description。

@@ -209,11 +209,27 @@ def _assemble_items(field, value):
     return assembled
 
 
+def _page_today():
+    return datetime.now().date().isoformat()
+
+
+def fill_caller_defaults(cap, inputs):
+    filled = dict(inputs or {})
+    for field in cap.get("caller_fields") or []:
+        key = field.get("id")
+        if not key or filled.get(key) not in (None, ""):
+            continue
+        if field.get("page_default") == "today":
+            filled[key] = _page_today()
+    return filled
+
+
 def build_request(cap, inputs, user):
     query = {}
     body = {}
     method = str((cap.get("execute") or {}).get("method") or "GET").upper()
     required = []
+    inputs = fill_caller_defaults(cap, inputs)
     for field in cap.get("caller_fields") or []:
         key = field.get("id")
         value = inputs.get(key)
