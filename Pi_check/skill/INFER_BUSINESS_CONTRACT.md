@@ -6,9 +6,11 @@
 
 Investigator 叫你认一项产物时立刻工作。该项已按目标做完且有真实 execute 就交，不要等用户结束，不要攒全场再交。交一项用 `submit_recording_capability`。不准宣布定稿，不准 `submit_recording_result`。
 
-不要单独交没有 `request_refs` 的 relations-only 信封。顺序关系写在已有能力之后的 `capability_relations`，不能当成一项没有 execute 的能力。
+不要单独交没有 `request_refs` 的 relations-only 信封。顺序关系写在已有能力之后的 `capability_relations`，不能当成一项没有 execute 的能力，也不能为补 relation 再交一份同名 `_v2`。
 
-目标要求先 A 后 B：有值流写 `links`；没有值流也必须写 `capability_relations`（handoff）。页内典型链（查询→新增、查询→编辑、查询→删除、新增→提交）只要本场都做完，必须挂 relation。Skill 4 靠这些关系编默认办理路线，不要自己写消费者包。
+修正已交项：`submit_recording_capability` 用**同一个** `capability_id` 把整项再交一遍（含 steps / refs / relations）。运输层按 id 覆盖。禁止另起 `_v2` / `_2` /「含顺序关系」新 id。闸门报「两个能力不能共用同一个 execute step_id」只约束**两项不同能力**；那不是让你给同一动作新编 step。新建和编辑才拆两个 execute step。同一「新增并提交」只交一项。
+
+目标要求先 A 后 B：有值流写 `links`；没有值流也必须写 `capability_relations`（handoff），挂在**已有**写能力上再交同一 id。页内典型链（查询→新增、查询→编辑、查询→删除、新增→提交）只要本场都做完，必须挂 relation。Skill 4 靠这些关系编默认办理路线，不要自己写消费者包。
 
 ## 禁止把未识别来源冻成录制常量
 
@@ -99,8 +101,8 @@ Investigator 叫你认一项产物时立刻工作。该项已按目标做完且�
 4. 同一次动作带出的预填、下拉、打开表单、提交后按 ID 回读，不是新能力；挂到该能力的 `request_refs`。
 5. 不要把页面加载时的全部流量都做成能力。
 6. 不要把登录、验证码、租户查询、权限菜单做成业务能力的步骤，除非本场录制的业务动作本身就是登录。
-7. 不要把同一个动作交两次（两个几乎相同的撤回/删除）。
-8. `capability_id`、`name`、`title` 必须能区分动作，禁止两个能力共用一个 `capability_id`。
+7. 不要把同一个动作交两次（两个几乎相同的撤回/删除/新增并提交）。同名且同一 execute path 就是重复，即使你换了 step_id 或加了 `_v2`。
+8. `capability_id`、`name`、`title` 必须能区分动作，禁止两个能力共用一个 `capability_id`。禁止用新 id 去「修订」已交项。
 9. 拿不准时写入 `unresolved`，不要猜一个假能力，也不要丢掉已经点过的真动作。
 
 ### 用索引建台账，不要靠抽样
@@ -436,7 +438,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 ## 提交前自检
 
 1. 先列出本场点过的独立业务动作。数量必须等于 `capabilities` + 仍缺证据的 `unresolved`。
-2. 每个能力都有互不相同的 `capability_id`、`name`、`title`，以及恰好一个不与其它能力共用的 `execute`。
+2. 每个能力都有互不相同的 `capability_id`、`name`、`title`，以及恰好一个不与其它能力共用的 `execute`。同名且同一 execute path 不得出现两份（含 `_v2`）。补 relation 用原 id 覆盖，不要新编 step。
 3. 每个能力的 `request_refs` 都是 `{step_id, usage}` 对象，并能在 `steps` 里找到同名 `step_id`。没有单独交只有 `capability_relations`、没有 `request_refs` 的项。
 4. 每个 step 的 `params` 都是数组。有元素时每个元素都有 `key` 和 `path`。`preflight` / `option_source` 必须是空数组 `[]`，不要为了凑这条去抄选项接口或打开表单的 query。
 5. 结果里没有 `capabilities[].fields`。

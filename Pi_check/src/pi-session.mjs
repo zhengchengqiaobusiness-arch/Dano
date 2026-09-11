@@ -125,7 +125,7 @@ export function buildUserSteerPrompt(text, { finalizing = false } = {}) {
   }
   return (
     `用户说：${body}\n` +
-    `这是对话。先用一两句话回答这句话，然后按 Skill 1 继续。人也可以点预览。未接到用户结束，禁止 submit_recording_result。`
+    `这是对话。先用一两句话回答这句话，然后按 Skill 1 继续。人也可以点预览。台账齐了就立刻 submit_recording_result({final:true, use_draft:true}) 并停止。不要等人说结束，不要再空转。`
   );
 }
 
@@ -134,7 +134,7 @@ export function buildLiveDrivePrompt({ targetUrl = "", goal = "" } = {}) {
     `你是 Business Skill Investigator。按 Skill 1–3 交能力。\n` +
     `目标：${String(goal || "").trim() || "把该页独立业务动作做成可调用能力"}\n` +
     `入口：${String(targetUrl || "").trim()}\n` +
-    `人也可以点预览。未接到用户结束，禁止 submit_recording_result。\n` +
+    `人也可以点预览。台账齐了就立刻 submit_recording_result({final:true, use_draft:true}) 并停止自动操作。不要等人说结束，不要再 snapshot 空转。\n` +
     `不要写消费者包，不要调 Skill 4。不要把完整 JSON 写在对话里。`
   );
 }
@@ -429,7 +429,7 @@ export class LivePiSession {
     const idleMs = Math.max(20, Number(idleSubmitMs) || 90000);
     const emptyBudget = Math.max(1, Number(maxEmptySettles) || MAX_EMPTY_FINAL_SETTLES);
     const continueNow = (
-      "继续用 control_in_app_browser 按 Skill 观察或最小操作。人也可以同时点预览。需要登录、写不进的字段或点了不发网的保存就 assist，不要锁预览。assist 之后必须停自动点，等用户说继续。不要盲点，不要 invent selector。"
+      "按 Skill 1：台账不齐才用 control_in_app_browser 做最小操作。台账齐了立刻 submit_recording_result({final:true, use_draft:true}) 并停止，不要再 snapshot，不要空转。人也可以同时点预览。阻断才 assist，不要锁预览。不要盲点，不要 invent selector。"
     );
     const checkResult = typeof hasResult === "function" ? hasResult : null;
     let lastToolCount = this.#trace.toolCount;

@@ -63,6 +63,8 @@ test("入口和定稿提示只留协调句，不含字段细则", () => {
   assert.match(drive, /Investigator/);
   assert.match(drive, /做成能力/);
   assert.match(drive, /http:\/\/example.com/);
+  assert.match(drive, /submit_recording_result/);
+  assert.doesNotMatch(drive, /未接到用户结束，禁止 submit_recording_result/);
   assert.doesNotMatch(drive, /x-dano-section-titles/);
   assert.doesNotMatch(drive, /部门树/);
   assert.doesNotMatch(drive, /空表/);

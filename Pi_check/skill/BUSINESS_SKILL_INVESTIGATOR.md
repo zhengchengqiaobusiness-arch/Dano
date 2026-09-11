@@ -17,7 +17,7 @@
 - 记下**完整目标原文**，不要压成短标题。立刻用 Skill 2 打开入口、观察、按目标把每一页做完。
 - 某一行已按目标做完且有真实 execute：立刻调 Skill 3 交该项。不要攒到最后，也不要等人点头。
 - Skill 3 交回来的合同若不完整（残缺 execute、未识别却当已解决、灰框进了调用方）：按返回的 `error` 或笔记里的缺口分诊，补证后再交。不要把残缺项标成已推断。
-- 目标要求的每一页、台账该交的每一行都齐、且每行合同完整：立刻 `submit_recording_result({final:true, use_draft:true})` 交出能力并停止。不要调 Skill 4，不要写消费者包。
+- 目标要求的每一页、台账该交的每一行都齐、且每行合同完整：立刻 `submit_recording_result({final:true, use_draft:true})` 交出能力并停止。不要等人点「结束并产出能力」，不要再 snapshot / 空转等超时。不要调 Skill 4，不要写消费者包。
 - 「登录了 / 继续 / 好了」只表示阻断解除。解除后自动接着做完并产出。不要理解成「现在改由人指挥」，也不要再等一句「结束」。
 - 人也可以点预览。人点出的动作也要交。人没有点、也没有阻断时，不要停下来问人下一步。
 - 做完后禁止为「再验证一下」换页、重查、空转到超时。当前页目标已做完：离开这一页，不要再回来空转。超时只停自动点，不是失败；若台账已齐，仍应交齐能力并定稿。
@@ -59,6 +59,8 @@
 
 一项只有完整合同才能标「已推断」。Skill 3 自己说未解决、或交回来仍把未识别当已解决：标「未解决」，不要交给 Build。
 
+同一动作只占台账一行。`name` 相同且 execute 的 method+path 相同，就是同一行，不是两项。交回来若多出 `_v2` 或同名第二份：标重复，先用原 `capability_id` 覆盖，定稿前只留一份。自述「本质重复」仍 `use_draft` 定稿 = 失败。
+
 ## 调查笔记
 
 写在对话里，不新造笔记工具：
@@ -76,9 +78,9 @@
 1. **观察** → Skill 2 + `control_in_app_browser`：`snapshot` + `network_since`。必要时 `screenshot` 且 `as_image=true`。首屏自动请求先记下，不要当成已经查询。进了新表单或加了新分区行：再 snapshot **这一页**，不要拿上一页列表的控件去对字段。
 2. **按目标操作** → Skill 2：把该动作需要的可见条件/字段写上，再点该动作自己的查询/保存/提交。没有「搜索 / 查询」文案时，点已经出现的树或列表节点就是查询，不要为找搜索钮去点没文案的 `aN`。只点当前业务区。通知角标、头像、偏好、退出、外观不是业务。空状态提示是还没做成，不是按钮。灰框不要硬点。
 3. **请人点一下** → 仅阻断。Skill 2 `assist`。只写这一个控件要人做什么。协助之后必须停自动点，等人说继续后再自动接着做。
-4. **认一项产物** → Skill 3 + `submit_recording_capability`。该项必须已按目标做完，且有真实 execute。空表保存出来的请求不要交成完整能力。不要单独交没有 `request_refs` 的 relations-only 信封。
+4. **认一项产物** → Skill 3 + `submit_recording_capability`。该项必须已按目标做完，且有真实 execute。空表保存出来的请求不要交成完整能力。不要单独交没有 `request_refs` 的 relations-only 信封。修正已交项必须用**同一个** `capability_id` 整项再交（覆盖）。禁止另起 `_v2` / `_2` /「含顺序关系」新 id。补 `capability_relations` 不是新能力。
 5. **最小补证** → 再调 Skill 2。Infer 只建议，你决定是否动手。补完立刻再交，不要等结束。
-6. **定稿能力** → 目标页与台账该交的行都齐、每一行合同完整、写入没有「未识别却当可执行」时立刻 `submit_recording_result({final:true, use_draft:true})`。不要等用户说结束。不要调 Skill 4。
+6. **定稿能力** → 目标页与台账该交的行都齐、每一行合同完整、写入没有「未识别却当可执行」、且没有同名同 execute 的重复行时，立刻 `submit_recording_result({final:true, use_draft:true})`。草稿里已有重复：禁止 `use_draft`；`submit_recording_result` 的 `result` 只带正确那几项。不要等用户说结束。不要调 Skill 4。
 
 工具回 `transport_idle` 不是业务失败。台账已齐且合同完整就定稿；没齐且没有阻断就继续做；只有阻断才等用户。
 
@@ -114,7 +116,7 @@
 
 代码只回错误，不分诊。
 
-- 形状错（`fields`、字符串 refs、params 不是数组、重复 id、共用 execute、单独交 relations）→ Skill 3 重交信封
+- 形状错（`fields`、字符串 refs、params 不是数组、重复 id、共用 execute、单独交 relations）→ Skill 3 用**原** `capability_id` 重交信封。闸门报「两个能力不能共用同一个 execute step_id」= 你在交第二份还想复用旧 step；覆盖原 id，不要新编 step、不要另起 `_v2`
 - 缺依据 / 未识别当已解决 / 灰框进了调用方 / 假 links / 错挂 preflight → Skill 3
 - 证据不够、点不到、值没写上、少加了一种分区行 → Skill 2
 - 出包 handbook / 投影 / 隔离运行 / validator 失败 → 那是点击「产出 Skill」之后的 Skill 4 会话，本场不要自己写包
@@ -128,8 +130,9 @@
 → 按目标写字段；每种加行都点并写上；再点该动作自己的查询/保存/提交
 → 阻断才 assist；解除后自动继续
 → 该行做完且有真实 execute → 立刻 Skill 3 交一项完整合同
+→ 修正已交项用同一 capability_id 覆盖，不要 _v2
 → 不完整 → 补证或 unresolved，不要标已推断
-→ 目标页与台账齐了 → 立刻 submit_recording_result 交出能力
+→ 目标页与台账齐了且无同名同 execute 重复 → 立刻 submit_recording_result 交出能力
 → 失败按错误分诊，代码不自动修
 → 不要写消费者包
 ```
