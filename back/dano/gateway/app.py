@@ -1821,6 +1821,7 @@ async def _latest_flow_spec_for_catalog_item(tenant: str, item: dict) -> dict | 
 
 
 @app.post("/v1/recording-results/{result_id}/export-skill")
+@app.post("/v1/pi-recordings/{result_id}/export-skill")
 async def export_recording_result_skill(
     result_id: str,
     req: ExportRecordingSkillReq,
@@ -2156,6 +2157,7 @@ class ExportDirectoryReq(BaseModel):
 
 
 @app.get("/export/directory")
+@app.get("/v1/export/directory")
 async def export_directory(x_tenant_key: str | None = Header(default=None)) -> dict:
     """返回当前导出目录：Skill 页保存的配置 > DANO_EXPORT_DIR > 平台默认。"""
     await _auth_tenant(x_tenant_key)
@@ -2163,6 +2165,7 @@ async def export_directory(x_tenant_key: str | None = Header(default=None)) -> d
 
 
 @app.put("/export/directory")
+@app.put("/v1/export/directory")
 async def put_export_directory(
     req: ExportDirectoryReq,
     x_tenant_key: str | None = Header(default=None),
@@ -2179,6 +2182,7 @@ async def put_export_directory(
 
 
 @app.post("/export/agent-skills")
+@app.post("/v1/skills/export")
 async def export_agent_skills_ep(req: ExportSkillsReq,
                                  x_tenant_key: str | None = Header(default=None)) -> dict:
     """Skills 目录重导：与录制「产出 Skill」同一套 Pi_check Skill 4 会话。"""
