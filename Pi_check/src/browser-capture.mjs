@@ -684,10 +684,10 @@ export class PlaywrightBrowser {
       || `ref=${item.ref}` === token
     ));
     if (!exact.length) return "";
-    const preferred = exact.find((item) => item.region === "dialog")
-      || exact.find((item) => item.region === "form")
-      || exact[exact.length - 1];
-    return String(preferred?.ref || "");
+    if (exact.length === 1) return String(exact[0]?.ref || "");
+    const dialog = exact.filter((item) => item.region === "dialog");
+    if (dialog.length === 1) return String(dialog[0]?.ref || "");
+    return "";
   }
 
   async #locateNow(page, token) {

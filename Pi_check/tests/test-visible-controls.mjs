@@ -233,6 +233,73 @@ test("snapshot 广告树节点，不广告无名钮和顶栏角标", async (t) =
   assert.match(String(period.placeholder || ""), /结束日期/);
 });
 
+test("snapshot 广告结果表可点格，不广告光秃数字和顶栏角标", async (t) => {
+  const html = `<!doctype html><html lang="zh-CN"><head><style>
+    td, th, a, span, .el-link, [role="treeitem"] { min-width: 24px; min-height: 16px; display: inline-block; }
+    header button { min-width: 16px; min-height: 16px; }
+  </style></head><body>
+    <header class="el-header"><button type="button">0</button></header>
+    <aside class="el-aside">
+      <div role="tree" class="el-tree"><div role="treeitem">源码</div></div>
+    </aside>
+    <div class="summary">应填总数 <b>9</b></div>
+    <table class="el-table">
+      <thead><tr><th>姓名</th><th>应填数量</th><th>未填数量</th><th>已填数量</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>源码</td>
+          <td><a href="javascript:;">9</a></td>
+          <td><span class="el-link" style="cursor:pointer;color:#f56c6c">8</span></td>
+          <td><a href="javascript:;">下载</a></td>
+        </tr>
+        <tr>
+          <td>宇擎</td>
+          <td><span style="cursor:pointer;color:#409EFF">9</span></td>
+          <td>0</td>
+          <td></td>
+        </tr>
+      </tbody>
+    </table>
+  </body></html>`;
+  const fixture = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  const port = await listen(fixture);
+  const browser = await chromium.launch({ headless: true });
+  t.after(async () => {
+    await browser.close().catch(() => {});
+    await new Promise((resolve) => fixture.close(resolve));
+  });
+  const page = await browser.newPage();
+  await page.goto(`http://127.0.0.1:${port}/`);
+  const facts = await page.evaluate(collectPageFacts);
+  const actions = facts.actions || [];
+  const labels = actions.map((item) => String(item.label || ""));
+  const tableLinks = actions.filter((item) => item.kind === "link" && item.region === "table");
+  assert.ok(tableLinks.length >= 3, `table links missing, got ${labels.join(",")}`);
+  assert.ok(
+    tableLinks.some((item) => item.label.includes("应填数量") && item.label.includes("源码") && item.label.includes("9")),
+    `expected column+row+cell label, got ${labels.join(",")}`,
+  );
+  assert.ok(
+    tableLinks.some((item) => item.label.includes("未填数量") && item.label.includes("8")),
+    `expected el-link cell, got ${labels.join(",")}`,
+  );
+  assert.ok(
+    tableLinks.some((item) => item.label.includes("应填数量") && item.label.includes("宇擎") && item.label.includes("9")),
+    `expected pointer span cell, got ${labels.join(",")}`,
+  );
+  assert.ok(
+    tableLinks.every((item) => item.selector && !/^ref=a\d+$/.test(item.selector) && item.selector !== "text=9"),
+    "table links must not advertise bare ref=aN or text=9",
+  );
+  assert.ok(!labels.includes("9"), "bare digits must not be advertised");
+  assert.ok(!labels.includes("0"), "plain zero cells and header badges must not be advertised");
+  assert.ok(!tableLinks.some((item) => item.label === "0" || /\s0$/.test(item.label)), "unlinked zero cells stay out");
+  assert.ok(labels.includes("源码"), "tree node must still be advertised");
+});
+
 test("SPA 路由变化后补采当前页控件，不判断能力", async (t) => {
   const html = `<!doctype html><html><body>
     <form class="el-form"><div class="el-form-item"><label class="el-form-item__label">甲</label><input name="first" /></div></form>

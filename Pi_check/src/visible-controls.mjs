@@ -710,9 +710,61 @@ export function collectPageFacts() {
     const named = parts.find((part) => /[\u4e00-\u9fff]{2,8}/.test(part) && !/未知/.test(part));
     return named || parts.find((part) => part.length >= 2 && !/^\d+$/.test(part)) || "";
   };
+  const isCellLinkHost = (node) => {
+    if (!node?.matches) return false;
+    if (node.matches("input, textarea, select, button, [role='button'], .el-button, .ant-btn")) return false;
+    if (node.matches("a, [role='link']")) return true;
+    const cls = String(node.className || "");
+    if (/(?:^|[\s])(?:el-link|ant-btn-link|ant-typography-link)(?:[\s]|$)/.test(cls)) return true;
+    try {
+      const text = compactText(textOf(node));
+      return Boolean(text) && text.length <= 24 && window.getComputedStyle(node).cursor === "pointer";
+    } catch {
+      return false;
+    }
+  };
+  const seenCellLink = new Set();
+  const pushTableCellLink = (host, cell) => {
+    if (!host || seenSnap.has(host) || snapshotActions.length >= 160) return;
+    if (inChrome(host) || inSidebar(host) || inPagination(host)) return;
+    if (cell.closest?.("thead, .el-table__header, .ant-table-thead, .vxe-header")) return;
+    if (cell.querySelector?.("input, textarea, select, [role='slider']")) return;
+    const raw = cleanLabel(host.getAttribute?.("aria-label") || textOf(host));
+    if (!raw || raw.length > 24) return;
+    const row = cell.closest?.("tr, .el-table__row, .ant-table-row, .vxe-body--row");
+    const column = columnLabel(cell);
+    const rowName = pickRowName(textOf(row));
+    const key = `${column}|${rowName}|${raw}`;
+    if (seenCellLink.has(key)) return;
+    seenCellLink.add(key);
+    seenSnap.add(host);
+    const ref = `a${snapshotActions.length + 1}`;
+    const label = [column, rowName, raw].filter(Boolean).join(" ");
+    mark(host, ref, { label: column, region: "table" });
+    snapshotActions.push({
+      ref,
+      label,
+      kind: "link",
+      region: dialogRoot(host) ? "dialog" : "table",
+      section: rowName || nearbyHeading(tableHostOf(host)),
+      column,
+      selector: `text=${label}`,
+    });
+  };
+  for (const cell of document.querySelectorAll("td, th, .el-table__cell, .ant-table-cell, .vxe-body--column")) {
+    if (!snapshotVisible(cell)) continue;
+    const hosts = [...cell.querySelectorAll("a, [role='link'], .el-link, .ant-btn-link, span, em, strong")];
+    let found = false;
+    for (const host of hosts) {
+      if (!snapshotVisible(host) || !isCellLinkHost(host)) continue;
+      pushTableCellLink(host, cell);
+      found = true;
+    }
+    if (!found && isCellLinkHost(cell)) pushTableCellLink(cell, cell);
+  }
   const pushSelectable = (node, label, kind) => {
     const text = cleanLabel(label);
-    if (!isBusinessLabel(text) || seenSnap.has(node) || inPagination(node) || inChrome(node) || snapshotActions.length >= 80) {
+    if (!isBusinessLabel(text) || seenSnap.has(node) || inPagination(node) || inChrome(node) || snapshotActions.length >= 160) {
       return;
     }
     seenSnap.add(node);

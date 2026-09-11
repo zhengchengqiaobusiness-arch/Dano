@@ -131,6 +131,10 @@ test("snapshot 给控件打稳定 ref 和语义 selector", () => {
   assert.deepEqual(parseLocator("type=checkbox"), { kind: "role", role: "checkbox", name: "", value: "checkbox" });
   assert.equal(snapshotSelector({ label: "张三", kind: "checkbox" }, "action"), 'role=checkbox[name="张三"]');
   assert.equal(snapshotSelector({ label: "张三", kind: "row" }, "action"), "text=张三");
+  assert.equal(
+    snapshotSelector({ label: "应填数量 源码 9", kind: "link" }, "action"),
+    "text=应填数量 源码 9",
+  );
 });
 
 test("choose 用语义选择器一次选中，不必再 snapshot", async () => {

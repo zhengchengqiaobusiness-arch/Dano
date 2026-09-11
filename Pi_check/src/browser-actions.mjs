@@ -27,7 +27,9 @@ export function snapshotSelector(item = {}, role = "control") {
   const kind = String(item.kind || item.control_kind || "");
   if (placeholder) return `placeholder=${placeholder}`;
   if (role === "action" && kind === "checkbox" && label) return `role=checkbox[name="${label}"]`;
-  if (role === "action" && (kind === "row" || kind === "text" || kind === "treeitem") && label) return `text=${label}`;
+  if (role === "action" && (kind === "row" || kind === "text" || kind === "treeitem" || kind === "link") && label) {
+    return `text=${label}`;
+  }
   if (role === "action" && label) return `role=button[name="${label}"]`;
   if (label) return `label=${label}`;
   if (item.ref) return `ref=${item.ref}`;
