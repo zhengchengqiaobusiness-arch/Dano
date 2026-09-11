@@ -36,12 +36,56 @@ def format_rows(rows, columns=None) -> str:
     return "\n".join(lines)
 
 
+def iter_row_lists(value):
+    if isinstance(value, list):
+        if value and all(isinstance(item, dict) for item in value):
+            yield value
+            return
+        for item in value:
+            yield from iter_row_lists(item)
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from iter_row_lists(item)
+
+
+def extract_rows(payload):
+    lists = list(iter_row_lists(payload))
+    if not lists:
+        return []
+    return max(lists, key=len)
+
+
+def format_result(payload) -> str:
+    return format_rows(extract_rows(payload))
+
+
+def attach_tables(payload):
+    if not isinstance(payload, dict):
+        return payload
+    for item in payload.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        result = item.get("result")
+        table = format_result(result)
+        if not table or table == "无数据":
+            continue
+        item["table"] = table
+        if isinstance(result, dict):
+            result["table"] = table
+    return payload
+
+
 def main(argv=None) -> int:
     raw = sys.stdin.read() if argv is None else None
     payload = json.loads(raw or argv or "[]")
-    rows = payload.get("rows") if isinstance(payload, dict) else payload
-    columns = payload.get("columns") if isinstance(payload, dict) else None
-    print(format_rows(rows, columns))
+    if isinstance(payload, dict) and "results" in payload:
+        print(json.dumps(attach_tables(payload), ensure_ascii=False, indent=2))
+        return 0
+    if isinstance(payload, dict) and payload.get("rows") is not None:
+        print(format_rows(payload.get("rows"), payload.get("columns")))
+        return 0
+    print(format_result(payload))
     return 0
 
 

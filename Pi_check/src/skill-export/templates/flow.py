@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sys
 
+import format_list
 import runtime
 
 
@@ -61,6 +62,8 @@ def main(argv):
             payload = {"ok": True, "results": [{"capability_id": route_id, "result": runtime.execute_capability(route_id, inputs, confirm=confirm)}]}
         else:
             payload = runtime.run_route(route_id, inputs, confirm=confirm)
+        if payload.get("ok"):
+            format_list.attach_tables(payload)
         _print(payload, 0 if payload.get("ok") else 1)
     except Exception as exc:
         code = 2 if getattr(exc, "code", "") == "AuthExpired" else 1

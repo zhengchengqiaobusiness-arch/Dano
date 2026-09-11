@@ -14,7 +14,7 @@
    → `submit_skill_export({ok:false, errors:[...]})`，停止。
 2. 调用 `read_export_contract`。唯一输入是五块：`capabilities` / `steps` / `links` / `capability_relations` / `unresolved`。禁止只扫 `capabilities[]`。禁止回头打开页面猜字段。
 3. 调用 `read_skill_artifact` 看运输层已物化的 `SKILL.md`、`references/CONTRACT.json`、`references/INPUT_FORMS.md`。先对现包跑 `validate_skill_package`。
-   - 已经 ok：禁止改字段表、冻结 JSON 的 id / inputType、查询确认规则，禁止另写更瘦表单。只允许改 frontmatter 的 `name` / `description`，以及「立刻办理」「成功、失败与停止」里与回复长短、日期 `today` 替换、default 链四步相关的句子。立刻办理缺「禁止 `--route default`」或「用户可见短汇总」时必须补上再 validate。禁止为某一页去改运输代码（`contract-materialize` / `runtime.py`）。通过后立刻 `submit_skill_export`。
+   - 已经 ok：禁止改字段表、冻结 JSON 的 id / inputType、查询确认规则，禁止另写更瘦表单。只允许改 frontmatter 的 `name` / `description`，以及「立刻办理」「成功、失败与停止」里与回复形态、日期 `today` 替换、default 链四步相关的句子。立刻办理缺「禁止 `--route default`」或「原始结果表」时必须补上再 validate。禁止为某一页去改运输代码（`contract-materialize` / `runtime.py`）。通过后立刻 `submit_skill_export`。
    - 只有 handbook_fields 失败时才改 `SKILL.md`。必须保留运输层已有的字段表、冻结提问 JSON、可用默认值、`合同值`、`route_id`。禁止另写一份更瘦的表单。禁止把 `dataSource` 写进 `SKILL.md`。禁止写 `"inputType": "table"`。
    - 改写被拒绝或再次失败：不要继续改瘦。用运输层现包再 validate，通过就提交。
 4. 写入行仍有未识别来源、或合同声明不可执行：停止，不要出可执行写能力。
@@ -59,9 +59,9 @@ frontmatter 仅非空 `name` + `description`。不要写 `version`、`compatibil
 
 正文必须有：`立刻办理`、`冻结提问`、`适用场景`、`不适用场景`、`选择工作流`、`组合与交接规则`、`执行协议`、`成功、失败与停止`、`按需读取资源`、`鉴权`。
 
-- `立刻办理`：读完立刻原样复制「冻结提问」JSON 一次问完整表单。不要先 ls、不要先读 `references/`、不要先跑脚本探路、不要改 `inputType`、不要自己补非日期 `default`。查询不要确认卡，写操作才确认。读完禁止再读本文件。日期 `default: today` 调用前必须先跑 `date +%F` 再换成当天 yyyy-MM-dd，禁止用录制/合同样本日期冒充当天，`required` 保持 false。查询成功只回短汇总，长名单不要整表贴。default 链固定四步，不许跳步：①只问读能力表，交回后只跑 `--route <读能力id>`，此时禁止 `--route default`；②读成功后先发一条用户可见短汇总，禁止此时就问写表单；③再问写能力表；④写确认后才跑写能力或此时才允许 `--route default`。缺写字段就跑 default 会失败。系统字段由 runtime 按合同自动填，不要向用户要，不要让用户补合同缺省。
+- `立刻办理`：读完立刻原样复制「冻结提问」JSON 一次问完整表单。不要先 ls、不要先读 `references/`、不要先跑脚本探路、不要改 `inputType`、不要自己补非日期 `default`。查询不要确认卡，写操作才确认。读完禁止再读本文件。日期 `default: today` 调用前必须先跑 `date +%F` 再换成当天 yyyy-MM-dd，禁止用录制/合同样本日期冒充当天，`required` 保持 false。查询成功必须回原始结果表：优先原样复制脚本返回的 `table`，列名和单元格与原始返回相同，禁止改写成短条，禁止漏行漏列，禁止为某一页发明口径。default 链固定四步，不许跳步：①只问读能力表，交回后只跑 `--route <读能力id>`，此时禁止 `--route default`；②读成功后先发一条用户可见的原始结果表，禁止此时就问写表单；③再问写能力表；④写确认后才跑写能力或此时才允许 `--route default`。缺写字段就跑 default 会失败。系统字段由 runtime 按合同自动填，不要向用户要，不要让用户补合同缺省。
 - `冻结提问`：每个能力一份宿主可执行的 `ask_user_question` JSON，字段 id 与 `caller_fields` 一致。一次一张完整表单，不要拆多轮。Dano 宿主没有 `table`：对象数组在提问里投影为同一 id 的 `textarea`，由 runtime 组装回数组。禁止写 `inputType: table`。无合同 default 的字段不写 `default`，不要编「请填写 / 暂无 / 请审批」。日期字段 `default` 写 `today`，调用前换成当天 yyyy-MM-dd，`required` 保持 false；禁止改回必填，禁止把内部 path 写进问句。
-- `成功、失败与停止`：查询只回短汇总；具体汇总字段按该能力结果写，不要为某一页写死口径。长名单不要整表贴，用户要明细再给。
+- `成功、失败与停止`：查询必须回原始结果表。列和单元格按该能力本次返回写，不要为某一页写死口径，不要改写成短条。
 - `description` 是路由触发：用合同里各能力的 `name` / `intent` 说明什么用户请求走哪条路线。用户意图对上某条能力就走该原子路线，对不上走 `default`。禁止为某个业务口令写死 `capability_id`。不要写「字段以 CONTRACT.json 为准」。
 - `适用场景` 不复读 description。
 - `选择工作流` 第一行 = 默认完整办理。禁止写「每次只执行一项」「不得自行串联」「一页面对应一个 Skill」。

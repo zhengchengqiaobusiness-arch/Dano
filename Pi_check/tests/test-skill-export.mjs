@@ -308,7 +308,7 @@ test("目录重导沿用同一 skill_id，并使用 overlay 最新能力", async
 const HANDBOOK = `# 日报填报
 
 ## 立刻办理
-读完本文件立刻提问。禁止 ls。禁止再读本文件。查询不要确认卡，写操作才弹确认卡。Skill4已核对手册。日期 today 调用前换成当天。读成功后先发一条用户可见短汇总。此时禁止 --route default。
+读完本文件立刻提问。禁止 ls。禁止再读本文件。查询不要确认卡，写操作才弹确认卡。Skill4已核对手册。日期 today 调用前换成当天。读成功后先发一条用户可见的原始结果表。此时禁止 --route default。
 
 ## 冻结提问
 第一次工具调用必须是 ask_user_question。
@@ -337,7 +337,7 @@ function coveringSkill4Handbook(draft, extra = "") {
   const contract = consumerContract(draft);
   const lines = [
     "## 立刻办理",
-    "读完立刻提问。禁止再读本文件。查询不要确认卡，写操作才弹确认卡。日期 today 调用前换成当天。读成功后先发一条用户可见短汇总。此时禁止 `--route default`。",
+    "读完立刻提问。禁止再读本文件。查询不要确认卡，写操作才弹确认卡。日期 today 调用前换成当天。读成功后先发一条用户可见的原始结果表。此时禁止 `--route default`。",
     extra,
     "## 冻结提问",
     "第一次工具调用必须是 ask_user_question。",
@@ -866,7 +866,7 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
   assert.match(handbook, /不要把 dataSource 放进 ask/);
   assert.match(handbook, /禁止再读本文件/);
   assert.match(handbook, /查询不要确认卡/);
-  assert.match(handbook, /短汇总/);
+  assert.match(handbook, /原始结果表/);
   assert.equal(query.caller_fields.find((item) => item.id === "startDate").page_default, "today");
   const queryAsk = frozenAskForm(query);
   assert.equal(queryAsk.questions.find((item) => item.id === "startDate").required, false);
@@ -888,7 +888,7 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
   assert.match(askForm, /换成当天/);
   assert.match(askForm, /"default": "today"/);
   assert.match(askForm, /禁止 `--route default`/);
-  assert.match(askForm, /用户可见短汇总/);
+  assert.match(askForm, /原始结果表/);
   assert.ok(handbookIsFaithful(askForm, contract));
   assert.ok(!handbookIsFaithful(`${askForm}\n{"inputType": "table"}\n`, contract));
   assert.ok(!handbookIsFaithful(`${askForm}\n{"dataSource": {"type":"api"}}\n`, contract));
@@ -1101,11 +1101,54 @@ test("查询日期未选按当天，旧手册缺确认卡即不保真", () => {
   assert.match(handbook, /禁止再读本文件/);
   assert.match(handbook, /查询不要确认卡/);
   assert.match(handbook, /禁止 `--route default`/);
-  assert.match(handbook, /用户可见短汇总/);
+  assert.match(handbook, /原始结果表/);
   const reasons = handbookUnfaithfulReasons(handbook.replace(/确认卡/g, "确认"), contract);
   assert.ok(reasons.some((item) => item.includes("确认卡")));
   const noDefault = handbookUnfaithfulReasons(handbook.replace(/禁止 `--route default`/g, "可以 default"), contract);
   assert.ok(noDefault.some((item) => item.includes("禁止提前 default")));
+  const noTable = handbookUnfaithfulReasons(handbook.replace(/原始结果表/g, "短汇总"), contract);
+  assert.ok(noTable.some((item) => item.includes("原始结果表")));
+});
+
+test("读结果按原始字段出表，取最长对象列表", async () => {
+  const tabled = await new Promise((resolve) => {
+    const scriptsDir = path.join(ROOT, "src", "skill-export", "templates");
+    const code = `import sys, json
+sys.path.insert(0, ${JSON.stringify(scriptsDir)})
+import format_list
+payload = {
+  "ok": True,
+  "results": [{
+    "capability_id": "query",
+    "result": {
+      "code": 0,
+      "msg": "ok",
+      "data": {
+        "meta": [{"k": "v"}],
+        "data": [
+          {"userId": 1, "userName": "张", "expectedCount": 9, "fillRate": 0.0},
+          {"userId": 2, "userName": "李", "expectedCount": 9, "fillRate": 0.0},
+        ],
+      },
+    },
+  }],
+}
+print(json.dumps(format_list.attach_tables(payload), ensure_ascii=False))`;
+    const child = spawn("python", ["-c", code], { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+  assert.equal(tabled.code, 0, tabled.stderr);
+  const payload = JSON.parse(tabled.stdout);
+  const table = payload.results[0].table;
+  assert.match(table, /\| userId \| userName \| expectedCount \| fillRate \|/);
+  assert.match(table, /\| 1 \| 张 \| 9 \| 0\.0 \|/);
+  assert.match(table, /\| 2 \| 李 \| 9 \| 0\.0 \|/);
+  assert.doesNotMatch(table, /姓名|应填|短汇总/);
+  assert.equal(payload.results[0].result.table, table);
 });
 
 test("手册保真只认合同覆盖，不按文案丢掉 Skill 4", () => {

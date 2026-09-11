@@ -583,14 +583,14 @@ export function renderSkillMd(contract) {
     "查询不要确认卡：表单提交后立刻执行。写操作才弹确认卡，确认后再 `--confirm`。",
     "default 链固定四步，不许跳步、不许一上来就 `--route default`：",
     "1. 只问读能力冻结表。用户提交后立刻 `python3 scripts/flow.py --route <读能力id> --input-json '{...}'`。此时禁止 `--route default`。",
-    "2. 读成功后先发一条用户可见短汇总，禁止此时就问写表单，禁止等整条链写完再补汇总。",
+    "2. 读成功后先发一条用户可见的原始结果表，禁止此时就问写表单，禁止等整条链写完再补表。",
     "3. 再问写能力冻结表。",
     "4. 写确认后才跑写能力，或此时才允许 `--route default`。",
     "缺写字段就跑 default 会报缺少必填字段，用户会看到命令执行失败。中间不要重读，不要第二次 `--list-options`。",
     "日期：冻结 JSON 的 `default` 是 `today`。调用 ask 前必须先跑 `date +%F`，用这条输出换成当天 yyyy-MM-dd，`required` 保持 false。禁止用合同、INPUT_FORMS、录制样本里的日期冒充当天，禁止自己猜年份。不要改回必填。runtime 也会把未选日期填成当天。",
     "冻结提问 JSON 必须原样复制，不要改 question 文案，不要给无合同 default 的字段编默认值。",
     "问句只保留短标题和行格式，不要把内部 path 或探路说明写进宿主标签。",
-    "查询成功只回短汇总，不要把长名单整表贴进对话；用户要明细再给。",
+    "查询成功必须回原始结果表：优先原样复制脚本返回的 `table`。没有 `table` 时按返回列表字段画 Markdown 表。列名和单元格必须与原始返回相同，禁止改写成短条，禁止漏行漏列，禁止为某一页发明口径。",
     "禁止改 `inputType`，禁止增删字段，禁止自己补非日期 `default`，禁止拆成多轮问卷。",
     "该路线若有动态字段（执行协议写了 `--list-options`）：先且只跑 `cd <本 SKILL.md 所在目录> && python3 scripts/flow.py --list-options <capability_id> <field>`，把返回的 `options`（已展平的 id/label）写进该字段，再复制冻结 JSON 调用 `ask_user_question`。",
     "不要把 dataSource 放进 ask_user_question。宿主会打聊天站点相对路径，拉不到业务树。INPUT_FORMS 里的 dataSource 只给脚本用。",
@@ -712,7 +712,7 @@ export function renderSkillMd(contract) {
     "## 成功、失败与停止",
     "",
     "- 任一步失败即停",
-    "- 查询成功只回短汇总，不要把长名单整表贴进对话",
+    "- 查询成功必须回原始结果表：优先原样复制脚本返回的 `table`，列名和单元格与原始返回相同，禁止改写成短条",
     "- 没有本包凭证或 401 / 账号未登录 → 停问一次 token。提问只用 `{\"questions\":[{\"id\":\"token\",\"question\":\"请粘贴新的访问令牌\",\"inputType\":\"text\",\"required\":true}]}`，不要加 title，不要自己补 default。拿到后用 `DANO_AUTH_HEADERS` 覆盖再跑同一条命令；不要改文件，不要再问第二次",
     "- 选项失败或空列表 → 停问",
     "",
@@ -817,7 +817,7 @@ export function handbookUnfaithfulReasons(text, contract) {
   if (!/换成当天/.test(text)) reasons.push("缺少日期 today 换成当天");
   if ((contract.routes || []).some((item) => item.route_id === "default") && (contract.capabilities || []).length > 1) {
     if (!/禁止 `--route default`|禁止 --route default/.test(text)) reasons.push("缺少禁止提前 default");
-    if (!/用户可见短汇总/.test(text)) reasons.push("缺少用户可见短汇总");
+    if (!/原始结果表/.test(text)) reasons.push("缺少原始结果表");
   }
   if ((contract.capabilities || []).some((cap) => (cap.caller_fields || []).some((field) => field.page_default === "today"))) {
     if (!/"default": "today"/.test(text) && !/"default":"today"/.test(text)) {
