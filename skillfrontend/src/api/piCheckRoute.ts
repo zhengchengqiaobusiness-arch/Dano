@@ -15,6 +15,15 @@ export function normalizePiCheckPath(pathname: string): string {
   return path;
 }
 
+export function recordingResultsProxyTarget(
+  pathname: string,
+  _method = "GET",
+): "piCheck" | "gateway" {
+  const path = normalizePiCheckPath(pathname);
+  if (path.includes("/export-skill") || /\/draft$/.test(path)) return "piCheck";
+  return "gateway";
+}
+
 export function shouldRouteToPiCheck(pathname: string, method = "GET"): boolean {
   const path = normalizePiCheckPath(pathname);
   const verb = String(method || "GET").toUpperCase();
@@ -22,8 +31,9 @@ export function shouldRouteToPiCheck(pathname: string, method = "GET"): boolean 
   if (path === "/v1/settings/token") return true;
   if (path === "/v1/export/directory" || path === "/export/directory") return true;
   if (path === "/v1/pi-recordings" || path.startsWith("/v1/pi-recordings/")) return true;
+  if (path.startsWith("/v1/recording-results/")) {
+    return recordingResultsProxyTarget(path, verb) === "piCheck";
+  }
   if (path.includes("/export-skill")) return true;
-  if ((verb === "PUT" || verb === "POST") && /^\/v1\/recording-results\/[^/]+\/draft$/.test(path)) return true;
-  if (verb === "GET" && /^\/v1\/recording-results\/rec_[^/]+$/.test(path)) return true;
   return false;
 }

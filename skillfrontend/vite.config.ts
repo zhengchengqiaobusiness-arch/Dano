@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { shouldRouteToPiCheck } from "./src/api/piCheckRoute";
+import { recordingResultsProxyTarget, shouldRouteToPiCheck } from "./src/api/piCheckRoute";
 
 // 出包/目录/token 必须先匹配 /v1/skills、/v1/settings/token，不能落到笼统的 /v1 网关。
 const gateway = process.env.DANO_GATEWAY || "http://localhost:8077";
@@ -37,9 +37,9 @@ export default defineConfig({
         target: gateway,
         changeOrigin: true,
         ...longProxy,
-        router(req: { url?: string }) {
+        router(req: { url?: string; method?: string }) {
           const path = String(req.url || "").split("?")[0];
-          if (/export-skill|\/draft$|rec_/.test(path)) return piCheck;
+          if (recordingResultsProxyTarget(path, req.method || "GET") === "piCheck") return piCheck;
           return gateway;
         },
       },

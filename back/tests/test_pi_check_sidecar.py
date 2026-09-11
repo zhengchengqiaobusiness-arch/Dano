@@ -170,6 +170,9 @@ async def test_recording_result_saved_is_rewritten_to_persisted_row() -> None:
     payload = __import__("json").loads(rewritten)
     assert payload["result"]["id"] == str(saved_id)
     assert payload["result"]["capability_count"] == 1
+    from dano.onboarding.recording_workflow import _draft_fingerprint
+
+    assert payload["result"]["draft_fingerprint"] == _draft_fingerprint(draft)
 
 
 @pytest.mark.asyncio
@@ -222,3 +225,23 @@ async def test_recording_result_saved_hands_pi_login_state_to_runtime(monkeypatc
     )
 
     assert handed_off == [("admin", "boot-dianshixinxi-com-90", state)]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_replaces_recording_id_fingerprint_with_content_hash() -> None:
+    from dano.onboarding.recording_workflow import _draft_fingerprint
+
+    draft = {"title": "查询", "capabilities": [{"name": "search_docs"}]}
+    context = RecordingBridgeContext()
+    rewritten = await context.rewrite_upstream(json.dumps({
+        "type": "snapshot",
+        "snapshot": {
+            "run_id": "rec_abc",
+            "draft": draft,
+            "draft_fingerprint": "rec_abc",
+            "progress": {"label": "PI 已提交 1 项能力"},
+        },
+    }))
+    payload = json.loads(rewritten)
+    assert payload["snapshot"]["draft_fingerprint"] == _draft_fingerprint(draft)
+    assert payload["snapshot"]["draft_fingerprint"] != "rec_abc"

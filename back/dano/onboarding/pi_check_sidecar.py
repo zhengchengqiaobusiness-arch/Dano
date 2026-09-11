@@ -351,6 +351,15 @@ class RecordingBridgeContext:
             label = str(progress.get("label") or snapshot.get("error") or "").strip()
             if label:
                 emit_run_event("pi_check.progress", stage="recording", summary=label)
+            draft = snapshot.get("draft")
+            if isinstance(draft, dict):
+                from dano.onboarding.recording_workflow import _draft_fingerprint
+
+                snapshot = dict(snapshot)
+                snapshot["draft_fingerprint"] = _draft_fingerprint(draft)
+                payload = dict(payload)
+                payload["snapshot"] = snapshot
+                return json.dumps(payload, ensure_ascii=False)
             return raw
         if kind != "recording_result_saved":
             return raw
@@ -384,9 +393,12 @@ class RecordingBridgeContext:
             return raw
         if saved is None:
             return raw
-        from dano.onboarding.recording_results import recording_result_summary
+        from dano.onboarding.recording_results import latest_recording_spec, recording_result_summary
+        from dano.onboarding.recording_workflow import _draft_fingerprint
 
         payload["result"] = recording_result_summary(saved)
+        spec = latest_recording_spec(dict(saved.body or {})) if isinstance(saved.body, dict) else None
+        payload["result"]["draft_fingerprint"] = _draft_fingerprint(spec if isinstance(spec, dict) else draft)
         emit_run_event(
             "pi_check.result_persisted",
             stage="recording",

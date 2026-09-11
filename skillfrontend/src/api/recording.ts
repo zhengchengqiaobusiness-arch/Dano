@@ -67,6 +67,8 @@ export type RecordingSkillLifecycle =
   | "needs_reexport"
   | string;
 
+export { preferStableDraftFingerprint } from "./recordingFingerprint";
+
 export interface RecordingResultSummary {
   id: string;
   action: string;
@@ -76,6 +78,7 @@ export interface RecordingResultSummary {
   request_count: number;
   created_at: string;
   published: boolean;
+  draft_fingerprint?: string;
   machine_verification_ran?: boolean;
   machine_verification_required?: boolean;
   machine_verification_status?: string;
@@ -120,11 +123,7 @@ export interface RecordingResultDetail extends RecordingResultSummary {
 }
 
 export async function getRecordingResult(id: string): Promise<RecordingResultDetail> {
-  const key = String(id || "").trim();
-  const path = key.startsWith("rec_")
-    ? `/v1/pi-recordings/${encodeURIComponent(key)}`
-    : `/v1/recording-results/${encodeURIComponent(key)}`;
-  const { data } = await api.get(path);
+  const { data } = await api.get(`/v1/recording-results/${encodeURIComponent(String(id || "").trim())}`);
   return data as RecordingResultDetail;
 }
 

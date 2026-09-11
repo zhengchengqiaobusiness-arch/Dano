@@ -55,6 +55,7 @@ import {
   getRecordingResult,
   listRecordingResults,
   patchRecordingResult,
+  preferStableDraftFingerprint,
   putRecordingDraft,
   rememberExportDir,
   rememberSkillExportDraft,
@@ -1496,6 +1497,10 @@ export default function PageRecorder({
     const current = snapshotRef.current;
     if (current && next.revision < current.revision && !acceptNextSnapshotRef.current) return;
     acceptNextSnapshotRef.current = false;
+    next = {
+      ...next,
+      draft_fingerprint: preferStableDraftFingerprint(current?.draft_fingerprint, next.draft_fingerprint),
+    };
     snapshotRef.current = next;
     setSnapshot(next);
     if (["recording", "processing", "waiting_operator", "editable", "failed", "cancelled", "published"].includes(next.status)) {
@@ -1614,6 +1619,15 @@ export default function PageRecorder({
           rememberRecordingResultId(sessionStorage, row.id);
           activeResultIdRef.current = row.id;
           setActiveResultId(row.id);
+          const fingerprint = preferStableDraftFingerprint(
+            snapshotRef.current?.draft_fingerprint,
+            row.draft_fingerprint,
+          );
+          if (fingerprint && snapshotRef.current && fingerprint !== snapshotRef.current.draft_fingerprint) {
+            const synced = { ...snapshotRef.current, draft_fingerprint: fingerprint };
+            snapshotRef.current = synced;
+            setSnapshot(synced);
+          }
         }
       } else if (incoming.type === "frame") {
         queueFrame(incoming);

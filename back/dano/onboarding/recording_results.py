@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -544,6 +545,220 @@ def _editable_recording_spec(body: dict[str, Any]) -> dict[str, Any]:
     return spec
 
 
+def _looks_like_recording_id(value: str) -> bool:
+    return str(value or "").startswith("rec_")
+
+
+def recording_id_of_body(body: dict[str, Any] | None, spec: dict[str, Any] | None = None) -> str:
+    payload = body if isinstance(body, dict) else {}
+    current = spec if isinstance(spec, dict) else latest_recording_spec(payload) or {}
+    meta = current.get("meta") if isinstance(current.get("meta"), dict) else {}
+    for candidate in (payload.get("recording_id"), meta.get("recording_id"), current.get("recording_id")):
+        text = str(candidate or "").strip()
+        if _looks_like_recording_id(text):
+            return text
+    return str(payload.get("recording_id") or "").strip()
+
+
+def _spec_without_recording_id(spec: dict[str, Any]) -> dict[str, Any]:
+    meta = spec.get("meta")
+    if not isinstance(meta, dict) or "recording_id" not in meta:
+        return spec
+    stripped = dict(spec)
+    stripped["meta"] = {key: value for key, value in meta.items() if key != "recording_id"}
+    return stripped
+
+
+def _is_pi_recording_contract(body: dict[str, Any], spec: dict[str, Any]) -> bool:
+    if str(body.get("recording_backend") or "") == "pi_check":
+        return True
+    return _looks_like_recording_id(recording_id_of_body(body, spec))
+
+
+def _accepted_draft_fingerprints(body: dict[str, Any], spec: dict[str, Any]) -> set[str]:
+    accepted = {_draft_fingerprint(spec), _draft_fingerprint(_spec_without_recording_id(spec))}
+    recording_id = recording_id_of_body(body, spec)
+    if _looks_like_recording_id(recording_id):
+        accepted.add(recording_id)
+    return {item for item in accepted if item}
+
+
+def _pi_capability_index(capabilities: list[dict[str, Any]], edit: dict[str, Any]) -> int:
+    capability_id = str(edit.get("capability_id") or "").strip()
+    name = str(edit.get("capability_name") or edit.get("name") or "").strip()
+    if capability_id:
+        for index, item in enumerate(capabilities):
+            if str(item.get("capability_id") or "") == capability_id:
+                return index
+    if name:
+        for index, item in enumerate(capabilities):
+            if str(item.get("name") or "") == name:
+                return index
+    if "capability_index" in edit:
+        index = int(edit.get("capability_index"))
+        if 0 <= index < len(capabilities):
+            return index
+        raise ValueError(f"capability index out of range: {index}")
+    raise ValueError("capability not found")
+
+
+def _remember_removed_pi_capability(spec: dict[str, Any], name: str) -> None:
+    label = str(name or "").strip()
+    if not label:
+        return
+    meta = dict(spec.get("meta") or {})
+    removed = [str(item) for item in (meta.get("removed_capabilities") or []) if str(item)]
+    if label not in removed:
+        removed.append(label)
+    meta["removed_capabilities"] = removed
+    spec["meta"] = meta
+
+
+def apply_pi_contract_edits(spec: dict[str, Any], edits: list[dict[str, Any]]) -> dict[str, Any]:
+    """Apply capability-page edits to a PI contract without FlowSpec materialization."""
+
+    if not isinstance(edits, list) or not edits:
+        raise ValueError("flow patch requires a non-empty edits list")
+    next_spec = copy.deepcopy(spec)
+    capabilities = list(next_spec.get("capabilities") or [])
+    steps = list(next_spec.get("steps") or [])
+    if any(not isinstance(item, dict) for item in capabilities + steps):
+        raise ValueError("PI 合同能力或步骤格式无效")
+    next_spec["capabilities"] = capabilities
+    next_spec["steps"] = steps
+
+    for raw in edits:
+        if not isinstance(raw, dict):
+            raise ValueError("flow patch edits must be objects")
+        edit = dict(raw)
+        op = str(edit.get("op") or "")
+        if op == "update":
+            step_id = str(edit.get("step_id") or "")
+            path = str(edit.get("param_path") or "")
+            field = str(edit.get("field") or "")
+            if field == "category":
+                raise ValueError("derived parameter field: category")
+            if not step_id or not path or not field:
+                raise ValueError("param update missing step_id, param_path or field")
+            found = False
+            for step in steps:
+                if str(step.get("step_id") or "") != step_id:
+                    continue
+                params = list(step.get("params") or [])
+                for param in params:
+                    if not isinstance(param, dict):
+                        continue
+                    if str(param.get("path") or "") == path:
+                        param[field] = edit.get("value")
+                        step["params"] = params
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                raise ValueError(f"param not found: {step_id} {path}")
+            continue
+        if op == "update_capability":
+            index = _pi_capability_index(capabilities, edit)
+            field = str(edit.get("field") or "")
+            if field not in {"name", "title", "intent"}:
+                raise ValueError(f"unknown capability field: {field}")
+            value = str(edit.get("value") or "").strip()
+            if field == "name":
+                if not value:
+                    raise ValueError("capability name cannot be empty")
+                if any(i != index and str(capabilities[i].get("name") or "") == value for i in range(len(capabilities))):
+                    raise ValueError(f"duplicate capability name: {value}")
+            capabilities[index][field] = value
+            continue
+        if op == "remove_capability":
+            index = _pi_capability_index(capabilities, edit)
+            removed = capabilities.pop(index)
+            _remember_removed_pi_capability(next_spec, str(removed.get("name") or removed.get("title") or ""))
+            continue
+        if op == "add_capability_step":
+            index = _pi_capability_index(capabilities, edit)
+            capability = capabilities[index]
+            step_id = str(edit.get("step_id") or "").strip()
+            if not step_id:
+                raise ValueError("add_capability_step missing step_id")
+            usage = str(edit.get("usage") or "execute")
+            origin = str(edit.get("origin") or "manual")
+            step_ids = [str(item) for item in (capability.get("step_ids") or []) if str(item)]
+            if step_id not in step_ids:
+                step_ids.append(step_id)
+            capability["step_ids"] = step_ids
+            refs = [dict(item) for item in (capability.get("request_refs") or []) if isinstance(item, dict)]
+            if not any(str(item.get("step_id") or "") == step_id for item in refs):
+                refs.append({
+                    "step_id": step_id,
+                    "usage": usage,
+                    "origin": origin,
+                    "confirmed": True,
+                })
+            capability["request_refs"] = refs
+            continue
+        if op == "remove_capability_step":
+            index = _pi_capability_index(capabilities, edit)
+            capability = capabilities[index]
+            step_id = str(edit.get("step_id") or "").strip()
+            capability["step_ids"] = [
+                str(item) for item in (capability.get("step_ids") or []) if str(item) and str(item) != step_id
+            ]
+            capability["request_refs"] = [
+                dict(item)
+                for item in (capability.get("request_refs") or [])
+                if isinstance(item, dict) and str(item.get("step_id") or "") != step_id
+            ]
+            continue
+        if op == "reorder_capability_steps":
+            index = _pi_capability_index(capabilities, edit)
+            capability = capabilities[index]
+            requested = [str(item) for item in (edit.get("step_ids") or []) if str(item)]
+            others = [
+                dict(item)
+                for item in (capability.get("request_refs") or [])
+                if isinstance(item, dict) and str(item.get("usage") or "execute") != "execute"
+            ]
+            execute = [
+                {"step_id": step_id, "usage": "execute", "origin": "manual", "confirmed": True}
+                for step_id in requested
+            ]
+            capability["step_ids"] = requested
+            capability["request_refs"] = others + execute
+            continue
+        raise ValueError(f"unsupported edit: {op}")
+    return next_spec
+
+
+async def find_recording_result_draft(
+    store: DraftStore,
+    *,
+    tenant: str,
+    result_id: str,
+) -> AssetDraft | None:
+    key = str(result_id or "").strip()
+    if not key:
+        return None
+    try:
+        parsed = UUID(key)
+    except ValueError:
+        parsed = None
+    if parsed is not None:
+        saved = await store.get_draft(parsed)
+        if saved is None or saved.tenant != tenant or not is_recording_result_key(saved.asset_key):
+            return None
+        return saved
+    if not _looks_like_recording_id(key):
+        return None
+    for saved in await store.list_recording_results(tenant=tenant):
+        if saved.tenant != tenant:
+            continue
+        if recording_id_of_body(dict(saved.body or {})) == key:
+            return saved
+    return None
+
+
 def apply_recording_result_edits(
     body: dict[str, Any],
     edits: list[dict[str, Any]],
@@ -559,15 +774,18 @@ def apply_recording_result_edits(
     expected = str(expected_fingerprint or "")
     if not expected:
         raise ValueError("expected_fingerprint is required")
-    if expected != current_fp:
+    if expected not in _accepted_draft_fingerprints(body, current_spec):
         raise FlowSpecConflictError(expected, current_fp)
-    spec = FlowSpec.model_validate(current_spec)
-    updated = apply_client_flow_patch(
-        spec,
-        list(edits or []),
-        expected_fingerprint=flow_spec_fingerprint(spec),
-    )
-    dumped = updated.model_dump(mode="json")
+    if _is_pi_recording_contract(body, current_spec):
+        dumped = apply_pi_contract_edits(current_spec, list(edits or []))
+    else:
+        spec = FlowSpec.model_validate(current_spec)
+        updated = apply_client_flow_patch(
+            spec,
+            list(edits or []),
+            expected_fingerprint=flow_spec_fingerprint(spec),
+        )
+        dumped = updated.model_dump(mode="json")
     next_body = dict(body)
     next_body["flow_spec"] = dumped
     next_body["fingerprint"] = _draft_fingerprint(dumped)
@@ -579,7 +797,8 @@ def apply_recording_result_edits(
         goal=str(goal.get("intent") or goal.get("text") or ""),
     )
     next_body["request_count"] = skill_request_count(dumped)
-    next_body = _refresh_business_description(next_body, dumped)
+    if not _is_pi_recording_contract(next_body, dumped):
+        next_body = _refresh_business_description(next_body, dumped)
     checkpoint = next_body.get("stage_seven") if isinstance(next_body.get("stage_seven"), dict) else None
     if checkpoint is not None:
         from dano.onboarding.recording_stage_seven import baseline_fingerprint

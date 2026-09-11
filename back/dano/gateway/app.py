@@ -1553,13 +1553,23 @@ async def get_recording_result(
         parsed = uuid.UUID(result_id)
     except ValueError:
         from dano.onboarding.pi_check_sidecar import adapt_pi_check_summary, get_sidecar
+        from dano.onboarding.recording_results import find_recording_result_draft
+        from dano.onboarding.recording_workflow import _draft_fingerprint
 
+        store = DraftStore()
+        persisted = await find_recording_result_draft(store, tenant=tenant, result_id=result_id)
+        if persisted is not None:
+            return recording_result_detail(persisted)
         detail = await get_sidecar().fetch_result(result_id)
         if detail is None:
             raise HTTPException(status_code=400, detail="无效的录制结果 ID") from None
         summary = adapt_pi_check_summary(detail) or {}
         summary["draft"] = detail.get("draft")
-        summary["draft_fingerprint"] = detail.get("draft_fingerprint") or result_id
+        draft = detail.get("draft")
+        if isinstance(draft, dict):
+            summary["draft_fingerprint"] = _draft_fingerprint(draft)
+        else:
+            summary["draft_fingerprint"] = detail.get("draft_fingerprint") or result_id
         return summary
     saved = await DraftStore().get_draft(parsed)
     if (
@@ -1598,6 +1608,34 @@ class PatchRecordingResultReq(BaseModel):
     expected_fingerprint: str = ""
 
 
+async def _load_saved_recording_result(result_id: str, tenant: str):
+    from dano.assets.drafts import DraftStore
+    from dano.onboarding.pi_check_sidecar import get_sidecar, persist_pi_submitted_result
+    from dano.onboarding.recording_results import find_recording_result_draft
+
+    store = DraftStore()
+    saved = await find_recording_result_draft(store, tenant=tenant, result_id=result_id)
+    if saved is not None:
+        return store, saved
+    if not _looks_like_recording_id(result_id):
+        return store, None
+    detail = await get_sidecar().fetch_result(result_id)
+    draft = detail.get("draft") if isinstance(detail, dict) else None
+    if not isinstance(draft, dict) or not list(draft.get("capabilities") or []):
+        return store, None
+    saved = await persist_pi_submitted_result(
+        tenant=tenant,
+        subsystem=str((detail or {}).get("subsystem") or "oa"),
+        action=str((detail or {}).get("action") or result_id),
+        title=str((detail or {}).get("title") or ""),
+        goal=(detail or {}).get("goal_summary") or "",
+        draft=draft,
+        request_count=int((detail or {}).get("request_count") or 0),
+        recording_id=result_id,
+    )
+    return store, saved
+
+
 @app.patch("/v1/recording-results/{result_id}")
 async def patch_recording_result(
     result_id: str,
@@ -1606,26 +1644,21 @@ async def patch_recording_result(
 ) -> dict:
     """Save capability-page edits to the stored recording result only."""
     tenant = await _auth_tenant(x_tenant_key)
-    from dano.assets.drafts import DraftStore
     from dano.execution.page.flow_spec import FlowSpecConflictError
     from dano.onboarding.recording_results import (
         apply_recording_result_edits,
-        is_recording_result_key,
         latest_recording_spec,
         recording_result_detail,
     )
 
-    try:
-        parsed = uuid.UUID(result_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="无效的录制结果 ID") from exc
-    store = DraftStore()
-    saved = await store.get_draft(parsed)
-    if (
-        saved is None
-        or saved.tenant != tenant
-        or not is_recording_result_key(saved.asset_key)
-    ):
+    store, saved = await _load_saved_recording_result(result_id, tenant)
+    if saved is None:
+        if _looks_like_recording_id(result_id):
+            raise HTTPException(status_code=404, detail="录制结果不存在")
+        try:
+            uuid.UUID(result_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="无效的录制结果 ID") from exc
         raise HTTPException(status_code=404, detail="录制结果不存在")
     try:
         next_body = apply_recording_result_edits(
@@ -1637,7 +1670,7 @@ async def patch_recording_result(
         raise HTTPException(status_code=409, detail="录制结果已被更新，请刷新后再保存") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    updated = await store.patch_recording_result_body(parsed, next_body)
+    updated = await store.patch_recording_result_body(saved.asset_draft_id, next_body)
     if updated is None:
         raise HTTPException(status_code=404, detail="录制结果不存在")
     recording_id = _recording_id_from_body(next_body)
