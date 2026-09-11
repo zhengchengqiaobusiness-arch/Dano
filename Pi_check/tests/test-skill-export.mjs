@@ -308,7 +308,7 @@ test("目录重导沿用同一 skill_id，并使用 overlay 最新能力", async
 const HANDBOOK = `# 日报填报
 
 ## 立刻办理
-读完本文件立刻提问。禁止 ls。禁止再读本文件。查询不要确认卡，写操作才弹确认卡。Skill4已核对手册。
+读完本文件立刻提问。禁止 ls。禁止再读本文件。查询不要确认卡，写操作才弹确认卡。Skill4已核对手册。日期 today 调用前换成当天。
 
 ## 冻结提问
 第一次工具调用必须是 ask_user_question。
@@ -337,7 +337,7 @@ function coveringSkill4Handbook(draft, extra = "") {
   const contract = consumerContract(draft);
   const lines = [
     "## 立刻办理",
-    "读完立刻提问。禁止再读本文件。查询不要确认卡，写操作才弹确认卡。",
+    "读完立刻提问。禁止再读本文件。查询不要确认卡，写操作才弹确认卡。日期 today 调用前换成当天。",
     extra,
     "## 冻结提问",
     "第一次工具调用必须是 ask_user_question。",
@@ -866,7 +866,7 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
   assert.match(handbook, /不要把 dataSource 放进 ask/);
   assert.match(handbook, /禁止再读本文件/);
   assert.match(handbook, /查询不要确认卡/);
-  assert.match(handbook, /统计概览/);
+  assert.match(handbook, /短汇总/);
   assert.equal(query.caller_fields.find((item) => item.id === "startDate").page_default, "today");
   const queryAsk = frozenAskForm(query);
   assert.equal(queryAsk.questions.find((item) => item.id === "startDate").required, false);
@@ -882,7 +882,11 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
   assert.doesNotMatch(askForm, /"inputType": "table"/);
   const createAsk = frozenAskForm(create);
   assert.equal(createAsk.questions.find((item) => item.id === "items").inputType, "textarea");
-  assert.ok(!Object.prototype.hasOwnProperty.call(createAsk.questions.find((item) => item.id === "startDate"), "default"));
+  assert.equal(createAsk.questions.find((item) => item.id === "startDate").default, "today");
+  assert.equal(createAsk.questions.find((item) => item.id === "startDate").required, false);
+  assert.doesNotMatch(createAsk.questions.find((item) => item.id === "title")?.question || "", /body\./);
+  assert.match(askForm, /换成当天/);
+  assert.match(askForm, /"default": "today"/);
   assert.ok(handbookIsFaithful(askForm, contract));
   assert.ok(!handbookIsFaithful(`${askForm}\n{"inputType": "table"}\n`, contract));
   assert.ok(!handbookIsFaithful(`${askForm}\n{"dataSource": {"type":"api"}}\n`, contract));

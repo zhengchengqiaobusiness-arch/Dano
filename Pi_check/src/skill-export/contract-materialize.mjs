@@ -378,8 +378,12 @@ function allowedDefaultText(field) {
   return `${parts.join("；")}。此外可用本对话用户已确认的值。禁止编造`;
 }
 
+function askRequired(field) {
+  return Boolean(field.required) && field.page_default !== "today";
+}
+
 function fieldFillRow(field) {
-  return `| \`${field.id}\` | ${field.title} | ${field.required ? "是" : "否"} | ${fieldControl(field)} | ${howToFill(field)} | ${allowedDefaultText(field)} |`;
+  return `| \`${field.id}\` | ${field.title} | ${askRequired(field) ? "是" : "否"} | ${fieldControl(field)} | ${howToFill(field)} | ${allowedDefaultText(field)} |`;
 }
 
 function askInputType(field) {
@@ -403,28 +407,14 @@ function arrayLineRecipe(field) {
 function askQuestion(field) {
   const parts = [field.title];
   if (field.type === "array") {
-    parts.push(Object.keys(field.sections || {}).length
-      ? "能力层是分区表，宿主 ask_user_question 没有 table，本字段用 textarea 收同一 id"
-      : "能力层是表格，宿主 ask_user_question 没有 table，本字段用 textarea 收同一 id");
     parts.push(arrayLineRecipe(field));
-    parts.push("也可提交 JSON 数组。没有行则留空。不要改 id，不要拆多轮");
-  } else if (field.dataSource) {
-    parts.push("从本次 `--list-options` 返回的候选里选 id，不要编造");
   } else if (field.enums.length) {
-    parts.push(`按合同枚举选 id：${enumText(field)}`);
-  } else if (field.type === "date") {
-    parts.push(field.page_default === "today"
-      ? "按 yyyy-MM-dd 填写；页面日期控件默认当日，可改"
-      : "按 yyyy-MM-dd 填写真实周期");
-  } else if (field.reason) {
-    parts.push(String(field.reason).replace(/。+$/, ""));
-  } else {
-    parts.push("向用户收集真实内容，禁止编造");
+    parts.push(enumText(field));
   }
   if (field.page_default === "today") {
-    parts.push("未选则按当天，不要因此卡住");
-  } else {
-    parts.push(field.required ? "必填，不要占位句" : "可选；没有就留空，不要占位句");
+    parts.push("未选则按当天");
+  } else if (askRequired(field)) {
+    parts.push("必填");
   }
   return `${parts.join("。")}。`;
 }
@@ -434,11 +424,14 @@ export function fieldAskSpec(field) {
     id: field.id,
     question: askQuestion(field),
     inputType: askInputType(field),
-    required: Boolean(field.required) && field.page_default !== "today",
+    required: askRequired(field),
   };
   if (field.enums.length) spec.options = field.enums.map(enumOption);
   if (field.type === "date") spec.dateFormat = "yyyy-MM-dd";
   if (Object.prototype.hasOwnProperty.call(field, "default")) spec.default = field.default;
+  if (field.page_default === "today" && !Object.prototype.hasOwnProperty.call(spec, "default")) {
+    spec.default = "today";
+  }
   if (spec.inputType === "textarea") spec.fieldAssist = true;
   return spec;
 }
@@ -588,9 +581,10 @@ export function renderSkillMd(contract) {
     "",
     "只读这一节就能办。读完禁止再读本文件，禁止读 `references/`，禁止 ls / cat / 探路。",
     "查询不要确认卡：表单提交后立刻执行。写操作才弹确认卡，确认后再 `--confirm`。",
-    "default：先查询（不确认）→ 只回统计概览 → 立刻问写表单（要确认）。中间不要重读，不要第二次 `--list-options`。",
-    "日期：口令里有就用口令；没选就按当天。runtime 会把未选日期填成当天，不要为日期卡住提交。",
-    "查询回复只要统计概览（应填 / 已填 / 未填 / 填写率）和已填写人员；未填写超过 8 人只报人数，除非用户要明细。",
+    "default：按路线步骤依次执行。读操作不确认，写操作才确认。读操作执行完立刻回短汇总，再问写表单，不要等写完才一并说。中间不要重读，不要第二次 `--list-options`。",
+    "日期：冻结 JSON 的 `default` 是 `today`。调用 ask 前必须换成当天 yyyy-MM-dd，`required` 保持 false。不要改回必填，不要为日期卡住提交。runtime 也会把未选日期填成当天。",
+    "问句只保留短标题和行格式，不要把内部 path 或探路说明写进宿主标签。",
+    "查询成功只回短汇总，不要把长名单整表贴进对话；用户要明细再给。",
     "禁止改 `inputType`，禁止增删字段，禁止自己补非日期 `default`，禁止拆成多轮问卷。",
     "该路线若有动态字段（执行协议写了 `--list-options`）：先且只跑 `cd <本 SKILL.md 所在目录> && python3 scripts/flow.py --list-options <capability_id> <field>`，把返回的 `options`（已展平的 id/label）写进该字段，再复制冻结 JSON 调用 `ask_user_question`。",
     "不要把 dataSource 放进 ask_user_question。宿主会打聊天站点相对路径，拉不到业务树。INPUT_FORMS 里的 dataSource 只给脚本用。",
@@ -623,7 +617,7 @@ export function renderSkillMd(contract) {
     "3. 枚举字段：只能用合同列出的 id",
     "4. 动态字段：只能用本次 `python3 scripts/flow.py --list-options <capability_id> <field>` 返回并被用户选中的 id",
     "",
-    "没有可用默认值的字段必须向用户收集真实内容。禁止编造「无」「示例」「请审批」。日期页面默认当日不算编造。",
+    "没有可用默认值的字段必须向用户收集真实内容。禁止编造「无」「示例」「请审批」。日期 `default: today` 必须在调用前换成当天，不算编造。",
     "系统常量必须带合同值，由 runtime 自动填。",
     "",
     "## 适用场景",
@@ -712,7 +706,7 @@ export function renderSkillMd(contract) {
     "## 成功、失败与停止",
     "",
     "- 任一步失败即停",
-    "- 查询成功只回统计概览和已填写人员，不要把未填写长名单整表贴进对话",
+    "- 查询成功只回短汇总，不要把长名单整表贴进对话",
     "- 没有本包凭证或 401 / 账号未登录 → 停问一次 token。提问只用 `{\"questions\":[{\"id\":\"token\",\"question\":\"请粘贴新的访问令牌\",\"inputType\":\"text\",\"required\":true}]}`，不要加 title，不要自己补 default。拿到后用 `DANO_AUTH_HEADERS` 覆盖再跑同一条命令；不要改文件，不要再问第二次",
     "- 选项失败或空列表 → 停问",
     "",
@@ -814,6 +808,12 @@ export function handbookUnfaithfulReasons(text, contract) {
   }
   if (!/禁止再读本文件|不要再读本文件/.test(text)) reasons.push("缺少不要再读本文件");
   if (!/确认卡/.test(text)) reasons.push("缺少确认卡规则");
+  if (!/换成当天/.test(text)) reasons.push("缺少日期 today 换成当天");
+  if ((contract.capabilities || []).some((cap) => (cap.caller_fields || []).some((field) => field.page_default === "today"))) {
+    if (!/"default": "today"/.test(text) && !/"default":"today"/.test(text)) {
+      reasons.push("冻结提问缺少日期 default today");
+    }
+  }
   return reasons;
 }
 
