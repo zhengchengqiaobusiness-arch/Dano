@@ -13,7 +13,10 @@
    `skill-generator-workflow.md` / `skill-generator-live-options.md`
    → `submit_skill_export({ok:false, errors:[...]})`，停止。
 2. 调用 `read_export_contract`。唯一输入是五块：`capabilities` / `steps` / `links` / `capability_relations` / `unresolved`。禁止只扫 `capabilities[]`。禁止回头打开页面猜字段。
-3. 调用 `read_skill_artifact` 看运输层已物化的 `SKILL.md`、`references/CONTRACT.json`、`references/INPUT_FORMS.md`。运输层 `SKILL.md` 只是合同骨架，不是成品；必须按本文件和 `doc/` 覆盖 `SKILL.md`。
+3. 调用 `read_skill_artifact` 看运输层已物化的 `SKILL.md`、`references/CONTRACT.json`、`references/INPUT_FORMS.md`。先对现包跑 `validate_skill_package`。
+   - 已经 ok：禁止覆盖 `SKILL.md` 正文。只允许改 frontmatter 的 `name` / `description`；改完必须再 validate。通过后立刻 `submit_skill_export`。
+   - 只有 handbook_fields 失败时才改 `SKILL.md`。必须保留运输层已有的字段表、冻结提问 JSON、可用默认值、`合同值`、`route_id`。禁止另写一份更瘦的表单。禁止把 `dataSource` 写进 `SKILL.md`。禁止写 `"inputType": "table"`。
+   - 改写被拒绝或再次失败：不要继续改瘦。用运输层现包再 validate，通过就提交。
 4. 写入行仍有未识别来源、或合同声明不可执行：停止，不要出可执行写能力。
 
 ## 运输层已经写好的包
@@ -75,7 +78,7 @@ frontmatter 仅非空 `name` + `description`。不要写 `version`、`compatibil
 
 ## 检查与验证
 
-用 `validate_skill_package` 跑结构规则和合同保真。有 error 就改 **SKILL.md**，不要改冻结执行器，不要改检查器去放行。
+用 `validate_skill_package` 跑结构规则和合同保真。运输层手册已经通过时不要重写。有 error 只改 **SKILL.md** 缺口，不要改冻结执行器，不要改检查器去放行。`handbook_fields` 会列出缺哪些字段 / 默认值 / 禁止的 `dataSource` JSON。
 
 对每个能力调用 `project_contract_to_request({capability_id, inputs})`。只按合同投影。缺键失败，列出缺哪些，**不准补键**。
 

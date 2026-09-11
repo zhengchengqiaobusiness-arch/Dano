@@ -17,8 +17,18 @@ import { logExport } from "../policy.mjs";
 import { usableAuthHeaders } from "../auth-vault.mjs";
 
 export function stableSkillId({ subsystem = "oa", recordingId = "", title = "", existing = "" } = {}) {
-  if (String(existing || "").includes(".")) return String(existing);
-  const action = String(recordingId || "").trim()
+  const existingText = String(existing || "").trim();
+  const rec = String(recordingId || "").trim();
+  const recSlug = rec.replace(/_/g, "-");
+  if (existingText.includes(".")) {
+    const action = existingText.split(".").pop();
+    const stalePlanner = rec.startsWith("rec_")
+      && /^action_[a-f0-9]{8,}$/i.test(action)
+      && action !== rec
+      && action !== recSlug;
+    if (!stalePlanner) return existingText;
+  }
+  const action = rec
     || `action_${createHash("sha1").update(String(title || "skill")).digest("hex").slice(0, 12)}`;
   return `${String(subsystem || "oa").replace(/[^a-zA-Z0-9_-]+/g, "-") || "oa"}.${action}`;
 }

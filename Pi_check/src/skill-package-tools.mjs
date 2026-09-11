@@ -7,6 +7,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { validateSkillPackageDir } from "./skill-export/validator.mjs";
+import { handbookUnfaithfulReasons } from "./skill-export/contract-materialize.mjs";
 
 const ARTIFACT_TOP = new Set(["SKILL.md", "config", "scripts", "references"]);
 const FROZEN_RELS = new Set([
@@ -45,6 +46,17 @@ export async function writeSkillArtifact(files, recordingId, rel, content) {
   const normalized = safeRel(rel);
   if (FROZEN_RELS.has(normalized)) {
     throw new Error(`冻结文件由运输层按合同物化，禁止重写: ${normalized}`);
+  }
+  if (normalized === "SKILL.md") {
+    try {
+      const contract = JSON.parse(await readFile(path.join(root, "references", "CONTRACT.json"), "utf8"));
+      const reasons = handbookUnfaithfulReasons(String(content ?? ""), contract);
+      if (reasons.length) {
+        return { saved: false, path: normalized, errors: reasons };
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
   }
   const target = path.join(root, normalized);
   await mkdir(path.dirname(target), { recursive: true });

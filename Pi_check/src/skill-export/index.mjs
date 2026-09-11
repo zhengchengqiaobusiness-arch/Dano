@@ -39,6 +39,7 @@ export {
   writeMaterializedPackage,
   contractFidelityIssues,
   handbookIsFaithful,
+  handbookUnfaithfulReasons,
   chooseHandbook,
   resolveSystemDefault,
 } from "./contract-materialize.mjs";

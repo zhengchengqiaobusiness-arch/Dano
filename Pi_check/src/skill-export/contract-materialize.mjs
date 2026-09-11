@@ -760,43 +760,53 @@ export function materializePackageTexts(draft) {
   };
 }
 
-export function handbookIsFaithful(text, contract) {
-  if (!text) return false;
+export function handbookUnfaithfulReasons(text, contract) {
+  if (!text) return ["手册为空"];
+  const reasons = [];
   for (const section of ["立刻办理", "冻结提问", "选择工作流", "执行协议", "按需读取资源", "鉴权"]) {
-    if (!text.includes(section)) return false;
+    if (!text.includes(section)) reasons.push(`缺少章节 ${section}`);
   }
-  if (!text.includes("可用默认值")) return false;
-  if (!text.includes("冻结提问") || !text.includes("ask_user_question")) return false;
-  if (/"inputType"\s*:\s*"table"/.test(text)) return false;
-  if (/字段以 references\/CONTRACT|先阅读全部 references/.test(text)) return false;
+  if (!text.includes("可用默认值")) reasons.push("缺少可用默认值");
+  if (!text.includes("ask_user_question")) reasons.push("缺少冻结提问 ask_user_question");
+  if (/"inputType"\s*:\s*"table"/.test(text)) reasons.push("提问里写了 inputType table");
+  if (/字段以 references\/CONTRACT|先阅读全部 references/.test(text)) reasons.push("写了禁止文案");
   for (const cap of contract.capabilities || []) {
-    if (!text.includes(cap.capability_id)) return false;
+    if (!text.includes(cap.capability_id)) reasons.push(`缺少能力 ${cap.capability_id}`);
     for (const field of cap.caller_fields || []) {
-      if (!text.includes(`\`${field.id}\``)) return false;
-      if (!text.includes(`"id": "${field.id}"`) && !text.includes(`"id":"${field.id}"`)) return false;
+      if (!text.includes(`\`${field.id}\``)) reasons.push(`缺少字段标记 ${field.id}`);
+      if (!text.includes(`"id": "${field.id}"`) && !text.includes(`"id":"${field.id}"`)) {
+        reasons.push(`冻结提问缺少 ${field.id}`);
+      }
       for (const key of Object.keys(field.itemProperties || {})) {
-        if (!text.includes(`${field.id}.${key}`) && !text.includes(`\`${key}\``)) return false;
+        if (!text.includes(`${field.id}.${key}`) && !text.includes(`\`${key}\``)) {
+          reasons.push(`缺少列 ${field.id}.${key}`);
+        }
       }
     }
     for (const param of cap.system_params || []) {
-      if (param.key && !text.includes(String(param.key))) return false;
+      if (param.key && !text.includes(String(param.key))) reasons.push(`缺少系统字段 ${param.key}`);
       if (Object.prototype.hasOwnProperty.call(param, "default_value")) {
-        if (!text.includes(`合同值 ${JSON.stringify(param.default_value)}`)) return false;
+        const needle = `合同值 ${JSON.stringify(param.default_value)}`;
+        if (!text.includes(needle)) reasons.push(`缺少 ${needle}`);
       }
     }
     for (const key of schemaPropertyKeys(cap)) {
-      if (!text.includes(key)) return false;
+      if (!text.includes(key)) reasons.push(`缺少 schema 字段 ${key}`);
     }
   }
   for (const item of contract.routes || []) {
-    if (item.route_id && !text.includes(`\`${item.route_id}\``)) return false;
+    if (item.route_id && !text.includes(`\`${item.route_id}\``)) reasons.push(`缺少路线 ${item.route_id}`);
   }
   if ((contract.capabilities || []).some((cap) => (cap.caller_fields || []).some((field) => field.dataSource))) {
-    if (!text.includes("--list-options")) return false;
-    if (!text.includes("不要把 dataSource 放进 ask")) return false;
-    if (/"dataSource"\s*:/.test(text)) return false;
+    if (!text.includes("--list-options")) reasons.push("缺少 --list-options");
+    if (!text.includes("不要把 dataSource 放进 ask")) reasons.push("缺少不要把 dataSource 放进 ask");
+    if (/"dataSource"\s*:/.test(text)) reasons.push("SKILL.md 里写了 dataSource JSON");
   }
-  return true;
+  return reasons;
+}
+
+export function handbookIsFaithful(text, contract) {
+  return handbookUnfaithfulReasons(text, contract).length === 0;
 }
 
 export function chooseHandbook(skill4Text, materializedText, contract) {

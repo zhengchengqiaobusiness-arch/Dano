@@ -13,7 +13,7 @@ import { readGeneratorGuides, REQUIRED_GUIDE_FILES, generatorGuideDir } from "..
 import { validateSkillPackageDir } from "../src/skill-export/validator.mjs";
 import { createExportToolHost, describeExportPiTools, describePiTools } from "../src/pi-tools.mjs";
 import { packSkill4Artifacts } from "../src/skill-export/pack.mjs";
-import { consumerContract, renderSkillMd, handbookIsFaithful, chooseHandbook, frozenAskForm } from "../src/skill-export/contract-materialize.mjs";
+import { consumerContract, renderSkillMd, handbookIsFaithful, handbookUnfaithfulReasons, chooseHandbook, frozenAskForm } from "../src/skill-export/contract-materialize.mjs";
 import { extractAuthHeadersFromEvidence, resolveExportAuth } from "../src/skill-export/auth-resolve.mjs";
 import { writeTokenRecord, writebackExportedPackages, writeAuthLocalFile } from "../src/skill-export/token-store.mjs";
 import { hydrateAuthFromRecordings } from "../src/skill-export/start-export-session.mjs";
@@ -296,6 +296,13 @@ test("目录重导沿用同一 skill_id，并使用 overlay 最新能力", async
   assert.deepEqual(seen, [{ existingSkillId: "oa.keep_id", title: "最新日报", capabilityCount: 3 }]);
   assert.equal(outcome.count, 1);
   assert.equal(stableSkillId({ existing: "oa.keep_id", recordingId: "rec_other" }), "oa.keep_id");
+  assert.equal(
+    stableSkillId({
+      existing: "ruoyioffice-com.action_0b0080e1bcee41aca9b01d76b0280b08",
+      recordingId: "rec_48e821e5fefd425fbbdaccedb93cd7e1",
+    }),
+    "oa.rec_48e821e5fefd425fbbdaccedb93cd7e1",
+  );
 });
 
 const HANDBOOK = `# 日报填报
@@ -772,6 +779,24 @@ test("写冻结执行器被拒绝", async () => {
     () => writeSkillArtifact({ directory: () => os.tmpdir() }, "rec_x", "references/CONTRACT.json", "{}"),
     /冻结文件/,
   );
+});
+
+test("合同已物化后拒绝改瘦 SKILL.md", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dano-thin-md-"));
+  const files = new RecordingFiles(root);
+  const recordingId = "rec_thin_md";
+  const dest = path.join(files.directory(recordingId), "skill-artifacts");
+  await mkdir(path.join(dest, "references"), { recursive: true });
+  const contract = consumerContract(DRAFT);
+  await writeFile(path.join(dest, "references", "CONTRACT.json"), `${JSON.stringify(contract, null, 2)}\n`, "utf8");
+  await writeFile(path.join(dest, "SKILL.md"), renderSkillMd(contract), "utf8");
+  const rejected = await writeSkillArtifact(files, recordingId, "SKILL.md", "# 残缺\n");
+  assert.equal(rejected.saved, false);
+  assert.ok((rejected.errors || []).some((item) => item.includes("立刻办理")));
+  const kept = await readFile(path.join(dest, "SKILL.md"), "utf8");
+  assert.match(kept, /立刻办理/);
+  const reasons = handbookUnfaithfulReasons("# 残缺\n", contract);
+  assert.ok(reasons.some((item) => item.includes("立刻办理")));
 });
 
 test("物化字段与录制调用方字段一致，flow --help 可读", async () => {

@@ -703,7 +703,10 @@ export function createExportToolHost({
     async write_skill_artifact({ path: rel, content }) {
       try {
         const result = await writeSkillArtifact(files, recordingId, rel, content);
-        logTool("write_skill_artifact", `path=${result.path} bytes=${String(content ?? "").length}`);
+        logTool(
+          "write_skill_artifact",
+          `path=${result.path} bytes=${String(content ?? "").length} saved=${result.saved !== false} ${result.errors?.length ? result.errors.join("; ") : ""}`.trim(),
+        );
         return result;
       } catch (error) {
         logTool("write_skill_artifact", `失败 path=${rel || "-"} ${error.message || error}`);
