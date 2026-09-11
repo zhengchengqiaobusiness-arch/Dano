@@ -146,6 +146,55 @@ test("录制中前台断开先宽限，接回后不得取消", async () => {
   }
 });
 
+test("PI 定稿后前台必须收到 editable，不必再点结束", async () => {
+  const result = sampleResult();
+  const harness = await createHarness({
+    result,
+    piBehavior: "submit_on_drive",
+  });
+  const catalog = new ResultsCatalog(harness.files);
+  const httpServer = createServer();
+  const wss = attachFrontendBridge(httpServer, { controller: harness.controller, catalog, disconnectGraceMs: 40 });
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const { port } = httpServer.address();
+  let ws;
+  try {
+    ws = await openRecorderSocket(port);
+    const snapshots = listenSnapshots(ws);
+    const saved = [];
+    ws.on("message", (raw) => {
+      let message;
+      try {
+        message = JSON.parse(String(raw));
+      } catch {
+        return;
+      }
+      if (message.type === "recording_result_saved") saved.push(message);
+    });
+    ws.send(JSON.stringify({
+      type: "start",
+      start_url: "http://example.com",
+      goal_text: "产出能力",
+      title: "自动定稿跳转",
+    }));
+    await waitFor(() => snapshots.some((item) => item.status === "editable"));
+    const recordingId = snapshots.findLast((item) => String(item.run_id || "").startsWith("rec_")).run_id;
+    const editable = snapshots.findLast((item) => item.status === "editable");
+    assert.equal(harness.controller.view(recordingId).status, "succeeded");
+    assert.equal(harness.controller.view(recordingId).hasFinalResult, true);
+    assert.equal(editable.draft.capabilities[0].name, "create_leave");
+    assert.equal(saved.length, 1);
+    assert.equal(catalog.detail(recordingId).draft.capabilities[0].name, "create_leave");
+    await waitFor(() => harness.getPi()?.alive === false);
+    assert.equal(harness.getPi().closeDuringTool, false);
+  } finally {
+    ws?.terminate();
+    wss.close();
+    await new Promise((resolve) => httpServer.close(resolve));
+    await harness.cleanup();
+  }
+});
+
 test("点完停止后前台断开，PI 仍能提交并写入历史", async () => {
   const result = sampleResult();
   const harness = await createHarness({

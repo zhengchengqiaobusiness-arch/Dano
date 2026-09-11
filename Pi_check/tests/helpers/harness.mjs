@@ -84,6 +84,28 @@ export class ScriptedPiSession {
     this.aborted = false;
     this.onThought = typeof onThought === "function" ? onThought : null;
     this.exitListeners = new Set();
+    this.toolInFlight = 0;
+    this.closeDuringTool = false;
+    this.submitReturned = false;
+  }
+
+  async #runTool(name, args) {
+    this.toolInFlight += 1;
+    try {
+      const out = await this.tools[name](args);
+      if (name === "submit_recording_result") this.submitReturned = true;
+      return out;
+    } finally {
+      this.toolInFlight -= 1;
+    }
+  }
+
+  async callSubmit(result) {
+    return this.#runTool("submit_recording_result", {
+      recording_id: this.recordingId,
+      final: true,
+      result: result || this.result,
+    });
   }
 
   onExit(listener) {
@@ -99,7 +121,7 @@ export class ScriptedPiSession {
     if (!this.alive) return;
     if (this.behavior === "submit_unfrozen") {
       try {
-        await this.tools.submit_recording_result({
+        await this.#runTool("submit_recording_result", {
           recording_id: this.recordingId,
           final: true,
           result: this.result,
@@ -170,7 +192,7 @@ export class ScriptedPiSession {
       throw new Error("PI 连续空转未自动操作");
     }
     if (this.behavior === "submit_on_drive") {
-      await this.tools.submit_recording_result({
+      await this.#runTool("submit_recording_result", {
         recording_id: this.recordingId,
         final: true,
         result: this.result,
@@ -192,7 +214,7 @@ export class ScriptedPiSession {
     if (this.behavior === "submit_after_delay") {
       await new Promise((resolve) => setTimeout(resolve, this.delayMs));
       if (!this.alive) throw new Error("PI 会话已关闭");
-      await this.tools.submit_recording_result({
+      await this.#runTool("submit_recording_result", {
         recording_id: this.recordingId,
         final: true,
         result: this.result,
@@ -200,7 +222,7 @@ export class ScriptedPiSession {
       return;
     }
     if (this.behavior === "empty_result") {
-      await this.tools.submit_recording_result({
+      await this.#runTool("submit_recording_result", {
         recording_id: this.recordingId,
         final: true,
         result: {},
@@ -208,7 +230,7 @@ export class ScriptedPiSession {
       return;
     }
     if (this.behavior === "wrong_id") {
-      await this.tools.submit_recording_result({
+      await this.#runTool("submit_recording_result", {
         recording_id: "rec_does_not_match",
         final: true,
         result: this.result,
@@ -216,21 +238,21 @@ export class ScriptedPiSession {
       return;
     }
     if (this.behavior === "not_final") {
-      await this.tools.submit_recording_result({
+      await this.#runTool("submit_recording_result", {
         recording_id: this.recordingId,
         final: false,
         result: this.result,
       });
       return;
     }
-    await this.tools.submit_recording_result({
+    await this.#runTool("submit_recording_result", {
       recording_id: this.recordingId,
       final: true,
       result: this.result,
     });
     if (this.behavior === "submit_twice") {
       try {
-        await this.tools.submit_recording_result({
+        await this.#runTool("submit_recording_result", {
           recording_id: this.recordingId,
           final: true,
           result: { ...this.result, injected_by_second_submit: true },
@@ -242,6 +264,7 @@ export class ScriptedPiSession {
   }
 
   async close() {
+    this.closeDuringTool = this.toolInFlight > 0;
     this.alive = false;
   }
 }

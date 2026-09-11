@@ -7,6 +7,28 @@ import assert from "node:assert/strict";
 import { createHarness, sampleResult } from "./helpers/harness.mjs";
 import { publicFailureMessage } from "../src/policy.mjs";
 
+function waitUntil(predicate, timeoutMs = 2000) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const tick = async () => {
+      try {
+        if (await predicate()) {
+          resolve();
+          return;
+        }
+      } catch {
+        // 条件未就绪时继续等
+      }
+      if (Date.now() - started >= timeoutMs) {
+        reject(new Error("等待超时"));
+        return;
+      }
+      setTimeout(tick, 15);
+    };
+    tick();
+  });
+}
+
 test("1. PI 启动失败时，浏览器录制不启动", async () => {
   const harness = await createHarness({ piFailStart: true });
   try {
@@ -193,6 +215,57 @@ test("7-9. 成功提交时保存内容与 PI 原始提交完全一致，代码�
     assert.equal(stopped.result.capabilities.length, 1);
     assert.equal(stopped.receipt.recording_id, started.id);
     assert.equal(Object.hasOwn(stopped.result, "accepted_at"), false);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("自动操作中定稿必须先通知前台，拆现场不得卡住当前工具", async () => {
+  let completed = 0;
+  const harness = await createHarness({ piBehavior: "submit_on_drive" });
+  try {
+    const started = await harness.controller.start({
+      targetUrl: "http://example.com",
+      goal: "目标",
+      onComplete: () => {
+        completed += 1;
+      },
+    });
+    await waitUntil(() => (
+      completed > 0
+      && harness.controller.view(started.id).status === "succeeded"
+      && harness.getPi()?.submitReturned
+    ));
+    assert.equal(completed, 1);
+    assert.equal(harness.controller.view(started.id).hasFinalResult, true);
+    await waitUntil(() => harness.getPi()?.alive === false);
+    assert.equal(harness.getPi().closeDuringTool, false);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("自动操作超时后定稿仍要收口并通知前台", async () => {
+  let completed = 0;
+  const harness = await createHarness({ piBehavior: "drive_fail" });
+  try {
+    const started = await harness.controller.start({
+      targetUrl: "http://example.com",
+      goal: "目标",
+      onComplete: () => {
+        completed += 1;
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(harness.controller.view(started.id).status, "recording");
+    const accepted = await harness.getPi().callSubmit(sampleResult());
+    assert.equal(accepted.accepted, true);
+    assert.equal(harness.getPi().submitReturned, true);
+    assert.equal(harness.controller.view(started.id).status, "succeeded");
+    assert.equal(harness.controller.view(started.id).hasFinalResult, true);
+    assert.equal(completed, 1);
+    await waitUntil(() => harness.getPi()?.alive === false);
+    assert.equal(harness.getPi().closeDuringTool, false);
   } finally {
     await harness.cleanup();
   }

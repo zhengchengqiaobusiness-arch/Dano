@@ -489,6 +489,7 @@ export function createPiToolHost({
       });
       if (accepted?.accepted && typeof onFinalAccepted === "function") {
         try {
+          // 只收口状态并通知前台；关 PI 必须排在本工具返回之后
           await onFinalAccepted();
         } catch {
           // 结果已落盘，收口失败不得让 PI 以为没交上

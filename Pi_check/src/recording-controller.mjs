@@ -335,6 +335,7 @@ export class RecordingController {
       browser: null,
       failed: false,
       completing: false,
+      teardownScheduled: false,
       replacingPi: false,
       analysisRetried: false,
       browserStartAttempted: false,
@@ -472,6 +473,27 @@ export class RecordingController {
     return this.#succeed(recordingId);
   }
 
+  #scheduleSiteTeardown(recordingId) {
+    const slot = this.#active.get(recordingId);
+    if (!slot || slot.teardownScheduled) return;
+    slot.teardownScheduled = true;
+    const tearDown = async () => {
+      try {
+        await slot.browser?.close();
+      } catch {
+        // ignore
+      }
+      try {
+        await slot.pi?.close({ reason: "completed" });
+      } catch {
+        // ignore
+      }
+    };
+    setImmediate(() => {
+      tearDown().catch(() => {});
+    });
+  }
+
   async #succeed(recordingId) {
     const slot = this.#active.get(recordingId);
     if (slot?.completing) {
@@ -498,16 +520,6 @@ export class RecordingController {
       hasFinalResult: true,
       publicMessage: `PI 已提交 ${capabilityCount} 项能力`,
     });
-    try {
-      await slot?.browser?.close();
-    } catch {
-      // ignore
-    }
-    try {
-      await slot?.pi?.close({ reason: "completed" });
-    } catch {
-      // ignore
-    }
     const payload = {
       session: this.view(recordingId),
       result: await this.files.readPiResult(recordingId),
@@ -518,6 +530,7 @@ export class RecordingController {
     } catch {
       // 完成通知失败不得改写结果
     }
+    this.#scheduleSiteTeardown(recordingId);
     return payload;
   }
 
