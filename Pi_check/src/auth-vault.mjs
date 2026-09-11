@@ -31,6 +31,24 @@ export function usableAuthHeaders(raw) {
   return headers;
 }
 
+export function hasCredentialHeaders(raw) {
+  const headers = usableAuthHeaders(raw);
+  return Boolean(
+    headers.Authorization
+    || headers.Cookie
+    || headers["X-Token"]
+    || headers["X-Access-Token"],
+  );
+}
+
+export function mergeAuthHeaders(...parts) {
+  const headers = {};
+  for (const part of parts) {
+    Object.assign(headers, usableAuthHeaders(part));
+  }
+  return headers;
+}
+
 export function canonicalHeaderName(name) {
   const key = String(name || "").trim();
   if (!key) return "";

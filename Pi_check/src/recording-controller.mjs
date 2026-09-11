@@ -187,6 +187,7 @@ export class RecordingController {
         const slot = this.#active.get(recordingId);
         slot?.pi?.pauseForAssist?.(payload?.reason || slot?.assist?.reason || "");
       },
+      onFinalAccepted: () => this.#succeed(recordingId),
     });
   }
 

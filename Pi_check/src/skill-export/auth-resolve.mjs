@@ -9,10 +9,12 @@ import {
   readAuthVault,
   vaultFilePath,
   usableAuthHeaders,
+  hasCredentialHeaders,
+  mergeAuthHeaders,
   baseUrlFromSources,
 } from "../auth-vault.mjs";
 import { parseLeadingJson } from "../fs-store.mjs";
-import { readTokenRecord } from "./token-store.mjs";
+import { listTenantTokenRecords, pickTenantCredential, readTokenRecord } from "./token-store.mjs";
 import { logExport } from "../policy.mjs";
 
 export async function readRecordingManifest(files, recordingId) {
@@ -47,28 +49,39 @@ export async function resolveExportAuth({
 } = {}) {
   const stored = await readTokenRecord(tenant, subsystem, tokenRoot);
   const fromRequest = usableAuthHeaders(requestHeaders);
+  const captured = evidence && recordingId
+    ? await extractAuthHeadersFromEvidence(evidence, recordingId)
+    : {};
+  const extras = [captured, stored.headers];
   if (stored.has_token && stored.source === "manual") {
-    logExport(`鉴权命中 store source=manual header_names=${Object.keys(stored.headers).join(",")} tenant=${tenant || "-"}`);
-    return { headers: stored.headers, source: "manual" };
+    const headers = mergeAuthHeaders(...extras, stored.headers);
+    logExport(`鉴权命中 store source=manual header_names=${Object.keys(headers).join(",")} tenant=${tenant || "-"}`);
+    return { headers, source: "manual" };
   }
-  if (Object.keys(fromRequest).length) {
-    logExport(`鉴权命中 request header_names=${Object.keys(fromRequest).join(",")} recording_id=${recordingId || "-"}`);
-    return { headers: fromRequest, source: "request" };
+  if (hasCredentialHeaders(fromRequest)) {
+    const headers = mergeAuthHeaders(...extras, fromRequest);
+    logExport(`鉴权命中 request header_names=${Object.keys(headers).join(",")} recording_id=${recordingId || "-"}`);
+    return { headers, source: "request" };
   }
-  if (stored.has_token) {
-    logExport(`鉴权命中 store source=${stored.source || "store"} header_names=${Object.keys(stored.headers).join(",")} tenant=${tenant || "-"}`);
-    return { headers: stored.headers, source: stored.source || "store" };
+  if (hasCredentialHeaders(stored.headers)) {
+    const headers = mergeAuthHeaders(...extras, stored.headers);
+    logExport(`鉴权命中 store source=${stored.source || "store"} header_names=${Object.keys(headers).join(",")} tenant=${tenant || "-"}`);
+    return { headers, source: stored.source || "store" };
   }
-
-  if (evidence && recordingId) {
-    const captured = await extractAuthHeadersFromEvidence(evidence, recordingId);
-    if (Object.keys(captured).length) {
-      logExport(`鉴权命中 recording header_names=${Object.keys(captured).join(",")} recording_id=${recordingId}`);
-      return { headers: captured, source: "recording" };
-    }
+  if (hasCredentialHeaders(captured)) {
+    logExport(`鉴权命中 recording header_names=${Object.keys(captured).join(",")} recording_id=${recordingId}`);
+    return { headers: mergeAuthHeaders(stored.headers, captured), source: "recording" };
+  }
+  const tenantHit = tenant
+    ? pickTenantCredential(await listTenantTokenRecords(tenant, tokenRoot), subsystem)
+    : null;
+  if (tenantHit && hasCredentialHeaders(tenantHit.headers)) {
+    const headers = mergeAuthHeaders(...extras, tenantHit.headers);
+    logExport(`鉴权命中 tenant_store subsystem=${tenantHit.subsystem || "-"} source=${tenantHit.source || "store"} header_names=${Object.keys(headers).join(",")} tenant=${tenant || "-"}`);
+    return { headers, source: tenantHit.source || "tenant_store" };
   }
   logExport(`鉴权落空 request=empty store=empty recording=${evidence && recordingId ? "empty" : "skip"} recording_id=${recordingId || "-"}`);
-  return { headers: {}, source: "" };
+  return { headers: mergeAuthHeaders(...extras), source: "" };
 }
 
 export async function resolveExportBaseUrl({ files, recordingId, draft } = {}) {

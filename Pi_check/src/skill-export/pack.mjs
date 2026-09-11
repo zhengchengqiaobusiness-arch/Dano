@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { artifactRoot } from "../skill-package-tools.mjs";
 import { validateSkillPackageDir } from "./validator.mjs";
 import { authLocalPayload, writeAuthLocalFile } from "./token-store.mjs";
-import { usableAuthHeaders, baseUrlFromSources } from "../auth-vault.mjs";
+import { hasCredentialHeaders, usableAuthHeaders, baseUrlFromSources } from "../auth-vault.mjs";
 import { extractAuthHeadersFromEvidence } from "./auth-resolve.mjs";
 import {
   chooseHandbook,
@@ -193,11 +193,11 @@ export async function refreshPackageTransport(dest, {
     });
   }
   const headers = usableAuthHeaders(authHeaders);
-  if (Object.keys(headers).length) {
+  if (hasCredentialHeaders(headers)) {
     await writeAuthLocalFile(dest, headers);
   }
-  logExport(`刷新运输 dest=${dest} rematerialize=${Array.isArray(draft?.capabilities) && draft.capabilities.length ? "yes" : "scripts_only"} token=${Object.keys(headers).length ? "full" : "empty"} base_url=${nextBase || "-"}`);
-  return { export_path: dest, base_url: nextBase, token_missing: Object.keys(headers).length === 0 };
+  logExport(`刷新运输 dest=${dest} rematerialize=${Array.isArray(draft?.capabilities) && draft.capabilities.length ? "yes" : "scripts_only"} token=${hasCredentialHeaders(headers) ? "full" : "empty"} base_url=${nextBase || "-"}`);
+  return { export_path: dest, base_url: nextBase, token_missing: !hasCredentialHeaders(headers) };
 }
 
 export async function packSkill4Artifacts({
@@ -247,7 +247,7 @@ export async function packSkill4Artifacts({
   });
   await writeAuthLocalFile(dest, headers);
   await stripNestedSkillPackages(dest);
-  const tokenMissing = Object.keys(authLocalPayload(headers).headers).length === 0;
+  const tokenMissing = !hasCredentialHeaders(headers);
   if (!validate) {
     logExport(`打包跳过校验 dest=${dest} reason=catalog_dump handbook=${packed.handbook_source}`);
     logExport(`打包完成 dest=${dest} token_missing=${tokenMissing} base_url=${resolvedBase || "-"} handbook=${packed.handbook_source}`);

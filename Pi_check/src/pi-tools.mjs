@@ -155,6 +155,7 @@ export function createPiToolHost({
   onAssist = null,
   isAssistHold = null,
   onPauseForAssist = null,
+  onFinalAccepted = null,
 }) {
   return {
     async list_recording_manifest() {
@@ -476,7 +477,7 @@ export function createPiToolHost({
         await freezeEvidence();
         session = evidence.snapshot(recordingId);
       }
-      return gate.submitRecordingResult({
+      const accepted = await gate.submitRecordingResult({
         recordingId: recording_id,
         expectedRecordingId: recordingId,
         callerSessionId: getPiSessionId(),
@@ -486,6 +487,14 @@ export function createPiToolHost({
         use_draft,
         frozen: Boolean(session.frozen),
       });
+      if (accepted?.accepted && typeof onFinalAccepted === "function") {
+        try {
+          await onFinalAccepted();
+        } catch {
+          // 结果已落盘，收口失败不得让 PI 以为没交上
+        }
+      }
+      return accepted;
     },
   };
 }

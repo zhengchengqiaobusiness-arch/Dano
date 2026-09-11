@@ -17,7 +17,7 @@ import { consumerContract, renderSkillMd, handbookIsFaithful, handbookUnfaithful
 import { extractAuthHeadersFromEvidence, resolveExportAuth } from "../src/skill-export/auth-resolve.mjs";
 import { writeTokenRecord, writebackExportedPackages, writeAuthLocalFile } from "../src/skill-export/token-store.mjs";
 import { hydrateAuthFromRecordings } from "../src/skill-export/start-export-session.mjs";
-import { writeAuthVault, vaultFilePath, usableAuthHeaders, asAuthorization } from "../src/auth-vault.mjs";
+import { writeAuthVault, vaultFilePath, usableAuthHeaders, asAuthorization, hasCredentialHeaders } from "../src/auth-vault.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -653,7 +653,7 @@ test("sealed 不算有证，登录响应写出完整 token", async () => {
     authorization: "[sealed:auth_ref_abc]",
     "tenant-id": "1",
   }, { root, merge: false });
-  assert.equal(stored.has_token, true);
+  assert.equal(stored.has_token, false);
   assert.equal(stored.headers.Authorization, undefined);
   assert.equal(stored.headers["tenant-id"], "1");
   const sealedOnly = await writeTokenRecord("empty", "oa", {
@@ -1189,6 +1189,30 @@ test("目录导出沿用已发布的 Skill 4 手册", async () => {
   assert.equal(outcome.status, "exported", (outcome.errors || []).join("; "));
   const packed = await readFile(path.join(outcome.export_path, "SKILL.md"), "utf8");
   assert.equal(packed, skill4Text);
+});
+
+test("只有 tenant-id 不算有证，出包回落到同租户可用 token", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dano-token-fallback-"));
+  await writeTokenRecord("acme", "ruoyioffice-com", { "tenant-id": "1" }, {
+    source: "recording",
+    root,
+    merge: false,
+  });
+  await writeTokenRecord("acme", "oa", { Authorization: "Bearer tenant-oa-token", "tenant-id": "1" }, {
+    source: "manual",
+    root,
+    merge: false,
+  });
+  const resolved = await resolveExportAuth({
+    tenant: "acme",
+    subsystem: "ruoyioffice-com",
+    tokenRoot: root,
+  });
+  assert.equal(resolved.source, "manual");
+  assert.equal(resolved.headers.Authorization, "Bearer tenant-oa-token");
+  assert.equal(resolved.headers["tenant-id"], "1");
+  assert.equal(hasCredentialHeaders({ "tenant-id": "1" }), false);
+  assert.equal(hasCredentialHeaders({ Authorization: "Bearer x", "tenant-id": "1" }), true);
 });
 
 test("页面保存的 token 优先于请求头，并回写已导出包", async () => {

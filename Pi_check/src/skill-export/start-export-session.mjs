@@ -11,10 +11,10 @@ import { artifactRoot } from "../skill-package-tools.mjs";
 import { readGeneratorGuides } from "./read-guides.mjs";
 import { packSkill4Artifacts, seedFrozenArtifacts } from "./pack.mjs";
 import { resolveExportAuth, resolveExportBaseUrl, extractAuthHeadersFromEvidence } from "./auth-resolve.mjs";
-import { writeTokenRecord, writebackExportedPackages, readTokenRecord, tokenStoreDir } from "./token-store.mjs";
+import { writeTokenRecord, writebackExportedPackages, readTokenRecord, tokenStoreDir, listTenantTokenRecords, pickTenantCredential } from "./token-store.mjs";
 import { skillManifestFromExport, upsertExportedSkill, listExportedSkills, getExportedSkill, getExportedSkillByRecording } from "./skill-catalog.mjs";
 import { logExport } from "../policy.mjs";
-import { usableAuthHeaders } from "../auth-vault.mjs";
+import { hasCredentialHeaders, usableAuthHeaders } from "../auth-vault.mjs";
 
 export function stableSkillId({ subsystem = "oa", recordingId = "", title = "", existing = "" } = {}) {
   const existingText = String(existing || "").trim();
@@ -97,8 +97,8 @@ export async function exportRecordingSkill({
     recordingId,
   });
   const baseUrl = await resolveExportBaseUrl({ files, recordingId, draft: latest });
-  logExport(`4/9 鉴权 source=${auth.source || "missing"} header_names=${Object.keys(auth.headers).join(",") || "-"} token=${Object.keys(auth.headers).length ? "full" : "empty"} base_url=${baseUrl || "-"}`, started);
-  if (Object.keys(auth.headers).length) {
+  logExport(`4/9 鉴权 source=${auth.source || "missing"} header_names=${Object.keys(auth.headers).join(",") || "-"} token=${hasCredentialHeaders(auth.headers) ? "full" : "empty"} base_url=${baseUrl || "-"}`, started);
+  if (hasCredentialHeaders(auth.headers)) {
     if (tenant) {
       await writeTokenRecord(tenant, subsystem, auth.headers, { source: auth.source || "recording" });
       logExport(`4/9 已写 token 仓库 tenant=${tenant} subsystem=${subsystem}`, started);
@@ -195,7 +195,7 @@ export async function exportRecordingSkill({
     existing: previous || submitted.skill_id,
   });
   logExport(`8/9 准备打包 skill_id=${skillId} previous=${previous || "-"} submitted_id=${submitted.skill_id || "-"}`, started);
-  if (tenant && Object.keys(auth.headers).length) {
+  if (tenant && hasCredentialHeaders(auth.headers)) {
     await writeTokenRecord(tenant, subsystem, auth.headers, { source: auth.source || "recording" });
   }
   let packed;
@@ -277,8 +277,8 @@ export async function dumpRecordingSkill({
     recordingId,
   });
   const baseUrl = await resolveExportBaseUrl({ files, recordingId, draft: latest });
-  logExport(`快速导出 鉴权 source=${auth.source || "missing"} header_names=${Object.keys(auth.headers).join(",") || "-"} token=${Object.keys(auth.headers).length ? "full" : "empty"} base_url=${baseUrl || "-"}`, started);
-  if (tenant && Object.keys(auth.headers).length) {
+  logExport(`快速导出 鉴权 source=${auth.source || "missing"} header_names=${Object.keys(auth.headers).join(",") || "-"} token=${hasCredentialHeaders(auth.headers) ? "full" : "empty"} base_url=${baseUrl || "-"}`, started);
+  if (tenant && hasCredentialHeaders(auth.headers)) {
     await writeTokenRecord(tenant, subsystem, auth.headers, { source: auth.source || "recording" });
   }
   const previousRow = existingSkillId
@@ -403,8 +403,8 @@ export async function hydrateAuthFromRecordings({ files, evidence, exportRoot = 
   const found = [];
   for (const recordingId of ids) {
     const headers = usableAuthHeaders(await extractAuthHeadersFromEvidence(ev, recordingId));
-    if (!Object.keys(headers).length) {
-      logExport(`启动回写 录制无可用头 recording_id=${recordingId}`, started);
+    if (!hasCredentialHeaders(headers)) {
+      logExport(`启动回写 录制无可用凭证 recording_id=${recordingId}`, started);
       continue;
     }
     const draft = (await files.readDraft(recordingId).catch(() => null))?.draft || {};
@@ -418,7 +418,16 @@ export async function hydrateAuthFromRecordings({ files, evidence, exportRoot = 
   for (const row of catalog) {
     const tenant = String(row.tenant || "").trim();
     const subsystem = row.subsystem || "oa";
-    const stored = tenant ? await readTokenRecord(tenant, subsystem, tokenRoot) : { has_token: false, headers: {}, source: "" };
+    let stored = tenant ? await readTokenRecord(tenant, subsystem, tokenRoot) : { has_token: false, headers: {}, source: "" };
+    if (!stored.has_token && tenant) {
+      const fallback = pickTenantCredential(await listTenantTokenRecords(tenant, tokenRoot), subsystem);
+      if (fallback) {
+        stored = await writeTokenRecord(tenant, subsystem, fallback.headers, {
+          source: fallback.source || "manual",
+          root: tokenRoot,
+        });
+      }
+    }
     if (stored.has_token) {
       const written = await writebackExportedPackages({
         subsystem,

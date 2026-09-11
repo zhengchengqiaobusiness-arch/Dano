@@ -5,7 +5,7 @@
 import { mkdir, readFile, writeFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { usableAuthHeaders } from "../auth-vault.mjs";
+import { hasCredentialHeaders, usableAuthHeaders } from "../auth-vault.mjs";
 import { logExport } from "../policy.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -45,7 +45,7 @@ export async function readTokenRecord(tenant, subsystem, root = ROOT) {
       headers,
       source: String(raw?.source || ""),
       updated_at: String(raw?.updated_at || ""),
-      has_token: Object.keys(headers).length > 0,
+      has_token: hasCredentialHeaders(headers),
     };
   } catch (error) {
     if (error?.code === "ENOENT") {
@@ -76,7 +76,45 @@ export async function writeTokenRecord(tenant, subsystem, headers, { source = "m
   };
   await mkdir(tokenStoreDir(root), { recursive: true });
   await writeFile(tokenFile(tenant, subsystem, root), `${JSON.stringify(record, null, 2)}\n`, "utf8");
-  return { ...record, has_token: Object.keys(record.headers).length > 0 };
+  return { ...record, has_token: hasCredentialHeaders(record.headers) };
+}
+
+export async function listTenantTokenRecords(tenant, root = ROOT) {
+  const wanted = String(tenant || "").trim();
+  if (!wanted) return [];
+  let names = [];
+  try {
+    names = await readdir(tokenStoreDir(root));
+  } catch {
+    return [];
+  }
+  const rows = [];
+  for (const name of names) {
+    const match = String(name).match(/^(.+)__(.+)\.json$/);
+    if (!match) continue;
+    if (safePart(match[1]) !== safePart(wanted)) continue;
+    const rec = await readTokenRecord(match[1], match[2], root);
+    if (hasCredentialHeaders(rec.headers)) rows.push(rec);
+  }
+  return rows;
+}
+
+export function pickTenantCredential(records, preferredSubsystem = "") {
+  const preferred = String(preferredSubsystem || "").trim();
+  let best = null;
+  let bestScore = -1;
+  for (const rec of Array.isArray(records) ? records : []) {
+    if (!hasCredentialHeaders(rec?.headers)) continue;
+    let score = 1;
+    if (rec.source === "manual") score += 8;
+    if (String(rec.subsystem || "") === "oa") score += 4;
+    if (preferred && String(rec.subsystem || "") === preferred) score += 2;
+    if (score > bestScore) {
+      best = rec;
+      bestScore = score;
+    }
+  }
+  return best;
 }
 
 export function authLocalPayload(headers) {
@@ -121,6 +159,10 @@ export async function writebackExportedPackages({
   catalogRows = [],
 } = {}) {
   const wanted = String(subsystem || "").trim();
+  if (!hasCredentialHeaders(headers)) {
+    logExport(`回写已导出包跳过 没有可用凭证 subsystem=${wanted || "-"}`);
+    return { updated: [] };
+  }
   const payload = authLocalPayload(headers);
   const updated = [];
   const seen = new Set();

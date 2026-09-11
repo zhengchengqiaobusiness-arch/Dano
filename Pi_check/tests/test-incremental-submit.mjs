@@ -7,6 +7,45 @@ import assert from "node:assert/strict";
 import { createHarness, sampleResult } from "./helpers/harness.mjs";
 import { createPiToolHost } from "../src/pi-tools.mjs";
 
+test("定稿被接受后必须通知现场收口", async () => {
+  const harness = await createHarness();
+  try {
+    const session = await harness.evidence.create({ targetUrl: "http://x", goal: "g" });
+    await harness.evidence.setStatus(session.id, { piSessionId: "pi-1" });
+    let closed = 0;
+    const tools = createPiToolHost({
+      recordingId: session.id,
+      evidence: harness.evidence,
+      files: harness.files,
+      gate: harness.gate,
+      getPiSessionId: () => "pi-1",
+      freezeEvidence: async () => {
+        if (!harness.evidence.snapshot(session.id).frozen) {
+          await harness.evidence.freeze(session.id);
+        }
+      },
+      onFinalAccepted: async () => {
+        closed += 1;
+      },
+    });
+    const result = sampleResult();
+    await tools.submit_recording_capability({
+      capability: JSON.stringify(result.capabilities[0]),
+      steps: JSON.stringify(result.steps),
+      title: "演示目标",
+    });
+    const accepted = await tools.submit_recording_result({
+      recording_id: session.id,
+      final: true,
+      use_draft: true,
+    });
+    assert.equal(accepted.accepted, true);
+    assert.equal(closed, 1);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test("单项能力写入草稿后可用 use_draft 定稿", async () => {
   const harness = await createHarness();
   try {
