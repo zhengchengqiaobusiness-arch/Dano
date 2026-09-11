@@ -581,8 +581,14 @@ export function renderSkillMd(contract) {
     "",
     "只读这一节就能办。读完禁止再读本文件，禁止读 `references/`，禁止 ls / cat / 探路。",
     "查询不要确认卡：表单提交后立刻执行。写操作才弹确认卡，确认后再 `--confirm`。",
-    "default：按路线步骤依次执行。读操作不确认，写操作才确认。读操作执行完立刻回短汇总，再问写表单，不要等写完才一并说。中间不要重读，不要第二次 `--list-options`。",
-    "日期：冻结 JSON 的 `default` 是 `today`。调用 ask 前必须换成当天 yyyy-MM-dd，`required` 保持 false。不要改回必填，不要为日期卡住提交。runtime 也会把未选日期填成当天。",
+    "default 链固定四步，不许跳步、不许一上来就 `--route default`：",
+    "1. 只问读能力冻结表。用户提交后立刻 `python3 scripts/flow.py --route <读能力id> --input-json '{...}'`。此时禁止 `--route default`。",
+    "2. 读成功后先发一条用户可见短汇总，禁止此时就问写表单，禁止等整条链写完再补汇总。",
+    "3. 再问写能力冻结表。",
+    "4. 写确认后才跑写能力，或此时才允许 `--route default`。",
+    "缺写字段就跑 default 会报缺少必填字段，用户会看到命令执行失败。中间不要重读，不要第二次 `--list-options`。",
+    "日期：冻结 JSON 的 `default` 是 `today`。调用 ask 前必须先跑 `date +%F`，用这条输出换成当天 yyyy-MM-dd，`required` 保持 false。禁止用合同、INPUT_FORMS、录制样本里的日期冒充当天，禁止自己猜年份。不要改回必填。runtime 也会把未选日期填成当天。",
+    "冻结提问 JSON 必须原样复制，不要改 question 文案，不要给无合同 default 的字段编默认值。",
     "问句只保留短标题和行格式，不要把内部 path 或探路说明写进宿主标签。",
     "查询成功只回短汇总，不要把长名单整表贴进对话；用户要明细再给。",
     "禁止改 `inputType`，禁止增删字段，禁止自己补非日期 `default`，禁止拆成多轮问卷。",
@@ -809,6 +815,10 @@ export function handbookUnfaithfulReasons(text, contract) {
   if (!/禁止再读本文件|不要再读本文件/.test(text)) reasons.push("缺少不要再读本文件");
   if (!/确认卡/.test(text)) reasons.push("缺少确认卡规则");
   if (!/换成当天/.test(text)) reasons.push("缺少日期 today 换成当天");
+  if ((contract.routes || []).some((item) => item.route_id === "default") && (contract.capabilities || []).length > 1) {
+    if (!/禁止 `--route default`|禁止 --route default/.test(text)) reasons.push("缺少禁止提前 default");
+    if (!/用户可见短汇总/.test(text)) reasons.push("缺少用户可见短汇总");
+  }
   if ((contract.capabilities || []).some((cap) => (cap.caller_fields || []).some((field) => field.page_default === "today"))) {
     if (!/"default": "today"/.test(text) && !/"default":"today"/.test(text)) {
       reasons.push("冻结提问缺少日期 default today");
