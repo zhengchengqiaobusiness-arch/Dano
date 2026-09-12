@@ -178,6 +178,7 @@ describe("detached-session", () => {
         additionalExtensionPaths: [
           expect.stringContaining("pi-heimdall/extensions/heimdall.ts"),
         ],
+        extensionsOverride: expect.any(Function),
       },
     });
     expect(applyOverrides).not.toHaveBeenCalled();

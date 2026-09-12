@@ -64,6 +64,16 @@ export interface ProviderRequest {
   readonly body?: unknown;
 }
 
+export interface ProviderSendEvidence {
+  readonly targetMatched: boolean;
+  readonly authorizationMatched: boolean;
+}
+
+interface RequestExecution {
+  readonly isActive: () => boolean;
+  readonly observeSend?: (evidence: ProviderSendEvidence) => void;
+}
+
 export type ProviderResponse =
   | {
       readonly ok: true;
@@ -359,11 +369,41 @@ export class CredentialBroker {
     });
   }
 
+  /** Anonymous executions retain their native HTTP behavior. */
+  pythonRequestOrigin(scope: string, agentSessionId: string): string | undefined {
+    return this.sessionState(scope, agentSessionId)?.activePiTurn?.loginSessionId
+      ? this.providerApiOrigin
+      : undefined;
+  }
+
+  /** Capture authority at script start; a later turn must never replace it. */
+  bindRequest(scope: string, agentSessionId: string) {
+    const state = this.sessionState(scope, agentSessionId);
+    const binding = state?.activePiTurn;
+    const isActive = () =>
+      Boolean(binding?.loginSessionId) &&
+      this.sessionState(scope, agentSessionId) === state &&
+      state?.activePiTurn === binding;
+    return (
+      request: ProviderRequest,
+      signal?: AbortSignal,
+      observeSend?: (evidence: ProviderSendEvidence) => void,
+    ): Promise<ProviderResponse> => {
+      if (!isActive() || signal?.aborted)
+        return Promise.resolve(AUTHENTICATION_REQUIRED);
+      return this.request(scope, agentSessionId, request, signal, {
+        isActive,
+        observeSend,
+      });
+    };
+  }
+
   async request(
     scope: string,
     agentSessionId: string,
     request: ProviderRequest,
     signal?: AbortSignal,
+    execution?: RequestExecution,
   ): Promise<ProviderResponse> {
     const issues: ProviderRequestIssue[] = [];
     const target =
@@ -424,6 +464,9 @@ export class CredentialBroker {
     if (!credential) return AUTHENTICATION_REQUIRED;
 
     const send = (requestCredential: ProviderCredential) => {
+      if (signal?.aborted || (execution && !execution.isActive())) {
+        throw new Error("Provider execution ended");
+      }
       const headers = requestHeaders(request.headers, requestCredential);
       if (body !== undefined && typeof request.body !== "string") {
         headers["content-type"] ??= "application/json";
@@ -431,6 +474,11 @@ export class CredentialBroker {
       try {
         this.options.observeRequestStage?.("request_sent");
       } catch {}
+      execution?.observeSend?.({
+        targetMatched: target!.origin === this.providerApiOrigin,
+        authorizationMatched:
+          headers.authorization === `Bearer ${requestCredential.accessToken}`,
+      });
       return this.providerFetch(target!, {
         method,
         headers,
