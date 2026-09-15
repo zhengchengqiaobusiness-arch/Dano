@@ -153,13 +153,16 @@ DANO_OAUTH_REDIRECT_URI
 requests the configured identity endpoint with the Provider access token. Set
 it to `token-introspection` for an RFC 7662-style endpoint authenticated with
 the configured OAuth Client. Provider `{code,data}` envelopes are normalized at
-the adapter boundary, and `user_id` is accepted as a stable external identity.
+the adapter boundary. Introspection accepts the standard `sub` field as well as
+the supported `userId`, `user_id`, and `id` fields as a stable external identity.
 
 When introspection omits display information, optionally set
 `DANO_OAUTH_PROFILE_ENDPOINT` to the Provider's user profile endpoint. Dano uses
 the same access token and configured headers for a Bearer GET and adopts the
 name/avatar only when the profile identifies the same user. An unavailable or
-invalid profile leaves the verified login usable. Existing Login Sessions gain
+invalid profile (including a failed business-code envelope with nonempty data)
+leaves the verified login usable. Its HTTPS origin participates in the same
+deployment TLS check as the other provider endpoints. Existing Login Sessions gain
 the display information on the next login; their conversation ownership is unchanged.
 
 The Release Build initializes Dano-owned OAuth Credential Encryption Material

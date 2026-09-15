@@ -595,6 +595,7 @@ export async function validateOAuthProviderTls(
     config.provider.authorizationEndpoint,
     config.provider.tokenEndpoint,
     config.provider.identityEndpoint,
+    ...(config.provider.profileEndpoint ? [config.provider.profileEndpoint] : []),
     config.providerApiOrigin,
     ...(config.provider.revocation?.endpoint
       ? [config.provider.revocation.endpoint]

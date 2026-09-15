@@ -289,6 +289,7 @@ function authorizationUrlWithFragmentRoute(
     queryIndex === -1 ? "" : fragment.slice(queryIndex + 1),
   );
   for (const [name, value] of protocolUrl.searchParams) {
+    url.searchParams.delete(name);
     parameters.set(name, value);
   }
   const query = parameters.toString();
@@ -306,7 +307,10 @@ async function fetchExternalIdentity(
   if (identityTransport === "token-introspection") {
     const identity = await oauth.tokenIntrospection(configuration, accessToken);
     if (!identity.active) throw new OAuthProviderContractError();
-    return parseExternalIdentity(identity);
+    return parseExternalIdentity({
+      ...identity,
+      userId: identity.userId ?? identity.user_id ?? identity.id ?? identity.sub,
+    });
   }
   if (tokenType && tokenType.trim().toLowerCase() !== "bearer") {
     throw new Error("Provider access token type is unsupported");
@@ -470,6 +474,7 @@ async function normalizeIntrospectionEndpointResponse(
 function providerDataObject(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
+  if ("code" in record && record.code !== 0 && record.code !== "0") return null;
   if (
     !("userId" in record) &&
     !("id" in record) &&

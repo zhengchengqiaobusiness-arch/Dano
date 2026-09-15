@@ -810,6 +810,7 @@ describe("Dano main", () => {
         DANO_OAUTH_REVOCATION_TRANSPORT: "rfc7009",
         DANO_OAUTH_REVOCATION_ENDPOINT:
           "https://provider-revoke.example.test/revoke",
+        DANO_OAUTH_PROFILE_ENDPOINT: "https://provider-profile.example.test/profile",
       }),
     }).oauthAuthentication!;
     const probes: string[] = [];
@@ -820,12 +821,18 @@ describe("Dano main", () => {
 
     expect(probes).toEqual([
       "https://provider.example.test/",
+      "https://provider-profile.example.test/",
       "https://provider-api.example.test/",
       "https://provider-revoke.example.test/",
     ]);
     await expect(
       validateOAuthProviderTls(configuration, async endpoint => {
         throw new Error(`private TLS detail for ${endpoint.href}`);
+      }),
+    ).rejects.toThrow("OAuth provider TLS validation failed");
+    await expect(
+      validateOAuthProviderTls(configuration, async endpoint => {
+        if (endpoint.hostname === "provider-profile.example.test") throw new Error("untrusted profile certificate");
       }),
     ).rejects.toThrow("OAuth provider TLS validation failed");
   });
