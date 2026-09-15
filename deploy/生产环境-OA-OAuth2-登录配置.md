@@ -76,6 +76,20 @@ OA 身份响应的 `data` 中必须包含非空且稳定的 `userId`、`user_id`
 
 如果生产 OA 的 Client 契约与上表不同，应修改 Dano 环境变量匹配真实契约，而不是复制测试环境值后猜测。
 
+### 资料接口必须单独验证
+
+身份校验成功不代表资料接口可用。指定官网的双用户验收中，分别使用两名用户的 OAuth Token
+调用 `/admin-api/system/oauth2/user/get`，一个用户成功，另一个用户返回 HTTP 200
+但业务码 500；后者仍能正常完成身份校验。改用官网个人中心实际使用的
+`/admin-api/system/user/profile/get` 后，第二个用户的资料响应业务码为 0，包含显示名，
+且 `id` 与 introspection 返回的用户标识一致。
+
+因此，`DANO_OAUTH_PROFILE_ENDPOINT` 应填写在目标环境实测可用的资料接口，不要默认
+沿用另一个 OA 环境的路径。验证至少覆盖两个真实用户，并同时检查业务码、非空显示名
+以及身份一致性。无需为此在 Dano 增加部门等业务规则；资料只补充显示信息，不能建立
+或替换已经确认的用户身份。下面的 `/sso`、HTTP opt-in 和 Client 认证方式也属于此前
+环境的示例，不能覆盖目标环境实际核实的 Hash 授权页、HTTPS 和 Client 契约。
+
 ## 三、配置生产 Dano
 
 在生产服务器的 `/opt/dano/deploy/.env` 中配置以下内容。示例不包含真实 OA 地址和秘密：
@@ -92,8 +106,8 @@ DANO_OAUTH_ALLOW_INSECURE_AUTHORIZATION_ENDPOINT=true
 DANO_OAUTH_TOKEN_ENDPOINT=<OA_API_ORIGIN>/admin-api/system/oauth2/token
 DANO_OAUTH_IDENTITY_ENDPOINT=<OA_API_ORIGIN>/admin-api/system/oauth2/check-token
 DANO_OAUTH_IDENTITY_TRANSPORT=token-introspection
-# 可选：校验接口没有名称时，从同一用户的 OAuth 资料中补齐昵称和头像。
-DANO_OAUTH_PROFILE_ENDPOINT=<OA_API_ORIGIN>/admin-api/system/oauth2/user/get
+# 可选：填写经过多用户验证、与身份校验返回相同用户标识的资料接口。
+DANO_OAUTH_PROFILE_ENDPOINT=<OA_VERIFIED_PROFILE_ENDPOINT>
 DANO_OAUTH_API_ORIGIN=<OA_API_ORIGIN>
 DANO_OAUTH_ALLOW_INSECURE_SERVER_ENDPOINTS=true
 
