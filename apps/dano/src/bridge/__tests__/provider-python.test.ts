@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { gzipSync } from "node:zlib";
 import {
   createBashTool,
   SessionManager,
@@ -286,6 +287,12 @@ async function pythonHarness() {
     }
     if (req.url === "/redirect") {
       res.writeHead(302, { location: "http://example.invalid/stolen" }).end();
+      return;
+    }
+    if (req.url === "/compressed") {
+      const bytes = gzipSync(JSON.stringify({ text: "中文响应" }));
+      res.writeHead(200, { "content-type": "application/json", "content-encoding": "gzip", "content-length": bytes.length });
+      res.end(bytes);
       return;
     }
     res.writeHead(req.url === "/business-denied" ? 403 : 200, {
@@ -628,6 +635,95 @@ async function urllibRequest(prefix: string, url: string, options = "") {
   const result = await execute("bash", ["-c", prefix + `python3 - <<'PY'\nimport json\nfrom urllib.request import Request, build_opener\nfrom urllib.error import HTTPError, URLError\ntry:\n with build_opener().open(Request(${JSON.stringify(url)}, ${options || "headers={'Authorization':'Bearer original'}"}), timeout=2) as r:\n  print(json.dumps({'status':r.status,'body':r.read().decode()}))\nexcept HTTPError as e:\n print(json.dumps({'status':e.code}))\nexcept URLError as e:\n print(json.dumps({'error':str(e.reason)}))\nPY`]);
   return JSON.parse(result.stdout);
 }
+
+async function httpxRequest(prefix: string, url: string, expression = "httpx.get(url, headers=headers)") {
+  // Exercise local receivers independently of the developer's outbound proxy.
+  for (const name of ["ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"])
+    vi.stubEnv(name, "");
+  const result = await execute("bash", ["-c", prefix + `python3 - <<'PY'\nimport asyncio, json, httpx\nurl = ${JSON.stringify(url)}\nheaders = {'Authorization': 'Bearer package-old-token'}\ntry:\n r = ${expression}\n print(json.dumps({'status': r.status_code, 'body': r.text}))\nexcept httpx.HTTPError as e:\n print(json.dumps({'error': str(e)}))\nPY`]);
+  return JSON.parse(result.stdout);
+}
+
+it("routes original httpx get/request and Client calls through the captured login", async () => {
+  const h = await pythonHarness();
+  const s = h.session("user", "agent", "login-a");
+  await withProviderPython(s.options, async p => {
+    for (const expression of ["httpx.get(url, headers=headers)", "httpx.request('POST', url, headers=headers, json={'test': True})", "httpx.Client().get(url, headers=headers)"]) {
+      const result = await httpxRequest(p, h.origin + "/query", expression);
+      expect(result, expression + JSON.stringify(result)).toMatchObject({ status: 200 });
+    }
+  });
+  expect(h.observed.map(r => r.auth)).toEqual(Array(3).fill("Bearer token-a"));
+  expect(JSON.parse(h.observed[1].body)).toEqual({ test: true });
+});
+
+it("keeps httpx nonmatching origins and anonymous authentication unchanged", async () => {
+  const h = await pythonHarness();
+  const other = await pythonHarness();
+  const s = h.session("user", "agent", "login-a");
+  await withProviderPython(s.options, async p => {
+    await httpxRequest(p, other.origin + "/query");
+    await httpxRequest(p, h.origin.replace("127.0.0.1", "localhost") + "/query");
+  });
+  const guest = h.session("guest", "guest");
+  await withProviderPython(guest.options, p => httpxRequest(p, h.origin + "/guest"));
+  expect(other.observed.map(r => r.auth)).toEqual(["Bearer package-old-token"]);
+  expect(h.observed.map(r => r.auth)).toEqual(["Bearer package-old-token", "Bearer package-old-token"]);
+});
+
+it("never follows httpx OA redirects or falls back after logout, and preserves business errors", async () => {
+  const h = await pythonHarness();
+  const s = h.session("user", "agent", "login-a");
+  await withProviderPython(s.options, async p => {
+    expect(await httpxRequest(p, h.origin + "/business-denied")).toMatchObject({ status: 403 });
+    expect(await httpxRequest(p, h.origin + "/redirect", "httpx.get(url, headers=headers, follow_redirects=True)")).toMatchObject({ error: expect.stringContaining("redirect") });
+    h.credentials.delete("login-a");
+    expect(await httpxRequest(p, h.origin + "/query")).toMatchObject({ error: expect.stringContaining("authentication_required") });
+  });
+  expect(h.observed.map(r => r.auth)).toEqual(["Bearer token-a", "Bearer token-a"]);
+});
+
+it("isolates httpx login sessions, refreshes credentials, and supports async HTTP transport", async () => {
+  for (const name of ["ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"])
+    vi.stubEnv(name, "");
+  const h = await pythonHarness();
+  const a = h.session("same-user", "a", "login-a");
+  const b = h.session("same-user", "b", "login-b");
+  await withProviderPython(a.options, async p => {
+    const script = join(h.cwd, "original-httpx.py");
+    const source = `import asyncio, httpx\nasync def main():\n async with httpx.AsyncClient() as client:\n  r = await client.post('${h.origin}/async', json={'purpose':'验收'}, headers={'Authorization':'Bearer old'})\n  assert r.status_code == 200\nasyncio.run(main())\n`;
+    await writeFile(script, source);
+    await execute("bash", ["-c", p + `python3 '${script}'`]);
+    expect(await readFile(script, "utf8")).toBe(source);
+  });
+  await withProviderPython(b.options, p => httpxRequest(p, h.origin + "/b"));
+  h.credentials.set("login-a", "expired");
+  await withProviderPython(a.options, async p => {
+    expect(await httpxRequest(p, h.origin + "/refresh")).toMatchObject({ status: 200 });
+    a.settled(); a.turn("login-b");
+    expect(await httpxRequest(p, h.origin + "/late")).toMatchObject({ error: expect.stringContaining("authentication_required") });
+  });
+  expect(h.observed.map(r => r.auth)).toEqual(["Bearer token-a", "Bearer token-b", "Bearer expired", "Bearer renewed"]);
+  expect(JSON.parse(h.observed[0].body)).toEqual({ purpose: "验收" });
+});
+
+it("rejects httpx streamed or binary bodies without sending the package token", async () => {
+  const h = await pythonHarness();
+  const s = h.session("user", "agent", "login-a");
+  await withProviderPython(s.options, async p => {
+    for (const content of ["iter([b'chunk'])", "bytes([255])"])
+      expect(await httpxRequest(p, h.origin + "/body", `httpx.post(url, headers=headers, content=${content})`)).toMatchObject({ error: expect.stringContaining("buffered UTF-8") });
+  });
+  expect(h.observed).toEqual([]);
+});
+
+it("rebuilds httpx response framing after the Broker decompresses text", async () => {
+  const h = await pythonHarness();
+  const s = h.session("user", "agent", "login-a");
+  const result = await withProviderPython(s.options, p => httpxRequest(p, h.origin + "/compressed"));
+  expect(result.status).toBe(200);
+  expect(JSON.parse(result.body)).toEqual({ text: "中文响应" });
+});
 
 it("records authentication evidence at final send rather than inferring binding from HTTP success", async () => {
   const h = await pythonHarness();

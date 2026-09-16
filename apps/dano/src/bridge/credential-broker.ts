@@ -168,6 +168,10 @@ const FORBIDDEN_REQUEST_HEADERS = new Set([
   "cookie",
   "host",
   "proxy-authorization",
+  // The outbound HTTP stack owns framing for the Broker's new message.
+  "content-length",
+  "transfer-encoding",
+  "connection",
 ]);
 const FORBIDDEN_RESPONSE_HEADERS = new Set([
   "authorization",

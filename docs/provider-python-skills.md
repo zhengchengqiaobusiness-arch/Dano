@@ -1,7 +1,7 @@
 # Existing OA Python Skills
 
 Run the original Skill unchanged inside Dano's controlled bash tool. During an
-authenticated Assistant Turn, standard Python `urllib.request` calls to the
+authenticated Assistant Turn, standard Python `urllib.request` and HTTPX calls to the
 configured OA business origin are routed through the Credential Broker. Its
 server-side Authorization header replaces the script's old header. Scripts do
 not import a Dano library or receive the current OA access/refresh token.
@@ -14,6 +14,21 @@ Python 3.9+ with normal site initialization: `urlopen`, `build_opener` and
 PYTHONPATH. Existing site customization is retained. Skill files and the global
 Python installation are not modified.
 
+The container ships a dedicated Python virtual environment on PATH, providing
+both `python` and `python3` and the HTTPX version pinned in
+`deploy/python-requirements.txt`. Dependencies are installed at image build time,
+not by model-driven commands during a Skill run.
+
+HTTPX top-level `get`/`request` functions, `Client` and `AsyncClient` are supported
+through their standard `HTTPTransport` / `AsyncHTTPTransport` send methods.
+Custom transports that replace these methods are outside this integration.
+Request encoding, auth and event hooks still run in HTTPX; only exact-origin
+network sends go to the Broker. The current provider token never enters Python.
+OA redirects raise `httpx.HTTPStatusError` even with `follow_redirects=True`;
+the response is available on the exception. Other HTTP statuses remain normal
+HTTPX responses; Broker failures raise `httpx.RequestError`. HTTP framing and
+compression headers are rebuilt because the Broker exchanges decoded text.
+
 Other HTTP clients (including requests, urllib3 and raw sockets), Python
 `-S`/`-I`/`-E`, and environments that remove or override the injected startup path
 are not covered. This is execution integration, not an OS-wide egress firewall.
@@ -24,6 +39,16 @@ are intended for OA JSON/text APIs.
 The implementation uses Python's documented [site customization](https://docs.python.org/3/library/site.html#sitecustomize)
 and [urllib opener](https://docs.python.org/3/library/urllib.request.html#openerdirector-objects)
 interfaces. Hooks run only inside Dano-controlled executions.
+HTTPX interception uses its documented [transport interface](https://www.python-httpx.org/advanced/transports/).
+
+For local authentication tests, install the same dependency into an isolated
+environment and put it on PATH before running Vitest (do not modify global Python):
+
+```sh
+python3 -m venv /private/tmp/dano-python-tests
+/private/tmp/dano-python-tests/bin/pip install -r deploy/python-requirements.txt
+PATH="/private/tmp/dano-python-tests/bin:$PATH" pnpm test apps/dano/src/bridge/__tests__/provider-python.test.ts
+```
 
 ## Target and identity
 

@@ -17,6 +17,13 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
+def _authority(url):
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https") or parsed.username is not None or parsed.password is not None:
+        return None
+    return (parsed.scheme, parsed.hostname, parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80))
+
+
 def request(method, path, headers=None, body=None, timeout=15.0):
     """Return the Broker envelope: ok/status/headers/body, or raise ProviderError."""
     endpoint = os.environ.get("DANO_PROVIDER_URL", "")
@@ -58,13 +65,7 @@ def install_urllib():
     if not origin:
         return
 
-    def authority(url):
-        parsed = urlsplit(url)
-        if parsed.scheme not in ("http", "https") or parsed.username is not None or parsed.password is not None:
-            return None
-        return (parsed.scheme, parsed.hostname, parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80))
-
-    expected = authority(origin)
+    expected = _authority(origin)
     class LoginHandler(BaseHandler):
         # Request processors have already run; intercept before proxy or HTTP
         # transport handlers, preserving urllib's request/response pipelines.
@@ -72,7 +73,7 @@ def install_urllib():
 
         def http_open(self, req):
             try:
-                matches = authority(req.full_url) == expected
+                matches = _authority(req.full_url) == expected
             except ValueError:
                 matches = False
             if not matches:
@@ -120,3 +121,72 @@ def install_urllib():
     OpenerDirector.__init__ = init_with_login
     if urllib.request._opener is not None:
         urllib.request._opener.add_handler(LoginHandler())
+
+
+def install_httpx():
+    """Route HTTPX's standard sync/async transports through the same Broker."""
+    origin = os.environ.get("DANO_PROVIDER_ORIGIN")
+    if not origin:
+        return
+    try:
+        import httpx
+    except ModuleNotFoundError as exc:
+        if exc.name == "httpx":
+            return  # urllib-only environments do not require HTTPX.
+        raise
+    import asyncio
+
+    expected = _authority(origin)
+    if getattr(httpx.HTTPTransport.handle_request, "_dano_login", False):
+        return
+
+    def matches(req):
+        try:
+            return expected is not None and _authority(str(req.url)) == expected
+        except ValueError:
+            return False
+
+    def send_with_login(req):
+        # Do not consume arbitrary streams or silently fall back to package
+        # credentials when the Broker cannot represent a request.
+        try:
+            body = req.content.decode("utf-8")
+        except (httpx.RequestNotRead, UnicodeDecodeError):
+            raise httpx.RequestError("Dano OA requests require a buffered UTF-8 request body", request=req) from None
+        parsed = urlsplit(str(req.url))
+        path = (parsed.path or "/") + (("?" + parsed.query) if parsed.query else "")
+        timeout = req.extensions.get("timeout", {}).get("read", 15.0)
+        try:
+            result = request(req.method, path, headers=dict(req.headers),
+                             body=body or None, timeout=timeout)
+        except ProviderError as exc:
+            raise httpx.RequestError("%s: %s" % (exc.code, exc), request=req) from None
+        # Broker returns decoded text, so upstream compression/length no longer
+        # describe the bytes handed back to HTTPX.
+        headers = {k: v for k, v in result["headers"].items()
+                   if k.lower() not in ("content-length", "content-encoding", "transfer-encoding")}
+        response = httpx.Response(result["status"], headers=headers,
+                                  content=result["body"].encode("utf-8"), request=req)
+        response.encoding = "utf-8"
+        # Raising at transport time prevents Client(follow_redirects=True)
+        # from replaying the Skill's original identity to another destination.
+        if 300 <= response.status_code < 400:
+            raise httpx.HTTPStatusError("Dano OA redirect blocked", request=req, response=response)
+        return response
+
+    original_sync = httpx.HTTPTransport.handle_request
+    original_async = httpx.AsyncHTTPTransport.handle_async_request
+
+    def handle_request(self, req):
+        if matches(req):
+            return send_with_login(req)
+        return original_sync(self, req)
+
+    async def handle_async_request(self, req):
+        if matches(req):
+            return await asyncio.to_thread(send_with_login, req)
+        return await original_async(self, req)
+
+    handle_request._dano_login = True
+    httpx.HTTPTransport.handle_request = handle_request
+    httpx.AsyncHTTPTransport.handle_async_request = handle_async_request

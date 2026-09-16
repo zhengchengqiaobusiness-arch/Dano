@@ -16,8 +16,9 @@ try:
         spec.loader.exec_module(existing)
 finally:
     try:
-        from dano_provider import install_urllib
+        from dano_provider import install_urllib, install_httpx
         install_urllib()
+        install_httpx()
     except Exception:
         # Python normally ignores sitecustomize failures. A broken auth hook must
         # not silently send the package's original authentication instead.

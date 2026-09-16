@@ -1,0 +1,2 @@
+# Runtime dependency for original OA Python Skills (also required by auth tests).
+httpx==0.28.1
