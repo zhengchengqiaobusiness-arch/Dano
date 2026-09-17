@@ -56,7 +56,10 @@ try {
     } else throw new Error("action");
   }
   console.log(`[system-prompt] ${action}: PASS`);
-} catch {
+} catch (error) {
+  if (error.message === "PRODUCT_IDENTITY_MISMATCH") {
+    console.error("[system-prompt] PRODUCT_IDENTITY_MISMATCH: stop release; reconcile the managed overlay and target config using deploy/README.md Release identity preflight, then rerun deploy-product-identity.mjs before sync/check. No names or configuration contents emitted.");
+  }
   console.error("[system-prompt] FAIL (configuration, content, path or metadata); no contents emitted");
   process.exitCode = 1;
 }

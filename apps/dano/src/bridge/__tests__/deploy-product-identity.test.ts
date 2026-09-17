@@ -73,5 +73,7 @@ describe("secret-safe deployment identity", () => {
     expect(result.status).toBe(1);
     expect(readFileSync(join(target, "SYSTEM.md"), "utf8")).toBe("preserve-existing");
     expect(result.stdout + result.stderr).not.toContain("different-runtime-name");
+    expect(result.stderr).toContain("PRODUCT_IDENTITY_MISMATCH");
+    expect(result.stderr).toContain("deploy-product-identity.mjs");
   });
 });

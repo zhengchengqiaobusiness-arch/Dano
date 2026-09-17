@@ -1404,7 +1404,7 @@ writeFileSync(process.env.DANO_TEST_APP_STARTED, "started");
     );
   });
 
-  it.each(["", "   ", "{产品名称}", "${NAME}", "{{name}}", null, 42])("rejects invalid source identity %j before building", productName => {
+  it.each(["", "   ", "{产品名称}", "${NAME}", "$PRODUCT_NAME", "%PRODUCT_NAME%", "{{name}}", null, 42])("rejects invalid source identity %j before building", productName => {
     const root = mkdtempSync(join(tmpdir(), "dano-identity-release-"));
     tempDirs.push(root);
     const marker = join(root, "build-or-switch");
