@@ -42,6 +42,7 @@ const composeFileArgs = [
   "docker-compose.yml",
   "-f",
   exposureComposeFile,
+  ...(existsSync("docker-compose.product-name.json") ? ["-f", "docker-compose.product-name.json"] : []),
 ];
 
 function run(args) {

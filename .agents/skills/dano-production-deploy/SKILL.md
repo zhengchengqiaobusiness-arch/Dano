@@ -20,7 +20,7 @@ Deploy only when the user explicitly requests a production update. Treat complet
 - Preserve `/opt/dano/runtime-data`, Compose named volumes, runtime skills, agent config/workspaces, TLS material, environment-owned nginx routes, secret files, and neighboring services—especially `dano-site` and `/web/`.
 - Never run `docker compose down -v`, remove named volumes, broadly delete runtime files, or prune an image/layer referenced by any container.
 - Keep Heimdall protection enabled. Stop if `HEIMDALL_PROTECT_CONFIG_OVERLAY=0` would reach the app. Do not weaken Bubblewrap, sandbox, runtime mounts, or secret filtering to make acceptance pass.
-- Do not overwrite user runtime config. Defaults in `deploy/runtime-defaults/` are copied only when missing by the current entrypoint. Synchronize `SYSTEM.md`, `settings.json`, or `heimdall.json` into an existing runtime only when the release explicitly requires it and the effective path has been proven. Do not add pre-1.0 layout migrations unless explicitly requested.
+- Every formal release synchronizes `SYSTEM.md` from the new image template using the effective product name. Preserve `settings.json` and `heimdall.json` unless the release explicitly requires their synchronization. Ordinary entrypoint starts initialize missing files only. Use the strict synchronization and read-back gate in `deploy/README.md`; prove the effective target, owner, permissions, exact rendered content, and absence of placeholders before any Compose switch. Do not add pre-1.0 layout migrations unless explicitly requested.
 - Do not substitute HTTP, `agent-browser`, API smoke, or screenshots for the required Codex in-app Browser run against `https://1.15.173.22/`.
 - Do not commit, push, open a PR, or change source code as part of a deploy request.
 
@@ -121,6 +121,8 @@ Resolve Compose as JSON entirely on-host and pipe it through `scripts/summarize-
 
 Immediately before switching traffic, fetch and compare `upstream/main` with `target_sha`. Treat `target_sha` as the release locked by this run. If upstream advanced, restart manifest/build preparation for the new SHA by default; deploy the locked older SHA only with explicit user direction.
 
+Under the existing deployment lock, run the new image's `./deploy/system-prompt.mjs sync` followed by `check` through the exact Compose app service and `--entrypoint node`. Include the managed product-name overlay when present. Both commands must exit zero before switching; preserve only a restricted on-host SYSTEM rollback copy, and restore it with the previous image if rollback is needed. For a configuration-only name update or drift repair, use `scripts/deploy-system-prompt.mjs` as documented in `deploy/README.md`, passing `DANO_DEPLOY_LOCK_FD=9` when reusing the existing lock. Its machine success still requires browser identity acceptance.
+
 Capture an RFC3339 UTC `switch_timestamp` immediately before Compose mutation. Run Compose `up -d --no-build` for only the Dano app/nginx services required by the current topology. Do not recreate or restart adjacent services. Wait for the app healthcheck and nginx dependency to settle. On failure, collect structured status and log counts scoped to `switch_timestamp`, then either correct the proven cause or execute the recorded rollback.
 
 Checkpoint: the running container image ID must equal the built image ID before acceptance begins.
@@ -160,7 +162,8 @@ Complete all of these on the new deployment:
 3. Create or select a non-sensitive per-run test image, upload it through the UI, ask the model to read and describe it, and confirm an actual `read` tool call plus a correct description. Do not use a secret-bearing screenshot or a stale uploaded hash.
 4. Inspect the loaded document and network resources. Confirm the JS/CSS asset names match the assets enumerated from the new image.
 5. Inspect the Dano page console and confirm there are no deployment-related errors or warnings.
-6. Execute any PR-specific UI/mobile acceptance in addition to this baseline, preserving necessary screenshots or browser evidence.
+6. When SYSTEM/productName changes, create a new session and ask for the assistant identity. Verify that the answer uses the effective product name and contains no `{产品名称}`.
+7. Execute any PR-specific UI/mobile acceptance in addition to this baseline, preserving necessary screenshots or browser evidence.
 
 If a previously working step fails, inspect the final URL, TLS state, active tab, browser-control connection, visible DOM, model chain, network requests, loaded static assets, container state, and safe structured diagnostics. Recover and retry the same path. Do not lower the bar or silently replace it with API checks. If in-app Browser access is unavailable or any item remains incomplete, deployment acceptance is incomplete.
 

@@ -23,3 +23,14 @@ export function syncSystemPrompt(options: {
   productName: string;
   mode: SystemPromptWriteMode;
 }): Promise<SystemPromptWriteResult>;
+
+export interface DeployedSystemPromptOptions {
+  templatePath: string;
+  targetPath: string;
+  agentDir: string;
+  productName: string;
+  owner: { uid: number; gid: number };
+}
+export function validateSystemPromptPath(targetPath: string, agentDir: string, owner: { uid: number; gid: number }): Promise<import("node:fs").Stats | undefined>;
+export function checkDeployedSystemPrompt(options: DeployedSystemPromptOptions): Promise<void>;
+export function syncDeployedSystemPrompt(options: DeployedSystemPromptOptions): Promise<void>;

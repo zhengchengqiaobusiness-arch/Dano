@@ -1,9 +1,11 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  checkDeployedSystemPrompt,
+  syncDeployedSystemPrompt,
   renderSystemPrompt,
   resolveProductName,
   writeSystemPromptFile,
@@ -81,5 +83,61 @@ describe("system prompt runtime", () => {
     ).resolves.toBe("written");
 
     expect(readFileSync(targetPath, "utf8")).toBe("新名称");
+  });
+});
+
+
+describe("deployment SYSTEM gate", () => {
+  async function fixture() {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "dano-system-gate-")));
+    tempDirs.push(root);
+    const templatePath = join(root, "template.md");
+    writeFileSync(templatePath, "你是{产品名称}。再次：{产品名称}。\n");
+    return { templatePath, targetPath: join(root, "SYSTEM.md"), agentDir: root,
+      productName: "有效助手", owner: { uid: process.getuid!(), gid: process.getgid!() } };
+  }
+  it("repairs old placeholders atomically and enforces private permissions", async () => {
+    const options = await fixture();
+    writeFileSync(options.targetPath, "旧{产品名称}", { mode: 0o644 });
+    const before = await lstat(options.targetPath);
+    await syncDeployedSystemPrompt(options);
+    await checkDeployedSystemPrompt(options);
+    const after = await lstat(options.targetPath);
+    expect(after.ino).not.toBe(before.ino);
+    expect(after.mode & 0o777).toBe(0o600);
+    expect(after.uid).toBe(options.owner.uid);
+  });
+  it.each(["残留{产品名称}", "错误助手"])("rejects inconsistent content without emitting it", async content => {
+    const options = await fixture();
+    writeFileSync(options.targetPath, content, { mode: 0o600 });
+    await expect(checkDeployedSystemPrompt(options)).rejects.toThrow(/SYSTEM_(PLACEHOLDER|CONTENT)/);
+  });
+  it("rejects missing names and placeholder names before replacing a file", async () => {
+    const options = await fixture();
+    writeFileSync(options.targetPath, "preserve");
+    for (const productName of ["", "{产品名称}"]) {
+      await expect(syncDeployedSystemPrompt({ ...options, productName })).rejects.toThrow();
+      expect(await readFile(options.targetPath, "utf8")).toBe("preserve");
+    }
+  });
+  it("treats dollar replacement sequences as literal product names", () => {
+    expect(renderSystemPrompt("你是{产品名称}", "$& $` $' $$")).toBe("你是$& $` $' $$");
+  });
+  it("rejects unexpected owner, permissions, target and symlinks", async () => {
+    const options = await fixture();
+    await syncDeployedSystemPrompt(options);
+    await expect(checkDeployedSystemPrompt({ ...options, owner: { ...options.owner, uid: options.owner.uid + 1 } })).rejects.toThrow("SYSTEM_DIRECTORY_METADATA");
+    await chmod(options.targetPath, 0o644);
+    await expect(checkDeployedSystemPrompt(options)).rejects.toThrow("SYSTEM_PERMISSIONS");
+    await expect(syncDeployedSystemPrompt({ ...options, targetPath: join(options.agentDir, "other") })).rejects.toThrow("SYSTEM_PATH");
+    await rm(options.targetPath);
+    await symlink(options.templatePath, options.targetPath);
+    await expect(syncDeployedSystemPrompt(options)).rejects.toThrow("SYSTEM_PATH");
+    expect(await readFile(options.templatePath, "utf8")).toContain("{产品名称}");
+    await rm(options.targetPath);
+    const alias = `${options.agentDir}-alias`;
+    tempDirs.push(alias);
+    await symlink(options.agentDir, alias);
+    await expect(syncDeployedSystemPrompt({ ...options, agentDir: alias, targetPath: join(alias, "SYSTEM.md") })).rejects.toThrow("SYSTEM_PATH");
   });
 });

@@ -239,6 +239,7 @@ if (process.env.DANO_FAKE_REQUIRE_OAUTH_CREDENTIAL_PAIR && args.includes("--vali
   const version = env.match(/^DANO_OAUTH_CREDENTIAL_KEY_VERSION=([^\\r\\n]+)$/m)?.[1];
   if (!key || Buffer.from(key, "base64url").byteLength !== 32 || !version) process.exit(2);
 }
+if (process.env.DANO_FAKE_SYSTEM_FAIL && args.includes("./deploy/system-prompt.mjs") && args.includes(process.env.DANO_FAKE_SYSTEM_FAIL)) process.exit(1);
 if (process.env.DANO_FAKE_CONFIG_INVALID && args.includes("--validate-config")) {
   process.exit(1);
 }
@@ -277,6 +278,7 @@ appendFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(["chown", ...process
       ...process.env,
       ...options.env,
       PATH: `${fakeBin}:${process.env.PATH}`,
+      DANO_DEPLOY_LOCK_PATH: join(cwd, "deploy.lock"),
       DANO_COMMAND_LOG: logPath,
       DANO_COMPOSE: "compose",
       DANO_FAKE_REPO: fakeRepo,
@@ -723,7 +725,8 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
       env: {
         ...process.env,
         PATH: `${fakeBin}:${process.env.PATH}`,
-        DANO_COMMAND_LOG: logPath,
+        DANO_DEPLOY_LOCK_PATH: join(cwd, "deploy.lock"),
+      DANO_COMMAND_LOG: logPath,
         DANO_RUNTIME_DIR: runtimeDir,
         DANO_BASH_ACCEPTANCE_MARKER: "DANO_BASH_OK",
         DANO_BASH_ACCEPTANCE_FORBIDDEN_MARKERS: "TOKEN missing",
@@ -1276,14 +1279,14 @@ writeFileSync(process.env.DANO_TEST_APP_STARTED, "started");
       "run",
       "--rm",
       "--no-deps",
-      "app",
+      "--entrypoint",
       "node",
-      "./deploy/render-system-prompt.mjs",
-      "--replace",
-      "/app/deploy/runtime-defaults/SYSTEM.md",
-      "/opt/dano/runtime-data/.pi/agent/SYSTEM.md",
+      "app",
+      "./deploy/system-prompt.mjs",
+      "sync",
     ]);
-    expect(JSON.parse(logLines[4])).toEqual([
+    expect(JSON.parse(logLines[4]).slice(-2)).toEqual(["./deploy/system-prompt.mjs", "check"]);
+    expect(JSON.parse(logLines[5])).toEqual([
       "compose",
       "-f",
       "docker-compose.yml",
@@ -1294,8 +1297,10 @@ writeFileSync(process.env.DANO_TEST_APP_STARTED, "started");
       "up",
       "-d",
       "--no-build",
+      "app",
+      "nginx",
     ]);
-    expect(logLines[5]).toBe("smoke");
+    expect(logLines[6]).toBe("smoke");
   });
 
   it("initializes Dano-owned OAuth credential encryption before the production gate", () => {
@@ -1388,6 +1393,21 @@ writeFileSync(process.env.DANO_TEST_APP_STARTED, "started");
     expect(readFileSync(join(deployDir, ".env"), "utf8")).toContain(
       "DANO_DEMO_JWT=legacy-token",
     );
+  });
+
+  it("refuses a release while SYSTEM browser acceptance is pending", () => {
+    const root = mkdtempSync(join(tmpdir(), "dano-pending-system-"));
+    tempDirs.push(root);
+    mkdirSync(join(root, ".system-rollback-pending"));
+    expect(() => runRelease({ deployDir: root })).toThrow("Resolve pending SYSTEM browser acceptance");
+  });
+
+  it.each(["sync", "check"])("stops release before Compose switch when SYSTEM %s fails", phase => {
+    const root = mkdtempSync(join(tmpdir(), "dano-system-gate-"));
+    tempDirs.push(root);
+    const marker = join(root, "switched");
+    expect(() => runRelease({ env: { DANO_FAKE_SYSTEM_FAIL: phase, DANO_FAKE_SWITCH_MARKER: marker } })).toThrow();
+    expect(existsSync(marker)).toBe(false);
   });
 
   it("removes only fixed Demo values after a successful production gate", () => {

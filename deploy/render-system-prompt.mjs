@@ -32,5 +32,10 @@ async function resolveEffectiveProductName() {
   );
 }
 
-const productName = await resolveEffectiveProductName();
-await syncSystemPrompt({ templatePath, targetPath, productName, mode });
+try {
+  const productName = await resolveEffectiveProductName();
+  await syncSystemPrompt({ templatePath, targetPath, productName, mode });
+} catch {
+  console.error("[system-prompt] initialization failed; check product name and runtime paths");
+  process.exitCode = 1;
+}

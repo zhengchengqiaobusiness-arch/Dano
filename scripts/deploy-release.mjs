@@ -8,10 +8,12 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { acquireDeploymentLock } from "./deploy-lock.mjs";
 import { resolveDeploymentExposure } from "./deploy-exposure.mjs";
 import {
   readEnvValues,
@@ -42,6 +44,9 @@ const npmRegistry =
   defaultNpmRegistry;
 
 let buildDir;
+let unlock;
+const productNameOverlay = join(deployDir, "docker-compose.product-name.json");
+const productNameArgs = () => existsSync(productNameOverlay) ? ["-f", productNameOverlay] : [];
 
 function output(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -125,6 +130,10 @@ function ensureOAuthCredentialEncryption() {
 }
 
 try {
+  unlock = acquireDeploymentLock();
+  if (existsSync(deployDir) && readdirSync(deployDir).some(name => name.startsWith(".system-rollback-"))) {
+    throw new Error("Resolve pending SYSTEM browser acceptance before release");
+  }
   const repoUrl = requireValue(
     "DANO_REPO_URL",
     process.env.DANO_REPO_URL ||
@@ -188,6 +197,7 @@ try {
       "docker-compose.yml",
       "-f",
       "docker-compose.exposure.yml",
+      ...productNameArgs(),
       "--env-file",
       ".env",
       "run",
@@ -219,20 +229,26 @@ try {
       "docker-compose.yml",
       "-f",
       "docker-compose.exposure.yml",
+      ...productNameArgs(),
       "--env-file",
       ".env",
       "run",
       "--rm",
       "--no-deps",
-      "app",
+      "--entrypoint",
       "node",
-      "./deploy/render-system-prompt.mjs",
-      "--replace",
-      "/app/deploy/runtime-defaults/SYSTEM.md",
-      "/opt/dano/runtime-data/.pi/agent/SYSTEM.md",
+      "app",
+      "./deploy/system-prompt.mjs",
+      "sync",
     ],
     { cwd: deployDir },
   );
+
+  // Independent read-back gate: no container switch on render or check failure.
+  run(composeBin, [...composeArgs, "-f", "docker-compose.yml", "-f",
+    "docker-compose.exposure.yml", ...productNameArgs(), "--env-file", ".env",
+    "run", "--rm", "--no-deps", "--entrypoint", "node", "app",
+    "./deploy/system-prompt.mjs", "check"], { cwd: deployDir });
 
   run(
     composeBin,
@@ -242,11 +258,14 @@ try {
       "docker-compose.yml",
       "-f",
       "docker-compose.exposure.yml",
+      ...productNameArgs(),
       "--env-file",
       ".env",
       "up",
       "-d",
       "--no-build",
+      "app",
+      "nginx",
     ],
     { cwd: deployDir },
   );
@@ -264,4 +283,5 @@ try {
     rmSync(buildDir, { recursive: true, force: true });
     console.log(`[deploy-release] removed ${buildDir}`);
   }
+  unlock?.();
 }

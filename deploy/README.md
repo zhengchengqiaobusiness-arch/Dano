@@ -95,14 +95,90 @@ product name. It never overwrites an existing runtime file, so the host
 persistence location may be edited directly. The release workflow explicitly
 synchronizes `SYSTEM.md` once per deployment, before starting the new app image;
 ordinary application and container restarts still preserve the current file.
-Manual Compose deployments can perform the same explicit synchronization with:
+Both release and supported product-name updates use the image's strict gate:
 
 ```bash
-docker compose --env-file .env run --rm --no-deps app \
-  node ./deploy/render-system-prompt.mjs --replace \
-  /app/deploy/runtime-defaults/SYSTEM.md \
-  /opt/dano/runtime-data/.pi/agent/SYSTEM.md
+# Use the exact Compose project/files/--env-file used by this deployment.
+docker compose -f docker-compose.yml -f docker-compose.exposure.yml \
+  --env-file .env run --rm --no-deps --entrypoint node app \
+  ./deploy/system-prompt.mjs sync
+docker compose -f docker-compose.yml -f docker-compose.exposure.yml \
+  --env-file .env run --rm --no-deps --entrypoint node app \
+  ./deploy/system-prompt.mjs check
 ```
+
+Include `-f docker-compose.product-name.json` when that managed file exists.
+The gate derives the target from the same `DANO_RUNTIME_DIR` and
+`PI_CODING_AGENT_DIR` as entrypoint. It rejects symlink escapes, non-regular
+or multiply linked targets, wrong owner, and writable-by-others agent directories.
+The result must match the image template rendered with `DANO_PRODUCT_NAME`
+overriding `dano.config.json.productName`, contain no `{产品名称}`, and be owned
+by `1000:1000` with mode `0600`. Missing names, rendering errors, and read-back
+validation failures stop the release before Compose switches containers. Output
+contains only status markers. `settings.json` and `heimdall.json` remain preserved
+unless a release explicitly requires their synchronization.
+
+### Supported product-name update and SYSTEM repair
+
+Use the checked-out release's helper with the existing deployment control
+directory. It requires host Node and Python 3, and an already healthy app:
+
+```bash
+export DANO_DEPLOY_DIR=/opt/dano/deploy
+export DANO_SMOKE_BASE_URL=https://your-dano-origin.example
+node scripts/deploy-system-prompt.mjs repair
+node scripts/deploy-system-prompt.mjs set-name 'New assistant name'
+```
+
+`repair` fixes prompt drift against the current Compose configuration/image.
+`set-name` is the supported product-name configuration update: it atomically
+writes only `docker-compose.product-name.json`, a private, non-secret Compose
+overlay. This overlay supplies the effective `DANO_PRODUCT_NAME` and is included
+by subsequent releases and `deploy:up`. Do not edit `.env` or switch images as
+part of a repair; those changes need their own rollback plan and formal release.
+Bare Compose restarts do not synchronize existing prompts.
+
+Both the release and repair helper acquire an interoperable exclusive `flock`
+on `/var/lock/dano-production-deploy.lock`. An isolated local deployment can set
+`DANO_DEPLOY_LOCK_PATH` to its own lock file. If the production operator already
+holds that lock on fd 9, pass `DANO_DEPLOY_LOCK_FD=9`; the helper verifies the
+inherited file identity and lock before proceeding. Keep that descriptor open
+through browser acceptance and the final disposition. `DANO_DEPLOY_COMPOSE_FILES`
+may be a JSON array of the exact environment-owned Compose files; set
+`DANO_COMPOSE=podman` for Podman. The helper does not stage nginx or touch adjacent
+services, TLS, credentials, settings, Heimdall configuration, sessions, or uploads.
+
+Under the lock, the helper checks existing health, saves a `0700` rollback
+directory containing only the previous SYSTEM and its metadata, then atomically
+renders and validates. A drift repair restarts the existing app container. A name update recreates only
+app with `--no-deps --no-build` and reloads nginx to refresh its upstream IP.
+The helper waits for app health, verifies `/api/health` through
+`DANO_SMOKE_BASE_URL` (default `http://127.0.0.1`), and checks the live SYSTEM.
+Failure restores the previous overlay and SYSTEM, restarts app if needed, and
+verifies health. The private host rollback directory also saves the prior
+non-secret product-name overlay and transaction metadata. Rollback failure retains the SYSTEM backup in the agent
+config directory for recovery under the same lock; the command exits nonzero.
+Machine success leaves a pending transaction and retains both rollback copies.
+Further scripted updates/releases are blocked until it is disposed. After the
+required browser acceptance, finalize using the printed transaction identifier:
+
+```bash
+node scripts/deploy-system-prompt.mjs accept <transaction>
+# If browser acceptance fails, restore the retained state instead:
+node scripts/deploy-system-prompt.mjs rollback <transaction>
+```
+
+Only accepted or successfully rolled-back transactions remove completed backups.
+Failed preparation cleans its partial backup before any mutation. If that cleanup
+is interrupted, use `abort <transaction>` under the same lock; abort is accepted
+only for transactions still in the preparing phase. This transaction covers
+SYSTEM and the managed product-name overlay, not externally edited configuration.
+
+After any SYSTEM/product-name change, open a **new session** in the Codex in-app
+Browser and ask the assistant to identify itself. Require the effective product
+name and no placeholder; also complete text, image read/description, and
+model-triggered `bash ls` acceptance. Existing conversations are not identity
+acceptance evidence. Machine health alone does not complete this gate.
 
 The shared renderer uses the mature `atomically` package for complete
 temporary-file writes followed by atomic publication. Missing-file
