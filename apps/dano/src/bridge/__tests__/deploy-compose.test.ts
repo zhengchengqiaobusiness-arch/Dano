@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -142,6 +143,7 @@ function runRelease(
     tlsInputsAreDirectories?: boolean;
     tlsPathStyle?: "absolute" | "relative";
     deployDir?: string;
+    productName?: unknown;
   } = {},
 ) {
   const cwd = mkdtempSync(join(tmpdir(), "dano-release-test-"));
@@ -170,6 +172,9 @@ function runRelease(
   mkdirSync(join(fakeRepo, "deploy/compose"), { recursive: true });
   mkdirSync(join(fakeRepo, "deploy/nginx/shared"), { recursive: true });
   mkdirSync(join(fakeRepo, "scripts"), { recursive: true });
+  mkdirSync(join(fakeRepo, "apps/dano/runtime"), { recursive: true });
+  cpSync(new URL("../../../runtime/product-name.mjs", import.meta.url), join(fakeRepo, "apps/dano/runtime/product-name.mjs"));
+  writeFileSync(join(fakeRepo, "dano.config.json"), JSON.stringify({ productName: options.productName === undefined ? "源码助手" : options.productName }));
   mkdirSync(fakeBin);
   mkdirSync(buildParent);
   writeFileSync(join(fakeRepo, "docker-compose.yml"), "services:\n  app:\n");
@@ -221,6 +226,7 @@ appendFileSync(process.env.DANO_COMMAND_LOG, "smoke\\n");
 import { cpSync } from "node:fs";
 const args = process.argv.slice(2);
 if (process.env.DANO_FAKE_GIT_REJECT_FILTER && args.includes("--filter=blob:none")) process.exit(129);
+if (args[0] === "rev-parse") console.log("a".repeat(40));
 if (args[0] === "clone") cpSync(process.env.DANO_FAKE_REPO, args.at(-1), { recursive: true });
 `,
   );
@@ -230,6 +236,7 @@ if (args[0] === "clone") cpSync(process.env.DANO_FAKE_REPO, args.at(-1), { recur
 import { appendFileSync, readFileSync } from "node:fs";
 const args = process.argv.slice(2);
 appendFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(args) + "\\n");
+if (process.env.DANO_FAKE_BUILD_MARKER && args.includes("build")) appendFileSync(process.env.DANO_FAKE_BUILD_MARKER, "build");
 if (process.env.DANO_FAKE_SWITCH_MARKER && args.includes("up")) {
   appendFileSync(process.env.DANO_FAKE_SWITCH_MARKER, "up\\n");
 }
@@ -1284,8 +1291,10 @@ writeFileSync(process.env.DANO_TEST_APP_STARTED, "started");
       "app",
       "./deploy/system-prompt.mjs",
       "sync",
+      "--expected-product-name",
+      "源码助手",
     ]);
-    expect(JSON.parse(logLines[4]).slice(-2)).toEqual(["./deploy/system-prompt.mjs", "check"]);
+    expect(JSON.parse(logLines[4]).slice(-4)).toEqual(["./deploy/system-prompt.mjs", "check", "--expected-product-name", "源码助手"]);
     expect(JSON.parse(logLines[5])).toEqual([
       "compose",
       "-f",
@@ -1393,6 +1402,24 @@ writeFileSync(process.env.DANO_TEST_APP_STARTED, "started");
     expect(readFileSync(join(deployDir, ".env"), "utf8")).toContain(
       "DANO_DEMO_JWT=legacy-token",
     );
+  });
+
+  it.each(["", "   ", "{产品名称}", "${NAME}", "{{name}}", null, 42])("rejects invalid source identity %j before building", productName => {
+    const root = mkdtempSync(join(tmpdir(), "dano-identity-release-"));
+    tempDirs.push(root);
+    const marker = join(root, "build-or-switch");
+    expect(() => runRelease({ productName, env: { DANO_FAKE_BUILD_MARKER: marker, DANO_FAKE_SWITCH_MARKER: marker } })).toThrow("PRODUCT_IDENTITY_PREFLIGHT_FAILED");
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("rejects a malformed overlay before build without exposing its data", () => {
+    const root = mkdtempSync(join(tmpdir(), "dano-identity-overlay-"));
+    tempDirs.push(root);
+    const marker = join(root, "build");
+    writeFileSync(join(root, "docker-compose.product-name.json"), '{"secret":"never-print-this"}');
+    try { runRelease({ deployDir: root, env: { DANO_FAKE_BUILD_MARKER: marker } }); throw new Error("unexpected success"); }
+    catch (error) { expect(String(error)).toContain("PRODUCT_IDENTITY_PREFLIGHT_FAILED"); expect(String(error)).not.toContain("never-print-this"); }
+    expect(existsSync(marker)).toBe(false);
   });
 
   it("refuses a release while SYSTEM browser acceptance is pending", () => {

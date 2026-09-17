@@ -6,6 +6,8 @@ import {
   writeFileSync, renameSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { resolveProductName } from "../apps/dano/runtime/product-name.mjs";
+import { readProductNameOverlay } from "./deploy-product-identity.mjs";
 import { acquireDeploymentLock } from "./deploy-lock.mjs";
 
 // Compose consumes secrets; this process never reads .env or resolved config.
@@ -23,6 +25,7 @@ if (!Array.isArray(files) || !files.length || !files.every(file => typeof file =
     (action === "repair" && value) || (disposition && !/^[a-f0-9-]{36}$/.test(value || ""))) {
   throw new Error("Usage: deploy-system-prompt.mjs repair | set-name <name> | accept <transaction> | rollback <transaction> | abort <transaction>");
 }
+if (action === "set-name") resolveProductName(value, undefined);
 const transaction = disposition ? value : randomUUID();
 const rollbackDir = join(deployDir, `.system-rollback-${transaction}`);
 const healthBase = new URL(process.env.DANO_SMOKE_BASE_URL || "http://127.0.0.1");
@@ -70,13 +73,8 @@ function publishOverlay(content) {
 }
 function readManagedOverlay() {
   if (!existsSync(overlayPath)) return undefined;
-  const content = readFileSync(overlayPath);
-  const parsed = JSON.parse(content);
-  if (Object.keys(parsed).join() !== "services" || Object.keys(parsed.services).join() !== "app" ||
-      Object.keys(parsed.services.app).join() !== "environment" ||
-      Object.keys(parsed.services.app.environment).join() !== "DANO_PRODUCT_NAME" ||
-      typeof parsed.services.app.environment.DANO_PRODUCT_NAME !== "string") throw new Error("PRODUCT_NAME_OVERLAY_INVALID");
-  return content;
+  readProductNameOverlay(overlayPath);
+  return readFileSync(overlayPath);
 }
 function discard() {
   prompt("discard");

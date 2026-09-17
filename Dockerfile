@@ -66,6 +66,7 @@ COPY deploy/docker-entrypoint.sh ./deploy/docker-entrypoint.sh
 COPY deploy/render-system-prompt.mjs ./deploy/render-system-prompt.mjs
 COPY deploy/system-prompt.mjs ./deploy/system-prompt.mjs
 COPY apps/dano/runtime/skill-seed.mjs ./apps/dano/runtime/skill-seed.mjs
+COPY apps/dano/runtime/product-name.mjs ./apps/dano/runtime/product-name.mjs
 COPY apps/dano/runtime/system-prompt.mjs ./apps/dano/runtime/system-prompt.mjs
 RUN mkdir -p /app/open-websearch-skill-seed \
   && cd /app/open-websearch-skill-seed \

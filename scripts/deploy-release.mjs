@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { preflightProductIdentity } from "./deploy-product-identity.mjs";
 import { acquireDeploymentLock } from "./deploy-lock.mjs";
 import { resolveDeploymentExposure } from "./deploy-exposure.mjs";
 import {
@@ -150,6 +151,9 @@ try {
   buildDir = mkdtempSync(join(buildParent, "dano-build-"));
   cloneRepo(repoUrl, buildDir);
   run("git", ["checkout", gitRef], { cwd: buildDir });
+  const identity = await preflightProductIdentity(buildDir, deployDir);
+  console.log(JSON.stringify(identity));
+  const expectedNameArgs = ["--expected-product-name", identity.productName];
   run(composeBin, [
     "build",
     "--build-arg",
@@ -240,6 +244,7 @@ try {
       "app",
       "./deploy/system-prompt.mjs",
       "sync",
+      ...expectedNameArgs,
     ],
     { cwd: deployDir },
   );
@@ -248,7 +253,10 @@ try {
   run(composeBin, [...composeArgs, "-f", "docker-compose.yml", "-f",
     "docker-compose.exposure.yml", ...productNameArgs(), "--env-file", ".env",
     "run", "--rm", "--no-deps", "--entrypoint", "node", "app",
-    "./deploy/system-prompt.mjs", "check"], { cwd: deployDir });
+    "./deploy/system-prompt.mjs", "check", ...expectedNameArgs], { cwd: deployDir });
+
+  const finalIdentity = await preflightProductIdentity(buildDir, deployDir, identity.targetSha);
+  if (JSON.stringify(finalIdentity) !== JSON.stringify(identity)) throw new Error("PRODUCT_IDENTITY_CHANGED; restart release preflight");
 
   run(
     composeBin,

@@ -118,6 +118,62 @@ validation failures stop the release before Compose switches containers. Output
 contains only status markers. `settings.json` and `heimdall.json` remain preserved
 unless a release explicitly requires their synchronization.
 
+### Release identity preflight
+
+Before any image build, run the target checkout's executable preflight under the
+same deployment lock (Node only; no dependency installation required):
+
+```sh
+node scripts/deploy-product-identity.mjs /opt/dano/deploy "$target_sha"
+```
+
+The checkout must be clean and its HEAD must match the full target SHA. The only
+success output is JSON with `productName`, `source`, and `targetSha`. Preserve
+these three fields in the release manifest and final evidence report. The
+managed `docker-compose.product-name.json` override takes precedence over the
+target commit's `dano.config.json.productName`; valid configuration proceeds
+without a user question. Ambient shell variables and `.env` are not identity
+sources for this preflight, and are never read or printed by it.
+
+A managed overlay must contain exactly
+`services.app.environment.DANO_PRODUCT_NAME` as a nonempty string, with no extra
+keys. Dollars must be escaped as `$$` for Compose; interpolation such as
+`${NAME}` or `$NAME` is rejected. The runtime resolver trims the selected name
+and rejects braces, template delimiters, and control characters. Empty or
+malformed managed overrides fail rather than silently falling back to source.
+
+On failure, stop before building: configure and commit a valid source
+`productName` for a new deployment, or use the healthy deployment's supported
+`deploy-system-prompt.mjs set-name 'Name'` transaction below. If the managed
+overlay has an invalid structure, restore its last known valid non-secret copy
+before invoking that helper. Resolve dirty/mismatched source by selecting the
+intended clean target commit. Ask the operator for the name only if it is
+missing or ambiguous; never guess, emit configuration contents, or edit `.env`.
+
+`deploy:release` executes this gate unconditionally after checkout and before
+build, then supplies its exact name to both container commands:
+
+```sh
+# product_name is the productName field of the successful JSON, not shell code.
+# Include the same managed overlay in both Compose invocations when present.
+docker compose -f docker-compose.yml -f docker-compose.exposure.yml \
+  --env-file .env run --rm --no-deps --entrypoint node app \
+  ./deploy/system-prompt.mjs sync --expected-product-name "$product_name"
+docker compose -f docker-compose.yml -f docker-compose.exposure.yml \
+  --env-file .env run --rm --no-deps --entrypoint node app \
+  ./deploy/system-prompt.mjs check --expected-product-name "$product_name"
+```
+
+The assertion compares the name against the container's actual environment and
+config before any SYSTEM mutation. A different `.env` override, mounted config,
+or image therefore fails closed without a Compose switch. Immediately before
+switching, repeat preflight and require all three fields to match the manifest;
+the release script does this automatically. The production deployment Skill uses
+this same executable gate even when preserving environment-owned staging files.
+The existing atomic sync, read-back, ownership checks and rollback contract remain
+in force. Changes to SYSTEM, product name, or repaired prompt drift require a new
+Codex in-app Browser session for identity acceptance.
+
 ### Supported product-name update and SYSTEM repair
 
 Use the checked-out release's helper with the existing deployment control

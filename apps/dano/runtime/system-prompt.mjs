@@ -7,15 +7,8 @@ function isErrorCode(error, code) {
   return error instanceof Error && "code" in error && error.code === code;
 }
 
-export function resolveProductName(environmentName, configuredName) {
-  const productName = environmentName?.trim() || configuredName?.trim();
-  if (!productName) {
-    throw new Error(
-      "Set productName in dano.config.json or provide DANO_PRODUCT_NAME",
-    );
-  }
-  return productName;
-}
+import { resolveProductName } from "./product-name.mjs";
+export { resolveProductName } from "./product-name.mjs";
 
 export function renderSystemPrompt(template, productName) {
   const name = resolveProductName(productName, undefined);

@@ -46,7 +46,8 @@ Record the local worktree status before switching branches. Stop rather than sta
 4. Identify the currently deployed immutable image, commit, product version, and frontend asset names using non-secret container/image inspection and HTTP HTML. If the old image tag does not prove a commit, correlate it with server Git history and image contents; label the result uncertain if it cannot be proven.
 5. Query merged PRs between the proven previous production commit and `target_sha`. For each, record PR number, title, merge commit, linked Issue(s), and a concise shipped-change summary. Read its PR body and linked Issue(s), extract every release-specific acceptance criterion, and classify each as applicable or not applicable with a reason.
 6. Define an immutable target tag from the full target commit, normally `dano-app:<short-sha>`. Never use an old tag or mutable `latest` as release identity.
-7. Confirm the live CI/check state for `target_sha`; stop on a required failing or pending check unless the user explicitly authorizes proceeding with the recorded risk.
+7. Record the effective product name, source and target SHA from the executable identity preflight below as required release-manifest fields. Valid configured identity continues automatically without asking the user; missing or ambiguous identity requires an explicit name, never a guess.
+8. Confirm the live CI/check state for `target_sha`; stop on a required failing or pending check unless the user explicitly authorizes proceeding with the recorded risk.
 
 Checkpoint: do not build unless `target_sha`, product version, previous release boundary, release PR list, every extracted acceptance criterion, target CI state, and rollback image are accounted for. If the previous boundary is uncertain, say so and use a conservative commit range rather than inventing precision.
 
@@ -88,6 +89,14 @@ Stop if the server checkout is dirty, diverged, or not at the target SHA after t
 
 ## Phase 5: Build the immutable image
 
+Before any build, under the existing lock, run the target checkout's executable preflight:
+
+```sh
+node scripts/deploy-product-identity.mjs /opt/dano/deploy "$target_sha"
+```
+
+Require exit zero and record its JSON `productName`, `source`, and `targetSha` in the release manifest. The command reads only public source config and the managed overlay and reuses the target runtime resolver. On missing/empty/placeholder names, invalid overlays or source mismatch, stop before build and follow the repair steps in `deploy/README.md`. Ask for a name only when missing or ambiguous. Valid configuration proceeds without a question.
+
 Build from the proven target checkout and current Dockerfile. Prefer a no-cache build for production updates. Pass registry selection only through the current supported build arguments; follow the Dockerfile's current npm and Debian apt mirror order exactly. Do not patch mirrors on the server or inject secrets into build arguments or logs.
 
 Capture the build exit status and structured stage results without returning raw output that may contain credentials. Reject a pre-existing target tag unless its image ID and proven provenance already match this exact run. Then verify inside the built image:
@@ -121,7 +130,7 @@ Resolve Compose as JSON entirely on-host and pipe it through `scripts/summarize-
 
 Immediately before switching traffic, fetch and compare `upstream/main` with `target_sha`. Treat `target_sha` as the release locked by this run. If upstream advanced, restart manifest/build preparation for the new SHA by default; deploy the locked older SHA only with explicit user direction.
 
-Under the existing deployment lock, run the new image's `./deploy/system-prompt.mjs sync` followed by `check` through the exact Compose app service and `--entrypoint node`. Include the managed product-name overlay when present. Both commands must exit zero before switching; preserve only a restricted on-host SYSTEM rollback copy, and restore it with the previous image if rollback is needed. For a configuration-only name update or drift repair, use `scripts/deploy-system-prompt.mjs` as documented in `deploy/README.md`, passing `DANO_DEPLOY_LOCK_FD=9` when reusing the existing lock. Its machine success still requires browser identity acceptance.
+Under the existing deployment lock, run the new image's `./deploy/system-prompt.mjs sync` followed by `check` through the exact Compose app service and `--entrypoint node`. Include the managed product-name overlay when present. Pass `--expected-product-name "$product_name"` to both commands, taking `product_name` exactly from the preflight JSON (never shell-evaluate JSON). This asserts equality with the actual container resolver before writing or checking SYSTEM. Repeat the same preflight immediately before switching and require all three evidence fields to equal the manifest. Both commands must exit zero before switching; preserve only a restricted on-host SYSTEM rollback copy, and restore it with the previous image if rollback is needed. For a configuration-only name update or drift repair, use `scripts/deploy-system-prompt.mjs` as documented in `deploy/README.md`, passing `DANO_DEPLOY_LOCK_FD=9` when reusing the existing lock. Its machine success still requires browser identity acceptance.
 
 Capture an RFC3339 UTC `switch_timestamp` immediately before Compose mutation. Run Compose `up -d --no-build` for only the Dano app/nginx services required by the current topology. Do not recreate or restart adjacent services. Wait for the app healthcheck and nginx dependency to settle. On failure, collect structured status and log counts scoped to `switch_timestamp`, then either correct the proven cause or execute the recorded rollback.
 
@@ -162,7 +171,7 @@ Complete all of these on the new deployment:
 3. Create or select a non-sensitive per-run test image, upload it through the UI, ask the model to read and describe it, and confirm an actual `read` tool call plus a correct description. Do not use a secret-bearing screenshot or a stale uploaded hash.
 4. Inspect the loaded document and network resources. Confirm the JS/CSS asset names match the assets enumerated from the new image.
 5. Inspect the Dano page console and confirm there are no deployment-related errors or warnings.
-6. When SYSTEM/productName changes, create a new session and ask for the assistant identity. Verify that the answer uses the effective product name and contains no `{产品名称}`.
+6. When SYSTEM/productName changes or this run repairs prompt drift, create a new session and ask for the assistant identity. Verify that the answer uses the effective product name and contains no `{产品名称}`.
 7. Execute any PR-specific UI/mobile acceptance in addition to this baseline, preserving necessary screenshots or browser evidence.
 
 If a previously working step fails, inspect the final URL, TLS state, active tab, browser-control connection, visible DOM, model chain, network requests, loaded static assets, container state, and safe structured diagnostics. Recover and retry the same path. Do not lower the bar or silently replace it with API checks. If in-app Browser access is unavailable or any item remains incomplete, deployment acceptance is incomplete.
@@ -197,6 +206,7 @@ Never delete an artifact whose ownership or reference status is uncertain.
 Report:
 
 - target deployment commit and product version;
+- effective product name, source (`dano.config.json` or `managed-overlay`), preflight target SHA, container sync/check equality, and new-session browser identity evidence when applicable;
 - immutable image tag and image ID;
 - built and browser-loaded JS/CSS asset names;
 - previous-to-current PR/Issue list with titles, merge commits, and summaries;

@@ -8,7 +8,7 @@ import {
 // This command runs as the image's app user with Compose's effective environment.
 // It emits markers only: JSON parse errors and filesystem errors can contain data.
 try {
-  const [action, transaction] = process.argv.slice(2);
+  const [action, transaction, expectedName, ...extra] = process.argv.slice(2);
   const runtimeDir = resolve(process.env.DANO_RUNTIME_DIR || "/opt/dano/runtime-data");
   const agentDir = resolve(process.env.PI_CODING_AGENT_DIR || join(runtimeDir, ".pi/agent"));
   if (!agentDir.startsWith(`${runtimeDir}/`)) throw new Error("path");
@@ -25,6 +25,8 @@ try {
       configuredName = typeof config.productName === "string" ? config.productName : undefined;
     }
     options.productName = resolveProductName(process.env.DANO_PRODUCT_NAME, configuredName);
+    if (transaction === "--expected-product-name" &&
+        (extra.length || expectedName !== options.productName)) throw new Error("PRODUCT_IDENTITY_MISMATCH");
     await (action === "sync" ? syncDeployedSystemPrompt : checkDeployedSystemPrompt)(options);
   } else {
     if (!/^[a-f0-9-]{36}$/.test(transaction || "")) throw new Error("transaction");
