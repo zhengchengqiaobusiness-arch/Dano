@@ -83,6 +83,23 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 - If `podman ps` works but `podman compose` or `podman machine list` fails with `podman-machine-default.lock: operation not permitted` or `could not find a matching machine`, treat it as local Podman machine metadata being blocked by the sandbox, not a Dano bug. Re-run the same Compose command outside the sandbox/escalated instead of changing Dano code.
 - After Podman-based deployment or smoke tests, stop and remove the test containers and pods, then remove Dano temporary images/tags and dangling build layers after confirming no containers reference them; keep reusable base images unless explicitly asked.
 
+### 镜像验收入口、上传与审批
+
+- 本地或 SSH 隧道访问的隔离镜像验收统一使用 `http://localhost:18710` 和
+  `https://localhost:18711`，只绑定回环地址；重建镜像或容器时保持浏览器入口不变。
+  本约定不改变开发服务器和生产服务的端口。
+- 启动前检查端口占用及所属任务。仅复用已确认属于本次验收的服务；其他任务占用时
+  优先协调或串行验收，不擅自终止进程或随机换端口。确需更换时提前说明原因和新入口。
+- 使用固定、无敏感信息的合成测试图片，放在代码仓库外的专用验收素材目录，并复用
+  浏览器验收标签页。同一轮验收尽量只上传一次；仅在用例要求、上传失败或会话隔离
+  必须重新上传时重复操作。图片上传验收仍须包含真实上传和模型识别。
+- 验收开始前明确容器、端口、隧道、素材绝对路径、上传目标和清理范围。对确实需要
+  审批且能提前申请的操作，先准备具体可审阅的操作，再集中提交审批；沿用会话内已获
+  授权的范围，避免重复询问。不把每轮验收本身额外变成一次审批。
+- 若工具强制逐次审批上传，提前告知该限制，在调用时遵守审批机制；固定入口和复用
+  素材不代表免审批。执行中发现无法预见的新权限需求时，说明原因，仅暂停依赖该权限
+  的步骤，继续完成其他已授权工作。
+
 ## Model tool argument compatibility
 
 - Treat model-generated tool arguments as best-effort input. Normalize supported aliases and safely coercible value types when the intended behavior remains unambiguous.
