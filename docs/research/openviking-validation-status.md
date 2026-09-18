@@ -962,6 +962,42 @@ runs were removed. The dependency-only added base layers are retained as
 they contain the existing public base image, compiler tools and installed npm
 dependencies, without the new extension/Dano source or user runtime state.
 
+### Owner directory provisioning
+
+`worker-workspace.ts` now connects the persistent identity registry to the
+actual worker directory layout. It derives the User Folder from the trusted
+users root and server owner ID, accepts only a direct workspace child, and
+rejects symlinks or foreign-owned/group-bound directories. Shared ancestors
+must already permit traversal; it does not widen the runtime root or recursively
+change user file permissions.
+
+The host owns transit directories and the workspace. The workspace uses
+setgid/sticky permissions so tools can manage their normal files while being
+unable to replace the host-owned `.pi` directory. Both project and tool-agent
+Heimdall policies are host-owned and read-only to the worker. Private host
+agent/state directories are under a separate `0700` host-state root outside
+the User Folders, keeping them outside ordinary user-file transfer paths.
+
+Registry initialization now writes an empty pool without consuming an identity
+and permits first initialization only when all supplied persistent data roots
+are empty. Provisioning requires an established pool. A normal restart retains
+the existing mapping; lost pool metadata over retained user/private state fails
+closed. Seven registry tests pass, including the lost-whole-directory case.
+
+The updated real Linux dual-worker fixture now uses this provisioning path
+instead of hand-created identities/directories. It passed with the existing
+cross-user and descendant-cleanup checks, plus raw unprivileged OS attempts to
+rename `.pi`, rewrite its policy and read a host-private credential. The guarded
+tool path also denied policy replacement and private-state reads. Symlink and
+outside-root provisioning requests failed without changing the target's mode.
+Type checking and server build passed. Test containers and five new source
+image layers were removed; the reusable dependency base was retained.
+
+This is not yet the final server lifecycle: main supervisor composition,
+system-account range reservation, upload/artifact access, and explicit user
+retirement/transfer/revocation remain to be connected and accepted before
+enabling the protected profile in Dano.
+
 ## #473 acceptance audit and handoff
 
 | Original gate requirement | Evidence and outcome |

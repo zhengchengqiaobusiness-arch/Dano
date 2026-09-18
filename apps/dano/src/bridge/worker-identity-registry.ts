@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, realpath, stat, type FileHandle } from "node:fs/promises";
+import { mkdir, open, readdir, realpath, stat, type FileHandle } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { flock } from "fs-ext";
@@ -41,6 +41,23 @@ export class WorkerIdentityRegistry {
   async get(ownerId: string, signal?: AbortSignal): Promise<WorkerIdentity> {
     if (typeof ownerId !== "string" || !ownerId || Buffer.byteLength(ownerId) > 4096) throw unavailable();
     const owner = createHash("sha256").update(ownerId).digest("hex");
+    return (await this.#update(owner, signal))!;
+  }
+
+  /** Before serving users, establish an empty pool only if all associated
+   * persistent data roots are empty. Never recreate a lost pool over old data. */
+  async initialize(dataRoots: readonly string[]): Promise<void> {
+    if (!dataRoots.length) throw unavailable();
+    await this.#update(undefined, undefined, dataRoots);
+  }
+
+  /** Provisioning must not implicitly create a new pool. */
+  async assertInitialized(): Promise<void> {
+    const handle = await open(join(this.#directory, "allocations.json"), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try { await this.#checkFile(handle); } finally { await handle.close(); }
+  }
+
+  async #update(owner?: string, signal?: AbortSignal, dataRoots?: readonly string[]): Promise<WorkerIdentity | undefined> {
     signal?.throwIfAborted();
     await mkdir(this.#directory, { mode: 0o700, recursive: true });
     if (await realpath(this.#directory) !== this.#directory) throw unavailable();
@@ -69,7 +86,12 @@ export class WorkerIdentityRegistry {
       let input: FileHandle | undefined;
       try { input = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw unavailable(); }
-      if (!input && marker === "1") throw unavailable();
+      if (!input && (marker === "1" || owner !== undefined)) throw unavailable();
+      if (!input && dataRoots) {
+        for (const root of dataRoots) {
+          if (await realpath(root) !== resolve(root) || (await readdir(root)).length) throw unavailable();
+        }
+      }
       if (input) {
         try {
           await this.#checkFile(input);
@@ -82,11 +104,15 @@ export class WorkerIdentityRegistry {
         } catch { throw unavailable(); }
         finally { await input.close(); }
       }
-      let offset = stored.owners.indexOf(owner);
-      if (offset === -1) {
+      let changed = !input;
+      let offset = owner === undefined ? -1 : stored.owners.indexOf(owner);
+      if (owner !== undefined && offset === -1) {
         if (stored.owners.length >= this.#range.count) throw new Error("WORKER_IDENTITY_RANGE_EXHAUSTED");
         offset = stored.owners.length;
         stored.owners.push(owner);
+        changed = true;
+      }
+      if (changed) {
         signal?.throwIfAborted();
         // A cancelled caller may reserve an identity, but must never cause it
         // to be reused after persistence. The next call finds that allocation.
@@ -101,7 +127,7 @@ export class WorkerIdentityRegistry {
         await handle.sync();
       }
       signal?.throwIfAborted();
-      return Object.freeze({ uid: this.#range.firstUid + offset, gid: this.#range.firstGid + offset });
+      return owner === undefined ? undefined : Object.freeze({ uid: this.#range.firstUid + offset, gid: this.#range.firstGid + offset });
     } finally {
       try { if (locked) await lock(handle.fd, "un"); }
       finally { await handle.close(); }

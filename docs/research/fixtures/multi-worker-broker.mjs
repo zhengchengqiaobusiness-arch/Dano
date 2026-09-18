@@ -1,9 +1,12 @@
 // Synthetic Linux acceptance. Run only in a disposable root container.
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, chmod, chown, writeFile, access, rm, symlink, readdir, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, chmod, chown, writeFile, access, rm, symlink, readdir, readFile, stat } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { startWorkerBroker } from '../dano-server/bridge/start-worker-broker.js';
 import { prepareLinuxProcessPrivacy } from '../dano-server/bridge/linux-process-privacy.js';
+import { provisionWorkerWorkspace, WorkerIdentityRegistry } from '../dano-server/bridge/worker-workspace.js';
 
 assert.equal(process.getuid(), 0);
 const initialGid = process.getgid();
@@ -14,6 +17,13 @@ const root = await mkdtemp('/tmp/dano-multi-worker-');
 await chmod(root, 0o711);
 const clients = [];
 const profiles = [];
+const execute = promisify(execFile);
+const usersRoot = join(root, 'users'), hostStateRoot = join(root, 'host-state');
+await mkdir(usersRoot, { mode: 0o711 }); await chown(usersRoot, hostUid, hostGid);
+await mkdir(hostStateRoot, { mode: 0o700 }); await chown(hostStateRoot, hostUid, hostGid);
+const identities = new WorkerIdentityRegistry({ directory: join(root, 'identities'),
+  firstUid: firstWorker, firstGid: firstWorker, count: 2, hostUid, hostGid, lockTimeoutMs: 5000 });
+await identities.initialize([usersRoot, hostStateRoot]);
 async function workerPids(uid) {
   const results = await Promise.all((await readdir('/proc')).filter(name => /^\d+$/.test(name)).map(async pid => {
     const status = await readFile(`/proc/${pid}/status`, 'utf8').catch(() => '');
@@ -28,26 +38,33 @@ async function assertWorkerGone(uid) {
 }
 try {
   for (let i = 0; i < 2; i++) {
-    const owner = join(root, `owner-${i}`);
-    const workspace = join(owner, 'workspace');
-    const agentDir = join(owner, 'private');
-    await mkdir(owner, { mode: 0o711 });
-    await mkdir(workspace, { mode: 0o770 });
-    await chown(workspace, hostUid, firstWorker + i);
-    await chmod(workspace, 0o770);
-    await mkdir(agentDir, { mode: 0o700 });
-    await chown(agentDir, hostUid, hostGid);
-    await mkdir(join(workspace, '.pi'), { mode: 0o770 });
-    await chown(join(workspace, '.pi'), firstWorker + i, firstWorker + i);
-    await writeFile(join(workspace, '.pi/heimdall.json'), JSON.stringify({ sandbox: {
-      enabled: true, userNamespace: false, paths: { [workspace]: { mode: 'write' } },
-    } }));
-    profiles.push({ workspace, agentDir, stateDir: agentDir, installationDir: '/app',
-      hostUid, hostGid, workerUid: firstWorker + i, workerGid: firstWorker + i,
+    const userId = `owner-${i}`;
+    const workspace = join(usersRoot, userId, 'workspaces/default');
+    const provisioned = await provisionWorkerWorkspace({ usersRoot, hostStateRoot, userId, workspace, hostUid, hostGid, identities });
+    const credential = join(provisioned.stateDir, 'credential');
+    await writeFile(credential, 'SYNTHETIC_PRIVATE_CREDENTIAL', { mode: 0o600 });
+    await chown(credential, hostUid, hostGid);
+    const asWorker = source => execute('/usr/bin/setpriv', ['--reuid', String(provisioned.identity.uid),
+      '--regid', String(provisioned.identity.gid), '--clear-groups', '--no-new-privs', '--',
+      process.execPath, '-e', source]);
+    await assert.rejects(asWorker(`require('node:fs').renameSync(${JSON.stringify(join(workspace, '.pi'))},${JSON.stringify(join(workspace, 'replaced-pi'))})`));
+    await assert.rejects(asWorker(`require('node:fs').writeFileSync(${JSON.stringify(join(workspace, '.pi/heimdall.json'))},'{}')`));
+    await assert.rejects(asWorker(`require('node:fs').readFileSync(${JSON.stringify(credential)})`));
+    profiles.push({ workspace, agentDir: provisioned.agentDir, stateDir: provisioned.stateDir, installationDir: '/app',
+      hostUid, hostGid, workerUid: provisioned.identity.uid, workerGid: provisioned.identity.gid,
       piPackageContext: '/app/memory-extension/package.json', privilegeGuard: '/usr/bin/setpriv',
       path: process.env.PATH, startupTimeoutMs: 30000, operationTimeoutMs: 10000,
       shutdownTimeoutMs: 3000, maxConcurrentOperations: 4, maxResultBytes: 1048576 });
   }
+  const outside = join(root, 'outside');
+  await mkdir(outside, { mode: 0o700 });
+  const linkedWorkspace = join(usersRoot, 'owner-0/workspaces/linked');
+  await symlink(outside, linkedWorkspace);
+  await assert.rejects(provisionWorkerWorkspace({ usersRoot, hostStateRoot, userId: 'owner-0',
+    workspace: linkedWorkspace, hostUid, hostGid, identities }));
+  await assert.rejects(provisionWorkerWorkspace({ usersRoot, hostStateRoot, userId: 'owner-0',
+    workspace: outside, hostUid, hostGid, identities }));
+  assert.equal((await stat(outside)).mode & 0o777, 0o700);
   // Collect every outcome before cleanup, including when only one start fails.
   const starts = await Promise.allSettled(profiles.map(async profile => {
     const client = await startWorkerBroker(profile);
@@ -71,6 +88,12 @@ try {
       update => { output += Buffer.from(update.data, 'base64').toString(); });
     assert.equal(identity.exitCode, 0, output);
     assert.deepEqual(output.trim().split('\n'), [String(firstWorker + i), String(firstWorker + i)]);
+    const replacePolicy = await client.execute('user_bash', { command: 'mv .pi replaced-pi' });
+    assert.notEqual(replacePolicy.exitCode, 0);
+    await assert.rejects(client.execute('write', { path: '.pi/heimdall.json', content: '{}' }));
+    await assert.rejects(client.execute('read', { path: join(profiles[i].stateDir, 'credential') }));
+    const rewriteUserPolicy = await client.execute('user_bash', { command: "printf '{}' > .pi/agent/heimdall.json" });
+    assert.notEqual(rewriteUserPolicy.exitCode, 0);
     await assert.rejects(client.execute('read', { path: join(profiles[1 - i].workspace, 'owned.txt') }));
     await assert.rejects(client.execute('write', { path: join(profiles[1 - i].workspace, 'owned.txt'), content: 'CROSS_USER_WRITE' }));
   }
@@ -99,7 +122,9 @@ try {
   await bob.close();
   await assertWorkerGone(firstWorker + 1);
   console.log(JSON.stringify({ parentUidPreserved: true, parentGidPreserved: true,
-    distinctWorkerIdentities: true, peerReadsAndWritesDenied: true, peerSymlinkDenied: true, streamingShell: true,
+    distinctWorkerIdentities: true, persistentIdentityProvisioning: true,
+    guardedWorkspaceProvisioning: true, policyReplacementDenied: true,
+    peerReadsAndWritesDenied: true, peerSymlinkDenied: true, streamingShell: true,
     closeStopsDetachedWrite: true, noWorkerProcessesRemain: true,
     otherWorkerSurvivesClose: true, finalServerVerified: false }));
 } finally {

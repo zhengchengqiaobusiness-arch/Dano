@@ -8,7 +8,7 @@ export default defineConfig({
   fixedExtension: false,
   clean: true,
   sourcemap: false,
-  entry: ["src/main.ts", "src/bridge/heimdall-worker-tools.ts", "src/bridge/linux-process-privacy.ts", "src/bridge/worker-broker-entry.ts", "src/bridge/start-worker-broker.ts"],
+  entry: ["src/main.ts", "src/bridge/heimdall-worker-tools.ts", "src/bridge/linux-process-privacy.ts", "src/bridge/worker-broker-entry.ts", "src/bridge/start-worker-broker.ts", "src/bridge/worker-workspace.ts"],
   outDir: "dist/server",
   copy: [{ from: "src/bridge/python/*.py", to: "dist/server/python" }],
   dts: false,

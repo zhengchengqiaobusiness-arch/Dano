@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFile, spawn } from "node:child_process";
@@ -9,12 +9,18 @@ import { WorkerIdentityRegistry } from "../worker-identity-registry.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
-async function harness(count = 20) {
+async function harness(count = 20, initialize = true) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "dano-worker-identities-")));
   roots.push(root);
   const options = { directory: join(root, "identities"), firstUid: 10001, firstGid: 20001,
     hostUid: 1000, hostGid: 1000, count, lockTimeoutMs: 5000 };
-  return { root, options, registry: new WorkerIdentityRegistry(options) };
+  const registry = new WorkerIdentityRegistry(options);
+  if (initialize) {
+    const data = join(root, "initial-data");
+    await mkdir(data);
+    await registry.initialize([data]);
+  }
+  return { root, options, registry };
 }
 
 it("serializes independent callers, keeps owners distinct, and preserves identities after restart", async () => {
@@ -65,6 +71,24 @@ it("rejects public metadata directories and cancelled allocation without changin
   expect(await readFile(join(h.options.directory, "allocations.json"), "utf8")).toBe(before);
   await chmod(h.options.directory, 0o755);
   await expect(h.registry.get("bob")).rejects.toThrow("IDENTITIES_UNAVAILABLE");
+});
+
+it("initializes without consuming an identity and refuses a lost pool over retained user state", async () => {
+  const h = await harness(20, false);
+  const users = join(h.root, "users"), privateState = join(h.root, "host-state");
+  await mkdir(users); await mkdir(privateState);
+  await expect(h.registry.assertInitialized()).rejects.toThrow();
+  await expect(h.registry.get("alice")).rejects.toThrow("IDENTITIES_UNAVAILABLE");
+  await h.registry.initialize([users, privateState]);
+  await h.registry.assertInitialized();
+  expect((await h.registry.get("alice")).uid).toBe(h.options.firstUid);
+  await writeFile(join(privateState, "retained-state"), "synthetic");
+  // A normal restart preserves the established pool even with stored data.
+  await new WorkerIdentityRegistry(h.options).initialize([users, privateState]);
+  await rm(h.options.directory, { recursive: true });
+  await expect(h.registry.assertInitialized()).rejects.toThrow();
+  await expect(h.registry.initialize([users, privateState])).rejects.toThrow("IDENTITIES_UNAVAILABLE");
+  await expect(readFile(join(h.options.directory, "allocations.json"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 it("allocates consistently across real competing processes", async () => {
