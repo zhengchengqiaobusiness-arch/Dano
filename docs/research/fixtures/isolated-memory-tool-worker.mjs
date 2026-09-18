@@ -73,13 +73,16 @@ if (process.argv[2] === '--worker') {
       env: { PATH: process.env.PATH, HOME: workspace, MEMORY_PROBE_TARGET: target },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    process.setgid(1000);
-    process.setuid(1000);
-    assert.equal((await fetch(endpoint, { headers: { authorization: `Bearer ${key}` } })).status, 200);
     let output = '', errors = '';
     child.stdout.on('data', chunk => { output += chunk; });
     child.stderr.on('data', chunk => { errors += chunk; });
-    const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
+    const completion = new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
+    process.setgid(1000);
+    process.setuid(1000);
+    const [code, authenticated] = await Promise.all([
+      completion, fetch(endpoint, { headers: { authorization: `Bearer ${key}` } }),
+    ]);
+    assert.equal(authenticated.status, 200);
     assert.equal(code, 0, errors);
     assert.equal(await readFile(target, 'utf8'), key);
     console.log(JSON.stringify({ trustedHttpAccess: true, credentialUnchanged: true,

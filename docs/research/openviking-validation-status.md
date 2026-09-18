@@ -5,9 +5,11 @@ Gate: [#473](https://github.com/zhengchengqiaobusiness-arch/Dano/issues/473)
 
 ## Current result
 
-2026-09-18: **not passed**. No memory runtime feature has been enabled. The
-implementation gate remains open until the real upstream service contracts and
-host protections have executable evidence.
+2026-09-18: **feasibility review passed for the selected Linux profile**;
+upstream PR merge and ticket closure remain pending. No memory runtime feature
+has been enabled. The decision covers the original #473 feasibility gate,
+not implementation or completion of #465. The host boundary and delivery
+obligations below are mandatory inputs to #474–477.
 
 ## Executed host file-tool probe
 
@@ -316,6 +318,11 @@ python docs/research/fixtures/openviking-model-extraction.py /path/to/isolated/r
 
 Actual package combination: server `0.4.20`, Python SDK dependency `0.1.11`,
 TypeScript SDK `0.1.0`, llama-cpp-python `0.3.35`, httpx `0.28.1`.
+The official `openviking-0.4.20-cp310-abi3-macosx_14_0_arm64.whl` was
+downloaded from its PyPI release metadata and verified as SHA-256
+`f3ca10af7bb93f69e00b21e188d2d0c2b8d1e49d505da3fbd9a29265b2735d7d`.
+All 1,365 installed distribution files outside installer metadata matched that
+wheel byte-for-byte, confirming the tested server was not privately patched.
 The TypeScript package registry integrity is
 `sha512-5RI0GTOKAW5+NUky5NW3AwLYXDF10UQBi9TSo6Y6yp0/aq7kNMNnQdtRlkMC4Aa3Cf1kHZs9NGbtF+1cxEHrFA==`.
 The downloaded GGUF SHA-256 is
@@ -488,6 +495,8 @@ The checked-in `fixtures/openviking-offline-snapshot.py` provides explicit
 listener/PID validation, optional graceful stop, process-exit verification,
 copying, a per-file digest manifest and destination config generation. Running
 it against the stopped research snapshot verified all 655 copied run files.
+The worker supervisor now registers child output/exit listeners immediately
+after spawning, before awaiting network requests; its Linux probe passed again.
 
 ## Environment observations
 
@@ -500,16 +509,22 @@ it against the stopped research snapshot verified all 655 copied run files.
   authentication-only service was stopped after its probes; the separate
   real-model environment supports ongoing governance experiments.
 
-## Remaining gate evidence
+## #473 acceptance audit and handoff
 
-- Actual service and SDK version combination, dual pi entry points and event
-  lifecycle, license/distribution conditions.
-- USER authentication, rotation, concurrent account/user/Peer/Session access.
-- Message/commit response-loss reconciliation and usable `ready` state.
-- Correction/deletion with shared sources and in-flight extraction.
-- Protected host state across all tool channels.
-- User export and consistent backup/restore including identity and post-backup
-  deletion/revocation records.
+| Original gate requirement | Evidence and outcome |
+|---|---|
+| Dual pi entries, events, stable sources, Runtime replacement, versions/licenses | Real model SDK/CLI lifecycle, fork IDs, fixed package metadata and distribution review; passed |
+| USER registration/rotation and account/user/Session/Peer isolation | Real concurrent matrix plus direct read/write/search/export and forged identity rejection; passed |
+| Lost/partial responses and restart reconciliation; actual ready evidence | Lost append/commit responses, client exit, six writers, six commits and real server interruption; completed task/archive/content/recall chain; passed |
+| Correction/deletion, shared facts, old in-flight work and source suppression | Three-process correction/deletion, source revocation, public hidden-file/export audit; passed for feasibility samples |
+| Enforced credential/state boundary across file, symlink, Shell, environment and HTTP | Selected Linux host/worker profile, bootstrap privilege drop, real OpenViking authenticated 200 versus worker 401, real native tools denied; passed |
+| Export versus consistent disaster recovery and later revocations | Public content recovery plus stopped full-state copy, original identity/task/archive recovery and post-snapshot deletion/key revocation replay; passed |
+| Executable operation contract | [Executed contract](openviking-executed-contract.md) links principals, requests, pre/postconditions, retry rules and fixtures; passed |
 
-Static API findings are tracked separately from executed tests. None of the
-remaining items is waived by the successful dependency install or file probe.
+Separate Standards and Spec review found no remaining blocking issues after
+fixes. Secret-file creation, backup-derived expectations, reproducible snapshot
+supervision and a child-exit listener race were corrected. A nonblocking helper
+duplication suggestion remains. Final artifact publication, complete adapter
+state machines, generic semantic editing, launcher/IPC integration and the
+full #465 browser/evaluation/deployment audit remain #474–477 deliverables.
+No test result here substitutes for those later acceptance requirements.
