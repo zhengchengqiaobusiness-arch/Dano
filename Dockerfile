@@ -1,6 +1,10 @@
 FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
+# fs-ext builds the memory extension's kernel-backed file locking binding.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
 ENV COREPACK_HOME=/tmp/corepack
 ENV PNPM_HOME=/tmp/pnpm-home
 ENV PNPM_STORE_DIR=/tmp/pnpm-store

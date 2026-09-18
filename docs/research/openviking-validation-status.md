@@ -16,8 +16,8 @@ obligations below are mandatory inputs to #474–477.
 
 #474 implementation now lives in the independent
 [pi-openviking repository](https://github.com/josephyoung/pi-openviking), with
-package name `@josephyoung/pi-openviking`. This is source implementation, not a
-published package or completed #474 acceptance. The current Dano implementation
+package name `@josephyoung/pi-openviking`. Version 0.1.0 is now published,
+but #474 acceptance is incomplete. The current Dano implementation
 branch starts from the merged gate on upstream/main.
 
 Dano's host-only owner registry now persists the stable authenticated user ID
@@ -40,7 +40,27 @@ propagated. Nine targeted tests and server type checking pass. A real local
 OpenViking 0.4.20 run created Alice and Bob in synthetic account
 `provision-c965eeac55e3`; a recreated client retrieved Alice's unchanged key,
 and the two users had distinct keys with verified ownership/roles. This client
-does not yet persist credentials or wire them into Dano runtime initialization.
+handles management transport only; storage and startup composition follow below.
+
+The protected credential store and identity startup service now compose these
+pieces: USER keys are encrypted with AES-256-GCM, with account/user and key
+version authenticated as associated data. Reopening validates private file
+permissions, metadata and ciphertext before returning a key. Startup verifies
+the saved key without management access, shares concurrent initialization,
+requires live tool isolation before credential access and before handoff, and
+withholds the connection if durable persistence fails. Corrupt records or
+changed encryption configuration are not treated as missing credentials.
+All four identity modules have 26 focused passing tests and pass server type
+checking. Runtime/session wiring and Linux end-to-end isolation remain open;
+these unit tests do not prove the final Dano process boundary.
+
+With the published dependency installed, the host entry and native lock binding
+load successfully. Full type/Svelte checks report zero diagnostics and the
+production build passes. The full regression rerun passes 109 test files and
+1431 tests (one existing skipped test). The first run exposed a delayed dialog
+scroll-lock cleanup after happy-dom teardown; the lightbox fixture now awaits
+unmount and the actual scroll-lock release before teardown, and both its
+focused rerun and the full rerun pass without unhandled errors.
 
 At extension commit `fb7f2c7`, 38 automated tests pass: owner-bound private file
 state, eight concurrent processes, killed-writer recovery, durable source
@@ -81,10 +101,13 @@ selection, while retaining its original default-model assertions.
 
 The 0.1.0 npm tarball includes both entry points, the CLI and Apache-2.0 text;
 its 33 files contain no bundled pi kernel, config credentials or test state.
-Actual npm publication was attempted but requires account second-factor
-approval; the interactive authorization expired, and registry lookup still
-returns no published package. Do not treat the tarball or source push as a
-completed publication gate. Package digest:
+The user completed npm second-factor approval and publication succeeded.
+Registry metadata confirms version 0.1.0, and the downloaded registry tarball
+matches the inspected candidate byte digest. Dano now pins that exact registry
+version and integrity in its package manifest and pnpm lockfile. The native
+file-locking dependency compiles locally; the image build stage now includes
+its compiler prerequisites, with clean-image validation still pending.
+Package digest:
 `sha512-VFsiYHDA5lLJjz6nciIoJI/eR3QYQ3VlHQ6z59HdZqQB1lf+i59mQVMIHqaHUpZ5j7QJAUmdTxzrB6YDvpWvpQ==`.
 
 The actual extension adapter also saved a synthetic preference through real
@@ -130,11 +153,11 @@ must match the configured account/user and USER role; missing identity or an
 administrator key is rejected. Actual-service checks verified saved-content
 reading and rejection of wrong credential binding and foreign references.
 
-Remaining #474 gates include the Linux isolated-worker launcher,
-exact-version publication and Dano integration,
-authenticated settings/status UI, and ordinary-pi plus in-app Browser flows.
-The dependency/license checks recorded in the extension repository must be
-resolved before publication. #465 and #474–477 remain open.
+Remaining #474 gates include the multi-user Dano Linux worker launcher,
+runtime/session integration, authenticated settings/status UI, interactive
+ordinary-pi evidence and in-app Browser flows. Publication and exact dependency
+installation are now evidenced above; they do not complete these integration
+gates. #465 and #474–477 remain open.
 
 ## Executed host file-tool probe
 

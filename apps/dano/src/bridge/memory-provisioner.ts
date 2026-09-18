@@ -64,12 +64,19 @@ export class MemoryProvisioner {
         if (!key) throw new Error("MEMORY_USER_REGISTRATION_UNRESOLVED");
       }
     }
+    await this.verifyUserKey(owner, key);
+    return key;
+  }
+
+  async verifyUserKey(owner: MemoryOwner, key: string): Promise<void> {
+    if (owner.accountId !== this.#accountId || !/^[A-Za-z0-9_-]{1,128}$/.test(owner.userId)) {
+      throw new Error("MEMORY_OWNER_MISMATCH");
+    }
     const bound = object(await this.#request("/health", key));
     if (bound.auth_mode !== "api_key" || bound.role !== "user"
       || bound.account_id !== owner.accountId || bound.user_id !== owner.userId) {
       throw new Error("MEMORY_CREDENTIAL_OWNER_MISMATCH");
     }
-    return key;
   }
 
   async #request(route: string, key: string, body?: object): Promise<unknown> {

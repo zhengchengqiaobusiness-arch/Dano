@@ -5,11 +5,9 @@ import * as path from "node:path";
 import { writeFile as writeFileAtomically } from "atomically";
 import type { UserContext } from "./user-context.js";
 import { ensureSafeDirectory } from "./safe-directory.js";
+import type { Owner } from "@josephyoung/pi-openviking/host";
 
-export interface MemoryOwner {
-  readonly accountId: string;
-  readonly userId: string;
-}
+export type MemoryOwner = Owner;
 
 interface StoredMemoryOwner {
   readonly version: 1;
