@@ -901,6 +901,25 @@ native-tool fallback. The extension changes remain unreleased; a real patch
 publication and exact Dano dependency update are still required before this
 entry can be enabled.
 
+The parent side now has `WorkerBrokerClient` and a built
+`bridge/start-worker-broker.js` supervisor helper. The client handles bounded
+requests, streaming, cancellation (including while waiting for startup),
+operation/startup timeouts, broker death and actual child-exit waiting. Shutdown
+has a kill deadline for a broker that ignores the request, and spawn errors
+that never emit `exit` are handled through `close`.
+
+Twelve tests across client/server protocol suites pass, including seven tests
+using real child processes. Those children run a synthetic worker, not a Linux
+UID sandbox. The supervisor helper validates protected paths, root-owned
+installation code/executables, distinct host/worker groups and the broker's
+actual kernel UID/GID, privilege state and `no_new_privs`. It projects only
+worker configuration into child argv and supplies a minimal environment. It
+does not change the parent's identities. Type checking and server build pass;
+the helper's privileged Linux path and complete descendant cleanup still need
+real acceptance. The root supervisor must prepare private procfs, reserve and
+provision owner-bound directories, supply the enforced Heimdall policy, and
+connect this helper to the HTTP server factory before runtime enablement.
+
 ## #473 acceptance audit and handoff
 
 | Original gate requirement | Evidence and outcome |
