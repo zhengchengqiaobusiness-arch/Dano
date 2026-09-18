@@ -127,6 +127,25 @@ server idempotency key. The public context endpoint exposes source metadata,
 which is a possible reconciliation input, but completeness across archive,
 truncation, response loss, concurrent commits and restart is still unproven.
 
+### Concurrent account, USER and actor-Peer boundary
+
+On 2026-09-18, `fixtures/openviking-peer-boundary.py` created two accounts,
+including Alice in each, and Alice/Bob within one account. It wrote synthetic
+memory files under Alice's project-a and project-b Peer paths through public
+content APIs, then issued six concurrent reads of project-b. The owning Alice
+with actor project-b succeeded (200). Alice with actor project-a received 403;
+Bob and Bob with forged account/user headers received 403. Alice from the other
+account received 404. Explicit project-b search and content replacement under
+actor project-a both returned 403, and the original content remained intact.
+
+Omitting the actor header allowed the owning Alice to read project-b (200).
+The Peer header selects a view within the USER identity and must therefore be
+bound by trusted host code; it is not a separately authenticated project
+credential. The fixture proves these public API cases, not the final host's
+scope authorization or empty-target handling. Its initial search request
+incorrectly supplied a context-only field and received 400; the recorded 403
+result came from the corrected valid `find` request.
+
 ### Response discarded before adapter receipt, with process restart
 
 On 2026-09-18, `fixtures/openviking-lost-response.py` ran its `prepare`,
