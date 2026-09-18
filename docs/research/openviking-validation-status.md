@@ -410,6 +410,34 @@ content recovery and one real index-readiness sample with recreated identity;
 it does not prove restoration of a complete identity/key snapshot, queued
 operations, concurrent-write consistency, or production upgrade/rollback.
 
+### Stopped full-state snapshot and later revocations
+
+On 2026-09-18 the supervisor confirmed the isolated source service process
+had exited before copying its entire run directory to a private snapshot.
+All 630 regular data files matched SHA-256 between source and copy. Host
+operation-state files were copied with the run directory. The source resumed
+on port 19337; an independent snapshot instance started on loopback 19339.
+No private database records were edited; only the copy's workspace/port config
+changed. This is an offline filesystem backup, distinct from USER export and
+the public content-only backup endpoint.
+
+`fixtures/openviking-snapshot-recovery.py` verified that the original USER key
+worked in both instances, and the same completed task and source archive were
+present. It then deleted a synthetic memory and rotated its user's key in the
+source after the snapshot. As expected, the old snapshot still accepted the
+old key and exposed the old file. Reapplying the external account/user
+revocation and deletion record through public APIs invalidated that key in
+the copy and removed the file and fact from direct reads/search. The copy was
+stopped after verification.
+
+The experiment proves an offline identity/content/completed-task recovery
+path and the need for post-backup revocation replay. It does not prove a live
+atomic snapshot, recovery of a pending queue from that snapshot, every crash
+point in replay, or production upgrade/rollback. The source root task listing
+contained two terminal records; that list is not evidence that all historical
+account tasks were enumerated. The stopped-process copy supplies the snapshot
+consistency boundary.
+
 ## Environment observations
 
 - Podman machine is running. `podman images` fails with
