@@ -179,7 +179,7 @@ async function createFieldAssistHttpHarness(
   };
 }
 
-describe("Pi 0.82.1 HTTP/SSE regression baseline", () => {
+describe("Pi 0.85.1 HTTP/SSE regression baseline", () => {
   it("projects a real Pi runtime configured through package-root interfaces", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-pi-http-sse-"));
     const provider = fauxProvider({ provider: "dano-regression" });
@@ -733,7 +733,9 @@ describe("Pi 0.82.1 HTTP/SSE regression baseline", () => {
     });
     modelRuntime.registerNativeProvider(provider.provider);
     await modelRuntime.setRuntimeApiKey("dano-session-state", "test-only");
-    await modelRuntime.getAvailable("dano-session-state");
+    // Initial selection reads Pi's complete availability snapshot. A provider-only
+    // query returns that provider's models without refreshing the global snapshot.
+    await modelRuntime.getAvailable();
     const settingsManager = SettingsManager.inMemory({
       defaultProvider: "dano-session-state",
       defaultModel: "default",

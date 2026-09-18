@@ -20,7 +20,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
-const PI_BASELINE_VERSION = "0.82.1";
+const PI_BASELINE_VERSION = "0.85.1";
 
 type PiAiPublicContracts = {
   authContext: AuthContext;
@@ -54,7 +54,7 @@ function acceptPublicContracts(
   _piCodingAgent: PiCodingAgentPublicContracts,
 ): void {}
 
-describe("Pi 0.82.1 public interface baseline", () => {
+describe("Pi 0.85.1 public interface baseline", () => {
   it("pins both Pi packages to the verified release", () => {
     const packageJson = JSON.parse(
       readFileSync(new URL("../../../package.json", import.meta.url), "utf8"),

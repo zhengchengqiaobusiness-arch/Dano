@@ -20,10 +20,10 @@ package name `@josephyoung/pi-openviking`. This is source implementation, not a
 published package or completed #474 acceptance. The current Dano implementation
 branch starts from the merged gate on upstream/main.
 
-At extension commit `029be99`, 38 automated tests pass: owner-bound private file
+At extension commit `fb7f2c7`, 38 automated tests pass: owner-bound private file
 state, eight concurrent processes, killed-writer recovery, durable source
 deduplication, response-loss reconciliation, concurrent delivery, pause,
-reconfirmation after enable, bounded recall and real pi 0.82.1 loading/reloading
+reconfirmation after enable, bounded recall and real pi 0.85.1 loading/reloading
 of both entry modules. No second pi kernel is bundled.
 
 The protected Linux CLI now invokes pi's public `main` with the standard
@@ -34,7 +34,36 @@ A planted workspace extension was not evaluated, and print mode exited
 normally. `no_new_privs` is verified from kernel metadata. Trusted host modules
 and optional Skills must remain in the protected installation; administrator
 profiles and ancestors cannot be group/other-writable. This run deliberately
-kept memory disabled; enabled consent/save/recall acceptance is still pending.
+kept memory disabled; the separate enabled consent/save/recall run is recorded below.
+
+The standard pi CLI/RPC entry has now passed the real OpenViking path: default
+consent off, explicit confirmation, model-triggered save, background `ready`,
+content/source inspection, new-session recall and pause. Automatic collection
+remained unapproved, and captured RPC events/stderr contained no USER key. A
+fresh-account rerun passed on pi 0.85.1 after the earlier 0.82.1 run. The
+[extension acceptance record](https://github.com/josephyoung/pi-openviking/blob/fb7f2c7/docs/acceptance-2026-09-18.md)
+records both operations and tokenizer parity evidence. Interactive TUI evidence,
+Dano browser acceptance and product dual-user integration remain outstanding.
+
+The release candidate now pins pi 0.85.1: 0.82.1's bundled shrinkwrap retained
+vulnerable dependencies despite root overrides. The new exact install resolves
+undici 8.9.0 / brace-expansion 5.0.9 and currently has zero npm audit findings.
+The fixed-image Linux worker regression passed again. Dano's pi-ai and
+pi-coding-agent dependencies are now aligned to this same release. The root
+product version is 0.2.28. `pnpm run check` reports no diagnostics, the full
+build passes, and the final Vitest run with two workers reports 105 files /
+1405 tests passing and one existing skipped test. The local Python test PATH
+uses the isolated environment containing httpx. The Pi-owned default-model
+fixture now refreshes the complete availability snapshot before initial
+selection, while retaining its original default-model assertions.
+
+The 0.1.0 npm tarball includes both entry points, the CLI and Apache-2.0 text;
+its 33 files contain no bundled pi kernel, config credentials or test state.
+Actual npm publication was attempted but requires account second-factor
+approval; the interactive authorization expired, and registry lookup still
+returns no published package. Do not treat the tarball or source push as a
+completed publication gate. Package digest:
+`sha512-VFsiYHDA5lLJjz6nciIoJI/eR3QYQ3VlHQ6z59HdZqQB1lf+i59mQVMIHqaHUpZ5j7QJAUmdTxzrB6YDvpWvpQ==`.
 
 The actual extension adapter also saved a synthetic preference through real
 OpenViking 0.4.20 and SDK 0.1.0: the source-bearing archive, completed matching
