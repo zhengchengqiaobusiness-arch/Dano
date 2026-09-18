@@ -12,6 +12,7 @@ import { wrapProviderBash } from "./provider-python.js";
 export interface ProtectedSessionTools {
   readonly agentDir: string;
   readonly trustedSkillPaths: readonly string[];
+  readonly providerPythonModuleDirectory?: string;
   resolveWorker(workspace: string): Promise<IsolatedToolExecutor>;
   createMemoryExtension?(workspace: string, worker: IsolatedToolExecutor): ExtensionFactory;
 }
@@ -22,6 +23,9 @@ export async function protectedSessionFactory(
   options: { signal: AbortSignal; credentialBroker?: CredentialBroker; credentialBrokerScope?: string },
 ): Promise<ExtensionFactory> {
   options.signal.throwIfAborted();
+  if (options.credentialBroker && options.credentialBrokerScope && !profile.providerPythonModuleDirectory) {
+    throw new Error("PROTECTED_PROVIDER_MODULES_REQUIRED");
+  }
   const resolvedWorker = await profile.resolveWorker(workspace);
   if (resolve(resolvedWorker.workspace) !== resolve(workspace)) throw new Error("MEMORY_WORKER_WORKSPACE_MISMATCH");
   const worker: IsolatedToolExecutor = {
@@ -48,7 +52,8 @@ export async function protectedSessionFactory(
     for (const definition of definitions) {
       const tool = definition.name === "bash" && options.credentialBroker && options.credentialBrokerScope
         ? wrapProviderBash(definition, { broker: options.credentialBroker,
-            scope: options.credentialBrokerScope, cwd: workspace, signal: options.signal })
+            scope: options.credentialBrokerScope, cwd: workspace, signal: options.signal,
+            moduleDirectory: profile.providerPythonModuleDirectory })
         : definition;
       pi.registerTool(tool);
     }

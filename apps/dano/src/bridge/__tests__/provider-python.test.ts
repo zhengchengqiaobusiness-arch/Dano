@@ -1,5 +1,5 @@
 import { execFile, type ExecFileOptions } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -80,6 +80,47 @@ it("a real Python request uses its Assistant Turn's Login Session without receiv
   expect(observed).toEqual([
     { authorization: "Bearer oa-secret-a", url: "/todo?pageNo=1" },
   ]);
+});
+
+it("shares read-only installation modules while keeping concurrent login capabilities separate", async () => {
+  const h = await pythonHarness();
+  const moduleDirectory = await mkdtemp(join(tmpdir(), "dano-python-installation-"));
+  cleanup.push(async () => {
+    await chmod(moduleDirectory, 0o755);
+    await rm(moduleDirectory, { recursive: true, force: true });
+  });
+  const originals = new Map<string, string>();
+  for (const name of ["dano_provider.py", "sitecustomize.py"]) {
+    const destination = join(moduleDirectory, name);
+    await copyFile(new URL(`../python/${name}`, import.meta.url), destination);
+    originals.set(name, await readFile(destination, "utf8"));
+    await chmod(destination, 0o444);
+  }
+  await chmod(moduleDirectory, 0o555);
+  const a = h.session("alice", "agent-a", "login-a");
+  const b = h.session("bob", "agent-b", "login-b");
+  const results = await Promise.all([a, b].map(session =>
+    withProviderPython({ ...session.options, moduleDirectory }, prefix =>
+      pythonRequest(prefix)),
+  ));
+  expect(results).toEqual([expect.objectContaining({ ok: true }), expect.objectContaining({ ok: true })]);
+  expect(h.observed.map(item => item.auth).sort()).toEqual(["Bearer token-a", "Bearer token-b"]);
+  await expect(withProviderPython({ ...a.options, moduleDirectory }, async () => {
+    throw new Error("synthetic execution failure");
+  })).rejects.toThrow("synthetic execution failure");
+  for (const [name, source] of originals) expect(await readFile(join(moduleDirectory, name), "utf8")).toBe(source);
+  expect((await readdir(h.cwd)).filter(name => name.startsWith(".dano-provider-"))).toEqual([]);
+});
+
+it("rejects invalid installation paths without falling back to copied modules", async () => {
+  const h = await pythonHarness();
+  const session = h.session("user", "agent", "login-a");
+  const run = vi.fn(async () => undefined);
+  for (const moduleDirectory of ["", "relative-path", join(h.cwd, "missing")]) {
+    await expect(withProviderPython({ ...session.options, moduleDirectory }, run)).rejects.toThrow();
+  }
+  expect(run).not.toHaveBeenCalled();
+  expect((await readdir(h.cwd)).filter(name => name.startsWith(".dano-provider-"))).toEqual([]);
 });
 
 it("the original PointLion ZIP stays byte-identical while its doctor and query use the login credential", async () => {

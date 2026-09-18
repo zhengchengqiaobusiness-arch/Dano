@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { copyFile, mkdtemp, rename, rm } from "node:fs/promises";
+import { copyFile, lstat, mkdtemp, rename, rm } from "node:fs/promises";
 import { createServer } from "node:http";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type {
@@ -17,11 +17,15 @@ interface ProviderPythonOptions {
   agentSessionId: string;
   cwd: string;
   signal?: AbortSignal;
+  /** Protected, read-only installation path provisioned by the trusted launcher. */
+  moduleDirectory?: string;
 }
 
 function shellQuote(value: string): string {
   return "'" + value.replaceAll("'", "'\"'\"'") + "'";
 }
+
+const PYTHON_MODULE_NAMES = ["dano_provider.py", "sitecustomize.py"] as const;
 
 /** A loopback listener and unguessable capability exist only during one bash call. */
 export async function withProviderPython<T>(
@@ -33,6 +37,17 @@ export async function withProviderPython<T>(
     redactFile: (path: string) => Promise<void>,
   ) => Promise<T>,
 ): Promise<T> {
+  if (options.moduleDirectory !== undefined) {
+    if (!isAbsolute(options.moduleDirectory)) throw new Error("Provider Python module directory must be absolute");
+    try {
+      if (!(await lstat(options.moduleDirectory)).isDirectory()) throw new Error();
+      for (const name of PYTHON_MODULE_NAMES) {
+        if (!(await lstat(join(options.moduleDirectory, name))).isFile()) throw new Error();
+      }
+    } catch {
+      throw new Error("Provider Python installation modules unavailable");
+    }
+  }
   const request = options.broker.bindRequest(
     options.scope,
     options.agentSessionId,
@@ -80,7 +95,7 @@ export async function withProviderPython<T>(
   const signal = options.signal
     ? AbortSignal.any([options.signal, lifetime.signal])
     : lifetime.signal;
-  const directory = await mkdtemp(join(options.cwd, ".dano-provider-"));
+  const directory = options.moduleDirectory ?? await mkdtemp(join(options.cwd, ".dano-provider-"));
   const server = createServer(async (req, res) => {
     res.setHeader("content-type", "application/json");
     if (
@@ -154,11 +169,13 @@ export async function withProviderPython<T>(
     }
   });
   try {
-    for (const name of ["dano_provider.py", "sitecustomize.py"]) {
-      await copyFile(
-        new URL(`./python/${name}`, import.meta.url),
-        join(directory, name),
-      );
+    if (!options.moduleDirectory) {
+      for (const name of PYTHON_MODULE_NAMES) {
+        await copyFile(
+          new URL(`./python/${name}`, import.meta.url),
+          join(directory, name),
+        );
+      }
     }
     const origin = options.broker.pythonRequestOrigin(
       options.scope,
@@ -191,7 +208,7 @@ export async function withProviderPython<T>(
     lifetime.abort();
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
-    await rm(directory, { recursive: true, force: true });
+    if (!options.moduleDirectory) await rm(directory, { recursive: true, force: true });
   }
 }
 

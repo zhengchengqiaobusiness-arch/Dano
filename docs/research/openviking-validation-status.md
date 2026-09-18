@@ -140,6 +140,32 @@ allocation, provider-Python file permissions across UIDs, actual memory factory
 composition and browser acceptance still remain before this profile can be
 enabled for the final Dano integration.
 
+The protected profile now requires a trusted `providerPythonModuleDirectory`
+when a credential broker is present. Provider Python can use these installed
+read-only modules without creating a host-owned `0700` directory in the worker
+workspace. It validates absolute paths and regular module files, never deletes
+the shared installation, and retains the ordinary temporary-copy mode outside
+the protected profile. Actual Python/HTTP tests cover concurrent separate
+login capabilities against shared read-only modules, unchanged module content,
+failure cleanup and rejection of missing/relative module paths without fallback.
+The 39 provider/runtime tests, server type check and server build pass. This
+does not yet prove cross-UID output-file redaction or the final worker mount.
+
+A real disposable Linux probe also established a required process-information
+boundary: without procfs restrictions, another UID can read a synthetic Shell
+capability from `/proc/<pid>/cmdline`, including through a filesystem symlink.
+`fixtures/linux-proc-isolation.cjs` verifies that remounting the container's
+procfs with `hidepid=2,gid=<trusted-host-group>` denies both cross-worker paths
+while retaining same-UID access and trusted-host inspection. Worker groups must
+be distinct and must never include the exempt host group; otherwise this
+protection is bypassed. Host inspection is needed for live worker identity
+checks. Run only in a disposable root container, supplying host and two distinct
+worker identities as the last three arguments (the fixture uses no real keys).
+The probe used no network, its container was removed, and no image was created.
+The final multi-user launcher must establish and verify this boundary before
+loading credentials; the existing single-host worker feasibility test alone
+does not prove process-information isolation.
+
 With the published dependency installed, the host entry and native lock binding
 load successfully. Full type/Svelte checks report zero diagnostics and the
 production build passes. The full regression rerun passes 109 test files and
