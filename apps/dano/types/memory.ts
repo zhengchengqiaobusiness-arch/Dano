@@ -5,3 +5,14 @@ export interface UserMemoryStatus {
   policyVersion: string;
   revision: number;
 }
+
+/** Local delivery receipt. Remote identifiers and pending payloads stay private. */
+export interface UserMemoryOperation {
+  id: string;
+  phase: "queued" | "session_unknown" | "session_created" | "message_unknown"
+    | "message_delivered" | "commit_unknown" | "processing" | "ready" | "failed"
+    | "blocked_by_pause" | "blocked";
+  createdAt: string;
+  updatedAt: string;
+  source: { sessionId: string; entryId: string; branchId: string };
+}

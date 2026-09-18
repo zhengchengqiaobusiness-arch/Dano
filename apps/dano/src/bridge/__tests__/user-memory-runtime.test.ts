@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { withUserMemory, type UserMemoryRuntime, type UserMemoryServices } from "../user-memory-runtime.js";
 import type { ProtectedSessionTools } from "../protected-session-tools.js";
+import { FileStateStore } from "@josephyoung/pi-openviking/host";
 
 const roots: string[] = [];
 const profiles: ProtectedSessionTools[] = [];
@@ -96,6 +97,31 @@ it("gives anonymous users only their existing isolated tool profile", async () =
   expect(anonymous.createMemoryExtension).toBeUndefined();
   expect(h.services.owners.get).not.toHaveBeenCalled();
   expect(h.registered).not.toHaveBeenCalled();
+});
+
+it("reports persisted delivery phases and local provenance without exposing payloads or remote identifiers", async () => {
+  const h = await harness();
+  const profile = await h.start();
+  const owner = await h.services.owners.get(h.context);
+  const store = new FileStateStore({ owner, directory: join(profile.memoryStateDirectory!, "memory"), policyVersion: "v1" });
+  const source = { sessionId: "local-session", entryId: "local-entry", branchId: "local-branch", contentVersion: "private-hash" };
+  const createdAt = new Date().toISOString();
+  for (const phase of ["queued", "session_unknown", "session_created", "message_unknown", "message_delivered",
+    "commit_unknown", "processing", "ready", "failed", "blocked_by_pause", "blocked"] as const) {
+    await store.transact(state => {
+      state.operations.receipt = { id: "receipt", owner, source, scope: null, kind: "explicit", authorizationEpoch: 0,
+        createdAt, updatedAt: createdAt, phase, remoteSessionId: "private-remote", taskId: "private-task",
+        payload: "private-payload", nextAttemptAt: Number.MAX_SAFE_INTEGER };
+    });
+    expect(await h.runtime().operation("receipt")).toEqual({ id: "receipt", phase, createdAt, updatedAt: createdAt,
+      source: { sessionId: "local-session", entryId: "local-entry", branchId: "local-branch" } });
+  }
+  expect(await h.runtime().operation("missing")).toBeUndefined();
+  expect(await h.runtime().operation("__proto__")).toBeUndefined();
+  expect(h.services.provisioner.provision).not.toHaveBeenCalled();
+  const runtime = h.runtime();
+  await profile.dispose!();
+  await expect(runtime.operation("receipt")).rejects.toThrow("MEMORY_RUNTIME_CLOSED");
 });
 
 it("clears the host registration and releases the worker exactly once", async () => {

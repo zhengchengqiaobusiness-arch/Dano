@@ -441,6 +441,28 @@ export class BridgeServer {
         return;
       }
 
+      const memoryOperationMatch = /^\/api\/clients\/([^/]+)\/memory\/operations\/([^/]+)$/.exec(pathname);
+      if (req.method === "GET" && memoryOperationMatch) {
+        const clientId = decodeURIComponent(memoryOperationMatch[1]!);
+        const operationId = decodeURIComponent(memoryOperationMatch[2]!);
+        const user = this.clientUsers.get(clientId);
+        if (!user || !("username" in user.user)) throw new UserContextError(401, "请先登录后再使用长期记忆");
+        await this.withUserWrite(clientId, async () => {
+          let operation;
+          try {
+            const runtime = await this.userRuntimeRegistry?.get(user);
+            if (!runtime?.memory) throw new Error("MEMORY_UNAVAILABLE");
+            operation = await runtime.memory.operation(operationId);
+          } catch { throw new HttpError(503, "长期记忆暂时不可用，普通聊天可继续"); }
+          if (!operation) throw new HttpError(404, "记忆投递记录不存在");
+          writeJson(res, 200, { id: operation.id, phase: operation.phase,
+            createdAt: operation.createdAt, updatedAt: operation.updatedAt,
+            source: { sessionId: operation.source.sessionId, entryId: operation.source.entryId,
+              branchId: operation.source.branchId } }, "no-store");
+        });
+        return;
+      }
+
       const memorySettingsMatch = /^\/api\/clients\/([^/]+)\/memory\/settings$/.exec(pathname);
       if (memorySettingsMatch?.[1] && (req.method === "GET" || req.method === "PUT")) {
         const clientId = decodeURIComponent(memorySettingsMatch[1]);
