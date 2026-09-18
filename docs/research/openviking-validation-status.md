@@ -222,6 +222,32 @@ The fixture mutates its synthetic sample; create a fresh extraction sample
 before rerunning it. Shared-source handling, in-flight tasks, durable source
 revocation and restore-time replay protection remain open gate requirements.
 
+## Executed export and same-service recovery
+
+On 2026-09-18, `fixtures/openviking-pack-recovery.py` exercised the public APIs
+against the synthetic account. USER export produced a valid ZIP (13 entries);
+another USER's attempt to export Alice's memory scope returned HTTP 403.
+An ADMIN backup with `include_vectors: true` returned HTTP 400, specifically
+`Cannot export incomplete OpenViking vector index snapshot`. This failed path
+is retained as evidence; a complete vector snapshot was not demonstrated.
+
+The supported backup without vectors succeeded (167 ZIP entries). After the
+probe durably recorded a deletion outside that backup, deleted one memory file
+and rotated Alice's key, public restore with `vector_mode: recompute` succeeded.
+The new key read the restored file with its exact original content; the old
+key still returned HTTP 401. Thus this content restore preserved the current
+identity store and also brought the deleted file back, as expected from the
+old snapshot. Reapplying the separate deletion record removed it from both
+direct reads and search results.
+
+This is a same-service, quiescent content-recovery experiment. It does not
+prove clean-server identity restoration, atomic backup under concurrent
+writes, recomputed-index completeness, full rollback, or absence of all
+derived facts after deleting a file. Operational recovery must gate access
+until identity reconciliation, durable deletion/revocation replay and index
+readiness finish. The fixture rotates the synthetic Alice key and updates
+its mode-0600 run state; it never prints key material.
+
 ## Environment observations
 
 - Podman machine is running. `podman images` fails with
