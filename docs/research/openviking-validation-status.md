@@ -336,6 +336,30 @@ until identity reconciliation, durable deletion/revocation replay and index
 readiness finish. The fixture rotates the synthetic Alice key and updates
 its mode-0600 run state; it never prints key material.
 
+### Separate-instance recovery and index readiness sample
+
+On 2026-09-18 a second unmodified OpenViking `0.4.20` instance started with a
+new storage directory and root key on loopback port 19338. The fixture
+`fixtures/openviking-clean-recovery.py` recreated the synthetic account and
+Alice through public administration APIs and restored the earlier public
+backup with vector recomputation. The source-service USER key returned 401
+both before and after recovery. The newly issued destination key could read
+the restored file and search returned its known acceptance-checklist fact.
+
+`on_conflict: fail` initially returned 409 against the account's automatically
+created default directories; `overwrite` was needed even in the new instance.
+Applying the independent deletion record then made the target read return 404
+and removed both its URI and its known fact from search results. An initial
+fixture assumption that a separate checklist memory would survive was false:
+inspection of the synthetic ZIP showed all three preferences in one file.
+The final checks correctly distinguish pre-deletion recall from post-deletion
+absence; this experiment is whole-file deletion, not selective fact editing.
+
+The destination service was stopped after verification. This proves public
+content recovery and one real index-readiness sample with recreated identity;
+it does not prove restoration of a complete identity/key snapshot, queued
+operations, concurrent-write consistency, or production upgrade/rollback.
+
 ## Environment observations
 
 - Podman machine is running. `podman images` fails with
