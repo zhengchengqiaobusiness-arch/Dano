@@ -124,7 +124,7 @@ export class WorkerSupervisorClient {
     let disposing: Promise<void> | undefined;
     const check = () => { if (disposed || this.#closed) throw unavailable(); };
     return {
-      agentDir: initial.agentDir, trustedSkillPaths: [...paths.trustedSkillPaths],
+      agentDir: initial.agentDir, memoryStateDirectory: initial.stateDir, trustedSkillPaths: [...paths.trustedSkillPaths],
       providerPythonModuleDirectory: paths.providerPythonModuleDirectory,
       resolveWorker: async workspace => {
         check();

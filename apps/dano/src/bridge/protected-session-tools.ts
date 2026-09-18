@@ -12,6 +12,8 @@ import { createWorkerOutputRedactor } from "./worker-output-redaction.js";
 /** Trusted launcher inputs only. The resolver must enforce this backend's owner. */
 export interface ProtectedSessionTools {
   readonly agentDir: string;
+  /** Supervisor-owned private state, outside every tool workspace. */
+  readonly memoryStateDirectory?: string;
   readonly trustedSkillPaths: readonly string[];
   readonly providerPythonModuleDirectory?: string;
   resolveWorker(workspace: string): Promise<IsolatedToolExecutor>;
