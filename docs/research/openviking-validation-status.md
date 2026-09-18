@@ -183,6 +183,25 @@ retrieved using the task result's archive URI. This demonstrates real process
 crash recovery and archive reconciliation for this single in-flight commit,
 not all possible interruption points, task expiry or multi-writer races.
 
+### Multiple local writer processes and abandoned delivery receipt
+
+On 2026-09-18, `fixtures/openviking-multiwriter.py` used a POSIX advisory lock
+and durable host-owned receipt file around a real public Session append.
+The first worker exited with code 77 after the service accepted the message
+and before persisting its delivery receipt. Six independent processes then
+raced to retry. The OS released the dead worker's lock; one successor found
+the source in public context and persisted the receipt, while the other five
+observed that receipt. Session metadata confirmed exactly one message.
+
+The coordinator then persisted revocation under the same lock and deleted the
+Session. Six further independent retries all stopped before transport, and
+the Session still returned 404. This proves the local single-host locking and
+receipt-reconciliation sequence for a dedicated Session with one bounded
+message and auto-commit disabled. It does not prove cross-host coordination,
+commit concurrency or absence checks over truncated/archived context. Every
+writer must participate in the lock protocol; an advisory lock alone cannot
+stop a process that bypasses the trusted adapter.
+
 ## Executed pi entry-point probe
 
 ```sh
