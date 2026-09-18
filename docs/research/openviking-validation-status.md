@@ -20,7 +20,7 @@ package name `@josephyoung/pi-openviking`. This is source implementation, not a
 published package or completed #474 acceptance. The current Dano implementation
 branch starts from the merged gate on upstream/main.
 
-At extension commit `ccf7e0f`, 22 automated tests pass: owner-bound private file
+At extension commit `cf85efa`, 31 automated tests pass: owner-bound private file
 state, eight concurrent processes, killed-writer recovery, durable source
 deduplication, response-loss reconciliation, concurrent delivery, pause,
 reconfirmation after enable, bounded recall and real pi 0.82.1 loading/reloading
@@ -54,6 +54,20 @@ inherit the synthetic memory key. Its UID is checked against Linux process
 metadata. The test container had no network and was removed. The worker
 primitive is implemented; this does not yet prove the final startup profile or
 the absence of all host-executable resource discovery paths.
+
+The standard entry now registers isolated proxies for read/write/edit/bash/
+grep/find/ls and routes interactive `!`/`!!` Shell commands through that same
+worker. The Linux run exercised the proxies, streamed output and preserved exit
+codes. Cancellation was checked by the absence of delayed file writes for both
+model Bash and interactive Shell, not only by observing a rejected promise.
+
+Standard-entry management includes confirmed enable, pause, status and saved
+content viewing. These handlers are tested, but the final interactive CLI
+launcher flow has not yet passed acceptance. Automatic collection stays off.
+Before first data access, the real service's authenticated `/health` identity
+must match the configured account/user and USER role; missing identity or an
+administrator key is rejected. Actual-service checks verified saved-content
+reading and rejection of wrong credential binding and foreign references.
 
 Remaining #474 gates include the Linux isolated-worker launcher,
 exact-version publication and Dano integration,
