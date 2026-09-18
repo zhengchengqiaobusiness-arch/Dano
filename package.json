@@ -32,6 +32,7 @@
     "secret:set": "node scripts/set-env-secret.mjs",
     "smoke:deploy": "node scripts/smoke-dano-deploy.mjs",
     "start": "pnpm -C apps/dano start",
+    "start:protected": "pnpm -C apps/dano start:protected",
     "test": "vitest run",
     "test:auth-built-entrypoint": "pnpm run build:server && node scripts/check-production-auth-entrypoint.mjs",
     "test:auth-real-provider-skill": "node scripts/check-provider-skill-release-gate.mjs",

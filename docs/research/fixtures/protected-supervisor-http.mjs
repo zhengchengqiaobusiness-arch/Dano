@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, chmod, writeFile, readdir, readFile, rm } from 'node:fs/promises';
 import { createHmac } from 'node:crypto';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runProtectedSupervisor } from '../dano-server/bridge/protected-supervisor.js';
 const root = await mkdtemp('/tmp/dano-supervisor-http-');
@@ -25,9 +26,19 @@ const environment = { PATH: process.env.PATH, NODE_ENV: 'test', HOME: options.ru
   DANO_HOST: '127.0.0.1', DANO_PORT: '18710', DANO_PRODUCT_NAME: 'Supervisor Fixture', DANO_CONFIG_PATH: join(root, 'dano.config.json'),
   DANO_AUTH_JWT_SECRET: 'synthetic-supervisor-http-test-key' };
 const crashHost = process.argv.includes('--crash-host');
+const useCli = process.argv.includes('--cli');
+const profilePath = '/etc/dano-supervisor-fixture.json';
+if (useCli) await writeFile(profilePath, JSON.stringify(options), { mode: 0o600, flag: 'wx' });
 const stop = new AbortController();
 let finished = false, failure;
-const serving = runProtectedSupervisor(options, environment, [], stop.signal).then(code => {
+const launch = () => {
+  if (!useCli) return runProtectedSupervisor(options, environment, [], stop.signal);
+  const child = spawn(process.execPath, ['/app/memory-extension/dano-server/protected-main.js', profilePath],
+    { env: environment, stdio: ['ignore', 'inherit', 'inherit'] });
+  stop.signal.addEventListener('abort', () => child.kill('SIGTERM'), { once: true });
+  return new Promise((resolve, reject) => { child.once('error', reject); child.once('close', code => resolve(code ?? 1)); });
+};
+const serving = launch().then(code => {
   finished = true; return code;
 }, error => { finished = true; failure = error; throw error; });
 void serving.catch(() => {});
@@ -75,10 +86,11 @@ try {
   const remaining = (await identities()).filter(p => [10001, 10002].includes(p.uid)
     || p.cmdline.includes('/protected-host-entry.js') || p.cmdline.includes('/worker-broker-entry.js'));
   assert.deepEqual(remaining, []);
-  console.log(JSON.stringify({ actualHttpHost: true, hostNonRoot: true, twoWorkerIdentities: true,
+  console.log(JSON.stringify({ actualHttpHost: true, cliEntrypoint: useCli, hostNonRoot: true, twoWorkerIdentities: true,
     exclusiveSupervisor: true, shutdownMode: crashHost ? 'host-killed' : 'graceful', shutdownReclaimsChildren: true, browserVerified: false, modelVerified: false }));
 } finally {
   stop.abort();
   await serving.catch(() => {});
+  if (useCli) await rm(profilePath);
   await rm(root, { recursive: true });
 }

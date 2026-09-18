@@ -13,6 +13,7 @@
     "dev:server": "node --import jiti/register ./src/main.ts",
     "dev:web": "vite",
     "start": "node ./dist/server/main.js",
+    "start:protected": "node ./dist/server/protected-main.js",
     "test": "vitest run --root ../.. --config vitest.config.ts"
   },
   "dependencies": {
