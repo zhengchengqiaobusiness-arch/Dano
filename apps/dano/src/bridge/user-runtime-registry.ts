@@ -8,6 +8,7 @@ import {
 import type { UserContext } from "./user-context.js";
 import { workspaceSessionDirectoryPath } from "./runtime-layout.js";
 import { ensureSafeDirectory } from "./safe-directory.js";
+import type { ProtectedSessionTools } from "./protected-session-tools.js";
 
 export interface UserRuntimeContext {
   readonly userId: string;
@@ -24,6 +25,7 @@ export type UserBackendFactory = (
 
 export interface UserRuntimeRegistryOptions {
   readonly sessionsRootPath?: string;
+  readonly protectedToolsForUser?: (context: UserContext) => Promise<ProtectedSessionTools>;
 }
 
 export interface UserOwnershipPathMap {
@@ -178,6 +180,7 @@ export class UserRuntimeRegistry {
     const backend = await this.createBackend({
       cwd: defaultWorkspacePath,
       credentialBrokerScope: userContext.user.id,
+      protectedTools: await this.options.protectedToolsForUser?.(userContext),
       sessionDir: workspaceSessionDirectoryPath(
         sessionsRootPath,
         defaultWorkspacePath,

@@ -1,9 +1,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { UserContext } from "../user-context.js";
 import { UserRuntimeRegistry } from "../user-runtime-registry.js";
+import type { ProtectedSessionTools } from "../protected-session-tools.js";
 
 const runtimeRoots: string[] = [];
 
@@ -14,6 +15,43 @@ afterEach(() => {
 });
 
 describe("UserRuntimeRegistry owner transfer", () => {
+  it("binds each server user context to its own protected backend profile", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-protected-users-"));
+    runtimeRoots.push(root);
+    const alice = userContext(root, "alice");
+    const bob = userContext(root, "bob");
+    const profiles = new Map<string, ProtectedSessionTools>();
+    const protectedToolsForUser = vi.fn(async (context: UserContext) => {
+      const profile: ProtectedSessionTools = {
+        agentDir: path.join(root, "private", context.user.id), trustedSkillPaths: [],
+        async resolveWorker() { throw new Error("not executed by the registry"); },
+      };
+      profiles.set(context.user.id, profile);
+      return profile;
+    });
+    const dispose = vi.fn(async () => {});
+    const backend = vi.fn(async () => ({ dispose }) as never);
+    const registry = new UserRuntimeRegistry(backend, { protectedToolsForUser });
+    try {
+      const [a, b, repeated] = await Promise.all([registry.get(alice), registry.get(bob), registry.get(alice)]);
+      expect(repeated).toBe(a);
+      expect(b).not.toBe(a);
+      expect(protectedToolsForUser).toHaveBeenCalledTimes(2);
+      expect(protectedToolsForUser).toHaveBeenCalledWith(alice);
+      expect(protectedToolsForUser).toHaveBeenCalledWith(bob);
+      for (const context of [alice, bob]) {
+        expect(backend).toHaveBeenCalledWith(expect.objectContaining({
+          cwd: path.join(context.folderPath, "workspaces", "default"),
+          credentialBrokerScope: context.user.id,
+          protectedTools: profiles.get(context.user.id),
+        }));
+      }
+    } finally {
+      await registry.dispose();
+    }
+    expect(dispose).toHaveBeenCalledTimes(2);
+  });
+
   it("merges preference objects while preserving unrelated file conflicts", async () => {
     const runtimeRoot = fs.mkdtempSync(
       path.join(os.tmpdir(), "dano-owner-transfer-"),

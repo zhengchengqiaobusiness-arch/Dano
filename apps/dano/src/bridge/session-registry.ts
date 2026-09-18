@@ -420,6 +420,7 @@ export class DetachedSessionRegistry {
         credentialBroker: this.newSessionRuntimeOptions.credentialBroker,
         credentialBrokerScope:
           this.newSessionRuntimeOptions.credentialBrokerScope,
+        protectedTools: this.newSessionRuntimeOptions.protectedTools,
       },
     );
     const handle = new DetachedSessionHandle(
@@ -427,7 +428,7 @@ export class DetachedSessionRegistry {
       sourceManager,
       this.fallbackCwd,
       this.askUserQuestionTool,
-      {},
+      this.runtimeOptionsFor(sourceManager.getCwd()),
       event => {
         this.emit(event);
       },
@@ -507,11 +508,12 @@ export class DetachedSessionRegistry {
     if (path.resolve(effectiveCwd) === path.resolve(this.fallbackCwd)) {
       return this.newSessionRuntimeOptions;
     }
-    return this.newSessionRuntimeOptions.credentialBroker
+    return this.newSessionRuntimeOptions.credentialBroker || this.newSessionRuntimeOptions.protectedTools
       ? {
           credentialBroker: this.newSessionRuntimeOptions.credentialBroker,
           credentialBrokerScope:
             this.newSessionRuntimeOptions.credentialBrokerScope,
+          protectedTools: this.newSessionRuntimeOptions.protectedTools,
         }
       : {};
   }

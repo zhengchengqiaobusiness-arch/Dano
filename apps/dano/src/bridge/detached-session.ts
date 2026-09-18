@@ -6,6 +6,7 @@ import {
   getAgentDir,
   createReadToolDefinition,
   createWriteToolDefinition,
+  SettingsManager,
   type AgentSessionRuntime,
   type CreateAgentSessionRuntimeFactory,
   type CreateAgentSessionFromServicesOptions,
@@ -21,6 +22,8 @@ import { danoVersionTool } from "./dano-version-tool.js";
 import { configureDanoLlmResilience } from "./llm-resilience.js";
 import type { CredentialBroker } from "./credential-broker.js";
 import { wrapProviderBash } from "./provider-python.js";
+import { protectedMemoryResources } from "@josephyoung/pi-openviking/host";
+import { protectedSessionFactory, type ProtectedSessionTools } from "./protected-session-tools.js";
 
 function resolveHeimdallExtensionPath(): string {
   try {
@@ -44,6 +47,7 @@ export interface CreateDetachedAgentSessionOptions {
   askUserQuestionTool?: ToolDefinition;
   credentialBroker?: CredentialBroker;
   credentialBrokerScope?: string;
+  protectedTools?: ProtectedSessionTools;
 }
 
 export interface CreateDetachedAgentSessionRuntimeResult {
@@ -65,12 +69,24 @@ export async function createDetachedAgentSessionRuntime(
     providerExecutionLifetime = lifetime;
     disposeCredentialBinding?.();
     disposeCredentialBinding = undefined;
+    const protectedProfile = options.protectedTools;
+    const protectedSettings = protectedProfile
+      ? options.settingsManager ?? SettingsManager.create(runtimeOptions.cwd, protectedProfile.agentDir)
+      : undefined;
+    const protectedResources = protectedProfile && protectedSettings
+      ? protectedMemoryResources(protectedSettings,
+          await protectedSessionFactory(protectedProfile, runtimeOptions.cwd, {
+            signal: lifetime.signal,
+            credentialBroker: options.credentialBroker,
+            credentialBrokerScope: options.credentialBrokerScope,
+          }), protectedProfile.trustedSkillPaths)
+      : undefined;
     const services = await createAgentSessionServices({
       cwd: runtimeOptions.cwd,
       agentDir: runtimeOptions.agentDir,
       modelRuntime: options.modelRuntime,
-      settingsManager: options.settingsManager,
-      resourceLoaderOptions: {
+      settingsManager: protectedSettings ?? options.settingsManager,
+      resourceLoaderOptions: protectedResources ?? {
         additionalExtensionPaths: [HEIMDALL_EXTENSION_PATH],
         extensionsOverride: loaded => {
           if (options.credentialBroker && options.credentialBrokerScope) {
@@ -96,11 +112,11 @@ export async function createDetachedAgentSessionRuntime(
       model: options.model,
       thinkingLevel: options.thinkingLevel,
       customTools: [
-        createReadToolDefinition(runtimeOptions.cwd, {
+        ...(protectedProfile ? [] : [createReadToolDefinition(runtimeOptions.cwd, {
           autoResizeImages: services.settingsManager.getImageAutoResize(),
         }),
         createEditToolDefinition(runtimeOptions.cwd),
-        createWriteToolDefinition(runtimeOptions.cwd),
+        createWriteToolDefinition(runtimeOptions.cwd)]),
         danoVersionTool,
         options.askUserQuestionTool ?? askUserQuestionTool,
         ...(options.credentialBroker && options.credentialBrokerScope
@@ -128,7 +144,7 @@ export async function createDetachedAgentSessionRuntime(
 
   const runtime = await createAgentSessionRuntime(createRuntime, {
     cwd,
-    agentDir: getAgentDir(),
+    agentDir: options.protectedTools?.agentDir ?? getAgentDir(),
     sessionManager,
   });
   runtime.setBeforeSessionInvalidate(() => {

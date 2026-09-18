@@ -110,6 +110,36 @@ The final container inventory is empty, and all 18 image layers created by
 these fixture iterations were removed by exact ID; the pre-existing base was
 retained.
 
+The host runtime now accepts a `ProtectedSessionTools` profile supplied from
+the server's User Context. The same profile reaches the initial backend,
+new/resumed sessions, different-workspace resolution and forks. Each runtime
+resolves and checks its workspace worker before enabling the protected entry;
+native file and Bash definitions become the published extension's worker
+proxies. Host Heimdall is omitted in this mode because the actual guards run
+inside the worker. The existing provider-Python wrapper remains around the
+proxied model Bash tool. User Shell hooks supply isolated operations; Dano's
+browser RPC still rejects direct Bash execution commands.
+
+Protected resource loading disables workspace extension discovery/project
+trust and retains explicitly supplied trusted Skills. A per-runtime abort
+signal invalidates old tool references when sessions are replaced or disposed.
+The ordinary mode retains its existing behavior when no protected profile is
+supplied. The profile resolver remains a trusted server seam: the future
+launcher must validate ownership, protected agent/Skill paths and live kernel
+isolation; it is not a browser configuration object.
+
+Real pi runtime tests verify model-triggered Bash routing, file and interactive
+Shell routing, no workspace extension execution, initial/new/resumed/forked
+bindings, stale tool rejection, foreign workspace rejection, and trusted Skill
+reload without duplicate tool registration. These tests use an executor double
+to prove routing/lifecycle, not kernel isolation. A separate two-user registry
+test verifies distinct profile binding from server User Context. The latest
+full regression passes **111 files / 1442 tests**, with one existing skipped
+test; full type/Svelte checks and production build pass. Multi-user process
+allocation, provider-Python file permissions across UIDs, actual memory factory
+composition and browser acceptance still remain before this profile can be
+enabled for the final Dano integration.
+
 With the published dependency installed, the host entry and native lock binding
 load successfully. Full type/Svelte checks report zero diagnostics and the
 production build passes. The full regression rerun passes 109 test files and
