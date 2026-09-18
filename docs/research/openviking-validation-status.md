@@ -95,7 +95,9 @@ prove its final multi-user launcher, provider-Python capability, or browser flow
 Reproduction fixtures are `fixtures/heimdall-isolated-worker.mjs` and
 `fixtures/heimdall-worker-provider.mjs`. Copy them into the extension installation
 as `scripts/linux-worker.mjs` and `scripts/provider.mjs`, copy Dano's server build
-to `dano-server`, and install the exact Heimdall peer. In the disposable root
+to `dano-server`, copy `apps/dano/src/bridge/worker-output-redaction.ts` to
+`scripts/worker-output-redaction.ts` (Node 22.23.2 strips its type-only syntax),
+and install the exact Heimdall peer. In the disposable root
 container, run `node scripts/linux-worker.mjs 1000 1000 10001 10001
 /app/memory-extension/scripts/provider.mjs`. IDs are fixture arguments, not
 production defaults. The fixture explicitly enables the sandbox and grants the
@@ -808,6 +810,13 @@ after spawning, before awaiting network requests; its Linux probe passed again.
 
 ## #474 protected Bash output redaction
 
+The HTTP server now forwards its trusted `protectedToolsForUser` factory to
+the runtime registry. It rejects that configuration when no server-side user
+resolver exists, avoiding an unprotected single-backend fallback. A real
+HTTP/SSE regression suite (9 tests) includes two authenticated users receiving
+separate profiles from verified User Contexts. Worker executors in that test
+are doubles; the production launcher still needs to supply this factory.
+
 Protected sessions now scrub provider capabilities from complete Bash output
 inside the same isolated worker through its guarded `user_bash` operation.
 The credential-bearing host no longer opens a worker-returned output path.
@@ -821,10 +830,28 @@ Current evidence: 43 tests in the provider Python, protected-session, and
 worker-output-redaction suites; server type check and build passed. The new
 Shell/Python tests cover private files, split capabilities in large output,
 shell metacharacters, rejected paths, cancellation and failed isolation.
-The routing tests prove host filesystem redaction is bypassed. These tests run
-with a local executor double and **do not prove cross-UID artifact handling**;
-that still requires the real Linux launcher/worker integration. No browser or
-final multi-user acceptance is claimed here.
+The routing tests prove host filesystem redaction is bypassed. Those unit tests
+use a local executor double. A subsequent disposable Linux/Node 22.23.2 run of
+the updated Heimdall fixture tested the actual redactor source with the built
+worker provider and the unreleased extension provider API at `a242afe`:
+
+- Worker UID/GID 10001 created a private `0600` output with capabilities across
+  a read-chunk boundary and at the end of a large file.
+- Host UID/GID 1000 received `EACCES` reading it before and after redaction.
+- Worker-side assertions verified exact redacted contents, retained worker
+  ownership and `0600` mode.
+- Attempts to redact a host-private credential directly and through a symlink
+  failed; the credential contents remained unchanged.
+- Existing real Heimdall file/Shell, streaming, cancellation, process privacy,
+  and protected-path checks also passed (exit 0).
+
+The disposable container was automatically removed; the test image and all
+eight newly created layers were removed by exact ID, retaining the existing
+base image. This proves the output
+operation across actual identities; it does not prove the final multi-user
+launcher, full provider-Python request flow or browser acceptance. In particular,
+any browser download path for worker-private artifacts must preserve this
+boundary rather than assume the host can open the file.
 
 ## #473 acceptance audit and handoff
 

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { bootstrapProtectedWorker, validateProtectedPaths } from '../dist/bootstrap.js';
 import { createIsolatedToolDefinitions, createIsolatedBashOperations } from '../dist/worker-tools.js';
 import { prepareLinuxProcessPrivacy } from '../dano-server/bridge/linux-process-privacy.js';
+import { createWorkerOutputRedactor } from './worker-output-redaction.ts';
 assert.equal(process.platform, 'linux');
 assert.equal(process.getuid(), 0);
 const [hostUid, hostGid, workerUid, workerGid] = process.argv.slice(2, 6).map(Number);
@@ -85,6 +86,21 @@ try {
   const bash = await worker.execute('bash', { command: 'test -z "$MEMORY_SYNTHETIC_KEY" && echo NO_INHERITED_KEY' }, undefined, () => { updates++; });
   assert(updates > 0);
   assert(bash.content.some(item => item.text?.includes('NO_INHERITED_KEY')));
+  const artifact = join(workspace, 'private-output.txt');
+  const capability = 'SYNTHETIC_OUTPUT_CAPABILITY';
+  const quote = value => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+  const python = async source => {
+    const result = await worker.execute('user_bash', { command: `python3 -I -S -c ${quote(source)}` });
+    assert.equal(result.exitCode, 0);
+  };
+  await python(`import os\np=${JSON.stringify(artifact)}\nfd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)\nwith os.fdopen(fd,'w') as f: f.write('x'*65530+${JSON.stringify(capability)}+'y'*200000+${JSON.stringify(capability)})`);
+  await assert.rejects(readFile(artifact), { code: 'EACCES' });
+  const redactOutput = createWorkerOutputRedactor(worker);
+  await redactOutput(artifact, capability);
+  await assert.rejects(readFile(artifact), { code: 'EACCES' });
+  await python(`import os,stat\np=${JSON.stringify(artifact)}\nassert os.stat(p).st_uid==${workerUid}\nassert stat.S_IMODE(os.stat(p).st_mode)==0o600\nwith open(p) as f: assert f.read()=='x'*65530+'[redacted]'+'y'*200000+'[redacted]'`);
+  await assert.rejects(redactOutput(credential, capability));
+  await assert.rejects(redactOutput(join(workspace, 'private-link/credential'), capability));
   assert.equal(await readFile(credential, 'utf8'), 'SYNTHETIC_PRIVATE_VALUE');
   const controller = new AbortController();
   const running = worker.execute('bash', { command: 'sleep 1; printf failed > cancelled-native.txt' }, controller.signal);
@@ -100,7 +116,9 @@ try {
   await assert.rejects(access(join(workspace, 'cancelled-interactive.txt')), { code: 'ENOENT' });
   console.log(JSON.stringify({ realHeimdallWorker: true, protectedBootstrap: true, customWorkerProvider: Boolean(toolProviderModule), outsideWorkerProviderRejected: true, outsidePiContextRejected: true, workerOwnedReadonlyCodeRejected: true, noNewPrivileges: true, toolProxies: true, interactiveShell: true, hostUid, workerUid,
     privateReadWriteEditDenied: true, symlinkDenied: true, credentialAbsentFromEnvironment: true,
-    workspaceReadWrite: true, streamingUpdates: true, cancellation: true, finalLauncherVerified: false }));
+    workspaceReadWrite: true, streamingUpdates: true, cancellation: true,
+    privateOutputRedactedInWorker: true, hostCannotReadRawOrRedactedOutput: true,
+    outputRedactionCannotRewriteHostCredential: true, finalLauncherVerified: false }));
 } catch (error) {
   console.error(await readFile(join(workspace, 'provider-diagnostic.json'), 'utf8').catch(() => 'no provider diagnostic'));
   throw error;

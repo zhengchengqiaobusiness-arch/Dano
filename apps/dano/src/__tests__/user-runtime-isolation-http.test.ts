@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_BRIDGE_CONFIG,
   type ClientMessage,
@@ -12,6 +12,7 @@ import {
 } from "../bridge/types.js";
 import { createJwtUserContextResolver } from "../bridge/user-context.js";
 import { startDanoServer, type DanoServerController } from "../server.js";
+import type { ProtectedSessionTools } from "../bridge/protected-session-tools.js";
 
 const TEST_JWT_SECRET = "test-secret-that-is-long-enough";
 const controllers: DanoServerController[] = [];
@@ -205,6 +206,33 @@ async function executeCommand(
 }
 
 describe("User runtime isolation over HTTP/SSE", () => {
+  it("binds protected tools to authenticated HTTP owners and rejects a missing identity resolver", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-http-protected-tools-"));
+    runtimeRoots.push(root);
+    const setup = authenticatedServerSetup(root);
+    const owners: string[] = [];
+    const protectedToolsForUser = vi.fn(async (context: { user: { id: string }; folderPath: string }): Promise<ProtectedSessionTools> => {
+      owners.push(context.user.id);
+      const agentDir = path.join(context.folderPath, "trusted-agent");
+      fs.mkdirSync(agentDir, { recursive: true });
+      return { agentDir, trustedSkillPaths: [], resolveWorker: async workspace => ({
+        workspace, assertIsolated: async () => {},
+        execute: async () => ({ content: [{ type: "text", text: "isolated fixture" }] }),
+      }) };
+    });
+    await expect(startDanoServer(setup.config, { captureSigint: false, protectedToolsForUser }))
+      .rejects.toThrow("PROTECTED_TOOLS_USER_CONTEXT_REQUIRED");
+    expect(protectedToolsForUser).not.toHaveBeenCalled();
+    const controller = await startDanoServer(setup.config, {
+      captureSigint: false, userContextResolver: setup.resolver, protectedToolsForUser,
+    });
+    controllers.push(controller);
+    const origin = controller.getBridgeUrl()!;
+    await createClient(origin, signUser("protected-a", "Alice"));
+    await createClient(origin, signUser("protected-b", "Bob"));
+    expect(owners.sort()).toEqual(["protected-a", "protected-b"]);
+  });
+
   it("assigns each authenticated User an isolated default Runtime Workspace", async () => {
     const runtimeRoot = fs.mkdtempSync(
       path.join(os.tmpdir(), "dano-user-runtime-http-"),

@@ -10,7 +10,7 @@ import type {
   ClientUserResolution,
   UserContextResolver,
 } from "./bridge/user-context.js";
-import { UserRuntimeRegistry } from "./bridge/user-runtime-registry.js";
+import { UserRuntimeRegistry, type UserRuntimeRegistryOptions } from "./bridge/user-runtime-registry.js";
 import type {
   BridgeClient,
   BridgeConfig,
@@ -41,6 +41,8 @@ export interface StartDanoServerOptions {
   credentialBroker?: CredentialBroker;
   anonymousUsers?: AnonymousUserContextResolver;
   anonymousUserCleanup?: { idleTtlMs: number; intervalMs: number };
+  /** Trusted launcher composition; identities come only from the server resolver. */
+  protectedToolsForUser?: UserRuntimeRegistryOptions["protectedToolsForUser"];
 }
 
 export interface DanoServerController {
@@ -57,6 +59,9 @@ export async function startDanoServer(
   config: BridgeConfig,
   options: StartDanoServerOptions = {},
 ): Promise<DanoServerController> {
+  if (options.protectedToolsForUser && !options.userContextResolver) {
+    throw new Error("PROTECTED_TOOLS_USER_CONTEXT_REQUIRED");
+  }
   const eventBus = new BridgeEventBus(config);
   const eventHandlers: Array<(event: BridgeEvent) => void> = [];
 
@@ -68,7 +73,7 @@ export async function startDanoServer(
             danoConfig: options.danoConfig,
             credentialBroker: options.credentialBroker,
           }),
-        { sessionsRootPath: options.sessionsRootPath },
+        { sessionsRootPath: options.sessionsRootPath, protectedToolsForUser: options.protectedToolsForUser },
       )
     : undefined;
   const backend = userRuntimeRegistry
