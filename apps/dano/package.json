@@ -18,6 +18,7 @@
   "dependencies": {
     "@earendil-works/pi-ai": "0.85.1",
     "@earendil-works/pi-coding-agent": "0.85.1",
+    "@huggingface/tokenizers": "0.2.0",
     "@internationalized/date": "^3.12.2",
     "@josephyoung/pi-heimdall": "0.2.17",
     "@josephyoung/pi-openviking": "0.1.0",
