@@ -5,9 +5,10 @@
   import { Button } from "$lib/components/ui/button";
   import { t } from "../i18n";
   import { requestMemorySettings } from "../utils/memorySettings";
+  import MemoryOperations from "./MemoryOperations.svelte";
 
-  let { open = false, authenticated = false, url = null, themeStyle = "", onClose = () => {} }:
-    { open?: boolean; authenticated?: boolean; url?: string | null; themeStyle?: string; onClose?: () => void } = $props();
+  let { open = false, authenticated = false, url = null, operationsUrl = null, themeStyle = "", onClose = () => {} }:
+    { open?: boolean; authenticated?: boolean; url?: string | null; operationsUrl?: string | null; themeStyle?: string; onClose?: () => void } = $props();
   let status = $state<UserMemoryStatus | null>(null);
   let loading = $state(false), saving = $state(false), error = $state(false);
   let reload = $state(0);
@@ -45,7 +46,7 @@
 </script>
 
 <Dialog.Root {open} onOpenChange={(value) => { if (!value) onClose(); }}>
-  <Dialog.Content style={themeStyle} overlayProps={{ style: themeStyle }}>
+  <Dialog.Content class="max-h-[85dvh] overflow-y-auto" style={themeStyle} overlayProps={{ style: themeStyle }}>
     <Dialog.Header>
       <Dialog.Title>{t("memory.title")}</Dialog.Title>
       <Dialog.Description>{t("memory.description")}</Dialog.Description>
@@ -70,6 +71,7 @@
           {saving ? t("memory.saving") : status.enabled ? t("memory.pause") : t("memory.enable")}
         </Button>
       </Dialog.Footer>
+      {#if operationsUrl}<MemoryOperations url={operationsUrl} />{/if}
     {/if}
   </Dialog.Content>
 </Dialog.Root>

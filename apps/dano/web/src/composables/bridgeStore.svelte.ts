@@ -3301,6 +3301,9 @@ if (!eventSource && !disposed) {
 
 export function initBridge() {
   return {
+    get memoryOperationsUrl() {
+      return clientId ? `/api/clients/${encodeURIComponent(clientId)}/memory/operations` : null;
+    },
     get memorySettingsUrl() {
       return clientId ? `/api/clients/${encodeURIComponent(clientId)}/memory/settings` : null;
     },

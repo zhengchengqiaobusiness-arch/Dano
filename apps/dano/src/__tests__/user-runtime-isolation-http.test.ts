@@ -840,6 +840,10 @@ it("authenticates memory settings, isolates owners and projects only safe status
             policyVersion: "v1", revision: 1, apiKey: "SYNTHETIC_PRIVATE_KEY", owner: "PRIVATE_OWNER" };
         },
         async setEnabled(enabled) { state.enabled = enabled; },
+        async operations() {
+          if (state.fail) throw new Error("SYNTHETIC_PRIVATE_ERROR");
+          return { items: [await this.operation(context.user.id)].filter(item => item !== undefined), nextCursor: null };
+        },
         async operation(id) {
           if (state.fail) throw new Error("SYNTHETIC_PRIVATE_ERROR");
           if (id !== context.user.id) return undefined;
@@ -872,6 +876,17 @@ it("authenticates memory settings, isolates owners and projects only safe status
   expect((await fetch(url(alice), { method: "PUT", headers: headers(aliceToken), body: JSON.stringify({ enabled: false }) })).status).toBe(200);
   expect([...states.values()].every(state => !state.enabled)).toBe(true);
   const operationUrl = (client: TestClient, id: string) => `${origin}/api/clients/${client.client.id}/memory/operations/${id}`;
+  const listUrl = (client: TestClient) => `${origin}/api/clients/${client.client.id}/memory/operations`;
+  expect((await fetch(listUrl(alice))).status).toBe(401);
+  expect((await fetch(listUrl(alice), { headers: headers(bobToken) })).status).toBe(403);
+  const list = await fetch(listUrl(alice), { headers: headers(aliceToken) });
+  expect(list.status).toBe(200);
+  expect(list.headers.get("cache-control")).toBe("no-store");
+  const listBody = await list.json() as { items: Array<{ id: string }> };
+  expect(listBody.items.map(item => item.id)).toEqual(["alice"]);
+  expect(JSON.stringify(listBody)).not.toContain("PRIVATE");
+  const peerList = await fetch(listUrl(bob), { headers: headers(bobToken) });
+  expect(await peerList.json()).toMatchObject({ items: [{ id: "bob" }] });
   expect((await fetch(operationUrl(alice, "alice"))).status).toBe(401);
   expect((await fetch(operationUrl(alice, "alice"), { headers: headers(bobToken) })).status).toBe(403);
   expect((await fetch(operationUrl(bob, "alice"), { headers: headers(bobToken) })).status).toBe(404);
@@ -882,6 +897,9 @@ it("authenticates memory settings, isolates owners and projects only safe status
     createdAt: "2026-09-18T00:00:00Z", updatedAt: "2026-09-18T00:00:01Z",
     source: { sessionId: "local-session", entryId: "local-entry", branchId: "local-branch" } });
   for (const state of states.values()) state.fail = true;
+  const failedList = await fetch(listUrl(alice), { headers: headers(aliceToken) });
+  expect(failedList.status).toBe(503);
+  expect(await failedList.text()).not.toContain("SYNTHETIC_PRIVATE");
   const failedReceipt = await fetch(operationUrl(alice, "alice"), { headers: headers(aliceToken) });
   expect(failedReceipt.status).toBe(503);
   expect(await failedReceipt.text()).not.toContain("SYNTHETIC_PRIVATE");
@@ -899,7 +917,8 @@ it("rejects anonymous memory settings even when a host profile accidentally expo
     userContextResolver: { resolve: async () => ({ user: { id: "guest" }, folderPath: path.join(root, "users/guest") }) },
     protectedToolsForUser: async () => {
       const agentDir = path.join(root, "private"); fs.mkdirSync(agentDir);
-      return { agentDir, trustedSkillPaths: [], memory: { status: read, setEnabled: async () => {}, operation: async () => undefined },
+      return { agentDir, trustedSkillPaths: [], memory: { status: read, setEnabled: async () => {}, operation: async () => undefined,
+        operations: async () => ({ items: [], nextCursor: null }) },
         resolveWorker: async workspace => ({ workspace, assertIsolated: async () => {}, execute: async () => ({}) }) };
     },
   });
@@ -909,5 +928,6 @@ it("rejects anonymous memory settings even when a host profile accidentally expo
   const response = await fetch(`${origin}/api/clients/${client.client.id}/memory/settings`);
   expect(response.status).toBe(401);
   expect((await fetch(`${origin}/api/clients/${client.client.id}/memory/operations/anything`)).status).toBe(401);
+  expect((await fetch(`${origin}/api/clients/${client.client.id}/memory/operations`)).status).toBe(401);
   expect(read).not.toHaveBeenCalled();
 });

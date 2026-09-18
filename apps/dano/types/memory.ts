@@ -16,3 +16,8 @@ export interface UserMemoryOperation {
   updatedAt: string;
   source: { sessionId: string; entryId: string; branchId: string };
 }
+
+export interface UserMemoryOperationPage {
+  items: UserMemoryOperation[];
+  nextCursor: string | null;
+}

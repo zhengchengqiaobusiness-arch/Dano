@@ -10,7 +10,8 @@ import { LazyMemoryClient } from "./lazy-memory-client.js";
 import type { ProtectedSessionTools } from "./protected-session-tools.js";
 import type { UserMemoryControls, UserMemoryStatus } from "./user-memory-controls.js";
 import type { UserContext } from "./user-context.js";
-import type { UserMemoryOperation } from "../../types/memory.js";
+import type { UserMemoryOperation, UserMemoryOperationPage } from "../../types/memory.js";
+import { memoryOperationPage, projectMemoryOperation } from "./memory-operation-page.js";
 
 type SchedulerPolicy = Omit<ConstructorParameters<typeof DeliveryScheduler>[0], "store" | "delivery">;
 export interface UserMemoryServices {
@@ -96,9 +97,14 @@ export class UserMemoryRuntime implements UserMemoryControls {
     this.#assertOpen();
     const operation = Object.hasOwn(state.operations, id) ? state.operations[id] : undefined;
     if (!operation) return undefined;
-    return { id: operation.id, phase: operation.phase, createdAt: operation.createdAt,
-      updatedAt: operation.updatedAt, source: { sessionId: operation.source.sessionId,
-        entryId: operation.source.entryId, branchId: operation.source.branchId } };
+    return projectMemoryOperation(operation);
+  }
+
+  async operations(cursor?: string): Promise<UserMemoryOperationPage> {
+    this.#assertOpen();
+    const state = await this.#store.read();
+    this.#assertOpen();
+    return memoryOperationPage(Object.values(state.operations), cursor);
   }
 
   #assertOpen(): void { if (this.#closed) throw new Error("MEMORY_RUNTIME_CLOSED"); }

@@ -13,6 +13,7 @@ import * as http from "node:http";
 import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
+import { InvalidMemoryCursor, projectMemoryOperation } from "./memory-operation-page.js";
 import type { BridgeEventBus } from "./bridge-event-bus.js";
 import { getLanIps, isTailscaleIp } from "./network.js";
 import {
@@ -441,6 +442,26 @@ export class BridgeServer {
         return;
       }
 
+      const memoryOperationsMatch = /^\/api\/clients\/([^/]+)\/memory\/operations$/.exec(pathname);
+      if (req.method === "GET" && memoryOperationsMatch) {
+        const clientId = decodeURIComponent(memoryOperationsMatch[1]!);
+        const user = this.clientUsers.get(clientId);
+        if (!user || !("username" in user.user)) throw new UserContextError(401, "请先登录后再使用长期记忆");
+        const cursor = url.searchParams.get("cursor") ?? undefined;
+        await this.withUserWrite(clientId, async () => {
+          try {
+            const runtime = await this.userRuntimeRegistry?.get(user);
+            if (!runtime?.memory) throw new Error("MEMORY_UNAVAILABLE");
+            const page = await runtime.memory.operations(cursor);
+            writeJson(res, 200, { items: page.items.map(projectMemoryOperation), nextCursor: page.nextCursor }, "no-store");
+          } catch (error) {
+            if (error instanceof InvalidMemoryCursor) throw new HttpError(400, "记忆列表分页位置无效，请刷新");
+            throw new HttpError(503, "长期记忆暂时不可用，普通聊天可继续");
+          }
+        });
+        return;
+      }
+
       const memoryOperationMatch = /^\/api\/clients\/([^/]+)\/memory\/operations\/([^/]+)$/.exec(pathname);
       if (req.method === "GET" && memoryOperationMatch) {
         const clientId = decodeURIComponent(memoryOperationMatch[1]!);
@@ -455,10 +476,7 @@ export class BridgeServer {
             operation = await runtime.memory.operation(operationId);
           } catch { throw new HttpError(503, "长期记忆暂时不可用，普通聊天可继续"); }
           if (!operation) throw new HttpError(404, "记忆投递记录不存在");
-          writeJson(res, 200, { id: operation.id, phase: operation.phase,
-            createdAt: operation.createdAt, updatedAt: operation.updatedAt,
-            source: { sessionId: operation.source.sessionId, entryId: operation.source.entryId,
-              branchId: operation.source.branchId } }, "no-store");
+          writeJson(res, 200, projectMemoryOperation(operation), "no-store");
         });
         return;
       }
