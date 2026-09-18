@@ -20,6 +20,15 @@ package name `@josephyoung/pi-openviking`. This is source implementation, not a
 published package or completed #474 acceptance. The current Dano implementation
 branch starts from the merged gate on upstream/main.
 
+Dano's host-only owner registry now persists the stable authenticated user ID
+and a deterministic account-scoped SHA-256 mapping. Display-name changes do
+not change ownership; anonymous callers cannot create records. Six focused
+tests cover restart stability, normalization collisions, concurrent creation,
+private permissions and rejection of foreign, exposed or symlink records;
+server type checking also passes. This registry is not yet wired into runtime
+creation or credential provisioning. Its parent directory must remain inside
+the protected host-state root enforced by the eventual launcher.
+
 At extension commit `fb7f2c7`, 38 automated tests pass: owner-bound private file
 state, eight concurrent processes, killed-writer recovery, durable source
 deduplication, response-loss reconciliation, concurrent delivery, pause,
