@@ -31,6 +31,7 @@ export class WorkerSupervisor {
   #closed = false;
   #closing?: Promise<void>;
   readonly #retirements = new Map<string, Promise<void>>();
+  readonly #releases = new Map<string, Promise<void>>();
 
   constructor(options: WorkerSupervisorOptions, factory?: Factory) {
     if (!Number.isSafeInteger(options.maxWorkers) || options.maxWorkers <= 0) throw new Error("INVALID_WORKER_SUPERVISOR_LIMIT");
@@ -50,6 +51,7 @@ export class WorkerSupervisor {
     if (typeof ownerId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(ownerId)
       || typeof workspace !== "string" || !isAbsolute(workspace)) throw new Error("INVALID_WORKER_OWNER_REQUEST");
     if (this.#closed || this.#retired.has(ownerId)) throw new Error("WORKER_SUPERVISOR_CLOSED");
+    if (this.#releases.has(ownerId)) throw new Error("WORKER_SUPERVISOR_RELEASING");
     const canonical = resolve(workspace);
     const key = JSON.stringify([ownerId, canonical]);
     const existing = this.#slots.get(key);
@@ -63,7 +65,7 @@ export class WorkerSupervisor {
         throw new Error("WORKER_SUPERVISOR_CLOSED");
       }
       await lease.worker.assertIsolated().catch(async error => { await this.#closeLease(slot, lease); throw error; });
-      if (this.#closed || this.#retired.has(ownerId)) {
+      if (this.#closed || this.#retired.has(ownerId) || this.#slots.get(key) !== slot) {
         await this.#closeLease(slot, lease);
         throw new Error("WORKER_SUPERVISOR_CLOSED");
       }
@@ -80,10 +82,22 @@ export class WorkerSupervisor {
     const previous = this.#retirements.get(ownerId);
     if (previous) return previous;
     this.#retired.add(ownerId);
+    const closing = this.release(ownerId);
+    this.#retirements.set(ownerId, closing);
+    return closing;
+  }
+
+  /** Release a failed/finished runtime without permanently retiring its owner. */
+  release(ownerId: string): Promise<void> {
+    const previous = this.#releases.get(ownerId);
+    if (previous) return previous;
     const slots = [...this.#slots.entries()].filter(([, slot]) => slot.ownerId === ownerId);
     for (const [key] of slots) this.#slots.delete(key);
-    const closing = this.#closeSlots(slots.map(([, slot]) => slot));
-    this.#retirements.set(ownerId, closing);
+    const closing = this.#closeSlots(slots.map(([, slot]) => slot)).then(() => {
+      this.#releases.delete(ownerId);
+    });
+    // Keep failures registered: no replacement worker until cleanup succeeds.
+    this.#releases.set(ownerId, closing);
     return closing;
   }
 
@@ -92,7 +106,7 @@ export class WorkerSupervisor {
     this.#closed = true;
     const slots = [...this.#slots.values()];
     this.#slots.clear();
-    this.#closing = this.#waitForCleanup([this.#closeSlots(slots), ...this.#retirements.values()]);
+    this.#closing = this.#waitForCleanup([this.#closeSlots(slots), ...this.#retirements.values(), ...this.#releases.values()]);
     return this.#closing;
   }
 

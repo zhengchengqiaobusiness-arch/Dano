@@ -8,7 +8,7 @@ export interface WorkerBrokerChannel extends Pick<EventEmitter, "on" | "off"> {
 }
 interface BrokerLimits { maxConcurrentOperations: number; maxResultBytes: number }
 type Worker = IsolatedToolExecutor & { close(): void };
-const operations = new Set(["read", "write", "edit", "bash", "grep", "find", "ls", "user_bash"]);
+export const workerOperations: ReadonlySet<string> = new Set(["read", "write", "edit", "bash", "grep", "find", "ls", "user_bash"]);
 
 export function assertWorkerProviderApi(capabilities: unknown): void {
   if (!capabilities || typeof capabilities !== "object"
@@ -55,7 +55,7 @@ export function serveWorkerBroker(worker: Worker, channel: WorkerBrokerChannel, 
     if (running.has(id)) { close(); return; }
     if ((request.type !== "assert" && request.type !== "execute")
       || running.size >= limits.maxConcurrentOperations
-      || (request.type === "execute" && (typeof request.name !== "string" || !operations.has(request.name)
+      || (request.type === "execute" && (typeof request.name !== "string" || !workerOperations.has(request.name)
         || !request.parameters || typeof request.parameters !== "object" || Array.isArray(request.parameters)))) {
       send({ type: "error", id, code: "WORKER_BROKER_REQUEST_REJECTED" });
       return;
