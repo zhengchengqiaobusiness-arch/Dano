@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { parseProtectedSupervisorProfile } from "../protected-supervisor-profile.js";
+import { parseProtectedHostProfile } from "../protected-host-profile.js";
 function profile() {
   return { runtimeRoot: "/runtime", sessionsRoot: "/sessions", hostStateRoot: "/host-state", maxWorkers: 4,
     identities: { directory: "/identities", firstUid: 10001, firstGid: 10001, count: 4, lockTimeoutMs: 5000 },
@@ -14,6 +15,18 @@ it("projects a complete administrator profile without applying hidden defaults",
   expect(parsed).toEqual(input);
   expect(parsed).not.toBe(input);
   expect(parsed.broker).not.toBe(input.broker);
+});
+it("accepts a private configuration path but leaves host state derivation to the supervisor", () => {
+  const input = { ...profile(), memoryConfigDirectory: "/private-config" };
+  expect(parseProtectedSupervisorProfile(input)).toEqual(input);
+  expect(() => parseProtectedSupervisorProfile({ ...input, memoryConfigDirectory: "./config" })).toThrow();
+  expect(() => parseProtectedSupervisorProfile({ ...input, host: { ...input.host,
+    memory: { configurationDirectory: "/private-config", stateDirectory: "/workspace" } } })).toThrow();
+  const memory = { configurationDirectory: "/private-config", stateDirectory: "/host-state/memory-service" };
+  expect(parseProtectedHostProfile({ ...input.host, memory }).memory).toEqual(memory);
+  for (const invalid of [{ ...memory, managementKey: "PRIVATE" }, { ...memory, stateDirectory: "relative" }, null]) {
+    expect(() => parseProtectedHostProfile({ ...input.host, memory: invalid })).toThrow("INVALID_PROTECTED_HOST_PROFILE");
+  }
 });
 it("rejects injected environment and credential fields at every profile level", () => {
   for (const level of ["root", "broker", "host", "identities"] as const) {

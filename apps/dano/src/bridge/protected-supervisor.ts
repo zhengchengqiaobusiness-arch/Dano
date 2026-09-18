@@ -1,6 +1,6 @@
 import { spawn, execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { mkdir, open, realpath } from "node:fs/promises";
+import { lstat, mkdir, open, realpath } from "node:fs/promises";
 import { join, relative, resolve, isAbsolute } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -16,10 +16,11 @@ export interface ProtectedSupervisorOptions {
   runtimeRoot: string;
   sessionsRoot: string;
   hostStateRoot: string;
+  memoryConfigDirectory?: string;
   identities: { directory: string; firstUid: number; firstGid: number; count: number; lockTimeoutMs: number };
   maxWorkers: number;
   broker: WorkerSupervisorOptions["broker"];
-  host: ProtectedHostProfile;
+  host: Omit<ProtectedHostProfile, "memory">;
 }
 const execute = promisify(execFile);
 const unsafe = () => new Error("UNSAFE_PROTECTED_SUPERVISOR_CONFIGURATION");
@@ -70,6 +71,7 @@ export async function runProtectedSupervisor(options: ProtectedSupervisorOptions
   if (process.platform !== "linux" || process.getuid?.() !== 0) throw new Error("PRIVILEGED_SUPERVISOR_REQUIRED");
   signal?.throwIfAborted();
   const host = parseProtectedHostProfile(options.host);
+  if (host.memory) throw unsafe();
   if (host.hostUid !== options.broker.hostUid || host.hostGid !== options.broker.hostGid) throw unsafe();
   const usersRoot = join(options.runtimeRoot, "users");
   const roots = [options.runtimeRoot, options.sessionsRoot, options.hostStateRoot, options.identities.directory];
@@ -79,6 +81,15 @@ export async function runProtectedSupervisor(options: ProtectedSupervisorOptions
     || inside(options.sessionsRoot, options.hostStateRoot) || inside(options.hostStateRoot, options.sessionsRoot)) throw unsafe();
   const identities = new WorkerIdentityRegistry({ ...options.identities, hostUid: host.hostUid, hostGid: host.hostGid });
   const installation = await realpath(options.broker.installationDir);
+  if (options.memoryConfigDirectory !== undefined) {
+    const directory = options.memoryConfigDirectory;
+    if (!isAbsolute(directory) || resolve(directory) !== directory || await realpath(directory) !== directory
+      || [...roots, installation].some(root => inside(root, directory) || inside(directory, root))) throw unsafe();
+    const metadata = await lstat(directory);
+    if (!metadata.isDirectory() || metadata.uid !== host.hostUid || metadata.gid !== host.hostGid
+      || (metadata.mode & 0o7777) !== 0o700) throw unsafe();
+    host.memory = { configurationDirectory: directory, stateDirectory: join(options.hostStateRoot, "memory-service") };
+  }
   await rootInstallation(installation);
   const entry = await rootFile(fileURLToPath(new URL("./protected-host-entry.js", import.meta.url)));
   if (!inside(installation, entry)) throw unsafe();

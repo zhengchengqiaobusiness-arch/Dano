@@ -3,6 +3,8 @@ import { parseProtectedHostProfile } from "./protected-host-profile.js";
 import { fileURLToPath } from "node:url";
 import { assertWorkerPrivacyEvidence } from "./linux-process-privacy.js";
 import { WorkerSupervisorClient } from "./worker-supervisor-client.js";
+import { createProtectedMemoryServices } from "./protected-memory-services.js";
+import { withUserMemory } from "./user-memory-runtime.js";
 
 /** Spawned by the root supervisor after setpriv drops all host capabilities. */
 export async function runProtectedHost(): Promise<number> {
@@ -19,15 +21,18 @@ export async function runProtectedHost(): Promise<number> {
     send: (value, callback) => process.send!(value, callback),
     disconnect: () => { if (process.connected) process.disconnect?.(); },
   }, profile);
+  let memory: Awaited<ReturnType<typeof createProtectedMemoryServices>>;
   try {
+    if (profile.memory) memory = await createProtectedMemoryServices(profile.memory.configurationDirectory, profile.memory.stateDirectory);
     // Remove only the launcher's fixed profile argument; retain normal Dano CLI options.
     process.argv.splice(2, 1);
     const { runDanoMain } = await import("../main.js");
+    const protectedToolsForUser = (context: Parameters<typeof client.profile>[0]) => client.profile(context, profile);
     return await runDanoMain({ signal: stopped.signal,
-      protectedToolsForUser: context => client.profile(context, profile) });
+      protectedToolsForUser: memory ? withUserMemory(protectedToolsForUser, memory.services) : protectedToolsForUser });
   } finally {
-    client.close();
-    process.off("disconnect", disconnected);
+    try { await memory?.close(); }
+    finally { client.close(); process.off("disconnect", disconnected); }
   }
 }
 

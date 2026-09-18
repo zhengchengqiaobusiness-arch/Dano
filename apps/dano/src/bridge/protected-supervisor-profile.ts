@@ -19,7 +19,7 @@ function path(value: unknown): string {
 
 /** Administrator configuration only: reject implicit defaults and environment/secret fields. */
 export function parseProtectedSupervisorProfile(input: unknown): ProtectedSupervisorOptions {
-  const value = record(input, ["runtimeRoot", "sessionsRoot", "hostStateRoot", "identities", "maxWorkers", "broker", "host"]);
+  const value = record(input, ["runtimeRoot", "sessionsRoot", "hostStateRoot", "memoryConfigDirectory", "identities", "maxWorkers", "broker", "host"]);
   const identities = record(value.identities, ["directory", "firstUid", "firstGid", "count", "lockTimeoutMs"]);
   const broker = record(value.broker, ["installationDir", "hostUid", "hostGid", "piPackageContext", "privilegeGuard", "path",
     "startupTimeoutMs", "operationTimeoutMs", "shutdownTimeoutMs", "maxConcurrentOperations", "maxResultBytes"]);
@@ -30,6 +30,7 @@ export function parseProtectedSupervisorProfile(input: unknown): ProtectedSuperv
     || !broker.path || broker.path.split(":").some(entry => !isAbsolute(entry) || resolve(entry) !== entry)) throw invalid();
   return { runtimeRoot: path(value.runtimeRoot), sessionsRoot: path(value.sessionsRoot), hostStateRoot: path(value.hostStateRoot),
     maxWorkers: positive(value.maxWorkers), host,
+    ...(value.memoryConfigDirectory === undefined ? {} : { memoryConfigDirectory: path(value.memoryConfigDirectory) }),
     identities: { directory: path(identities.directory), firstUid: positive(identities.firstUid), firstGid: positive(identities.firstGid),
       count: positive(identities.count), lockTimeoutMs: positive(identities.lockTimeoutMs) },
     broker: { installationDir: path(broker.installationDir), hostUid: host.hostUid, hostGid: host.hostGid,

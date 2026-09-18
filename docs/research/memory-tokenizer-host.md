@@ -40,10 +40,11 @@ registries and unknown models have no implicit fallback.
 
 ## Outstanding release gates
 
-This module is not yet wired to the protected host startup configuration.
+The protected host now starts this module from private configuration and closes
+the shared workers after user-runtime disposal completes.
 The extension's model-aware asynchronous callback is now published in `0.1.1`
-and Dano pins that exact registry artifact. Protected startup wiring and shared
-tokenizer shutdown ownership remain required before enabling it in the application.
+and Dano pins that exact registry artifact. The real model's tokenizer binding,
+recall behavior and deployment acceptance remain required before production use.
 
 Local tokenizer parity proves the specified files' counts. A provider alias or
 display name does not prove which model/tokenizer a remote proxy actually uses.

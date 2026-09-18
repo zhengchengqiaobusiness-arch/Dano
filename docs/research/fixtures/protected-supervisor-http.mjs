@@ -1,7 +1,7 @@
 // Development contract check in a disposable Linux container. Not browser/model acceptance.
 import assert from 'node:assert/strict';
-import { mkdtemp, chmod, writeFile, readdir, readFile, rm } from 'node:fs/promises';
-import { createHmac } from 'node:crypto';
+import { mkdtemp, chmod, chown, mkdir, writeFile, readdir, readFile, rm } from 'node:fs/promises';
+import { createHash, createHmac } from 'node:crypto';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -27,6 +27,28 @@ const environment = { PATH: process.env.PATH, NODE_ENV: 'test', HOME: options.ru
   DANO_AUTH_JWT_SECRET: 'synthetic-supervisor-http-test-key' };
 const crashHost = process.argv.includes('--crash-host');
 const useCli = process.argv.includes('--cli');
+const withMemory = process.argv.includes('--memory');
+if (withMemory) {
+  options.memoryConfigDirectory = join(root, 'private-config');
+  await mkdir(options.memoryConfigDirectory, { mode: 0o700 });
+  await chown(options.memoryConfigDirectory, hostUid, hostGid);
+  const asset = async (name, value) => {
+    const path = join(root, name), bytes = JSON.stringify(value); await writeFile(path, bytes, { mode: 0o644 });
+    return { path, sha256: createHash('sha256').update(bytes).digest('hex') };
+  };
+  const config = { version: 1, baseUrl: 'http://127.0.0.1:1', accountId: 'fixture', managementKey: 'SYNTHETIC_MANAGEMENT_KEY',
+    encryptionKey: 'ab'.repeat(32), encryptionKeyVersion: 'v1', requestTimeoutMs: 100, maxContentBytes: 16384, policyVersion: 'v1',
+    policy: { maxPayloadBytes: 4096, recallTimeoutMs: 1000, recallTokenBudget: 1500, recallLimit: 5, minimumScore: 0.5 },
+    scheduler: { pollIntervalMs: 1000, initialBackoffMs: 1000, maxBackoffMs: 5000, maxAttemptsPerPhase: 5, maxOperationsPerTick: 4 },
+    tokenizerLimits: { maxAssetBytes: 65536, maxInputBytes: 8192, startupTimeoutMs: 5000 },
+    tokenizers: [{ model: { provider: 'fixture', api: 'openai-completions', id: 'fixture' },
+      tokenizer: await asset('tokenizer.json', { version: '1.0', added_tokens: [], normalizer: null,
+        pre_tokenizer: { type: 'Whitespace' }, post_processor: null, decoder: null,
+        model: { type: 'WordLevel', vocab: { '[UNK]': 0, hello: 1 }, unk_token: '[UNK]' } }),
+      config: await asset('tokenizer_config.json', { tokenizer_class: 'PreTrainedTokenizerFast', unk_token: '[UNK]' }) }] };
+  const path = join(options.memoryConfigDirectory, 'memory-service.json');
+  await writeFile(path, JSON.stringify(config), { mode: 0o600 }); await chown(path, hostUid, hostGid);
+}
 const profilePath = '/etc/dano-supervisor-fixture.json';
 if (useCli) await writeFile(profilePath, JSON.stringify(options), { mode: 0o600, flag: 'wx' });
 const stop = new AbortController();
@@ -69,10 +91,30 @@ try {
   if (failure) throw failure;
   assert(healthy, 'protected HTTP host did not start');
   await assert.rejects(runProtectedSupervisor(options, environment), /SUPERVISOR_ALREADY_RUNNING/);
+  const clients = [];
   for (const id of ['alice-fixture', 'bob-fixture']) {
     const response = await fetch(`${origin}/api/clients`, { method: 'POST',
       headers: { authorization: `Bearer ${token(id)}`, 'content-type': 'application/json' }, body: '{}' });
-    assert.equal(response.status, 201, await response.text());
+    assert.equal(response.status, 201);
+    clients.push({ id, client: (await response.json()).client });
+  }
+  if (withMemory) {
+    const settings = async (entry, enabled) => {
+      const response = await fetch(`${origin}/api/clients/${entry.client.id}/memory/settings`, {
+        method: enabled === undefined ? 'GET' : 'PUT',
+        headers: { authorization: `Bearer ${token(entry.id)}`, 'content-type': 'application/json' },
+        ...(enabled === undefined ? {} : { body: JSON.stringify({ enabled }) }) });
+      assert.equal(response.status, 200); return response.json();
+    };
+    for (const entry of clients) {
+      const state = await settings(entry); assert.equal(state.enabled, false); assert.equal(state.automaticCollection, false);
+    }
+    assert.equal((await settings(clients[0], true)).enabled, true);
+    assert.equal((await settings(clients[1])).enabled, false);
+    assert.equal((await settings(clients[0], false)).enabled, false);
+    const foreign = await fetch(`${origin}/api/clients/${clients[0].client.id}/memory/settings`, {
+      headers: { authorization: `Bearer ${token(clients[1].id)}` } });
+    assert.equal(foreign.status, 403);
   }
   const live = await identities();
   assert(live.some(p => p.uid === hostUid && p.cmdline.includes('/protected-host-entry.js')));
@@ -87,7 +129,7 @@ try {
     || p.cmdline.includes('/protected-host-entry.js') || p.cmdline.includes('/worker-broker-entry.js'));
   assert.deepEqual(remaining, []);
   console.log(JSON.stringify({ actualHttpHost: true, cliEntrypoint: useCli, hostNonRoot: true, twoWorkerIdentities: true,
-    exclusiveSupervisor: true, shutdownMode: crashHost ? 'host-killed' : 'graceful', shutdownReclaimsChildren: true, browserVerified: false, modelVerified: false }));
+    exclusiveSupervisor: true, memorySettingsVerified: withMemory, shutdownMode: crashHost ? 'host-killed' : 'graceful', shutdownReclaimsChildren: true, browserVerified: false, modelVerified: false }));
 } finally {
   stop.abort();
   await serving.catch(() => {});

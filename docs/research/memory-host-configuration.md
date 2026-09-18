@@ -36,12 +36,15 @@ HTTP host; never serialize it into argv, worker RPC, browser state or logs.
 
 The private reader and parser have automated coverage for normal reads,
 configuration absence, corrupt input, permission violations, symlinks and hard
-links. Runtime service construction and protected-host startup wiring are still
-pending; the model-aware extension is now published and pinned at `0.1.1`.
+links. Runtime service construction and protected-host startup wiring now use
+the published and pinned extension `0.1.1`. The supervisor's optional
+`memoryConfigDirectory` supplies only a private path; the non-root host reads
+the configuration, constructs owner/credential/provisioning services and starts
+the explicitly configured tokenizer workers. It composes these services with
+authenticated user runtimes; anonymous users receive no memory extension.
 The user runtime now drains the active delivery tick after settling its network
 client before releasing the worker. There is no local drain timeout that could
 be mistaken for completed persistence. Supervisor-level forced termination must
 still be treated as crash recovery, not a successful drain.
-This configuration module does not
-turn memory on, does not create remote identities and does not establish a
+Startup does not turn memory on, does not create remote identities and does not establish a
 production deployment or completed #465 acceptance.
