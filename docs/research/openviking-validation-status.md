@@ -159,6 +159,36 @@ extension in each loader rather than duplicating registration. This proves
 loading and hook registration only; emitted lifecycle events, stable entry IDs,
 actual CLI package installation and model execution remain to be exercised.
 
+### Real model events and Runtime replacement
+
+On 2026-09-18, `fixtures/pi-memory-lifecycle.mjs` exercised the real pi
+`0.82.1` AgentSessionRuntime using both a file extension entry and an inline
+host factory. Each made a real synthetic model request with tools disabled,
+then navigated the session tree, forked at the user entry, reloaded, created a
+new Session and disposed the runtime. Both observed `before_agent_start`,
+`context`, `turn_end`, `agent_end`, `session_tree`, `session_before_fork`, and
+the corresponding startup/shutdown reasons. Fork created a distinct Session
+while retaining the source user entry ID; reload retained that ID as well.
+No extension error was reported. Temporary configuration copies and session
+files were removed in `finally`; model credentials were not printed.
+
+An initial `bindExtensions({})` probe observed shutdown on reload without a
+new startup. The installed runtime checks for an actual UI, command, shutdown
+or error binding before emitting reload startup. Providing the host's error
+listener binding made shutdown/startup pairing pass in both modes. Hosts must
+bind runtime services and rebind replacement Sessions; registering hooks alone
+is insufficient. This verifies SDK lifecycle behavior, not an installed CLI
+package, Dano browser lifecycle, memory extraction hooks or Runtime cwd changes.
+
+### Installed license metadata
+
+The installed OpenViking `0.4.20` wheel declares `License-Expression: AGPL-3.0`
+and contains its LICENSE file. Published `@openviking/sdk@0.1.0` declares
+`Apache-2.0`; installed pi coding-agent `0.82.1` declares `MIT`. These are
+artifact metadata observations, not a completed distribution review. The
+final service image, extension tarball and source/notice delivery still need
+to be checked against their actual shipped contents before release.
+
 ## Executed real-model extraction and SDK probe
 
 A separate isolated service used the configured OpenAI-compatible chat gateway
