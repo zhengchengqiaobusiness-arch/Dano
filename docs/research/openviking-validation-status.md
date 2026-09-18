@@ -853,6 +853,29 @@ launcher, full provider-Python request flow or browser acceptance. In particular
 any browser download path for worker-private artifacts must preserve this
 boundary rather than assume the host can open the file.
 
+## #474 persistent worker identity allocation
+
+`worker-identity-registry.ts` provides launcher-owned, append-only UID/GID
+allocation using the existing `fs-ext` OS advisory-lock implementation (now an
+exact direct dependency). The configured ranges exclude the host UID/GID and
+invalid kernel identities. A user gets the same offset across restarts; new
+users get new offsets, and exhaustion fails rather than reusing an old identity.
+There is no release API. Owner identifiers are hashed before storage.
+
+Records use private files, atomic replacement and fsync under an exclusive
+OS lock. Invalid permissions, symlinks, duplicate owners, corrupt records and
+range changes fail closed. A retained initialization marker detects loss of
+the allocation file rather than starting allocation again. This is not a
+backup rollback detector: the final launcher must refuse a missing allocation
+directory when existing user data remains, reserve ranges against system
+accounts, and protect the directory's ancestors from tool users.
+
+Six tests pass, including six real competing Node processes, stable allocation
+after restart, exhaustion, lost/corrupt records, and OS-lock release after
+terminating its holder. Tests run on the development host; server type checking
+and build pass. The allocator is not yet composed into a privileged multi-user
+supervisor, so no production launcher or full lifecycle acceptance is claimed.
+
 ## #473 acceptance audit and handoff
 
 | Original gate requirement | Evidence and outcome |
