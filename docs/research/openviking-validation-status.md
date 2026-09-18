@@ -20,7 +20,7 @@ package name `@josephyoung/pi-openviking`. This is source implementation, not a
 published package or completed #474 acceptance. The current Dano implementation
 branch starts from the merged gate on upstream/main.
 
-At extension commit `cae9637`, 16 automated tests pass: owner-bound private file
+At extension commit `ccf7e0f`, 22 automated tests pass: owner-bound private file
 state, eight concurrent processes, killed-writer recovery, durable source
 deduplication, response-loss reconciliation, concurrent delivery, pause,
 reconfirmation after enable, bounded recall and real pi 0.82.1 loading/reloading
@@ -32,6 +32,20 @@ task, memory diff, current content and successful retrieval established `ready`
 in 22.8 seconds. Every delivery step recreated the adapter from durable state.
 This single run is functional evidence, not the PRD latency/quality benchmark.
 
+The owner-level background scheduler now persists backoff and attempt counts,
+recovers queued work on startup, bounds per-tick work and shutdown waits, and
+reports exhausted reconciliation as blocked without repeating a mutation.
+A fresh actual-service background run reached `ready` in 30.3 seconds; a
+subsequent query retrieved the preference without foreground delivery calls.
+These are functional samples, not completion of the release benchmark.
+
+The resource-profile helper disables project trust before package resolution,
+disables automatic extension discovery, and retains explicitly supplied trusted
+Skills. Real pi reload tests show that a workspace extension is suppressed;
+the same fixture executes when project trust is enabled as a positive control.
+The launcher must apply this profile and protect all supplied installation and
+Skill paths. `noExtensions` alone does not skip package resolution.
+
 The extension's actual IPC worker also passed an isolated Linux/Node 22.23.2
 run with pi 0.82.1. It streamed tool updates and cancelled a long Bash command;
 workspace read/write succeeded, while absolute and symlink read/write/edit
@@ -41,8 +55,8 @@ metadata. The test container had no network and was removed. The worker
 primitive is implemented; this does not yet prove the final startup profile or
 the absence of all host-executable resource discovery paths.
 
-Remaining #474 gates include the Linux isolated-worker launcher, bounded
-background scheduling, exact-version publication and Dano integration,
+Remaining #474 gates include the Linux isolated-worker launcher,
+exact-version publication and Dano integration,
 authenticated settings/status UI, and ordinary-pi plus in-app Browser flows.
 The dependency/license checks recorded in the extension repository must be
 resolved before publication. #465 and #474–477 remain open.
