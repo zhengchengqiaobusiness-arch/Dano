@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -48,6 +48,11 @@ describe("secret-safe deployment identity", () => {
   });
   it.each(["", "  ", "{产品名称}", "{{name}}", "${SECRET}", "$SECRET", "$$${SECRET}", "<%=name%>", "name\nsecret", 42, null])("rejects invalid managed names %j instead of falling back", value => {
     const f = fixture(); f.name(value);
+    expect(f.run().status).toBe(1);
+  });
+  it("rejects dangling overlay links instead of treating them as absent", () => {
+    const f = fixture();
+    symlinkSync(join(f.root, "missing"), join(f.root, "deploy/docker-compose.product-name.json"));
     expect(f.run().status).toBe(1);
   });
   it("rejects a wrong commit and dirty source", () => {

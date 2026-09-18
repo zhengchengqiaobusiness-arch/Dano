@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -9,9 +9,13 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Managed overlays contain exactly one literal value. Compose interpolation
 // would make identity depend on secrets/.env; only escaped dollars are allowed.
 export function readProductNameOverlay(path) {
-  if (!existsSync(path)) return undefined;
+  let stat;
+  try { stat = lstatSync(path); } catch (error) {
+    if (error.code === "ENOENT") return undefined;
+    throw new Error("PRODUCT_NAME_OVERLAY_INVALID");
+  }
   try {
-    if (!lstatSync(path).isFile()) throw new Error();
+    if (!stat.isFile()) throw new Error();
     let value = JSON.parse(readFileSync(path, "utf8"));
     for (const key of ["services", "app", "environment", "DANO_PRODUCT_NAME"]) {
       if (!value || Array.isArray(value) || typeof value !== "object" ||
