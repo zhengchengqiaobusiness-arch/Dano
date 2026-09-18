@@ -69,6 +69,47 @@ reported a storage readlink error, but exact-ID cleanup succeeded after a
 separate container inventory confirmed no references. No shared-storage repair
 or broad prune was performed.
 
+Dano now builds a separate `dist/server/bridge/heimdall-worker-tools.js` entry
+for this provider interface. It loads the installed Heimdall 0.2.17 through
+pi 0.85.1's public extension runner with an in-memory credential store,
+project trust disabled, and executable resource discovery disabled. Native file
+tools run through its actual `tool_call` and `tool_result` handlers; model Bash
+and interactive Shell use its actual sandbox operations. Guard errors stop
+execution. The worker uses Dano's headless UI context because an active Heimdall
+sandbox renders a status with the theme API during initialization.
+
+Four new tests cover workspace I/O, `.env`/configuration protection, result
+filtering, untrusted extension suppression, cancellation before writes, closed
+providers and no unsandboxed Shell fallback. These and 14 existing Heimdall and
+session tests pass; server type checking and server build also pass.
+
+The actual built provider passed a disposable Linux/Node 22.23.2 run with the
+unreleased extension commit `a242afe`: distinct host/worker UIDs, kernel
+`NoNewPrivs: 1`, denied private absolute/symlink read/write/edit, absent inherited
+synthetic credential, successful file I/O, model Bash and interactive Shell,
+streaming, preserved exit code, `.env`/configuration rejection, and cancellation
+verified by absence of delayed file writes. This run used no network and the
+existing Compose capability/seccomp settings. It did not run Dano's server or
+prove its final multi-user launcher, provider-Python capability, or browser flow.
+
+Reproduction fixtures are `fixtures/heimdall-isolated-worker.mjs` and
+`fixtures/heimdall-worker-provider.mjs`. Copy them into the extension installation
+as `scripts/linux-worker.mjs` and `scripts/provider.mjs`, copy Dano's server build
+to `dano-server`, and install the exact Heimdall peer. In the disposable root
+container, run `node scripts/linux-worker.mjs 1000 65534 1000
+/app/memory-extension/scripts/provider.mjs`. IDs are fixture arguments, not
+production defaults. The fixture explicitly enables the sandbox and grants the
+canonical workspace write access: because the generic worker sets HOME to its
+workspace, Heimdall's automatically added absolute HOME read rule otherwise
+overrides the relative `.` write rule. The eventual trusted Dano launcher must
+provision this canonical policy and the required bubblewrap environment; the
+factory does not rewrite user policy or bypass guards. Protected configuration
+remains inaccessible. Cleanup of worker-owned files can require the container's
+root; removing the disposable container supplies that cleanup boundary.
+The final container inventory is empty, and all 18 image layers created by
+these fixture iterations were removed by exact ID; the pre-existing base was
+retained.
+
 With the published dependency installed, the host entry and native lock binding
 load successfully. Full type/Svelte checks report zero diagnostics and the
 production build passes. The full regression rerun passes 109 test files and
