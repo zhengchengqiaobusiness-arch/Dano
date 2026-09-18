@@ -876,6 +876,31 @@ terminating its holder. Tests run on the development host; server type checking
 and build pass. The allocator is not yet composed into a privileged multi-user
 supervisor, so no production launcher or full lifecycle acceptance is claimed.
 
+## #474 worker broker entry and capability gate
+
+The Dano build now includes `bridge/worker-broker-entry.js`, an IPC-only Linux
+root entry that invokes the protected bootstrap in its own process. The
+bootstrap drops that broker to the host UID/GID while its tool worker uses the
+separate worker identity. This preserves the future parent supervisor's root
+identity for subsequent users. The installed Dano Heimdall provider path is
+fixed by the entry; RPC messages cannot choose modules or environment values.
+
+The broker protocol supports only isolation checks, the seven native tool
+names, interactive Shell, cancellation and shutdown. It bounds concurrent
+operations and message sizes, aborts operations on channel loss, and reports
+fixed error codes without forwarding worker exceptions. Five protocol tests,
+server type checking and the server build pass. These tests use a channel and
+worker double; the new broker entry itself has not yet passed a real Linux
+multi-process run or been wired to Dano's main server supervisor.
+
+The independent extension now exports `protectedWorkerProviderApiVersion = 1`
+from its bootstrap entry; all 42 extension tests pass. Dano requires this
+capability before bootstrapping its broker. Its currently locked npm `0.1.0`
+does not advertise the capability and will be rejected, preventing silent
+native-tool fallback. The extension changes remain unreleased; a real patch
+publication and exact Dano dependency update are still required before this
+entry can be enabled.
+
 ## #473 acceptance audit and handoff
 
 | Original gate requirement | Evidence and outcome |
