@@ -29,6 +29,19 @@ server type checking also passes. This registry is not yet wired into runtime
 creation or credential provisioning. Its parent directory must remain inside
 the protected host-state root enforced by the eventual launcher.
 
+The management-only provisioning client checks ROOT or account-bound ADMIN
+identity before registration, resolves an existing exact user before creating
+one, and verifies the returned credential through authenticated `/health` as
+the exact account/user with USER role. Lost registration responses trigger a
+read reconciliation, never an automatic POST replay or key rotation. Existing
+hashed keys without a recoverable plaintext credential require explicit
+recovery. Transport redirects are rejected and upstream error bodies are not
+propagated. Nine targeted tests and server type checking pass. A real local
+OpenViking 0.4.20 run created Alice and Bob in synthetic account
+`provision-c965eeac55e3`; a recreated client retrieved Alice's unchanged key,
+and the two users had distinct keys with verified ownership/roles. This client
+does not yet persist credentials or wire them into Dano runtime initialization.
+
 At extension commit `fb7f2c7`, 38 automated tests pass: owner-bound private file
 state, eight concurrent processes, killed-writer recovery, durable source
 deduplication, response-loss reconciliation, concurrent delivery, pause,
