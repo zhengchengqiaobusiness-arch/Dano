@@ -164,6 +164,25 @@ concurrent commit safety, context completeness for long Sessions, task receipt
 retention beyond expiry, or durable recovery from server restart. Ambiguous
 receipts stop the fixture rather than trigger a blind retry.
 
+### Actual server-process interruption and task recovery
+
+On 2026-09-18, `fixtures/openviking-server-crash.py` prepared a fresh synthetic
+account and a real commit. The supervisor verified the loopback listener PID,
+its exact isolated config path and the task's pending/running state, then
+sent SIGKILL. It restarted the unmodified service using the same data and
+configuration. An earlier attempt finished before interruption and was
+excluded from crash evidence; the successful injection checked and killed
+within one supervisor step.
+
+After restart, the same USER key and Session remained valid. Public task
+listing returned one running task, which subsequently completed without any
+message or commit retry by the fixture. Search recalled the synthetic report
+preference. The source ID was initially visible in context; after completion
+it was absent from current context but present in the completed archive
+retrieved using the task result's archive URI. This demonstrates real process
+crash recovery and archive reconciliation for this single in-flight commit,
+not all possible interruption points, task expiry or multi-writer races.
+
 ## Executed pi entry-point probe
 
 ```sh
