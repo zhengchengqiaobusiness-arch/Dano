@@ -180,6 +180,20 @@ bind runtime services and rebind replacement Sessions; registering hooks alone
 is insufficient. This verifies SDK lifecycle behavior, not an installed CLI
 package, Dano browser lifecycle, memory extraction hooks or Runtime cwd changes.
 
+### Real CLI local-package installation
+
+On 2026-09-18, `fixtures/pi-memory-cli-install.mjs` invoked the installed pi
+CLI, installed a minimal local package through `pi install`, and verified its
+registration in isolated agent settings. A print-mode real model request with
+tools and session persistence disabled executed all six registered hooks:
+startup, before-agent, context, turn-end, agent-end and quit shutdown. The
+CLI returned the expected synthetic response. `pi remove` removed that package
+registration. Temporary agent configuration, workspace and package files were
+cleaned up; the user's normal settings were unchanged. Local paths are stored
+relative to the settings directory, so the fixture resolves them before
+checking package identity. This proves local package installation/loading,
+not registry publication or installation of the final memory extension.
+
 ### Installed license metadata
 
 The installed OpenViking `0.4.20` wheel declares `License-Expression: AGPL-3.0`
