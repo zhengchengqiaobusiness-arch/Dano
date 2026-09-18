@@ -7,6 +7,7 @@ import {
 import { resolve } from "node:path";
 import type { CredentialBroker } from "./credential-broker.js";
 import { wrapProviderBash } from "./provider-python.js";
+import { createWorkerOutputRedactor } from "./worker-output-redaction.js";
 
 /** Trusted launcher inputs only. The resolver must enforce this backend's owner. */
 export interface ProtectedSessionTools {
@@ -53,7 +54,8 @@ export async function protectedSessionFactory(
       const tool = definition.name === "bash" && options.credentialBroker && options.credentialBrokerScope
         ? wrapProviderBash(definition, { broker: options.credentialBroker,
             scope: options.credentialBrokerScope, cwd: workspace, signal: options.signal,
-            moduleDirectory: profile.providerPythonModuleDirectory })
+            moduleDirectory: profile.providerPythonModuleDirectory,
+            redactOutputFile: createWorkerOutputRedactor(worker) })
         : definition;
       pi.registerTool(tool);
     }

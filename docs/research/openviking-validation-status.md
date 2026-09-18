@@ -806,6 +806,26 @@ after spawning, before awaiting network requests; its Linux probe passed again.
   authentication-only service was stopped after its probes; the separate
   real-model environment supports ongoing governance experiments.
 
+## #474 protected Bash output redaction
+
+Protected sessions now scrub provider capabilities from complete Bash output
+inside the same isolated worker through its guarded `user_bash` operation.
+The credential-bearing host no longer opens a worker-returned output path.
+The operation uses isolated Python (`-I -S`), bounded streaming, a private
+temporary file, and atomic replacement. It rejects symlinks and non-regular
+files; cancellation, isolation failure, and redaction failure prevent a
+successful tool result from being returned. Ordinary host-tool sessions retain
+their existing redaction behavior.
+
+Current evidence: 43 tests in the provider Python, protected-session, and
+worker-output-redaction suites; server type check and build passed. The new
+Shell/Python tests cover private files, split capabilities in large output,
+shell metacharacters, rejected paths, cancellation and failed isolation.
+The routing tests prove host filesystem redaction is bypassed. These tests run
+with a local executor double and **do not prove cross-UID artifact handling**;
+that still requires the real Linux launcher/worker integration. No browser or
+final multi-user acceptance is claimed here.
+
 ## #473 acceptance audit and handoff
 
 | Original gate requirement | Evidence and outcome |

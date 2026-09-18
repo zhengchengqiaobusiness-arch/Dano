@@ -112,6 +112,21 @@ it("shares read-only installation modules while keeping concurrent login capabil
   expect((await readdir(h.cwd)).filter(name => name.startsWith(".dano-provider-"))).toEqual([]);
 });
 
+it("delegates artifact redaction without opening worker paths on the host and propagates failures", async () => {
+  const h = await pythonHarness();
+  const session = h.session("user", "agent", "login-a");
+  const redactOutputFile = vi.fn(async (_path: string, _capability: string) => {});
+  await withProviderPython({ ...session.options, redactOutputFile }, async (_prefix, redact, _requests, redactFile) => {
+    await redactFile("/worker-only/no-host-file");
+    const [path, capability] = redactOutputFile.mock.calls[0];
+    expect(path).toBe("/worker-only/no-host-file");
+    expect(capability).toMatch(/^[a-f0-9]{64}$/);
+    expect(redact(capability)).toBe("[redacted]");
+    redactOutputFile.mockRejectedValueOnce(new Error("worker unavailable"));
+    await expect(redactFile(path)).rejects.toThrow("worker unavailable");
+  });
+});
+
 it("rejects invalid installation paths without falling back to copied modules", async () => {
   const h = await pythonHarness();
   const session = h.session("user", "agent", "login-a");

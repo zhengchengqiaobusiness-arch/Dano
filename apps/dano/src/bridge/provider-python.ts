@@ -19,6 +19,8 @@ interface ProviderPythonOptions {
   signal?: AbortSignal;
   /** Protected, read-only installation path provisioned by the trusted launcher. */
   moduleDirectory?: string;
+  /** Run artifact redaction with the same filesystem authority as the tool. */
+  redactOutputFile?: (path: string, capability: string, signal?: AbortSignal) => Promise<void>;
 }
 
 function shellQuote(value: string): string {
@@ -59,6 +61,10 @@ export async function withProviderPython<T>(
       : JSON.parse(JSON.stringify(value).replaceAll(capability, "[redacted]"));
   const requests: ProviderPythonRequest[] = [];
   const redactFile = async (path: string) => {
+    if (options.redactOutputFile) {
+      await options.redactOutputFile(path, capability, options.signal);
+      return;
+    }
     const staged = `${path}.${randomBytes(16).toString("hex")}`;
     try {
       await pipeline(
