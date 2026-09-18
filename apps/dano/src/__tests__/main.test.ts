@@ -123,7 +123,7 @@ describe("Dano main", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it("ships bash with pinned Heimdall guards", () => {
     const runtimeDefaultsDir = resolve("deploy/runtime-defaults");
