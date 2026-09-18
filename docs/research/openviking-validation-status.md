@@ -6,10 +6,46 @@ Gate: [#473](https://github.com/zhengchengqiaobusiness-arch/Dano/issues/473)
 ## Current result
 
 2026-09-18: **feasibility review passed for the selected Linux profile**;
-upstream PR merge and ticket closure remain pending. No memory runtime feature
+[PR #480](https://github.com/zhengchengqiaobusiness-arch/Dano/pull/480) merged as
+`eab2a9cb6e0d638e564e77cf957a233d531a0952` and #473 is closed. No memory runtime feature
 has been enabled. The decision covers the original #473 feasibility gate,
 not implementation or completion of #465. The host boundary and delivery
 obligations below are mandatory inputs to #474–477.
+
+## Implementation handoff
+
+#474 implementation now lives in the independent
+[pi-openviking repository](https://github.com/josephyoung/pi-openviking), with
+package name `@josephyoung/pi-openviking`. This is source implementation, not a
+published package or completed #474 acceptance. The current Dano implementation
+branch starts from the merged gate on upstream/main.
+
+At extension commit `cae9637`, 16 automated tests pass: owner-bound private file
+state, eight concurrent processes, killed-writer recovery, durable source
+deduplication, response-loss reconciliation, concurrent delivery, pause,
+reconfirmation after enable, bounded recall and real pi 0.82.1 loading/reloading
+of both entry modules. No second pi kernel is bundled.
+
+The actual extension adapter also saved a synthetic preference through real
+OpenViking 0.4.20 and SDK 0.1.0: the source-bearing archive, completed matching
+task, memory diff, current content and successful retrieval established `ready`
+in 22.8 seconds. Every delivery step recreated the adapter from durable state.
+This single run is functional evidence, not the PRD latency/quality benchmark.
+
+The extension's actual IPC worker also passed an isolated Linux/Node 22.23.2
+run with pi 0.82.1. It streamed tool updates and cancelled a long Bash command;
+workspace read/write succeeded, while absolute and symlink read/write/edit
+against the trusted host's private credential failed. The worker did not
+inherit the synthetic memory key. Its UID is checked against Linux process
+metadata. The test container had no network and was removed. The worker
+primitive is implemented; this does not yet prove the final startup profile or
+the absence of all host-executable resource discovery paths.
+
+Remaining #474 gates include the Linux isolated-worker launcher, bounded
+background scheduling, exact-version publication and Dano integration,
+authenticated settings/status UI, and ordinary-pi plus in-app Browser flows.
+The dependency/license checks recorded in the extension repository must be
+resolved before publication. #465 and #474–477 remain open.
 
 ## Executed host file-tool probe
 
