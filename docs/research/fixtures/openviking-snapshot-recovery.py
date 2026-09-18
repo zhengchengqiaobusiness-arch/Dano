@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 import httpx
+from probe_state import write_private_json
 
 source, snapshot = map(Path, sys.argv[1:3])
 evidence = json.loads((snapshot / 'snapshot-evidence.json').read_text())
@@ -53,7 +54,7 @@ new_source_key = ok(source_config, 'POST', f"/admin/accounts/{state['account']}/
                     source_config['server']['root_api_key'])['user_key']
 source_state = {**state, 'key': new_source_key}
 source_state_path = source / 'server-crash-state.json'
-source_state_path.write_text(json.dumps(source_state)); source_state_path.chmod(0o600)
+write_private_json(source_state_path, source_state)
 assert call(source_config, 'GET', '/content/read', key, params={'uri': uri}).status_code == 401
 assert call(destination_config, 'GET', '/content/read', key, params={'uri': uri}).status_code == 200
 # Reapply external records before releasing recovered service to callers.

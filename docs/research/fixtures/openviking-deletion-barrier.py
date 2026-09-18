@@ -13,11 +13,13 @@ import httpx
 
 run = Path(sys.argv[1])
 phase = sys.argv[2]
+correction = len(sys.argv) > 3 and sys.argv[3] == 'correction'
+replacement = '所有技术方案都要列出风险缓解措施。'
 config = json.loads((run / 'ov.conf').read_text())
 assert config['server']['host'] in ('127.0.0.1', 'localhost')
 client = httpx.Client(base_url=f"http://127.0.0.1:{config['server']['port']}/api/v1",
                      timeout=120, trust_env=False)
-state_path = run / 'deletion-barrier-state.json'
+state_path = run / ('correction-barrier-state.json' if correction else 'deletion-barrier-state.json')
 
 
 def save(state):
@@ -95,6 +97,8 @@ else:
             removed = [line for line in lines if '目标和非目标' in line]
             assert removed and all('简体中文' not in line for line in removed), 'Shared facts require semantic editing'
             edited = ''.join(line for line in lines if '目标和非目标' not in line)
+            if correction:
+                edited = '- ' + replacement + '\n' + edited
             assert '简体中文' in edited, 'Unrelated fact must remain'
             request('POST', '/content/write', key, {'uri': uri, 'content': edited,
                     'mode': 'replace', 'wait': True, 'timeout': 60})
@@ -105,7 +109,8 @@ else:
         state.update({'phase': 'deleted', 'changed': changed})
         save(state)
         print(json.dumps({'recoveredRevocation': True, 'oldTaskDrained': True,
-                          'selectiveDeleteApplied': True, 'sourceSessionDeleted': True}))
+                          'correctionApplied': correction, 'selectiveDeleteApplied': not correction,
+                          'sourceSessionDeleted': True}))
     elif phase == 'verify':
         assert state['phase'] == 'deleted'
         def replay_old_source():
@@ -116,15 +121,20 @@ else:
         for uri in state['changed']:
             raw = request('GET', '/content/read', key, params={'uri': uri, 'raw': True})
             assert '目标和非目标' not in raw and '简体中文' in raw
+            if correction:
+                assert replacement in raw
         recalled = json.dumps(find(key), ensure_ascii=False)
         assert '目标和非目标' not in recalled and '简体中文' in recalled
+        if correction:
+            assert '风险缓解措施' in recalled
         assert client.get(f"/sessions/{state['sid']}", headers={'X-API-Key': key}).status_code == 404
         tasks = request('GET', '/tasks', key, params={'resource_id': state['sid'], 'task_type': 'session_commit'})
         assert len(tasks) == 1 and tasks[0]['task_id'] == state['task']
         report = {'revocationSurvivesProcessRestart': True, 'oldQueueReplayBlocked': True,
+                  'newCorrectedFactRetained': correction,
                   'forgottenFactAbsentFromReadAndSearch': True, 'unrelatedFactPreserved': True,
                   'noAdditionalExtractionTask': True, 'multiWriterAndServerCrashVerified': False}
-        (run / 'deletion-barrier-result.json').write_text(json.dumps(report))
+        (run / ('correction-barrier-result.json' if correction else 'deletion-barrier-result.json')).write_text(json.dumps(report))
         print(json.dumps(report))
     else:
         raise ValueError('Unknown phase')

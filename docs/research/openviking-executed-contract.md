@@ -51,9 +51,11 @@ adapter's state transitions still require implementation tests.
   A Linux prototype using distinct trusted/tool process UIDs blocked native
   read/write/edit and Bash access while preserving workspace file access.
   Its synthetic HTTP probe does not replace actual service authentication.
-- The final platform/process architecture, distribution obligations, general
-  semantic correction and host-owned authorization are still gate decisions;
-  these results do not authorize an unprotected implementation.
+- The [host boundary decision](openviking-host-boundary-decision.md) selects
+  the Linux launcher/worker profile, and the [distribution review](openviking-distribution-review.md)
+  defines source/notice delivery. In-flight correction was separately tested.
+  Production integration must implement these decisions; the results do not
+  authorize an unprotected same-process implementation.
 
 ## Remaining evidence must retain its original scope
 

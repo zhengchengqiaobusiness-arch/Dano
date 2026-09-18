@@ -4,7 +4,9 @@ Arguments: source synthetic run directory, clean recovery run directory.
 Recreates identity via admin APIs and replays the independent deletion record.
 """
 import json
+import io
 import sys
+import zipfile
 from pathlib import Path
 import httpx
 
@@ -45,24 +47,31 @@ alice = (created_user.json()['result']['user_key'] if created_user.status_code =
          ok('POST', f"/admin/accounts/{state['account']}/users/alice/key", root)['user_key'])
 assert call('GET', '/content/read', alice, params={'uri': deletion['uri']}).status_code == 404
 backup = (source / 'synthetic-account-backup.ovpack').read_bytes()
+with zipfile.ZipFile(io.BytesIO(backup)) as archive:
+    suffix = '/files/' + deletion['uri'].removeprefix('viking://')
+    matches = [name for name in archive.namelist() if name.endswith(suffix)]
+    assert len(matches) == 1, 'Backup must contain exactly one selected memory file'
+    expected = archive.read(matches[0]).decode('utf-8')
+    query = next(line.strip('- #') for line in expected.splitlines()
+                 if line.strip() and not line.lstrip().startswith('<!--'))
 upload = client.post('/resources/temp_upload', headers={'X-API-Key': admin},
                      files={'file': ('backup.ovpack', backup, 'application/zip')})
 assert upload.status_code == 200
 ok('POST', '/pack/restore', admin, {'temp_file_id': upload.json()['result']['temp_file_id'],
    'on_conflict': 'overwrite', 'vector_mode': 'recompute'})
 restored = ok('GET', '/content/read', alice, params={'uri': deletion['uri'], 'raw': True})
-assert restored, 'Backup did not restore content'
+assert restored == expected, 'Restored content differs from actual backup member'
 assert call('GET', '/content/read', old_key, params={'uri': deletion['uri']}).status_code == 401
-search_body = {'query': '技术文档的验收检查项偏好',
+search_body = {'query': query,
                'target_uri': 'viking://user/alice/memories', 'limit': 20}
 before_delete = ok('POST', '/search/find', alice, search_body)
-assert '验收检查项' in json.dumps(before_delete, ensure_ascii=False), 'Restored fact not searchable'
+assert any(item['uri'] == deletion['uri'] for item in before_delete['memories']), 'Restored memory not searchable'
 # Do not make the recovered account available until independent tombstones apply.
 ok('DELETE', '/fs', alice, params={'uri': deletion['uri'], 'recursive': False, 'wait': True})
 assert call('GET', '/content/read', alice, params={'uri': deletion['uri']}).status_code == 404
 search = ok('POST', '/search/find', alice, search_body)
 assert all(item['uri'] != deletion['uri'] for item in search['memories'])
-assert '验收检查项' not in json.dumps(search, ensure_ascii=False), 'Deleted file fact remains searchable'
+assert query not in json.dumps(search, ensure_ascii=False), 'Deleted sample remains searchable'
 report = {'targetMissingBeforeRestore': True, 'identityRecreatedThroughPublicApi': True,
           'oldServiceUserKeyRejectedBeforeAndAfterRestore': True,
           'restoredContentAccessibleWithNewKey': True, 'deletionRecordReapplied': True,

@@ -9,6 +9,7 @@ A completed task alone is insufficient; the fixed synthetic facts must be recall
 import json,secrets,time,sys
 from pathlib import Path
 import httpx
+from probe_state import write_private_json
 r=Path(sys.argv[1])
 c=json.loads((r/'ov.conf').read_text())
 assert c['server']['host'] in ('127.0.0.1','localhost'), 'Use an isolated loopback service'
@@ -26,7 +27,7 @@ request('POST',f'/sessions/{sid}/messages',key,{'role':'user','content':'请记�
 t=time.monotonic()
 commit=request('POST',f'/sessions/{sid}/commit',key,{'keep_recent_count':0})
 state={'account':account,'key':key,'sessionId':sid,'commit':commit}
-p=r/'probe-state.json';p.write_text(json.dumps(state));p.chmod(0o600)
+write_private_json(r/'probe-state.json', state)
 print(json.dumps({'commitStatus':commit.get('status'),'taskIdPresent':bool(commit.get('task_id')),'archived':commit.get('archived')}),flush=True)
 task_id=commit.get('task_id')
 for _ in range(36):

@@ -12,6 +12,7 @@ import uuid
 import zipfile
 from pathlib import Path
 import httpx
+from probe_state import write_private_json
 
 run = Path(sys.argv[1])
 config = json.loads((run / 'ov.conf').read_text())
@@ -85,11 +86,7 @@ result('DELETE', '/fs', alice, params={'uri': uri, 'recursive': False, 'wait': T
 assert client.get('/content/read', headers={'X-API-Key': alice}, params={'uri': uri}).status_code == 404
 new_key = result('POST', f'/admin/accounts/{account}/users/alice/key', root_key)['user_key']
 state['key'] = new_key
-with state_path.open('w') as stream:
-    json.dump(state, stream)
-    stream.flush()
-    os.fsync(stream.fileno())
-state_path.chmod(0o600)
+write_private_json(state_path, state)
 
 upload = client.post('/resources/temp_upload', headers={'X-API-Key': admin_key},
                      files={'file': ('backup.ovpack', backup, 'application/zip')})

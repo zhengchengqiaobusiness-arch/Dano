@@ -87,6 +87,17 @@ architecture. Lifecycle integration, legitimate Skill paths, unprivileged
 startup, process controls and actual OpenViking access remain to be validated.
 All temporary containers and files from this experiment were removed.
 
+### Final boundary feasibility follow-up
+
+The updated worker prototype cleared supplementary groups and dropped the
+trusted host to UID/GID 1000 after spawning the separate tool worker. It
+repeated all file/environment/workspace checks and connected to real
+OpenViking 0.4.20: trusted authenticated request 200, worker without key 401.
+A VM-loopback SSH reverse forward reached the macOS-loopback service; no fake
+HTTP endpoint substituted for it. Temporary container, tunnel and connection
+files were removed. The [selected host boundary](openviking-host-boundary-decision.md)
+defines the supported Linux profile and concrete standard-pi/Dano obligations.
+
 ## Executed real-server Session contract probe
 
 The unmodified PyPI `openviking==0.4.20` package was installed in an isolated
@@ -267,10 +278,11 @@ not registry publication or installation of the final memory extension.
 
 The installed OpenViking `0.4.20` wheel declares `License-Expression: AGPL-3.0`
 and contains its LICENSE file. Published `@openviking/sdk@0.1.0` declares
-`Apache-2.0`; installed pi coding-agent `0.82.1` declares `MIT`. These are
-artifact metadata observations, not a completed distribution review. The
-final service image, extension tarball and source/notice delivery still need
-to be checked against their actual shipped contents before release.
+`Apache-2.0`; installed pi coding-agent `0.82.1` declares `MIT`. The
+[distribution review](openviking-distribution-review.md) selects separate
+unmodified server delivery, a published HTTP SDK dependency and pi peer
+compatibility, with explicit source/notice release actions. Actual image and
+tarball contents must still be checked before publication.
 
 ## Executed real-model extraction and SDK probe
 
@@ -375,6 +387,18 @@ export coverage. It does not prove absence of every semantic paraphrase or
 inspect private service storage. Executed behavior and required adapter
 sequencing are mapped in [the executed contract](openviking-executed-contract.md).
 
+### In-flight correction follow-up
+
+Running `openviking-deletion-barrier.py` with the `correction` argument repeated
+the three-process experiment while an old real extraction was pending/running.
+Recovery drained that task, replaced the old goals/non-goals fact with the
+requirement to list risk mitigations, retained Simplified Chinese and removed
+the old source Session. After another process restart, the new fact remained
+in direct reads/search, the old fact was absent, unrelated language preference
+remained, and the revoked old source could not submit another extraction.
+This closes the tested old-extraction/new-correction sequencing gap for the
+synthetic sample; a generic semantic editor is later implementation work.
+
 ## Executed export and same-service recovery
 
 On 2026-09-18, `fixtures/openviking-pack-recovery.py` exercised the public APIs
@@ -452,6 +476,18 @@ point in replay, or production upgrade/rollback. The source root task listing
 contained two terminal records; that list is not evidence that all historical
 account tasks were enumerated. The stopped-process copy supplies the snapshot
 consistency boundary.
+
+## Reproducibility fixes after gate review
+
+Secret-bearing fixture state now uses a shared atomic writer that creates
+mode-0600 files before writing, including when replacing a preexisting
+mode-0644 file. A permissive-umask experiment verified both cases. Clean
+recovery derives its expected content and query from the selected actual ZIP
+member, removing a hidden dependency on the earlier checklist-message probe.
+The checked-in `fixtures/openviking-offline-snapshot.py` provides explicit
+listener/PID validation, optional graceful stop, process-exit verification,
+copying, a per-file digest manifest and destination config generation. Running
+it against the stopped research snapshot verified all 655 copied run files.
 
 ## Environment observations
 
