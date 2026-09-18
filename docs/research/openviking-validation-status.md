@@ -266,6 +266,31 @@ The fixture mutates its synthetic sample; create a fresh extraction sample
 before rerunning it. Shared-source handling, in-flight tasks, durable source
 revocation and restore-time replay protection remain open gate requirements.
 
+### Durable deletion intent with in-flight extraction
+
+On 2026-09-18, `fixtures/openviking-deletion-barrier.py` ran `prepare`,
+`recover` and `verify` as separate processes. It created a fresh synthetic
+account and a source containing two preferences, then observed a pending or
+running real extraction task before writing the source revocation. The state
+file uses an owner-only temporary file, file fsync, atomic replacement and
+directory fsync outside OpenViking storage/backups.
+
+After process restart, recovery read that intent, waited for the old task to
+complete, removed the goals/non-goals fact through public content replacement
+while retaining Simplified Chinese, and deleted the source Session. After a
+second restart, the prototype's delivery guard rejected the revoked source
+before transport. Direct reads and search omitted the forgotten fact while
+retaining the unrelated preference. The source Session returned 404 and its
+task list contained only the original task.
+
+This validates the sequence against real extraction for one writer and the
+known synthetic fact shape. It does not prove a production queue, concurrent
+delivery exclusion, unknown accepted tasks, service crashes, arbitrary semantic
+editing or full derived-content enumeration. The replay guard is part of the
+prototype, not an upstream API capability; without that guard the earlier raw
+replay test demonstrated resurrection. These remaining conditions must be
+implemented and tested before the gate can pass.
+
 ## Executed export and same-service recovery
 
 On 2026-09-18, `fixtures/openviking-pack-recovery.py` exercised the public APIs
