@@ -3,12 +3,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { createWorkerTools } from "../heimdall-worker-tools.js";
+import { assertWorkerProcessPrivacy } from "../linux-process-privacy.js";
+
+// These tests exercise the real pi/Heimdall lifecycle on the development host.
+// The separate Linux fixture exercises the actual kernel evidence checker.
+vi.mock("../linux-process-privacy.js", () => ({ assertWorkerProcessPrivacy: vi.fn(async () => {}) }));
 
 const roots: string[] = [];
 const providers: Awaited<ReturnType<typeof createWorkerTools>>[] = [];
 afterEach(async () => {
   for (const provider of providers.splice(0)) provider.close();
   vi.unstubAllEnvs();
+  vi.mocked(assertWorkerProcessPrivacy).mockReset().mockResolvedValue(undefined);
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
@@ -25,6 +31,27 @@ async function harness() {
       provider.execute(name, input, new AbortController().signal, () => {}) };
   } };
 }
+
+it("stops tool execution if the live process isolation check fails", async () => {
+  const h = await harness();
+  const { execute } = await h.start();
+  vi.mocked(assertWorkerProcessPrivacy).mockRejectedValue(new Error("MEMORY_PROCESS_PRIVACY_REQUIRED"));
+  await expect(execute("write", { path: "unprotected.txt", content: "bad" }))
+    .rejects.toThrow("MEMORY_PROCESS_PRIVACY_REQUIRED");
+  await expect(readFile(join(h.workspace, "unprotected.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("does not execute a tool when the provider closes during an isolation check", async () => {
+  const h = await harness();
+  const { execute, provider } = await h.start();
+  let release!: () => void;
+  vi.mocked(assertWorkerProcessPrivacy).mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+  const pending = execute("write", { path: "after-close.txt", content: "bad" });
+  provider.close();
+  release();
+  await expect(pending).rejects.toThrow("WORKER_GUARDS_UNAVAILABLE");
+  await expect(readFile(join(h.workspace, "after-close.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+});
 
 it("runs native workspace tools through the real Heimdall guards", async () => {
   const h = await harness();

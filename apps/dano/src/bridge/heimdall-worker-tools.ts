@@ -9,9 +9,11 @@ import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { createHeadlessUIContext } from "./headless-ui-context.js";
+import { assertWorkerProcessPrivacy } from "./linux-process-privacy.js";
 
 /** Load only inside the isolated tool process, whose HOME/config is tool-only. */
 export async function createWorkerTools({ workspace }: { workspace: string }) {
+  await assertWorkerProcessPrivacy();
   const settingsManager = SettingsManager.inMemory();
   settingsManager.setProjectTrusted(false);
   const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(),
@@ -41,21 +43,24 @@ export async function createWorkerTools({ workspace }: { workspace: string }) {
       createEditToolDefinition(workspace), createGrepToolDefinition(workspace),
       createFindToolDefinition(workspace), createLsToolDefinition(workspace), bash] as unknown as ToolDefinition[];
     const tools = new Map(definitions.map(tool => [tool.name, tool]));
-    const check = () => {
+    const check = async () => {
+      if (closed || failed) throw new Error("WORKER_GUARDS_UNAVAILABLE");
+      await assertWorkerProcessPrivacy();
       if (closed || failed) throw new Error("WORKER_GUARDS_UNAVAILABLE");
     };
     return {
       async execute(name: string, parameters: Record<string, unknown>, signal: AbortSignal,
         onUpdate: (value: unknown) => void): Promise<unknown> {
-        check();
+        await check();
         const operationSignal = AbortSignal.any([signal, lifetime.signal]);
         operationSignal.throwIfAborted();
         if (name === "user_bash") {
           if (typeof parameters.command !== "string") throw new Error("INVALID_WORKER_COMMAND");
           const intercepted = await runner.emitUserBash({ type: "user_bash", command: parameters.command,
             cwd: workspace, excludeFromContext: true });
-          check();
+          await check();
           if (!intercepted?.operations) throw new Error("WORKER_SHELL_GUARD_UNAVAILABLE");
+          operationSignal.throwIfAborted();
           return intercepted.operations.exec(parameters.command, workspace, {
             signal: operationSignal,
             timeout: typeof parameters.timeout === "number" ? parameters.timeout : undefined,
@@ -66,14 +71,14 @@ export async function createWorkerTools({ workspace }: { workspace: string }) {
         if (!tool) throw new Error("INVALID_WORKER_TOOL");
         const id = randomUUID();
         const decision = await runner.emitToolCall({ type: "tool_call", toolName: name, toolCallId: id, input: parameters });
-        check();
+        await check();
         if (decision?.block) throw new Error("WORKER_TOOL_BLOCKED");
         operationSignal.throwIfAborted();
         const result = await tool.execute(id, parameters, operationSignal, onUpdate, runner.createContext());
         const projection = await runner.emitToolResult({ type: "tool_result", toolName: name,
           toolCallId: id, input: parameters, content: result.content, details: result.details,
           isError: false } as ToolResultEvent);
-        check();
+        await check();
         return projection ? { ...result, ...projection } : result;
       },
       close() {

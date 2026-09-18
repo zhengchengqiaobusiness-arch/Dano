@@ -40,7 +40,7 @@ RUN registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-$DANO_DEFAULT_NPM_REGISTRY}
   && npm_config_registry="$registry" npm install --global open-websearch@2.1.11
 RUN sed -i 's|https\?://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; s|https\?://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/debian.sources \
   && apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates bubblewrap curl fd-find git python3 python3-venv ripgrep \
+  && apt-get install -y --no-install-recommends ca-certificates bubblewrap curl fd-find git mount python3 python3-venv ripgrep util-linux \
   && ln -sf "$(command -v fdfind)" /usr/local/bin/fd \
   && chmod 4755 /usr/bin/bwrap \
   && rm -rf /var/lib/apt/lists/*

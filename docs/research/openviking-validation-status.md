@@ -96,7 +96,7 @@ Reproduction fixtures are `fixtures/heimdall-isolated-worker.mjs` and
 `fixtures/heimdall-worker-provider.mjs`. Copy them into the extension installation
 as `scripts/linux-worker.mjs` and `scripts/provider.mjs`, copy Dano's server build
 to `dano-server`, and install the exact Heimdall peer. In the disposable root
-container, run `node scripts/linux-worker.mjs 1000 65534 1000
+container, run `node scripts/linux-worker.mjs 1000 1000 10001 10001
 /app/memory-extension/scripts/provider.mjs`. IDs are fixture arguments, not
 production defaults. The fixture explicitly enables the sandbox and grants the
 canonical workspace write access: because the generic worker sets HOME to its
@@ -165,6 +165,43 @@ The probe used no network, its container was removed, and no image was created.
 The final multi-user launcher must establish and verify this boundary before
 loading credentials; the existing single-host worker feasibility test alone
 does not prove process-information isolation.
+
+`linux-process-privacy.ts` now provides the startup preparation and live worker
+check. The root launcher must call preparation inside a dedicated mount
+namespace before loading credentials. It remounts procfs if necessary, checks
+all procfs aliases, and uses a credential-free `setpriv` child to prove the
+configured host identity can inspect its root parent. The tool provider checks
+kernel metadata before initialization and on tool execution: consistent
+non-root identities, no foreign supplementary groups, zero permitted/effective/
+ambient capabilities, and `NoNewPrivs`. It also verifies that the worker cannot
+read its actual host parent's process status. Closing the provider during an
+asynchronous check prevents subsequent tool execution.
+
+The runtime check deliberately uses access tests rather than comparing raw
+procfs exemption GIDs with process-local GIDs. In the tested rootless Podman
+namespace, mounting with group 1000 reported `gid=100999` in mountinfo. The
+[kernel procfs documentation](https://docs.kernel.org/filesystems/proc.html)
+describes the group exemption, and [user_namespaces(7)](https://man7.org/linux/man-pages/man7/user_namespaces.7.html)
+describes identity mappings. This observed mapping was not hardcoded.
+
+The actual built privacy module passed `fixtures/linux-process-privacy-artifact.cjs`
+in a disposable Linux container: root was rejected, setup was idempotent, a
+distinct nonprivileged worker passed, the exempt group and missing NoNewPrivs
+were rejected, removing hidepid invalidated a subsequent check, and restoring
+the policy passed again. Parser/guard/lifecycle tests pass; their development-host
+Heimdall tests mock only the kernel check and do not claim Linux isolation.
+
+The updated full Heimdall fixture also passed with the new built privacy check
+enabled. It prepares procfs before privilege drop and uses distinct host and
+worker groups; the workspace is owned by the host with the worker's group
+allowed to access it. Workspace I/O, model/interactive Shell, streaming,
+cancellation and private-path denial still pass with live process privacy
+checks. The runtime Dockerfile explicitly installs `mount` and `util-linux`
+for the startup helper's commands. The 15 focused tests, server type check and server build pass. All test
+containers and the eight image layers created by this iteration were removed;
+the pre-existing base image remains. This is executable launcher preparation
+and worker protection, not the still-outstanding multi-user supervisor or Dano
+browser acceptance.
 
 With the published dependency installed, the host entry and native lock binding
 load successfully. Full type/Svelte checks report zero diagnostics and the

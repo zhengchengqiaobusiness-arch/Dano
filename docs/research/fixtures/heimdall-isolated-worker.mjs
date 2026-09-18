@@ -5,36 +5,39 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootstrapProtectedWorker, validateProtectedPaths } from '../dist/bootstrap.js';
 import { createIsolatedToolDefinitions, createIsolatedBashOperations } from '../dist/worker-tools.js';
+import { prepareLinuxProcessPrivacy } from '../dano-server/bridge/linux-process-privacy.js';
 assert.equal(process.platform, 'linux');
 assert.equal(process.getuid(), 0);
-const [hostUid, workerUid, groupId] = process.argv.slice(2, 5).map(Number);
-const toolProviderModule = process.argv[5];
-assert([hostUid, workerUid, groupId].every(id => Number.isSafeInteger(id) && id > 0));
+const [hostUid, hostGid, workerUid, workerGid] = process.argv.slice(2, 6).map(Number);
+const toolProviderModule = process.argv[6];
+assert([hostUid, hostGid, workerUid, workerGid].every(id => Number.isSafeInteger(id) && id > 0));
+assert.notEqual(hostGid, workerGid);
+await prepareLinuxProcessPrivacy(hostUid, hostGid);
 const root = await mkdtemp('/tmp/pi-memory-worker-');
 const workspace = join(root, 'workspace'), protectedDir = join(root, 'private');
-await chmod(root, 0o711); await chown(root, hostUid, groupId);
-await mkdir(workspace, { mode: 0o770 }); await chown(workspace, workerUid, groupId); await chmod(workspace, 0o770);
-await mkdir(protectedDir, { mode: 0o700 }); await chown(protectedDir, hostUid, groupId);
+await chmod(root, 0o711); await chown(root, hostUid, hostGid);
+await mkdir(workspace, { mode: 0o770 }); await chown(workspace, hostUid, workerGid); await chmod(workspace, 0o770);
+await mkdir(protectedDir, { mode: 0o700 }); await chown(protectedDir, hostUid, hostGid);
 const credential = join(protectedDir, 'credential');
-await writeFile(credential, 'SYNTHETIC_PRIVATE_VALUE', { mode: 0o600 }); await chown(credential, hostUid, groupId);
+await writeFile(credential, 'SYNTHETIC_PRIVATE_VALUE', { mode: 0o600 }); await chown(credential, hostUid, hostGid);
 await symlink(protectedDir, join(workspace, 'private-link'));
 await writeFile(join(workspace, '.env'), 'SYNTHETIC=fixture');
 await mkdir(join(workspace, '.pi'));
-await chown(join(workspace, '.pi'), workerUid, groupId);
+await chown(join(workspace, '.pi'), workerUid, workerGid);
 await chmod(join(workspace, '.pi'), 0o770);
 await writeFile(join(workspace, '.pi/heimdall.json'), JSON.stringify({ sandbox: { enabled: true, userNamespace: false, paths: { [workspace]: { mode: 'write' } } } }));
 const unsafeInstall = join(root, 'unsafe-install');
 await mkdir(unsafeInstall, { mode: 0o755 });
 const workerOwnedCode = join(unsafeInstall, 'readonly.js');
 await writeFile(workerOwnedCode, 'export default 1', { mode: 0o444 });
-await chown(workerOwnedCode, workerUid, groupId);
+await chown(workerOwnedCode, workerUid, workerGid);
 await assert.rejects(validateProtectedPaths({ workspace, agentDir: protectedDir, stateDir: protectedDir,
-  installationDir: unsafeInstall, hostUid, workerUid, workerGid: groupId }), /REPLACE_PROTECTED/);
+  installationDir: unsafeInstall, hostUid, workerUid, workerGid }), /REPLACE_PROTECTED/);
 await rm(unsafeInstall, { recursive: true });
 process.env.MEMORY_SYNTHETIC_KEY = 'SYNTHETIC_PRIVATE_VALUE';
 const bootstrapOptions = { workspace, agentDir: protectedDir, stateDir: protectedDir,
-  installationDir: '/app', hostGid: groupId, piPackageContext: fileURLToPath(new URL('../package.json', import.meta.url)), privilegeGuard: '/usr/bin/setpriv',
-  hostUid, workerUid, workerGid: groupId, path: process.env.PATH,
+  installationDir: '/app', hostGid, piPackageContext: fileURLToPath(new URL('../package.json', import.meta.url)), privilegeGuard: '/usr/bin/setpriv',
+  hostUid, workerUid, workerGid, path: process.env.PATH,
   toolProviderModule,
   startupTimeoutMs: 10000, operationTimeoutMs: 5000, maxConcurrentOperations: 4, maxResultBytes: 1024 * 1024 };
 const alternateInstallation = join(root, 'alternate-installation');
