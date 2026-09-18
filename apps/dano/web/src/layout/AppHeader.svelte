@@ -3,6 +3,7 @@
   import LogIn from "@lucide/svelte/icons/log-in";
   import LogOut from "@lucide/svelte/icons/log-out";
   import Menu from "@lucide/svelte/icons/menu";
+  import Brain from "@lucide/svelte/icons/brain";
   import Palette from "@lucide/svelte/icons/palette";
   import SquarePen from "@lucide/svelte/icons/square-pen";
   import * as AlertDialog from "../components/ui/alert-dialog";
@@ -23,6 +24,7 @@
     showNewSession = true,
     authentication,
     onOpenTheme,
+    onOpenMemory,
     onLogin,
     onLogout,
   }: {
@@ -34,6 +36,7 @@
     showNewSession?: boolean;
     authentication: BrowserAuthenticationState;
     onOpenTheme?: () => void;
+    onOpenMemory?: () => void;
     onLogin?: () => void;
     onLogout?: () => void | Promise<void>;
   } = $props();
@@ -114,6 +117,12 @@
           <Palette size={16} aria-hidden="true" />
           <span>{t("appHeader.themeColor")}</span>
         </Button>
+        {#if onOpenMemory}
+          <Button class="header-menu-item" variant="ghost" onclick={() => { menuOpen = false; onOpenMemory?.(); }}>
+            <Brain data-icon="inline-start" aria-hidden="true" />
+            <span>{t("memory.title")}</span>
+          </Button>
+        {/if}
         <div class="header-menu-separator" role="separator"></div>
         {#if currentUser}
           <div class="header-user-summary">

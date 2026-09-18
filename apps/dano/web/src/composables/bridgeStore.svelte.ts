@@ -260,7 +260,7 @@ export const TRANSCRIPT_PAGE_LIMIT = 80;
 // ---------------------------------------------------------------------------
 
 let eventSource: EventSource | null = null;
-let clientId: string | null = null;
+let clientId = $state<string | null>(null);
 let clientMessagesUrl: string | null = null;
 let defaultWorkspacePath: string | null = null;
 let heartbeatWatchdog: ReturnType<typeof setInterval> | null = null;
@@ -3301,6 +3301,9 @@ if (!eventSource && !disposed) {
 
 export function initBridge() {
   return {
+    get memorySettingsUrl() {
+      return clientId ? `/api/clients/${encodeURIComponent(clientId)}/memory/settings` : null;
+    },
     get connectionStatus() {
       return connectionStatus;
     },
