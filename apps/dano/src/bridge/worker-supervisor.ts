@@ -2,7 +2,7 @@ import { isAbsolute, resolve } from "node:path";
 import type { IsolatedToolExecutor } from "@josephyoung/pi-openviking/worker-tools";
 import type { WorkerIdentityRegistry } from "./worker-identity-registry.js";
 import { provisionWorkerWorkspace } from "./worker-workspace.js";
-import { startWorkerBroker, type WorkerBrokerProfile } from "./start-worker-broker.js";
+import type { WorkerBrokerProfile } from "./start-worker-broker.js";
 
 export interface SupervisedWorker {
   readonly workspace: string;
@@ -40,6 +40,7 @@ export class WorkerSupervisor {
       const provisioned = await provisionWorkerWorkspace({ usersRoot: options.usersRoot,
         hostStateRoot: options.hostStateRoot, identities: options.identities,
         hostUid: options.broker.hostUid, hostGid: options.broker.hostGid, userId: ownerId, workspace });
+      const { startWorkerBroker } = await import("./start-worker-broker.js");
       const worker = await startWorkerBroker({ ...options.broker,
         workspace: provisioned.workspace, agentDir: provisioned.agentDir, stateDir: provisioned.stateDir,
         workerUid: provisioned.identity.uid, workerGid: provisioned.identity.gid });

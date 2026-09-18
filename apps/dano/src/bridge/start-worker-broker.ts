@@ -1,47 +1,14 @@
 import { spawn } from "node:child_process";
-import { lstat, readFile, readdir, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { readFile } from "node:fs/promises";
+import { isAbsolute, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as bootstrap from "@josephyoung/pi-openviking/bootstrap";
 import { assertWorkerPrivacyEvidence } from "./linux-process-privacy.js";
 import { assertWorkerProviderApi } from "./worker-broker.js";
+import { rootFile, rootInstallation } from "./trusted-installation.js";
 import { WorkerBrokerClient } from "./worker-broker-client.js";
 
 export type WorkerBrokerProfile = Parameters<typeof bootstrap.bootstrapProtectedWorker>[0] & { shutdownTimeoutMs: number };
-
-/** Root code/executables must not be replaceable by the dropped host either. */
-async function rootFile(path: string): Promise<string> {
-  if (!isAbsolute(path)) throw new Error("WORKER_BROKER_INSTALLATION_REQUIRED");
-  const canonical = await realpath(path);
-  let current = canonical;
-  for (;;) {
-    const metadata = await lstat(current);
-    if (metadata.uid !== 0 || (metadata.mode & 0o022)
-      || (current === canonical ? !metadata.isFile() : !metadata.isDirectory())) {
-      throw new Error("WORKER_BROKER_INSTALLATION_REQUIRED");
-    }
-    const parent = dirname(current);
-    if (parent === current) return canonical;
-    current = parent;
-  }
-}
-
-async function rootInstallation(root: string): Promise<void> {
-  const visited = new Set<string>();
-  const pending = [root];
-  while (pending.length) {
-    const path = await realpath(pending.pop()!);
-    const suffix = relative(root, path);
-    if (suffix === ".." || suffix.startsWith("../") || isAbsolute(suffix)) throw new Error("WORKER_BROKER_INSTALLATION_REQUIRED");
-    if (visited.has(path)) continue;
-    visited.add(path);
-    const metadata = await lstat(path);
-    if (metadata.uid !== 0 || (metadata.mode & 0o022)) throw new Error("WORKER_BROKER_INSTALLATION_REQUIRED");
-    if (metadata.isDirectory()) {
-      for (const child of await readdir(path)) pending.push(join(path, child));
-    } else if (!metadata.isFile()) throw new Error("WORKER_BROKER_INSTALLATION_REQUIRED");
-  }
-}
 
 /** Called by the privileged supervisor only, after private procfs setup and
  * owner-bound workspace provisioning. The supervisor's own UID/GID is unchanged. */

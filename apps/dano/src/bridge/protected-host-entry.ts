@@ -1,41 +1,8 @@
 import { readFile } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { parseProtectedHostProfile } from "./protected-host-profile.js";
 import { fileURLToPath } from "node:url";
 import { assertWorkerPrivacyEvidence } from "./linux-process-privacy.js";
 import { WorkerSupervisorClient } from "./worker-supervisor-client.js";
-
-export interface ProtectedHostProfile {
-  hostUid: number;
-  hostGid: number;
-  startupTimeoutMs: number;
-  operationTimeoutMs: number;
-  maxConcurrentOperations: number;
-  maxMessageBytes: number;
-  trustedSkillPaths: string[];
-  providerPythonModuleDirectory: string;
-}
-
-export function parseProtectedHostProfile(input: unknown): ProtectedHostProfile {
-  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("INVALID_PROTECTED_HOST_PROFILE");
-  const value = input as Record<string, unknown>;
-  const positive = (key: string) => {
-    const item = value[key];
-    if (typeof item !== "number" || !Number.isSafeInteger(item) || item <= 0) throw new Error("INVALID_PROTECTED_HOST_PROFILE");
-    return item;
-  };
-  const hostUid = positive("hostUid");
-  const hostGid = positive("hostGid");
-  if (hostUid >= 2 ** 32 - 1 || hostGid >= 2 ** 32 - 1
-    || !Array.isArray(value.trustedSkillPaths)
-    || value.trustedSkillPaths.some(path => typeof path !== "string" || !isAbsolute(path))
-    || typeof value.providerPythonModuleDirectory !== "string" || !isAbsolute(value.providerPythonModuleDirectory)) {
-    throw new Error("INVALID_PROTECTED_HOST_PROFILE");
-  }
-  return { hostUid, hostGid, startupTimeoutMs: positive("startupTimeoutMs"),
-    operationTimeoutMs: positive("operationTimeoutMs"), maxConcurrentOperations: positive("maxConcurrentOperations"),
-    maxMessageBytes: positive("maxMessageBytes"), trustedSkillPaths: [...value.trustedSkillPaths] as string[],
-    providerPythonModuleDirectory: value.providerPythonModuleDirectory };
-}
 
 /** Spawned by the root supervisor after setpriv drops all host capabilities. */
 export async function runProtectedHost(): Promise<number> {

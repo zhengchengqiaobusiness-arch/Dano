@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { parseProtectedHostProfile } from "../protected-host-entry.js";
+import { parseProtectedHostProfile } from "../protected-host-profile.js";
 
 const profile = { hostUid: 1000, hostGid: 1000, startupTimeoutMs: 1000, operationTimeoutMs: 1000,
   maxConcurrentOperations: 4, maxMessageBytes: 4096, trustedSkillPaths: ["/app/skills"],
