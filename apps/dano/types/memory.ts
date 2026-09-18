@@ -21,3 +21,10 @@ export interface UserMemoryOperationPage {
   items: UserMemoryOperation[];
   nextCursor: string | null;
 }
+
+export interface UserMemoryContent {
+  operationId: string;
+  index: number;
+  total: number;
+  text: string;
+}

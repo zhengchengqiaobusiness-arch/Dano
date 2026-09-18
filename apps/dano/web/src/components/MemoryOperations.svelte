@@ -3,12 +3,14 @@
   import { Button } from "$lib/components/ui/button";
   import * as Alert from "$lib/components/ui/alert";
   import { t } from "../i18n";
+  import MemoryContent from "./MemoryContent.svelte";
 
   let { url }: { url: string } = $props();
   let items = $state<UserMemoryOperation[]>([]);
   let nextCursor = $state<string | null>(null);
   let loading = $state(false), error = $state(false);
   let refresh = $state(0);
+  let selectedId = $state<string | null>(null);
   let generation = 0;
   let controller: AbortController | undefined;
 
@@ -42,7 +44,7 @@
   $effect(() => {
     const target = url; void refresh;
     const current = ++generation;
-    items = []; nextCursor = null;
+    items = []; nextCursor = null; selectedId = null;
     controller = new AbortController();
     void load(target, current, controller.signal);
     return () => { generation++; controller?.abort(); };
@@ -67,6 +69,12 @@
         <p>{t("memory.createdAt")}: <time datetime={item.createdAt}>{new Date(item.createdAt).toLocaleString()}</time></p>
         <p>{t("memory.updatedAt")}: <time datetime={item.updatedAt}>{new Date(item.updatedAt).toLocaleString()}</time></p>
         <p class="break-all text-muted-foreground">{t("memory.sourceSession")}: {item.source.sessionId}</p>
+        {#if item.phase === "ready"}
+          <Button class="mt-2" variant="outline" size="sm" onclick={() => selectedId = selectedId === item.id ? null : item.id}>
+            {selectedId === item.id ? t("memory.hideContent") : t("memory.viewContent")}
+          </Button>
+          {#if selectedId === item.id}<MemoryContent {url} operationId={item.id} />{/if}
+        {/if}
       </li>
     {/each}
   </ul>

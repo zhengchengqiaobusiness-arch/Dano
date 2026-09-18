@@ -844,6 +844,12 @@ it("authenticates memory settings, isolates owners and projects only safe status
           if (state.fail) throw new Error("SYNTHETIC_PRIVATE_ERROR");
           return { items: [await this.operation(context.user.id)].filter(item => item !== undefined), nextCursor: null };
         },
+        async content(id, index) {
+          if (state.fail) throw new Error("SYNTHETIC_PRIVATE_ERROR");
+          if (id !== context.user.id || index !== 0) return undefined;
+          return { operationId: id, index, total: 1, text: `Fact for ${context.user.id}`,
+            apiKey: "PRIVATE_KEY", uri: "PRIVATE_REMOTE_URI" };
+        },
         async operation(id) {
           if (state.fail) throw new Error("SYNTHETIC_PRIVATE_ERROR");
           if (id !== context.user.id) return undefined;
@@ -877,6 +883,14 @@ it("authenticates memory settings, isolates owners and projects only safe status
   expect([...states.values()].every(state => !state.enabled)).toBe(true);
   const operationUrl = (client: TestClient, id: string) => `${origin}/api/clients/${client.client.id}/memory/operations/${id}`;
   const listUrl = (client: TestClient) => `${origin}/api/clients/${client.client.id}/memory/operations`;
+  const contentUrl = (client: TestClient, id: string) => `${operationUrl(client, id)}/content/0`;
+  expect((await fetch(contentUrl(alice, "alice"))).status).toBe(401);
+  expect((await fetch(contentUrl(alice, "alice"), { headers: headers(bobToken) })).status).toBe(403);
+  expect((await fetch(contentUrl(bob, "alice"), { headers: headers(bobToken) })).status).toBe(404);
+  const content = await fetch(contentUrl(alice, "alice"), { headers: headers(aliceToken) });
+  expect(content.status).toBe(200);
+  expect(content.headers.get("cache-control")).toBe("no-store");
+  expect(await content.json()).toEqual({ operationId: "alice", index: 0, total: 1, text: "Fact for alice" });
   expect((await fetch(listUrl(alice))).status).toBe(401);
   expect((await fetch(listUrl(alice), { headers: headers(bobToken) })).status).toBe(403);
   const list = await fetch(listUrl(alice), { headers: headers(aliceToken) });
@@ -897,6 +911,9 @@ it("authenticates memory settings, isolates owners and projects only safe status
     createdAt: "2026-09-18T00:00:00Z", updatedAt: "2026-09-18T00:00:01Z",
     source: { sessionId: "local-session", entryId: "local-entry", branchId: "local-branch" } });
   for (const state of states.values()) state.fail = true;
+  const failedContent = await fetch(contentUrl(alice, "alice"), { headers: headers(aliceToken) });
+  expect(failedContent.status).toBe(503);
+  expect(await failedContent.text()).not.toContain("SYNTHETIC_PRIVATE");
   const failedList = await fetch(listUrl(alice), { headers: headers(aliceToken) });
   expect(failedList.status).toBe(503);
   expect(await failedList.text()).not.toContain("SYNTHETIC_PRIVATE");
@@ -918,7 +935,7 @@ it("rejects anonymous memory settings even when a host profile accidentally expo
     protectedToolsForUser: async () => {
       const agentDir = path.join(root, "private"); fs.mkdirSync(agentDir);
       return { agentDir, trustedSkillPaths: [], memory: { status: read, setEnabled: async () => {}, operation: async () => undefined,
-        operations: async () => ({ items: [], nextCursor: null }) },
+        operations: async () => ({ items: [], nextCursor: null }), content: async () => undefined },
         resolveWorker: async workspace => ({ workspace, assertIsolated: async () => {}, execute: async () => ({}) }) };
     },
   });
@@ -929,5 +946,6 @@ it("rejects anonymous memory settings even when a host profile accidentally expo
   expect(response.status).toBe(401);
   expect((await fetch(`${origin}/api/clients/${client.client.id}/memory/operations/anything`)).status).toBe(401);
   expect((await fetch(`${origin}/api/clients/${client.client.id}/memory/operations`)).status).toBe(401);
+  expect((await fetch(`${origin}/api/clients/${client.client.id}/memory/operations/anything/content/0`)).status).toBe(401);
   expect(read).not.toHaveBeenCalled();
 });

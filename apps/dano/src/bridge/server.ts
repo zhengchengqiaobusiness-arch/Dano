@@ -442,6 +442,28 @@ export class BridgeServer {
         return;
       }
 
+      const memoryContentMatch = /^\/api\/clients\/([^/]+)\/memory\/operations\/([^/]+)\/content\/([0-9]+)$/.exec(pathname);
+      if (req.method === "GET" && memoryContentMatch) {
+        const clientId = decodeURIComponent(memoryContentMatch[1]!);
+        const user = this.clientUsers.get(clientId);
+        if (!user || !("username" in user.user)) throw new UserContextError(401, "请先登录后再使用长期记忆");
+        const operationId = decodeURIComponent(memoryContentMatch[2]!);
+        const index = Number(memoryContentMatch[3]);
+        if (!Number.isSafeInteger(index)) throw new HttpError(400, "记忆内容序号无效");
+        await this.withUserWrite(clientId, async () => {
+          let content;
+          try {
+            const runtime = await this.userRuntimeRegistry?.get(user);
+            if (!runtime?.memory) throw new Error("MEMORY_UNAVAILABLE");
+            content = await runtime.memory.content(operationId, index);
+          } catch { throw new HttpError(503, "记忆内容暂时不可用，请刷新后重试"); }
+          if (!content) throw new HttpError(404, "记忆内容不存在或尚未就绪");
+          writeJson(res, 200, { operationId: content.operationId, index: content.index,
+            total: content.total, text: content.text }, "no-store");
+        });
+        return;
+      }
+
       const memoryOperationsMatch = /^\/api\/clients\/([^/]+)\/memory\/operations$/.exec(pathname);
       if (req.method === "GET" && memoryOperationsMatch) {
         const clientId = decodeURIComponent(memoryOperationsMatch[1]!);

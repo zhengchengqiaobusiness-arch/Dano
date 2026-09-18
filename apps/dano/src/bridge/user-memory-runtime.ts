@@ -10,7 +10,7 @@ import { LazyMemoryClient } from "./lazy-memory-client.js";
 import type { ProtectedSessionTools } from "./protected-session-tools.js";
 import type { UserMemoryControls, UserMemoryStatus } from "./user-memory-controls.js";
 import type { UserContext } from "./user-context.js";
-import type { UserMemoryOperation, UserMemoryOperationPage } from "../../types/memory.js";
+import type { UserMemoryOperation, UserMemoryOperationPage, UserMemoryContent } from "../../types/memory.js";
 import { memoryOperationPage, projectMemoryOperation } from "./memory-operation-page.js";
 
 type SchedulerPolicy = Omit<ConstructorParameters<typeof DeliveryScheduler>[0], "store" | "delivery">;
@@ -21,6 +21,7 @@ export interface UserMemoryServices {
   baseUrl: string;
   requestTimeoutMs: number;
   shutdownTimeoutMs: number;
+  maxContentBytes: number;
   policyVersion: string;
   policy: MemoryExtensionOptions["policy"];
   scheduler: SchedulerPolicy;
@@ -49,6 +50,7 @@ export class UserMemoryRuntime implements UserMemoryControls {
     options: UserMemoryServices): Promise<UserMemoryRuntime> {
     if (!("username" in context.user)) throw new Error("MEMORY_LOGIN_REQUIRED");
     if (!Number.isSafeInteger(options.shutdownTimeoutMs) || options.shutdownTimeoutMs <= 0) throw new Error("INVALID_MEMORY_SHUTDOWN_TIMEOUT");
+    if (!Number.isSafeInteger(options.maxContentBytes) || options.maxContentBytes <= 0) throw new Error("INVALID_MEMORY_CONTENT_LIMIT");
     await worker.assertIsolated();
     const owner = await options.owners.get(context);
     const identity = new MemoryIdentityService({ ...options, assertToolIsolation: () => worker.assertIsolated() });
@@ -105,6 +107,24 @@ export class UserMemoryRuntime implements UserMemoryControls {
     const state = await this.#store.read();
     this.#assertOpen();
     return memoryOperationPage(Object.values(state.operations), cursor);
+  }
+
+  /** Accept only a local receipt and ordinal; never accept a browser-supplied URI. */
+  async content(id: string, index: number): Promise<UserMemoryContent | undefined> {
+    this.#assertOpen();
+    if (!Number.isSafeInteger(index) || index < 0) return undefined;
+    const state = await this.#store.read();
+    const operation = Object.hasOwn(state.operations, id) ? state.operations[id] : undefined;
+    if (!operation || operation.phase !== "ready" || !operation.memoryUris?.[index]) return undefined;
+    const text = await this.#client.readMemory(operation.memoryUris[index]);
+    this.#assertOpen();
+    if (Buffer.byteLength(text, "utf8") > this.#options.maxContentBytes) throw new Error("MEMORY_CONTENT_TOO_LARGE");
+    // Governance or authorization changes while reading invalidate the response.
+    // Do not cache memory bodies in the host or return stale deletion results.
+    const latest = await this.#store.read();
+    this.#assertOpen();
+    if (latest.revision !== state.revision) throw new Error("MEMORY_CONTENT_CHANGED");
+    return { operationId: id, index, total: operation.memoryUris.length, text };
   }
 
   #assertOpen(): void { if (this.#closed) throw new Error("MEMORY_RUNTIME_CLOSED"); }
