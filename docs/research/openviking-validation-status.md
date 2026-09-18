@@ -202,6 +202,18 @@ commit concurrency or absence checks over truncated/archived context. Every
 writer must participate in the lock protocol; an advisory lock alone cannot
 stop a process that bypasses the trusted adapter.
 
+### Simultaneous commit requests
+
+On 2026-09-18, `fixtures/openviking-commit-race.py` released six simultaneous
+HTTP commit requests for a fresh Session containing one synthetic source.
+One returned `accepted` with a task ID; five returned HTTP 200 with
+`skipped/no_messages`. Public task listing contained exactly one extraction
+task. It completed, its public archive contained the source ID, and search
+recalled the synthetic preference. Thus neither HTTP 200 nor a skipped reply
+is an operation-specific ready receipt; the adapter must reconcile the
+accepted task and archive. This sample does not cover interleaving new message
+appends with commit or multiple server instances writing the same storage.
+
 ## Executed pi entry-point probe
 
 ```sh
