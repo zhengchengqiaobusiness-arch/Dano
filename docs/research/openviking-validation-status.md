@@ -360,6 +360,21 @@ prototype, not an upstream API capability; without that guard the earlier raw
 replay test demonstrated resurrection. These remaining conditions must be
 implemented and tested before the gate can pass.
 
+### Public derived-content and export audit
+
+On 2026-09-18, `fixtures/openviking-derived-content-audit.py` traversed the
+deletion-barrier account's USER tree through paginated public per-directory
+listing. It visited nine directories and read all 18 enumerable files,
+including 15 hidden summary/overview files. No file contained the forgotten
+goals/non-goals literal; the separate Simplified Chinese fact remained in the
+memory body. A USER export ZIP passed integrity checks; all 20 UTF-8 entries
+were scanned, decoding JSON escapes, with no forgotten literal found.
+
+This strengthens the earlier search-only sample with public derived-file and
+export coverage. It does not prove absence of every semantic paraphrase or
+inspect private service storage. Executed behavior and required adapter
+sequencing are mapped in [the executed contract](openviking-executed-contract.md).
+
 ## Executed export and same-service recovery
 
 On 2026-09-18, `fixtures/openviking-pack-recovery.py` exercised the public APIs
