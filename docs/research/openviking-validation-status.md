@@ -54,6 +54,21 @@ All four identity modules have 26 focused passing tests and pass server type
 checking. Runtime/session wiring and Linux end-to-end isolation remain open;
 these unit tests do not prove the final Dano process boundary.
 
+Independent extension commit `a242afe` adds an unreleased protected
+`toolProviderModule` interface so Dano can preserve its tool policies inside
+the worker. Its 41 tests and real fixed-image Linux runs of both default and
+custom tool providers pass: UID/no_new_privs, private absolute/symlink access
+denial, no inherited credential, workspace I/O, streaming and cancellation.
+The interface is not in Dano's currently pinned npm 0.1.0 artifact. A separate
+Bubblewrap probe verified compatibility with no_new_privs using Dano's
+existing bound `/dev` and read-only `/proc` settings; fresh devpts mounting
+failed. This guides the upcoming Heimdall adapter, not proof it is complete.
+The two test containers and all seven layers created by this run were removed;
+the pre-existing base image was retained. Podman's general image listing
+reported a storage readlink error, but exact-ID cleanup succeeded after a
+separate container inventory confirmed no references. No shared-storage repair
+or broad prune was performed.
+
 With the published dependency installed, the host entry and native lock binding
 load successfully. Full type/Svelte checks report zero diagnostics and the
 production build passes. The full regression rerun passes 109 test files and
