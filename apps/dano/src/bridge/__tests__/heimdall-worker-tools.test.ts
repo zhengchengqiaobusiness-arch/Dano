@@ -24,6 +24,9 @@ async function harness() {
   const workspace = join(root, "workspace");
   await mkdir(workspace);
   vi.stubEnv("PI_CODING_AGENT_DIR", join(root, "agent"));
+  for (const name of ["HEIMDALL_BWRAP_BIND_KERNEL_FS", "HEIMDALL_BWRAP_BIND_PROC", "HEIMDALL_BWRAP_BIND_ROOT"]) {
+    vi.stubEnv(name, process.env[name]);
+  }
   return { root, workspace, async start() {
     const provider = await createWorkerTools({ workspace });
     providers.push(provider);

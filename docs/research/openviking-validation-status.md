@@ -915,10 +915,52 @@ installation code/executables, distinct host/worker groups and the broker's
 actual kernel UID/GID, privilege state and `no_new_privs`. It projects only
 worker configuration into child argv and supplies a minimal environment. It
 does not change the parent's identities. Type checking and server build pass;
-the helper's privileged Linux path and complete descendant cleanup still need
-real acceptance. The root supervisor must prepare private procfs, reserve and
+the helper's privileged Linux path and descendant cleanup now have the
+disposable-container evidence below. The root supervisor must prepare private procfs, reserve and
 provision owner-bound directories, supply the enforced Heimdall policy, and
 connect this helper to the HTTP server factory before runtime enablement.
+
+### Actual dual-worker broker acceptance
+
+`fixtures/multi-worker-broker.mjs` exercised the built supervisor helper and
+broker entry with the extension's unreleased `c9305bb` source on Linux/Node
+22.23.2. The container had no network, used init for orphan reaping, and used
+the existing isolated-test capability/seccomp settings. Fixture identities
+were host 1000 and workers 10001/10002; these are arguments, not product defaults.
+
+The first run exposed a real missing integration: Shell failed with a devpts
+mount permission error. The earlier single-worker fixture had supplied required
+bubblewrap environment settings through its wrapper. Those settings now belong
+to `createWorkerTools`: reuse container devices, omit procfs inside Shell, and
+scope writable mounts to the worker workspace. The fixture wrapper no longer
+supplies these settings. The actual dual-worker path uses the fixed installed
+Dano provider without a wrapper.
+
+The final run exited 0 and proved:
+
+- Parent root UID/GID remained unchanged while two brokers bootstrapped workers.
+- Each worker reported its distinct UID/GID through real guarded Shell; that
+  Shell could not see `/proc/1/cmdline`.
+- Both owners' files existed before negative tests. Cross-owner read/write and
+  symlink reads failed, and both original contents remained intact.
+- A `setsid` descendant reported that it had started before its worker was
+  closed. Its delayed write never occurred; `/proc` inspection found no
+  processes remaining under that worker UID. Inspection had first positively
+  identified the live workers, avoiding a vacuous absence check.
+- The other worker continued reading its own file; its later close also left
+  no processes under its UID.
+
+Related deterministic suites pass 18 tests; server type checking/build pass.
+The fixture can run via stdin from its current source with working directory
+`/app/memory-extension/scripts` using `node --input-type=module - 1000 1000 10001`.
+This proves the two-worker process path, not Dano HTTP/browser acceptance or
+the final owner-directory provisioning and user retirement/transfer lifecycle.
+The extension still needs actual patch publication and a locked Dano update.
+All disposable containers and five source/artifact image layers from these
+runs were removed. The dependency-only added base layers are retained as
+`localhost/dano-memory-worker-base:9582c21a2198` for subsequent Linux fixtures;
+they contain the existing public base image, compiler tools and installed npm
+dependencies, without the new extension/Dano source or user runtime state.
 
 ## #473 acceptance audit and handoff
 

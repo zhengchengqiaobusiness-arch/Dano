@@ -14,6 +14,12 @@ import { assertWorkerProcessPrivacy } from "./linux-process-privacy.js";
 /** Load only inside the isolated tool process, whose HOME/config is tool-only. */
 export async function createWorkerTools({ workspace }: { workspace: string }) {
   await assertWorkerProcessPrivacy();
+  // The no_new_privs worker cannot create a fresh devpts mount. Reuse the
+  // container's devices and omit procfs inside each Shell sandbox so a new
+  // proc mount cannot undo the launcher's cross-user process privacy policy.
+  process.env.HEIMDALL_BWRAP_BIND_KERNEL_FS = "1";
+  process.env.HEIMDALL_BWRAP_BIND_PROC = "0";
+  process.env.HEIMDALL_BWRAP_BIND_ROOT = workspace;
   const settingsManager = SettingsManager.inMemory();
   settingsManager.setProjectTrusted(false);
   const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(),
