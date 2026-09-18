@@ -5,7 +5,7 @@ Gate: [#473](https://github.com/zhengchengqiaobusiness-arch/Dano/issues/473)
 
 ## Current result
 
-2026-09-17: **not passed**. No memory runtime feature has been enabled. The
+2026-09-18: **not passed**. No memory runtime feature has been enabled. The
 implementation gate remains open until the real upstream service contracts and
 host protections have executable evidence.
 
@@ -43,7 +43,49 @@ owner-only permissions, does not protect it from tools running as the same OS
 user. Before introducing memory credentials, demonstrate an enforced access
 boundary covering file tools, symlinks, Shell and HTTP. Preserve legitimate
 project/Skill access; do not rely on prompt instructions or pretend the
-Heimdall Bash boundary also wraps native file tools.
+Heimdall Bash boundary also wraps native file tools. The raw-tool experiment
+bypasses extension hooks; the Linux guard result below narrows this finding.
+
+### Linux with the real Heimdall guard active
+
+On 2026-09-18, `fixtures/heimdall-memory-boundary.mjs` loaded the actual
+Heimdall extension and invoked its registered `session_start` and `tool_call`
+handlers before executing the real pi read tool. The existing Linux image
+`sha256:faa21ab482017c6cb4b08bff7126235e6d88a3350b4223e64960406cb31e0994`
+contains bubblewrap, pi `0.82.1` and Heimdall `0.2.17`. The fixture confirmed
+the sandbox-active notification and used an explicit deny rule for a synthetic
+protected directory.
+
+| Read channel | Guard blocked | Synthetic content exposed |
+|---|---|---|
+| Absolute protected path | Yes | No |
+| Workspace symlink into protected directory | No | Yes |
+
+This establishes a symlink gap in the registered guard path, not an absence
+of all native-file protection. It still does not exercise a model turn or
+prove Bash sandbox execution. The temporary container and synthetic files
+were removed. A separate process identity or a stronger file execution
+boundary needs executable evidence before credentials are introduced.
+
+### Separate tool-worker identity feasibility
+
+`fixtures/isolated-memory-tool-worker.mjs` ran in the same disposable Linux
+image with a trusted parent and a tool subprocess under UID/GID 65534. The
+parent owned a synthetic credential in a mode-0700 directory and passed an
+explicit environment allowlist to the child. Real pi read/write/edit tools
+failed with permission errors for both absolute and symlink paths. Real pi
+Bash could neither read that file nor see the parent's synthetic key variable.
+The child still successfully wrote and read its own workspace file. The
+parent verified its credential remained unchanged.
+
+A synthetic HTTP authorization endpoint accepted the parent credential and
+returned 401 to the child without it. This checks credential withholding in
+the prototype only; it does not replace real OpenViking authorization evidence
+or prove every reachable HTTP endpoint is safe. The prototype establishes a
+feasible OS-enforced file boundary, not a completed Dano/standard-pi process
+architecture. Lifecycle integration, legitimate Skill paths, unprivileged
+startup, process controls and actual OpenViking access remain to be validated.
+All temporary containers and files from this experiment were removed.
 
 ## Executed real-server Session contract probe
 
@@ -84,6 +126,24 @@ The duplicate append is a verified limitation: `source_message_ids` is not a
 server idempotency key. The public context endpoint exposes source metadata,
 which is a possible reconciliation input, but completeness across archive,
 truncation, response loss, concurrent commits and restart is still unproven.
+
+### Response discarded before adapter receipt, with process restart
+
+On 2026-09-18, `fixtures/openviking-lost-response.py` ran its `prepare`,
+`reconcile` and `finish` phases as three separate processes against the real
+model service. It persisted an operation/source reference before mutation,
+discarded the successful append response body and restarted. Public context
+reconciliation found the source ID and metadata confirmed exactly one message;
+the message was not resent. It then discarded the commit response body and
+restarted again. Filtering public tasks by the dedicated Session found exactly
+one task. That task completed and search recalled the new synthetic fact.
+
+This demonstrates a viable reconciliation path for one dedicated Session and
+one writer, within task retention. The fixture models response loss at the
+adapter boundary, not a TCP failure or server crash. It does not establish
+concurrent commit safety, context completeness for long Sessions, task receipt
+retention beyond expiry, or durable recovery from server restart. Ambiguous
+receipts stop the fixture rather than trigger a blind retry.
 
 ## Executed pi entry-point probe
 
@@ -143,6 +203,24 @@ request to reach HTTP 401 without credentials and HTTP 200 with the configured
 key. TLS verification remained enabled; no leaf certificate was blindly trusted.
 Local llama context creation failed in the Codex sandbox and succeeded with
 the same weights outside it; the real-model service used that execution mode.
+
+## Executed correction, selective forgetting and old-source replay
+
+On 2026-09-18, `fixtures/openviking-governance-primitives.py` used the real
+model-service sample above and only public APIs. Replacing the goals/non-goals
+fact with an acceptance-steps fact updated both direct reads and search while
+preserving the Simplified Chinese preference. Removing the corrected fact
+preserved that unrelated preference. Deleting the source Session returned
+success and subsequent retrieval returned HTTP 404.
+
+The probe then deliberately replayed the original message with its original
+`source_message_ids` into a new Session. Real extraction completed and search
+returned the forgotten goals/non-goals fact again. Upstream deletion alone
+therefore does not prevent an old queue from resurrecting forgotten content.
+This is an observed failing baseline, not a passed adapter deletion barrier.
+The fixture mutates its synthetic sample; create a fresh extraction sample
+before rerunning it. Shared-source handling, in-flight tasks, durable source
+revocation and restore-time replay protection remain open gate requirements.
 
 ## Environment observations
 
