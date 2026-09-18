@@ -13,6 +13,7 @@ import type { ProtectedSessionTools } from "./protected-session-tools.js";
 export interface UserRuntimeContext {
   readonly userId: string;
   readonly backend: DanoBackend;
+  readonly memory?: ProtectedSessionTools["memory"];
   readonly defaultWorkspacePath: string;
   readonly sessionsRootPath: string;
   ownsSessionPath(candidatePath: string): boolean;
@@ -216,6 +217,7 @@ export class UserRuntimeRegistry {
     const context: UserRuntimeContext = {
       userId: userContext.user.id,
       backend,
+      memory: protectedTools?.memory,
       defaultWorkspacePath,
       sessionsRootPath,
       ownsSessionPath: candidatePath =>

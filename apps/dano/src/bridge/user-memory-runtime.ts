@@ -8,6 +8,7 @@ import type { MemoryProvisioner } from "./memory-provisioner.js";
 import { MemoryIdentityService } from "./memory-identity-service.js";
 import { LazyMemoryClient } from "./lazy-memory-client.js";
 import type { ProtectedSessionTools } from "./protected-session-tools.js";
+import type { UserMemoryControls, UserMemoryStatus } from "./user-memory-controls.js";
 import type { UserContext } from "./user-context.js";
 
 type SchedulerPolicy = Omit<ConstructorParameters<typeof DeliveryScheduler>[0], "store" | "delivery">;
@@ -25,7 +26,7 @@ export interface UserMemoryServices {
 
 /** One authenticated user's shared authorization/outbox, with per-session
  * extension factories. Construct only after supervisor isolation is verified. */
-export class UserMemoryRuntime {
+export class UserMemoryRuntime implements UserMemoryControls {
   readonly #store: FileStateStore;
   readonly #delivery: MemoryDelivery;
   readonly #scheduler: DeliveryScheduler;
@@ -78,7 +79,7 @@ export class UserMemoryRuntime {
     return pending;
   }
 
-  async status() {
+  async status(): Promise<UserMemoryStatus> {
     this.#assertOpen();
     const state = await this.#store.read();
     // Explicit projection excludes owners, API keys, remote task/session IDs,
@@ -110,7 +111,7 @@ export class UserMemoryRuntime {
 export function withUserMemory(
   protectedToolsForUser: (context: UserContext) => Promise<ProtectedSessionTools>,
   options: UserMemoryServices,
-  onRuntime: (context: UserContext, runtime: UserMemoryRuntime | undefined) => void,
+  onRuntime: (context: UserContext, runtime: UserMemoryRuntime | undefined) => void = () => {},
 ): (context: UserContext) => Promise<ProtectedSessionTools> {
   return async context => {
     const profile = await protectedToolsForUser(context);
@@ -125,7 +126,7 @@ export function withUserMemory(
       onRuntime(context, runtime);
       const bound = runtime;
       let disposing: Promise<void> | undefined;
-      return { ...profile,
+      return { ...profile, memory: bound,
         createMemoryExtension: (_workspace, sessionWorker) => bound.extension(sessionWorker),
         dispose: () => disposing ??= (async () => {
           try { await bound.close(); }

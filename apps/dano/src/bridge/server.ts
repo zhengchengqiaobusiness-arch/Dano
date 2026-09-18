@@ -441,6 +441,41 @@ export class BridgeServer {
         return;
       }
 
+      const memorySettingsMatch = /^\/api\/clients\/([^/]+)\/memory\/settings$/.exec(pathname);
+      if (memorySettingsMatch?.[1] && (req.method === "GET" || req.method === "PUT")) {
+        const clientId = decodeURIComponent(memorySettingsMatch[1]);
+        const user = this.clientUsers.get(clientId);
+        if (!user || !("username" in user.user)) {
+          throw new UserContextError(401, "请先登录后再使用长期记忆");
+        }
+        let enabled: boolean | undefined;
+        if (req.method === "PUT") {
+          if (req.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
+            throw new HttpError(415, "记忆设置需要 JSON 请求");
+          }
+          let body: unknown;
+          try { body = await readJsonBody(req); }
+          catch { throw new HttpError(400, "记忆设置无效"); }
+          if (!body || typeof body !== "object" || Array.isArray(body)
+            || Object.keys(body).some(key => key !== "enabled")
+            || typeof (body as { enabled?: unknown }).enabled !== "boolean") {
+            throw new HttpError(400, "记忆设置无效");
+          }
+          enabled = (body as { enabled: boolean }).enabled;
+        }
+        await this.withUserWrite(clientId, async () => {
+          try {
+            const runtime = await this.userRuntimeRegistry?.get(user);
+            if (!runtime?.memory) throw new Error("MEMORY_UNAVAILABLE");
+            if (enabled !== undefined) await runtime.memory.setEnabled(enabled);
+            const status = await runtime.memory.status();
+            writeJson(res, 200, { enabled: status.enabled, automaticCollection: status.automaticCollection,
+              effectiveAt: status.effectiveAt, policyVersion: status.policyVersion, revision: status.revision }, "no-store");
+          } catch { throw new HttpError(503, "长期记忆暂时不可用，普通聊天可继续"); }
+        });
+        return;
+      }
+
       const clientThemePreferenceMatch =
         /^\/api\/clients\/([^/]+)\/preferences\/theme$/.exec(pathname);
       if (
@@ -1586,10 +1621,11 @@ function writeJson(
   res: http.ServerResponse,
   status: number,
   data: unknown,
+  cacheControl: "no-cache" | "no-store" = "no-cache",
 ): void {
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "no-cache",
+    "Cache-Control": cacheControl,
   });
   res.end(JSON.stringify(data));
 }

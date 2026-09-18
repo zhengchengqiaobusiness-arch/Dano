@@ -819,3 +819,74 @@ describe("User runtime isolation over HTTP/SSE", () => {
     expect(fs.existsSync(bobUpload.path)).toBe(true);
   });
 });
+
+it("authenticates memory settings, isolates owners and projects only safe status fields", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-memory-settings-http-"));
+  runtimeRoots.push(root);
+  const setup = authenticatedServerSetup(root);
+  const states = new Map<string, { enabled: boolean; fail: boolean }>();
+  const controller = await startDanoServer(setup.config, {
+    captureSigint: false, userContextResolver: setup.resolver,
+    protectedToolsForUser: async context => {
+      const state = { enabled: false, fail: false }; states.set(context.user.id, state);
+      const agentDir = path.join(root, "private", context.user.id);
+      fs.mkdirSync(agentDir, { recursive: true });
+      return { agentDir, trustedSkillPaths: [], resolveWorker: async workspace => ({
+        workspace, assertIsolated: async () => {}, execute: async () => ({}),
+      }), memory: {
+        async status() {
+          if (state.fail) throw new Error("SYNTHETIC_PRIVATE_ERROR");
+          return { enabled: state.enabled, automaticCollection: false, effectiveAt: "2026-09-18T00:00:00Z",
+            policyVersion: "v1", revision: 1, apiKey: "SYNTHETIC_PRIVATE_KEY", owner: "PRIVATE_OWNER" };
+        },
+        async setEnabled(enabled) { state.enabled = enabled; },
+      } };
+    },
+  });
+  controllers.push(controller);
+  const origin = controller.getBridgeUrl()!;
+  const aliceToken = signUser("alice", "Alice"), bobToken = signUser("bob", "Bob");
+  const alice = await createClient(origin, aliceToken), bob = await createClient(origin, bobToken);
+  const url = (client: TestClient) => `${origin}/api/clients/${client.client.id}/memory/settings`;
+  const headers = (token: string) => ({ authorization: `Bearer ${token}`, "content-type": "application/json" });
+  expect((await fetch(url(alice))).status).toBe(401);
+  expect((await fetch(url(alice), { headers: headers(bobToken) })).status).toBe(403);
+  const initial = await fetch(url(alice), { headers: headers(aliceToken) });
+  expect(initial.headers.get("cache-control")).toBe("no-store");
+  expect(await initial.json()).toEqual({ enabled: false, automaticCollection: false, effectiveAt: "2026-09-18T00:00:00Z", policyVersion: "v1", revision: 1 });
+  for (const body of [{ enabled: "false" }, { enabled: true, owner: "bob" }, { automaticCollection: true }]) {
+    expect((await fetch(url(alice), { method: "PUT", headers: headers(aliceToken), body: JSON.stringify(body) })).status).toBe(400);
+  }
+  const enabled = await fetch(url(alice), { method: "PUT", headers: headers(aliceToken), body: JSON.stringify({ enabled: true }) });
+  expect(enabled.status).toBe(200);
+  expect(await enabled.json()).toMatchObject({ enabled: true });
+  const peer = await fetch(url(bob), { headers: headers(bobToken) });
+  expect(await peer.json()).toMatchObject({ enabled: false });
+  expect((await fetch(url(alice), { method: "PUT", headers: headers(aliceToken), body: JSON.stringify({ enabled: false }) })).status).toBe(200);
+  expect([...states.values()].every(state => !state.enabled)).toBe(true);
+  for (const state of states.values()) state.fail = true;
+  const failed = await fetch(url(alice), { headers: headers(aliceToken) });
+  expect(failed.status).toBe(503);
+  expect(await failed.text()).not.toContain("SYNTHETIC_PRIVATE");
+});
+
+it("rejects anonymous memory settings even when a host profile accidentally exposes controls", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-anonymous-memory-http-"));
+  runtimeRoots.push(root);
+  const read = vi.fn(async () => ({ enabled: false, automaticCollection: false, effectiveAt: "", policyVersion: "v1", revision: 0 }));
+  const controller = await startDanoServer(authenticatedServerSetup(root).config, {
+    captureSigint: false,
+    userContextResolver: { resolve: async () => ({ user: { id: "guest" }, folderPath: path.join(root, "users/guest") }) },
+    protectedToolsForUser: async () => {
+      const agentDir = path.join(root, "private"); fs.mkdirSync(agentDir);
+      return { agentDir, trustedSkillPaths: [], memory: { status: read, setEnabled: async () => {} },
+        resolveWorker: async workspace => ({ workspace, assertIsolated: async () => {}, execute: async () => ({}) }) };
+    },
+  });
+  controllers.push(controller);
+  const origin = controller.getBridgeUrl()!;
+  const client = await createClient(origin, "ignored-by-fixture-resolver");
+  const response = await fetch(`${origin}/api/clients/${client.client.id}/memory/settings`);
+  expect(response.status).toBe(401);
+  expect(read).not.toHaveBeenCalled();
+});

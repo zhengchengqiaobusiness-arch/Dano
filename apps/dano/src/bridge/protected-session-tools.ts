@@ -1,3 +1,4 @@
+import type { UserMemoryControls } from "./user-memory-controls.js";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import {
   createIsolatedBashOperations,
@@ -14,6 +15,7 @@ export interface ProtectedSessionTools {
   readonly agentDir: string;
   /** Supervisor-owned private state, outside every tool workspace. */
   readonly memoryStateDirectory?: string;
+  readonly memory?: UserMemoryControls;
   readonly trustedSkillPaths: readonly string[];
   readonly providerPythonModuleDirectory?: string;
   resolveWorker(workspace: string): Promise<IsolatedToolExecutor>;
