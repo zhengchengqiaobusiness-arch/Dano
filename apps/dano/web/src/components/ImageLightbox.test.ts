@@ -57,7 +57,12 @@ describe("ImageLightbox", () => {
       target.querySelector<HTMLButtonElement>(".image-lightbox-close")!.click();
       expect(onClose).toHaveBeenCalledOnce();
     } finally {
-      unmount(component);
+      await unmount(component);
+      // Dialog releases its scroll lock asynchronously. Finish that cleanup
+      // while happy-dom is still alive, before tearing down document.
+      await vi.waitFor(() => {
+        expect(document.body.style.overflow).not.toBe("hidden");
+      });
     }
   });
 });
