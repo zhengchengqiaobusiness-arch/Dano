@@ -35,6 +35,7 @@ import { createJwtUserContextResolver } from "./bridge/user-context.js";
 import type { BridgeConfig, UploadConfig } from "./bridge/types.js";
 import { createDanoDevReloadController } from "./dev-reload.js";
 import { loadDanoRuntime, type DanoRuntime } from "./runtime.js";
+import type { StartDanoServerOptions } from "./server.js";
 import type { BridgeEmptyStateConfig } from "../types/protocol.js";
 
 const DEFAULT_DANO_PORT = 8080;
@@ -1023,13 +1024,21 @@ function migrateHeimdallRuntimeSettings(path: string): void {
   writeFileSync(path, `${JSON.stringify(root, null, 2)}\n`);
 }
 
+/** Installed supervisor entrypoint injection; never loaded from user config. */
+export interface DanoMainServices {
+  protectedToolsForUser?: StartDanoServerOptions["protectedToolsForUser"];
+  signal?: AbortSignal;
+}
+
 async function runDanoServer(
   runtime: DanoRuntime,
   config: BridgeConfig,
   options: DanoServerOptions,
   entryFile: string,
   danoConfig: DanoConfig,
+  services: DanoMainServices,
 ): Promise<boolean> {
+  services.signal?.throwIfAborted();
   let resolveStopped: (() => void) | undefined;
   const stopped = new Promise<void>(resolve => {
     resolveStopped = resolve;
@@ -1107,6 +1116,7 @@ async function runDanoServer(
       anonymousUserCleanup: options.anonymousUserCleanup,
       authHttpHandler: oauthAuthentication,
       credentialBroker,
+      protectedToolsForUser: services.protectedToolsForUser,
       onShutdown: () => resolveStopped?.(),
     });
   } catch (error) {
@@ -1149,11 +1159,14 @@ async function runDanoServer(
   };
 
   process.on("SIGTERM", onSigterm);
+  services.signal?.addEventListener("abort", onSigterm, { once: true });
+  if (services.signal?.aborted) onSigterm();
 
   try {
     await stopped;
   } finally {
     process.off("SIGTERM", onSigterm);
+    services.signal?.removeEventListener("abort", onSigterm);
     devReload?.dispose();
     await oauthAuthentication?.dispose();
   }
@@ -1161,7 +1174,8 @@ async function runDanoServer(
   return devReload?.reloadRequested() ?? false;
 }
 
-async function runDanoMain(): Promise<number> {
+export async function runDanoMain(services: DanoMainServices = {}): Promise<number> {
+  services.signal?.throwIfAborted();
   let options: DanoServerOptions;
   let danoConfig: DanoConfig;
   try {
@@ -1227,6 +1241,7 @@ async function runDanoMain(): Promise<number> {
       options,
       thisFile,
       danoConfig,
+      services,
     );
 
     if (!reloadRequested) {
