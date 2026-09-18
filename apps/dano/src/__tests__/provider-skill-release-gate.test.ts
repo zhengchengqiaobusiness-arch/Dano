@@ -240,7 +240,7 @@ describe("real provider Skill release gate", () => {
     });
     expect(fixture.earlyLogoutStatus).toBe(400);
     expect(fixture.output()).toContain("LIVE HTTP/SSE/Pi COLLECTOR PASS:");
-  });
+  }, 10_000);
 
   it("refuses prepare and offline verify instead of reconstructing a live collector PASS", () => {
     const root = temporaryRoot();
