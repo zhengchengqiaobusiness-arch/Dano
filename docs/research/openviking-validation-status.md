@@ -20,11 +20,21 @@ package name `@josephyoung/pi-openviking`. This is source implementation, not a
 published package or completed #474 acceptance. The current Dano implementation
 branch starts from the merged gate on upstream/main.
 
-At extension commit `cf85efa`, 31 automated tests pass: owner-bound private file
+At extension commit `029be99`, 38 automated tests pass: owner-bound private file
 state, eight concurrent processes, killed-writer recovery, durable source
 deduplication, response-loss reconciliation, concurrent delivery, pause,
 reconfirmation after enable, bounded recall and real pi 0.82.1 loading/reloading
 of both entry modules. No second pi kernel is bundled.
+
+The protected Linux CLI now invokes pi's public `main` with the standard
+extension factory after directory/code validation, worker startup and host
+UID/GID drop. A real model turn invoked Bash to write a synthetic file and
+read to retrieve it; filesystem ownership confirmed the separate tool UID.
+A planted workspace extension was not evaluated, and print mode exited
+normally. `no_new_privs` is verified from kernel metadata. Trusted host modules
+and optional Skills must remain in the protected installation; administrator
+profiles and ancestors cannot be group/other-writable. This run deliberately
+kept memory disabled; enabled consent/save/recall acceptance is still pending.
 
 The actual extension adapter also saved a synthetic preference through real
 OpenViking 0.4.20 and SDK 0.1.0: the source-bearing archive, completed matching
@@ -52,7 +62,7 @@ workspace read/write succeeded, while absolute and symlink read/write/edit
 against the trusted host's private credential failed. The worker did not
 inherit the synthetic memory key. Its UID is checked against Linux process
 metadata. The test container had no network and was removed. The worker
-primitive is implemented; this does not yet prove the final startup profile or
+primitive and ordinary CLI path are implemented; this does not yet prove the full memory-enabled startup profile or
 the absence of all host-executable resource discovery paths.
 
 The standard entry now registers isolated proxies for read/write/edit/bash/
