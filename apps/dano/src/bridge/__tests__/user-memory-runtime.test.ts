@@ -27,7 +27,7 @@ async function harness() {
     owners: { get: vi.fn(async () => ({ accountId: "account", userId: "alice" })) },
     credentials: { read: vi.fn(async () => undefined), write: vi.fn(async () => {}) },
     provisioner: { provision: vi.fn(async () => { throw new Error("REMOTE_OFFLINE"); }), verifyUserKey: vi.fn(async () => {}) },
-    baseUrl: "https://memory.example.test", requestTimeoutMs: 100, shutdownTimeoutMs: 1000, maxContentBytes: 1024, policyVersion: "v1",
+    baseUrl: "https://memory.example.test", requestTimeoutMs: 100, maxContentBytes: 1024, policyVersion: "v1",
     // Fixture-only counter. Production must supply the active model's tokenizer.
     policy: { maxPayloadBytes: 8192, recallTimeoutMs: 50, recallTokenBudget: 1000, recallLimit: 5,
       minimumScore: 0.5, countTokens: text => text.length },
@@ -42,7 +42,8 @@ async function harness() {
 function bind(profile: ProtectedSessionTools, worker: Awaited<ReturnType<ProtectedSessionTools["resolveWorker"]>>) {
   const handlers = new Map<string, (...args: any[]) => any>();
   const tools = new Map<string, any>();
-  const pi = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler),
+  const pi = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name,
+    (event, context = { model: { provider: "fixture", api: "openai-completions", id: "fixture-model" } }) => handler(event, context)),
     registerTool: (tool: any) => tools.set(tool.name, tool) } as unknown as ExtensionAPI;
   profile.createMemoryExtension!(worker.workspace, worker)(pi);
   return { handlers, tools };
@@ -135,6 +136,49 @@ it("clears the host registration and releases the worker exactly once", async ()
   expect(h.release).toHaveBeenCalledTimes(1);
   await expect(runtime.setEnabled(true)).rejects.toThrow("CLOSED");
   expect(() => profile.createMemoryExtension!(h.workspace, h.worker)).toThrow("CLOSED");
+});
+
+it("retains the user's worker until the remote response receipt has been persisted", async () => {
+  const h = await harness();
+  h.services.scheduler.pollIntervalMs = 5;
+  const profile = await h.start();
+  await h.runtime().setEnabled(true);
+  const owner = await h.services.owners.get(h.context);
+  const store = new FileStateStore({ owner, directory: join(profile.memoryStateDirectory!, "memory"), policyVersion: "v1" });
+  let remoteResponded = false;
+  let writingReceipt = false;
+  let releaseWrite!: () => void;
+  const heldWrite = new Promise<void>(resolve => { releaseWrite = resolve; });
+  const transact = FileStateStore.prototype.transact;
+  vi.spyOn(FileStateStore.prototype, "transact").mockImplementation(async function (this: FileStateStore, mutation) {
+    if (remoteResponded) { writingReceipt = true; await heldWrite; }
+    return transact.call(this, mutation);
+  });
+  vi.spyOn(LazyMemoryClient.prototype, "createSession").mockImplementation(async () => { remoteResponded = true; });
+  const append = vi.spyOn(LazyMemoryClient.prototype, "append");
+  const id = "a".repeat(64);
+  let closing: Promise<void> | undefined;
+  try {
+    await store.transact(state => {
+      state.operations[id] = { id, owner, scope: null, kind: "explicit", authorizationEpoch: state.authorization.epoch,
+        source: { sessionId: "chat", entryId: "entry", branchId: "root", contentVersion: "1" },
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), phase: "queued",
+        remoteSessionId: "remote-session", payload: "fact" };
+    });
+    await vi.waitFor(() => expect(writingReceipt).toBe(true));
+    closing = profile.dispose!();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(h.release).not.toHaveBeenCalled();
+    expect((await store.read()).operations[id]!.phase).toBe("session_unknown");
+    releaseWrite();
+    await closing;
+    expect((await store.read()).operations[id]!.phase).toBe("session_created");
+    expect(h.release).toHaveBeenCalledTimes(1);
+    expect(append).not.toHaveBeenCalled();
+  } finally {
+    releaseWrite();
+    await closing;
+  }
 });
 
 it("serializes repeated enables without creating multiple consent boundaries", async () => {

@@ -13,7 +13,6 @@ export interface MemoryHostConfig {
   encryptionKey: string;
   encryptionKeyVersion: string;
   requestTimeoutMs: number;
-  shutdownTimeoutMs: number;
   maxContentBytes: number;
   policyVersion: string;
   policy: Omit<UserMemoryServices["policy"], "countTokens">;
@@ -49,7 +48,7 @@ function asset(value: unknown) {
 export function parseMemoryHostConfig(input: unknown): MemoryHostConfig {
   try {
     const raw = object(input, ["version", "baseUrl", "accountId", "managementKey", "encryptionKey", "encryptionKeyVersion",
-      "requestTimeoutMs", "shutdownTimeoutMs", "maxContentBytes", "policyVersion", "policy", "scheduler", "tokenizerLimits", "tokenizers"]);
+      "requestTimeoutMs", "maxContentBytes", "policyVersion", "policy", "scheduler", "tokenizerLimits", "tokenizers"]);
     const url = new URL(text(raw.baseUrl));
     const encryptionKey = text(raw.encryptionKey), managementKey = text(raw.managementKey);
     if (raw.version !== 1 || !["http:", "https:"].includes(url.protocol) || url.username || url.password
@@ -73,7 +72,7 @@ export function parseMemoryHostConfig(input: unknown): MemoryHostConfig {
     });
     return { version: 1, baseUrl: url.origin, accountId: identifier(raw.accountId), managementKey, encryptionKey,
       encryptionKeyVersion: identifier(raw.encryptionKeyVersion), policyVersion: text(raw.policyVersion),
-      requestTimeoutMs: positive(raw.requestTimeoutMs), shutdownTimeoutMs: positive(raw.shutdownTimeoutMs),
+      requestTimeoutMs: positive(raw.requestTimeoutMs),
       maxContentBytes: positive(raw.maxContentBytes),
       policy: { maxPayloadBytes: positive(policy.maxPayloadBytes), recallTimeoutMs: positive(policy.recallTimeoutMs),
         recallTokenBudget: positive(policy.recallTokenBudget), recallLimit: positive(policy.recallLimit), minimumScore: policy.minimumScore },

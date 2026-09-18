@@ -20,7 +20,7 @@ policy defaults:
 - A 32-byte credential encryption key encoded as 64 hexadecimal characters,
   plus its key version. Retain the key/version when restoring encrypted USER
   credentials; do not regenerate them on each startup.
-- Request/shutdown deadlines, maximum displayed content bytes and policy version.
+- Request deadline, maximum displayed content bytes and policy version.
 - Save payload limit, recall timeout, token budget, result count and score threshold.
 - Scheduler polling, backoff, retry and per-tick operation limits.
 - Tokenizer asset/input limits, startup deadline and one or more explicit model
@@ -37,6 +37,11 @@ HTTP host; never serialize it into argv, worker RPC, browser state or logs.
 The private reader and parser have automated coverage for normal reads,
 configuration absence, corrupt input, permission violations, symlinks and hard
 links. Runtime service construction and protected-host startup wiring are still
-pending the model-aware extension release. This configuration module does not
+pending; the model-aware extension is now published and pinned at `0.1.1`.
+The user runtime now drains the active delivery tick after settling its network
+client before releasing the worker. There is no local drain timeout that could
+be mistaken for completed persistence. Supervisor-level forced termination must
+still be treated as crash recovery, not a successful drain.
+This configuration module does not
 turn memory on, does not create remote identities and does not establish a
 production deployment or completed #465 acceptance.

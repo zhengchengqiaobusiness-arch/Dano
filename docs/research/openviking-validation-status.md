@@ -16,9 +16,30 @@ obligations below are mandatory inputs to #474–477.
 
 #474 implementation now lives in the independent
 [pi-openviking repository](https://github.com/josephyoung/pi-openviking), with
-package name `@josephyoung/pi-openviking`. Version 0.1.0 is now published,
+package name `@josephyoung/pi-openviking`. Version 0.1.1 is now published,
 but #474 acceptance is incomplete. The current Dano implementation
 branch starts from the merged gate on upstream/main.
+
+### 2026-09-18 patch publication checkpoint
+
+GitHub Actions [run 35336512204](https://github.com/josephyoung/pi-openviking/actions/runs/35336512204)
+published `0.1.1` from extension commit `32732f58e8ee89920c7793fe1351a53cd7f9e59e`
+using npm Trusted Publishing. The official registry version endpoint confirms
+the version, `pi-package`/`pi-extension` keywords and provenance attestation.
+Dano's exact dependency and lockfile integrity match the registry artifact:
+`sha512-8GKiWKSVNaib6DsTH9G/R5kukjqCCJPLvsMy2/CFU2qHfAue1vNw/RZnipnNCydW2NF4Z+h04CVeekIxgwtFkQ==`.
+This supersedes earlier unreleased/0.1.0 dependency checkpoints below. The patch
+includes the protected worker provider capability, asynchronous model-aware token
+counting and explicit delivery drain results. Publication and dependency locking
+do not establish protected-host startup wiring or real-browser #474 acceptance.
+
+Validation after the exact dependency upgrade: `pnpm run check` and
+`pnpm run build` pass; `vitest run --maxWorkers=2` passes all 131 files with
+1545 tests passed and one skipped. A built-server import also loads the published
+host/bootstrap entries and verifies `protectedWorkerProviderApiVersion === 1`.
+A delayed local receipt-write test confirms the user worker is retained until
+the active scheduler tick settles. No real-service/browser completion is inferred
+from these regression and module-loading checks.
 
 Dano's host-only owner registry now persists the stable authenticated user ID
 and a deterministic account-scoped SHA-256 mapping. Display-name changes do

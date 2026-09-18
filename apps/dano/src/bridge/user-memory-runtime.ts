@@ -20,7 +20,6 @@ export interface UserMemoryServices {
   provisioner: Pick<MemoryProvisioner, "provision" | "verifyUserKey">;
   baseUrl: string;
   requestTimeoutMs: number;
-  shutdownTimeoutMs: number;
   maxContentBytes: number;
   policyVersion: string;
   policy: MemoryExtensionOptions["policy"];
@@ -49,7 +48,6 @@ export class UserMemoryRuntime implements UserMemoryControls {
   static async create(context: UserContext, stateDirectory: string, worker: IsolatedToolExecutor,
     options: UserMemoryServices): Promise<UserMemoryRuntime> {
     if (!("username" in context.user)) throw new Error("MEMORY_LOGIN_REQUIRED");
-    if (!Number.isSafeInteger(options.shutdownTimeoutMs) || options.shutdownTimeoutMs <= 0) throw new Error("INVALID_MEMORY_SHUTDOWN_TIMEOUT");
     if (!Number.isSafeInteger(options.maxContentBytes) || options.maxContentBytes <= 0) throw new Error("INVALID_MEMORY_CONTENT_LIMIT");
     await worker.assertIsolated();
     const owner = await options.owners.get(context);
@@ -138,7 +136,9 @@ export class UserMemoryRuntime implements UserMemoryControls {
       await this.#scheduler.stop(0);
       await this.#settings;
       await this.#client.close();
-      await this.#scheduler.stop(this.#options.shutdownTimeoutMs);
+      // A timeout is not a persistence fence. Once sent network requests have
+      // settled, retain the user's resources until the local tick also ends.
+      await this.#scheduler.stop();
     })();
     return this.#closing;
   }

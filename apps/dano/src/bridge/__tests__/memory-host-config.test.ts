@@ -7,7 +7,7 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 function config() {
   return { version: 1, baseUrl: "https://memory.example.test/", accountId: "account", managementKey: "SYNTHETIC_PRIVATE_KEY",
-    encryptionKey: "ab".repeat(32), encryptionKeyVersion: "v1", requestTimeoutMs: 1000, shutdownTimeoutMs: 2000,
+    encryptionKey: "ab".repeat(32), encryptionKeyVersion: "v1", requestTimeoutMs: 1000,
     maxContentBytes: 16384, policyVersion: "v1",
     policy: { maxPayloadBytes: 4096, recallTimeoutMs: 1000, recallTokenBudget: 1500, recallLimit: 5, minimumScore: 0.5 },
     scheduler: { pollIntervalMs: 1000, initialBackoffMs: 1000, maxBackoffMs: 5000, maxAttemptsPerPhase: 5, maxOperationsPerTick: 4 },
