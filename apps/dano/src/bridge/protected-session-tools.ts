@@ -15,6 +15,8 @@ export interface ProtectedSessionTools {
   readonly trustedSkillPaths: readonly string[];
   readonly providerPythonModuleDirectory?: string;
   resolveWorker(workspace: string): Promise<IsolatedToolExecutor>;
+  /** Release this user runtime's workers after all its sessions have stopped. */
+  dispose?(): Promise<void>;
   createMemoryExtension?(workspace: string, worker: IsolatedToolExecutor): ExtensionFactory;
 }
 
