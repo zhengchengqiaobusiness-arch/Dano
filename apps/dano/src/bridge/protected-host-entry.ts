@@ -5,6 +5,7 @@ import { assertWorkerPrivacyEvidence } from "./linux-process-privacy.js";
 import { WorkerSupervisorClient } from "./worker-supervisor-client.js";
 import { createProtectedMemoryServices } from "./protected-memory-services.js";
 import { withUserMemory } from "./user-memory-runtime.js";
+import { startManagedSearch } from "./managed-search.js";
 
 /** Spawned by the root supervisor after setpriv drops all host capabilities. */
 export async function runProtectedHost(): Promise<number> {
@@ -15,6 +16,9 @@ export async function runProtectedHost(): Promise<number> {
   const stopped = new AbortController();
   const disconnected = () => stopped.abort(new Error("SUPERVISOR_DISCONNECTED"));
   process.on("disconnect", disconnected);
+  const terminate = () => stopped.abort();
+  process.on("SIGTERM", terminate);
+  process.on("SIGINT", terminate);
   const client = new WorkerSupervisorClient({
     get connected() { return Boolean(process.connected); },
     on: process.on.bind(process), off: process.off.bind(process),
@@ -22,17 +26,29 @@ export async function runProtectedHost(): Promise<number> {
     disconnect: () => { if (process.connected) process.disconnect?.(); },
   }, profile);
   let memory: Awaited<ReturnType<typeof createProtectedMemoryServices>>;
+  let search: Awaited<ReturnType<typeof startManagedSearch>> | undefined;
+  let searchFailed = false;
   try {
     if (profile.memory) memory = await createProtectedMemoryServices(profile.memory.configurationDirectory, profile.memory.stateDirectory);
+    search = await startManagedSearch({ signal: stopped.signal,
+      host: process.env.OPEN_WEBSEARCH_HOST, port: process.env.OPEN_WEBSEARCH_PORT,
+      onFailure: () => { searchFailed = true; stopped.abort(new Error("SEARCH_DAEMON_EXITED")); } });
     // Remove only the launcher's fixed profile argument; retain normal Dano CLI options.
     process.argv.splice(2, 1);
     const { runDanoMain } = await import("../main.js");
     const protectedToolsForUser = (context: Parameters<typeof client.profile>[0]) => client.profile(context, profile);
-    return await runDanoMain({ signal: stopped.signal,
+    const code = await runDanoMain({ signal: stopped.signal,
       protectedToolsForUser: memory ? withUserMemory(protectedToolsForUser, memory.services) : protectedToolsForUser });
+    return searchFailed ? 1 : code;
   } finally {
-    try { await memory?.close(); }
-    finally { client.close(); process.off("disconnect", disconnected); }
+    try { await search?.close(); }
+    finally {
+      try { await memory?.close(); }
+      finally {
+        client.close(); process.off("disconnect", disconnected);
+        process.off("SIGTERM", terminate); process.off("SIGINT", terminate);
+      }
+    }
   }
 }
 

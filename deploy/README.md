@@ -11,6 +11,11 @@ podman build --target protected-runtime -t dano-protected:acceptance .
 ```
 
 This target starts `node ./dist/server/protected-main.js` as the root supervisor.
+After dropping privileges, the HTTP host starts the local `open-websearch`
+daemon and waits for readiness before starting Dano. It stops the daemon during
+shutdown and stops Dano with a failure exit code if the daemon exits unexpectedly.
+The daemon uses `OPEN_WEBSEARCH_HOST` and `OPEN_WEBSEARCH_PORT`, with the same
+loopback defaults as the ordinary container entrypoint.
 Supply one root-owned supervisor JSON path as the container command. The
 supervisor validates installation/configuration ownership, prepares the isolated
 user roots and drops the HTTP host to the configured non-root UID/GID. See
