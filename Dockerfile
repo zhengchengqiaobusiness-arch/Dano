@@ -27,7 +27,7 @@ RUN registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-$DANO_DEFAULT_NPM_REGISTRY}
 
 COPY . .
 RUN pnpm run build
-RUN pnpm --filter @dano/app --prod deploy /prod/dano
+RUN pnpm --store-dir="$PNPM_STORE_DIR" --offline --filter @dano/app --prod deploy /prod/dano
 
 FROM node:22-bookworm-slim AS runtime
 
