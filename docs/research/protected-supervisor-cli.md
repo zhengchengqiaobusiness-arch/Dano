@@ -239,3 +239,28 @@ The latest image build was not executed: automatic approval review reported an
 account usage limit before launching Podman. The verified image above therefore
 still excludes the SYSTEM.md/settings fixes. Updated-image, OAuth, rendered
 browser, model and remaining release gates are outstanding.
+
+## Memory-only initialization failure (2026-09-20)
+
+Image `b2cc3dc54f6f99c622be70698f7436b423e4cea078848e381166e3d659288ea2`
+completed `--cli --memory --real-service --memory-failure`. After host startup,
+the fixture writes a malformed identity record for Alice in the disposable
+host state. Alice's client creation succeeds, her memory settings return 503,
+Bob's settings remain available, and Alice completes a real model turn through
+HTTP/SSE. The corrupted record remains byte-for-byte unchanged. Shutdown
+reclaims the host, search and worker processes. Evidence:
+`/private/tmp/dano465-memory-failure.log`. This proves the memory-only failure
+boundary with a real model; synthetic JWTs still do not prove OAuth/browser
+acceptance.
+
+## Deployment dependency store reuse (2026-09-20)
+
+The network retry built the image above, but also confirmed that deployment
+packaging used an empty store instead of installation's `/tmp/pnpm-store`.
+A disposable `--network none` probe successfully ran pnpm 9.15.9 deployment
+with that existing store and `--offline`, reusing 385 packages with zero
+downloads. Dockerfile now uses the same options. The full resulting image is
+`ef36dec85897d4c7170b581a94ad2a2439b93efbf777a43a630059fef1698ada`;
+its build log confirms zero downloads during deployment packaging.
+Logs: `/private/tmp/dano465-deploy-store-probe.log` and
+`/private/tmp/dano474-protected-offline-store-build.log`.

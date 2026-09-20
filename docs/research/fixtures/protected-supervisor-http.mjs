@@ -35,6 +35,9 @@ const crashSearch = process.argv.includes('--crash-search');
 const useCli = process.argv.includes('--cli');
 const withMemory = process.argv.includes('--memory');
 const realService = process.argv.includes('--real-service');
+const memoryFailure = process.argv.includes('--memory-failure');
+let memoryAccountId, corruptOwnerPath;
+if (memoryFailure) assert(realService, 'Memory failure check requires the real model/service configuration');
 if (realService) {
   assert(withMemory && useCli, 'Real service mode requires --cli --memory');
   const agentDir = join(root, 'host-agent');
@@ -64,6 +67,7 @@ if (withMemory) {
         model: { type: 'WordLevel', vocab: { '[UNK]': 0, hello: 1 }, unk_token: '[UNK]' } }),
       config: await asset('tokenizer_config.json', { tokenizer_class: 'PreTrainedTokenizerFast', unk_token: '[UNK]' }) }] };
   const path = join(options.memoryConfigDirectory, 'memory-service.json');
+  memoryAccountId = config.accountId;
   await writeFile(path, JSON.stringify(config), { mode: 0o600 }); await chown(path, hostUid, hostGid);
 }
 const profilePath = '/etc/dano-supervisor-fixture.json';
@@ -108,6 +112,13 @@ try {
   if (failure) throw failure;
   assert(healthy, 'protected HTTP host did not start');
   await assert.rejects(runProtectedSupervisor(options, environment), /SUPERVISOR_ALREADY_RUNNING/);
+  if (memoryFailure) {
+    const directory = join(options.hostStateRoot, 'memory-service', 'owners');
+    await mkdir(directory, { recursive: true, mode: 0o700 }); await chown(directory, hostUid, hostGid);
+    const digest = createHash('sha256').update(JSON.stringify([memoryAccountId, 'alice-fixture'])).digest('hex');
+    corruptOwnerPath = join(directory, `${digest}.json`);
+    await writeFile(corruptOwnerPath, '{damaged', { mode: 0o600 }); await chown(corruptOwnerPath, hostUid, hostGid);
+  }
   const clients = [];
   for (const id of ['alice-fixture', 'bob-fixture']) {
     const response = await fetch(`${origin}/api/clients`, { method: 'POST',
@@ -136,15 +147,22 @@ try {
       assert.equal(response.status, 200); return response.json();
     };
     for (const entry of clients) {
+      if (memoryFailure && entry === clients[0]) {
+        const response = await fetch(`${origin}/api/clients/${entry.client.id}/memory/settings`, {
+          headers: { authorization: `Bearer ${token(entry.id)}` } });
+        assert.equal(response.status, 503);
+        continue;
+      }
       const state = await settings(entry); assert.equal(state.enabled, false); assert.equal(state.automaticCollection, false);
     }
-    assert.equal((await settings(clients[0], true)).enabled, true);
+    if (!memoryFailure) assert.equal((await settings(clients[0], true)).enabled, true);
     assert.equal((await settings(clients[1])).enabled, false);
     if (realService) {
       const { verifyMemoryHttpFlow } = await import('./protected-memory-http-flow.mjs');
-      await verifyMemoryHttpFlow({ origin, clients, token });
+      await verifyMemoryHttpFlow({ origin, clients, token, memoryUnavailable: memoryFailure });
     }
-    assert.equal((await settings(clients[0], false)).enabled, false);
+    if (!memoryFailure) assert.equal((await settings(clients[0], false)).enabled, false);
+    else assert.equal(await readFile(corruptOwnerPath, 'utf8'), '{damaged');
     const foreign = await fetch(`${origin}/api/clients/${clients[0].client.id}/memory/settings`, {
       headers: { authorization: `Bearer ${token(clients[1].id)}` } });
     assert.equal(foreign.status, 403);
@@ -180,7 +198,8 @@ try {
   } while (Date.now() < cleanupDeadline);
   assert.deepEqual(remaining, []);
   console.log(JSON.stringify({ actualHttpHost: true, cliEntrypoint: useCli, hostNonRoot: true, twoWorkerIdentities: true,
-    exclusiveSupervisor: true, searchNonRoot: true, memorySettingsVerified: withMemory, sequentialCapacityVerified: capacityMode,
+    exclusiveSupervisor: true, searchNonRoot: true, memorySettingsVerified: withMemory, memoryFailureVerified: memoryFailure,
+    sequentialCapacityVerified: capacityMode,
     shutdownMode: crashHost ? 'host-killed' : crashSearch ? 'search-killed' : 'graceful',
     shutdownReclaimsChildren: true, browserVerified: false, modelVerified: realService }));
 } finally {

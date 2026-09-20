@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 
-export async function verifyMemoryHttpFlow({ origin, clients, token }) {
+export async function verifyMemoryHttpFlow({ origin, clients, token, memoryUnavailable = false }) {
   const [alice, bob] = clients;
   const events = [];
   let failure, request, nextId = 0;
@@ -58,6 +58,16 @@ export async function verifyMemoryHttpFlow({ origin, clients, token }) {
       return events.slice(from).filter(event => event.type === 'event').map(event => event.payload);
     };
     await command('set_model', { provider: 'cestc', modelId: 'qwen35' });
+    if (memoryUnavailable) {
+      const completed = await turn('请只回复：普通聊天正常');
+      const messages = completed.filter(event => event.type === 'agent_end').flatMap(event => event.messages ?? []);
+      const text = messages.filter(message => message.role === 'assistant').flatMap(message => message.content ?? [])
+        .filter(block => block.type === 'text').map(block => block.text).join('\n');
+      assert(text.includes('普通聊天正常'), 'Ordinary model chat failed with unavailable memory');
+      console.log(JSON.stringify({ danoHttpSse: true, realModel: true, memoryUnavailable: true,
+        ordinaryChatVerified: true, browserVerified: false, oauthVerified: false }));
+      return;
+    }
     await turn('请记住我的稳定偏好：验收报告以“竹影验收”作为标题，正文使用简体中文。请调用 memory_save 保存。');
     const receipt = await wait(async () => (await read(endpoint)).items.find(item => item.phase === 'ready'), 180000);
     assert(receipt.source?.sessionId && receipt.source?.entryId && receipt.createdAt);
