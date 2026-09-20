@@ -3,6 +3,37 @@
 Parent: [#465](https://github.com/zhengchengqiaobusiness-arch/Dano/issues/465)
 Gate: [#473](https://github.com/zhengchengqiaobusiness-arch/Dano/issues/473)
 
+## Fresh isolated service check — 2026-09-20
+
+A newly installed OpenViking `0.4.20`, httpx `0.28.1` and locally compiled
+llama-cpp-python `0.3.35` started on loopback with API-key authentication.
+The BGE GGUF and pinned DeepSeek tokenizer/config files were downloaded again
+and matched the SHA-256 values recorded in this document and the tokenizer
+configuration evidence. Downloading through the existing host proxy succeeded;
+direct Hugging Face access failed at TLS negotiation.
+
+The first synthetic extraction failed because Python's initial trust bundle
+did not include the model gateway's system-trusted certificate chain. Exporting
+Node's default CA set with `--use-system-ca` produced 135 roots. Python then
+verified TLS and received HTTP 200 for the authenticated models request. The
+isolated service was restarted with this CA bundle; certificate verification
+remained enabled and no certificate obtained from the remote endpoint was
+added as a trust anchor.
+
+`fixtures/openviking-model-extraction.py` then completed extraction at the
+15.2-second polling sample. Search returned both synthetic facts: technical
+plans should state goals/non-goals, and use Simplified Chinese by default.
+A separate Bob credential in the same account received HTTP 403 for direct
+read, Alice-targeted search and content overwrite. Alice's content was unchanged
+after these attempts. Configuration, credentials and full results remain in
+the private temporary acceptance directory, outside the repository.
+
+This verifies one fresh real-service extraction/recall and cross-user API
+boundary sample. It does not establish Dano or standard-pi end-to-end behavior,
+browser acceptance, tokenizer equivalence for the gateway's model alias,
+aggregate quality/p95/cost, offline replay isolation or deletion non-resurrection.
+The #474–#477 release gates remain open.
+
 ## Current result
 
 2026-09-18: **feasibility review passed for the selected Linux profile**;
