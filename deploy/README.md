@@ -30,6 +30,34 @@ The default Dockerfile target remains `default-runtime`, inheriting the existing
 non-root app entrypoint. Selecting `protected-runtime` is explicit and does not
 change ordinary deployments.
 
+For isolated Compose acceptance, append `deploy/compose/protected.yml` to the
+base Compose file and the selected exposure overlay. Set
+`DANO_PROTECTED_IMAGE`, `DANO_PROTECTED_CONFIG_VOLUME` and
+`DANO_PROTECTED_DATA_VOLUME` explicitly. Set `DANO_PROTECTED_UPLOAD_DIR` to an
+absolute path within the configured private host-state root so uploads are
+included with protected data rather than the base runtime bind mount.
+These are external Linux volumes;
+Compose does not create or initialize them and does not remove them on `down`.
+Record their exact names for deliberate acceptance cleanup and backup.
+
+Provision `/etc/dano-protected/supervisor.json` as root-owned mode 0600, with
+root-owned non-writable ancestors. Provision `/etc/dano-protected/agent` and
+`/etc/dano-protected/memory` as host-UID/GID-owned mode 0700; credential files
+inside them must be mode 0600. Set the profile's `memoryConfigDirectory` to
+the latter path and configure tokenizer asset paths explicitly. Put distinct
+runtime, session, host-state and identity roots beneath
+`/var/lib/dano-protected`; their ownership must satisfy the supervisor contract.
+For a fresh deployment, let the supervisor create those empty child roots.
+Never reuse a pre-existing identity range or initialize it against unrelated
+data. Configuration remains writable to the appropriate owner because Pi
+persists host settings, while the supervisor JSON remains root-owned.
+
+The existing OAuth configuration, nginx and exposure settings still apply.
+This overlay supplies no substitute identity provider and does not certify
+the browser, clean deployment or recovery gates. Its two private volumes are
+additional to the base deployment volumes; do not treat the base `workspaces`
+volume as the protected supervisor's user workspace root.
+
 ## Product Site Sidecar
 
 `apps/sites` is released independently from the Dano application and is served

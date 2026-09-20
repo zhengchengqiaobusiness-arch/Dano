@@ -1,0 +1,22 @@
+# Opt-in only. Provision the external configuration/data volumes before use.
+# The supervisor profile defines ownership, identities and all resource limits.
+services:
+  app:
+    image: ${DANO_PROTECTED_IMAGE:?DANO_PROTECTED_IMAGE is required}
+    user: "0:0"
+    entrypoint: ["node", "./dist/server/protected-main.js"]
+    command: ["/etc/dano-protected/supervisor.json"]
+    environment:
+      PI_CODING_AGENT_DIR: /etc/dano-protected/agent
+      DANO_UPLOAD_DIR: ${DANO_PROTECTED_UPLOAD_DIR:?DANO_PROTECTED_UPLOAD_DIR is required}
+    volumes:
+      - protected-config:/etc/dano-protected
+      - protected-data:/var/lib/dano-protected
+
+volumes:
+  protected-config:
+    external: true
+    name: ${DANO_PROTECTED_CONFIG_VOLUME:?DANO_PROTECTED_CONFIG_VOLUME is required}
+  protected-data:
+    external: true
+    name: ${DANO_PROTECTED_DATA_VOLUME:?DANO_PROTECTED_DATA_VOLUME is required}
