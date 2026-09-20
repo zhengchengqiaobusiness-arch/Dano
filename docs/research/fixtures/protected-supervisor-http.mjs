@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import { mkdtemp, chmod, chown, mkdir, writeFile, readdir, readFile, rm } from 'node:fs/promises';
 import { createHash, createHmac } from 'node:crypto';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { runProtectedSupervisor } from '../dano-server/bridge/protected-supervisor.js';
+const installationDir = process.env.DANO_FIXTURE_INSTALLATION ?? '/app/memory-extension';
+const serverDir = process.env.DANO_FIXTURE_SERVER ?? join(installationDir, 'dano-server');
+const { runProtectedSupervisor } = await import(pathToFileURL(join(serverDir, 'bridge/protected-supervisor.js')).href);
 const root = await mkdtemp('/tmp/dano-supervisor-http-');
 await chmod(root, 0o711);
 await writeFile(join(root, 'dano.config.json'), '{}\n', { mode: 0o644 });
@@ -14,13 +17,13 @@ const options = {
   runtimeRoot: join(root, 'runtime'), sessionsRoot: join(root, 'sessions'), hostStateRoot: join(root, 'host-state'),
   identities: { directory: join(root, 'identities'), firstUid: 10001, firstGid: 10001, count: 4, lockTimeoutMs: 5000 },
   maxWorkers: 4,
-  broker: { installationDir: '/app/memory-extension', hostUid, hostGid,
-    piPackageContext: '/app/memory-extension/package.json', privilegeGuard: '/usr/bin/setpriv',
+  broker: { installationDir, hostUid, hostGid,
+    piPackageContext: join(installationDir, 'package.json'), privilegeGuard: '/usr/bin/setpriv',
     path: process.env.PATH, startupTimeoutMs: 30000, operationTimeoutMs: 10000,
     shutdownTimeoutMs: 5000, maxConcurrentOperations: 4, maxResultBytes: 1048576 },
   host: { hostUid, hostGid, startupTimeoutMs: 30000, operationTimeoutMs: 40000,
     maxConcurrentOperations: 8, maxMessageBytes: 1048576, trustedSkillPaths: [],
-    providerPythonModuleDirectory: '/app/memory-extension/dano-server/python' },
+    providerPythonModuleDirectory: join(serverDir, 'python') },
 };
 const environment = { PATH: process.env.PATH, NODE_ENV: 'test', HOME: options.runtimeRoot,
   DANO_HOST: '127.0.0.1', DANO_PORT: '18710', DANO_PRODUCT_NAME: 'Supervisor Fixture', DANO_CONFIG_PATH: join(root, 'dano.config.json'),
@@ -55,7 +58,7 @@ const stop = new AbortController();
 let finished = false, failure;
 const launch = () => {
   if (!useCli) return runProtectedSupervisor(options, environment, [], stop.signal);
-  const child = spawn(process.execPath, ['/app/memory-extension/dano-server/protected-main.js', profilePath],
+  const child = spawn(process.execPath, [join(serverDir, 'protected-main.js'), profilePath],
     { env: environment, stdio: ['ignore', 'inherit', 'inherit'] });
   stop.signal.addEventListener('abort', () => child.kill('SIGTERM'), { once: true });
   return new Promise((resolve, reject) => { child.once('error', reject); child.once('close', code => resolve(code ?? 1)); });

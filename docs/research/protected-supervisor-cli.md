@@ -113,3 +113,20 @@ These checks establish image construction and module loading only; they do
 not establish Compose provisioning, model calls, real OpenViking delivery or
 browser acceptance. The default Dockerfile target still inherits the ordinary
 non-root runtime entrypoint.
+
+The lifecycle fixture can also target this repository image layout using
+`DANO_FIXTURE_INSTALLATION=/app` and `DANO_FIXTURE_SERVER=/app/dist/server`.
+Mount `fixtures/protected-supervisor-http.mjs` read-only and invoke it with
+`node /fixture.mjs --cli --memory` in a disposable, network-disabled container
+with the supervisor's required capabilities. No host ports or credential mounts
+are needed for this synthetic contract check.
+
+On the same image above, this check passed for both graceful shutdown and
+forced HTTP-host death (`--crash-host`): real HTTP
+startup, two distinct worker UIDs, exclusive supervisor locking, default-off
+memory settings, per-user enable/pause isolation, cross-user HTTP 403 and child
+process reclamation. Both ephemeral containers were removed. This image predates the host-model configuration fix in
+`f3031b46`, so it is not evidence for that fix. Rebuilding the newer source
+completed application compilation but failed fetching the open-websearch Skill
+from GitHub with `gnutls_handshake() failed: An unexpected TLS packet was
+received`. The newer image and real model/browser gates remain unverified.
