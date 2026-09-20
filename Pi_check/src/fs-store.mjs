@@ -191,6 +191,34 @@ export class RecordingFiles {
     }
   }
 
+  contextSkillPath(recordingId) {
+    return path.join(this.directory(recordingId), "context-skill.md");
+  }
+
+  async hasContextSkill(recordingId) {
+    try {
+      await stat(this.contextSkillPath(recordingId));
+      return true;
+    } catch (error) {
+      if (error?.code === "ENOENT") return false;
+      throw error;
+    }
+  }
+
+  async readContextSkill(recordingId) {
+    try {
+      const text = await readFile(this.contextSkillPath(recordingId), "utf8");
+      return String(text || "").trim() || null;
+    } catch (error) {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  async writeContextSkill(recordingId, content) {
+    await atomicWrite(this.contextSkillPath(recordingId), String(content || ""));
+  }
+
   async writeDraft(recordingId, draft) {
     await atomicJson(this.draftPath(recordingId), draft);
   }

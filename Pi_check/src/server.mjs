@@ -47,6 +47,27 @@ process.on("unhandledRejection", (error) => {
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PUBLIC = path.join(ROOT, "src", "public");
 const PORT = Number(process.env.PI_CHECK_PORT || 18080);
+
+// ── 自动加载 PI 凭证（开发环境）────────────────────────────────────────────
+// 若未注入 DANO_PI_API_KEY，则尝试从 back/.env 读取（Python 网关不在线时可独立运行）。
+if (!process.env.DANO_PI_API_KEY && !process.env.PI_API_KEY) {
+  try {
+    const envFilePath = path.join(ROOT, "..", "back", ".env");
+    const envText = await readFile(envFilePath, "utf8").catch(() => "");
+    let loaded = 0;
+    for (const line of envText.split("\n")) {
+      const m = line.trim().match(/^([A-Z0-9_]+)=(.+)$/);
+      if (m && !process.env[m[1]]) {
+        process.env[m[1]] = m[2].trim();
+        loaded++;
+      }
+    }
+    if (loaded > 0) logPiOnly(`已从 back/.env 自动加载 ${loaded} 个环境变量（开发模式）`);
+  } catch {
+    // 生产环境可以不依赖此文件，凭证由 Python 网关注入
+  }
+}
+
 const piBoot = readPiModelEnv();
 logPiOnly(`启动时 PI 凭证 key_set=${Boolean(piBoot.apiKey)} model=${piBoot.modelId || "(empty)"} baseUrl=${piBoot.baseUrl ? "set" : "(none)"} provider=${piBoot.provider || "(empty)"}`);
 const listeners = new Map();

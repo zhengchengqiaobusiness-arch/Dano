@@ -56,7 +56,7 @@ export default defineConfig({
       },
       "/tenants": { target: gateway, changeOrigin: true },
       "/auth": { target: gateway, changeOrigin: true },
-      "/onboarding": { target: gateway, changeOrigin: true, ws: true },
+      "/onboarding": { target: piCheck, changeOrigin: true, ws: true },
       "/settings/runtime": { target: gateway, changeOrigin: true },
       "/export": { target: gateway, changeOrigin: true },
       "/lifecycle": { target: gateway, changeOrigin: true },

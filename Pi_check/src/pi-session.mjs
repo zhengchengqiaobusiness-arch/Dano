@@ -20,6 +20,10 @@ export function recordingPiAgentDir() {
   return path.join(ROOT, "runtime", "pi-agent");
 }
 
+export function monitorPiAgentDir() {
+  return path.join(ROOT, "runtime", "pi-agent-monitor");
+}
+
 export function exportPiAgentDir() {
   return path.join(ROOT, "runtime", process.env.PI_EXPORT_AGENT_DIR || "pi-agent-export");
 }
@@ -29,6 +33,7 @@ export const RECORDING_SKILL_FILES = [
   "CONTROL_IN_APP_BROWSER.md",
   "INFER_BUSINESS_CONTRACT.md",
 ];
+export const MONITOR_SKILL_FILE = "MONITOR_PI_CONTEXT_WRITER.md";
 export const EXPORT_SKILL_FILE = "BUILD_AND_VALIDATE_DEDICATED_SKILL.md";
 export const REQUIRED_SKILL_FILES = [
   ...RECORDING_SKILL_FILES,
@@ -51,6 +56,49 @@ export async function readRequiredSkills(skillDir = path.join(ROOT, "skill")) {
     loaded.push({ name, text: text.trim() });
   }
   return loaded;
+}
+
+/**
+ * 读取监控 PI 的 Skill 文件（MONITOR_PI_CONTEXT_WRITER.md）。
+ * 失败时返回 null（监控 PI 可降级跳过）。
+ */
+export async function readMonitorSkill(skillDir = path.join(ROOT, "skill")) {
+  try {
+    const text = await readFile(path.join(skillDir, MONITOR_SKILL_FILE), "utf8");
+    return String(text || "").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 构建含上下文 Skill 的录制 PI 指令。
+ * contextSkillContent 由监控 PI 写入；若为空则仅用通用模板。
+ */
+export function buildPiInstructionsWithContext(baseSkills = [], contextSkillContent = null) {
+  const allSkills = [...baseSkills];
+  if (contextSkillContent && String(contextSkillContent).trim()) {
+    allSkills.push({
+      name: "CONTEXT_SKILL_本场会话上下文",
+      text: String(contextSkillContent).trim(),
+    });
+  }
+  return buildPiInstructions(allSkills);
+}
+
+/**
+ * 构建监控 PI 的指令字符串。
+ */
+export function buildMonitorPiInstructions(monitorSkillText = "", { targetUrl = "", goal = "" } = {}) {
+  const notice = `你是监控 PI（侦察阶段）。你的唯一任务：快速观察目标页面，识别系统特征，调用 write_context_skill 写入上下文 Skill，然后立即停止。
+禁止：提交录制能力、操作表单、submit_recording_result、长时间空转。
+完成写入后立即 stop（不要再调其他工具）。`;
+
+  const body = String(monitorSkillText || "").trim();
+  const urlLine = targetUrl ? `目标页面：${targetUrl}` : "";
+  const goalLine = goal ? `录制目标（仅供参考，用于在上下文 Skill 里记录页面清单）：${goal}` : "";
+
+  return [notice, body, urlLine, goalLine].filter(Boolean).join("\n\n");
 }
 
 export function buildPiInstructions(skills = []) {
@@ -111,9 +159,11 @@ ${String(skillText || "").trim()}
 }
 
 const ALL_REQUIRED_SKILLS = await readRequiredSkills();
-export const PI_INSTRUCTIONS = buildPiInstructions(
-  ALL_REQUIRED_SKILLS.filter((item) => RECORDING_SKILL_FILES.includes(item.name)),
+export const BASE_RECORDING_SKILLS = ALL_REQUIRED_SKILLS.filter(
+  (item) => RECORDING_SKILL_FILES.includes(item.name),
 );
+// 静态版（无上下文 Skill）——兼容旧调用路径
+export const PI_INSTRUCTIONS = buildPiInstructions(BASE_RECORDING_SKILLS);
 
 export function buildUserSteerPrompt(text, { finalizing = false } = {}) {
   const body = String(text || "").trim();
@@ -1080,9 +1130,17 @@ export class LivePiSession {
   }
 }
 
-export async function createLivePiSession({ recording, tools, onThought = null }) {
+export async function createLivePiSession({
+  recording,
+  tools,
+  onThought = null,
+  instructions: instructionsOverride = null,  // 若传入则覆盖内部构建的通用指令（支持注入上下文 Skill）
+  toolSpecs = null,                           // 若传入则覆盖 describePiTools()（监控 PI 使用）
+  agentToolNames = null,                      // 若传入则覆盖默认的工具名列表（监控 PI 使用）
+  agentDirOverride = null,                    // 若传入则使用独立 agentDir（监控 PI 用隔离目录，避免影响主 PI）
+}) {
   assertNeverStartLegacy();
-  const agentDir = recordingPiAgentDir();
+  const agentDir = agentDirOverride || recordingPiAgentDir();
   const cwd = path.join(ROOT, "runtime", "pi-cwd", recording.id);
   await mkdir(agentDir, { recursive: true });
   await mkdir(cwd, { recursive: true });
@@ -1119,11 +1177,11 @@ export async function createLivePiSession({ recording, tools, onThought = null }
     onRepair: ({ toolCallCount }) => logPiOnly(`已补齐 OpenAI 兼容流的 finish_reason tool_calls=${toolCallCount}`),
   });
 
-  const loaded = await readRequiredSkills();
-  const recordingSkills = loaded.filter((item) => RECORDING_SKILL_FILES.includes(item.name));
-  const instructions = buildPiInstructions(recordingSkills);
+  // 若外部传入了含上下文 Skill 的指令（监控 PI 已写入），直接使用；否则用通用模板
+  const instructions = instructionsOverride || buildPiInstructions(BASE_RECORDING_SKILLS);
   const trace = createPiTrace({ onThought });
-  const customTools = wrapPiToolsForSdk(tools, defineTool, Type, trace);
+  // toolSpecs 可由监控 PI 传入自定义描述集（含 write_context_skill），否则用通用集
+  const customTools = wrapPiToolsForSdk(tools, defineTool, Type, trace, toolSpecs || undefined);
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
@@ -1136,6 +1194,22 @@ export async function createLivePiSession({ recording, tools, onThought = null }
   logPiOnly("正在初始化 PI 会话");
   let created;
   try {
+    const DEFAULT_AGENT_TOOL_NAMES = [
+      "list_recording_manifest",
+      "list_recording_index",
+      "list_action_timeline",
+      "read_request_shape",
+      "read_visible_controls",
+      "read_evidence_delta",
+      "read_evidence_item",
+      "read_response_blob",
+      "read_screenshot",
+      "get_recording_freeze_state",
+      "submit_recording_capability",
+      "read_page_asset",
+      "submit_recording_result",
+      "control_in_app_browser",
+    ];
     created = await createAgentSession({
       cwd,
       agentDir,
@@ -1143,22 +1217,7 @@ export async function createLivePiSession({ recording, tools, onThought = null }
       modelRegistry,
       model,
       noTools: "builtin",
-      tools: [
-        "list_recording_manifest",
-        "list_recording_index",
-        "list_action_timeline",
-        "read_request_shape",
-        "read_visible_controls",
-        "read_evidence_delta",
-        "read_evidence_item",
-        "read_response_blob",
-        "read_screenshot",
-        "get_recording_freeze_state",
-        "submit_recording_capability",
-        "read_page_asset",
-        "submit_recording_result",
-        "control_in_app_browser",
-      ],
+      tools: agentToolNames || DEFAULT_AGENT_TOOL_NAMES,
       customTools,
       resourceLoader,
       sessionManager: SessionManager.inMemory(),

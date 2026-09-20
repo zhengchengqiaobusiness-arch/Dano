@@ -721,6 +721,107 @@ export function describePiTools() {
   ];
 }
 
+/**
+ * 监控 PI 工具集（轻量侦察阶段）。
+ *
+ * 只读工具（list_recording_manifest / list_recording_index / read_request_shape /
+ * read_evidence_item / control_in_app_browser[snapshot only]）
+ * + 一个写出口 write_context_skill。
+ * 禁止提交能力、操作表单、写入证据。
+ */
+export function createMonitorPiToolHost({
+  recordingId,
+  evidence,
+  files,
+  getBrowser = null,
+}) {
+  const logTool = (name, detail) =>
+    logPiOnly(`[监控PI] 工具 ${name} recording=${recordingId || "-"} ${detail}`);
+
+  return {
+    /** 读录制会话基本信息（URL、状态、证据数量） */
+    async list_recording_manifest() {
+      return evidence.snapshot(recordingId);
+    },
+
+    /** 读证据索引（类型、seq、摘要） */
+    async list_recording_index() {
+      const index = await evidence.index(recordingId);
+      logTool("list_recording_index", `count=${index.count}`);
+      return { recording_id: recordingId, count: index.count, items: index.items };
+    },
+
+    /** 读指定 seq 请求的 query/body 键和响应摘要 */
+    async read_request_shape({ seq }) {
+      const events = await evidence.files.readEvidence(recordingId);
+      const shape = requestShapeFromEvents(events, seq);
+      logTool("read_request_shape", `seq=${seq} ok=${Boolean(shape?.method)}`);
+      return shape;
+    },
+
+    /** 读指定 seq 的原始证据事件 */
+    async read_evidence_item({ seq }) {
+      const event = await evidence.readOne(recordingId, seq);
+      if (!event) return { found: false, seq };
+      const requestId = event.payload?.request_id;
+      if (event.kind === "network_request" && requestId) {
+        const response = await evidence.findResponseForRequest(recordingId, requestId);
+        if (response) {
+          return { found: true, event, response_status: response.payload?.status };
+        }
+      }
+      logTool("read_evidence_item", `seq=${seq} kind=${event.kind}`);
+      return { found: true, event };
+    },
+
+    /** 只读快照（监控阶段不允许点击/填写） */
+    async control_in_app_browser({ action, selector, ref } = {}) {
+      const allowedActions = ["snapshot", "screenshot", "network_since"];
+      const kind = String(action || "snapshot").toLowerCase();
+      if (!allowedActions.includes(kind)) {
+        return {
+          ok: false,
+          error: `监控 PI 只允许只读动作：${allowedActions.join(" / ")}。不能 ${kind}。`,
+        };
+      }
+      const browser = typeof getBrowser === "function" ? getBrowser() : null;
+      if (!browser) {
+        return { available: false, error: "浏览器尚未打开，稍后重试或使用 list_recording_index 读已有证据。" };
+      }
+      logTool("control_in_app_browser", `action=${kind}`);
+      if (kind === "snapshot") {
+        const shot = await browser.snapshot?.({ selector, ref });
+        return compactInspect(shot);
+      }
+      if (kind === "screenshot") {
+        return await browser.screenshot?.({ asImage: false }) ?? { available: false };
+      }
+      if (kind === "network_since") {
+        const since = await browser.networkSince?.({ seq: 0 });
+        return since ?? { requests: [] };
+      }
+      return { ok: false, error: "未知动作" };
+    },
+
+    /**
+     * 写入本场录制的上下文 Skill。
+     * content：Markdown 格式，主 PI 将以 "## CONTEXT_SKILL_本场会话上下文" 注入指令。
+     * 写完后监控 PI 必须立刻停止。
+     */
+    async write_context_skill({ content }) {
+      const text = String(content || "").trim();
+      if (!text) return { ok: false, error: "content 不能为空" };
+      await files.writeContextSkill(recordingId, text);
+      logTool("write_context_skill", `bytes=${Buffer.byteLength(text, "utf8")}`);
+      return {
+        ok: true,
+        bytes: Buffer.byteLength(text, "utf8"),
+        message: "上下文 Skill 已写入。主 PI 将在启动时读取。监控 PI 请立刻停止。",
+      };
+    },
+  };
+}
+
 export function createExportToolHost({
   files,
   recordingId,
@@ -812,6 +913,80 @@ export function createExportToolHost({
       return { accepted: true, ...payload };
     },
   };
+}
+
+/**
+ * 监控 PI 工具描述（schema）。
+ * 只含轻量只读工具 + write_context_skill，不含任何写入能力或表单操作工具。
+ */
+export function describeMonitorPiTools() {
+  return [
+    {
+      name: "list_recording_manifest",
+      label: "录制概况",
+      description: "读取本场录制的 URL、状态、证据数量等基本信息。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
+      name: "list_recording_index",
+      label: "证据索引",
+      description: "读取本场录制所有证据的类型、seq 和摘要列表。用于找 network_request 证据。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
+      name: "read_request_shape",
+      label: "请求形状",
+      description: "按 seq 读取指定请求的 method、URL、query/body 键和响应状态摘要。",
+      parameters: {
+        type: "object",
+        properties: { seq: { type: "integer" } },
+        required: ["seq"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "read_evidence_item",
+      label: "证据详情",
+      description: "按 seq 读取指定证据事件的原始内容。",
+      parameters: {
+        type: "object",
+        properties: { seq: { type: "integer" } },
+        required: ["seq"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "control_in_app_browser",
+      label: "页面快照（只读）",
+      description: "仅允许 action=snapshot / screenshot / network_since。监控阶段禁止 click/fill 等写操作。",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["snapshot", "screenshot", "network_since"] },
+          selector: { type: "string" },
+          ref: { type: "string" },
+        },
+        required: ["action"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "write_context_skill",
+      label: "写入上下文 Skill",
+      description: "把侦察结果以 Markdown 格式写入本场录制的上下文 Skill。写完后立即停止。",
+      parameters: {
+        type: "object",
+        properties: {
+          content: {
+            type: "string",
+            description: "Markdown 格式的上下文 Skill 内容，须包含：目标系统域名、API 前缀、噪声路径、业务路径、文件上传模式（若有）、日期格式。",
+          },
+        },
+        required: ["content"],
+        additionalProperties: false,
+      },
+    },
+  ];
 }
 
 export function describeExportPiTools() {

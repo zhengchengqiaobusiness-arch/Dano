@@ -19,7 +19,16 @@ import { attachBlobSaver } from "./browser-capture.mjs";
 import { capabilityCountFromPiResult } from "./capability-presence.mjs";
 import { thoughtFromEvidence } from "./pi-trace.mjs";
 import { resolveInteractionActor, shouldSteerHumanAct } from "./browser-actions.mjs";
-import { isEmptySpinError, readRequiredSkills } from "./pi-session.mjs";
+import {
+  isEmptySpinError,
+  readRequiredSkills,
+  readMonitorSkill,
+  buildPiInstructionsWithContext,
+  buildMonitorPiInstructions,
+  BASE_RECORDING_SKILLS,
+  monitorPiAgentDir,
+} from "./pi-session.mjs";
+import { createMonitorPiToolHost, describeMonitorPiTools } from "./pi-tools.mjs";
 import path from "node:path";
 
 export class RecordingController {
@@ -165,6 +174,85 @@ export class RecordingController {
         // 自动点击失败不得结束录制
       }
     });
+  }
+
+  /**
+   * 监控 PI 侦察阶段（浏览器已打开后调用）。
+   * 启动一个短暂的 Monitor PI，让它观察目标页面（snapshot + network_since）并写入 context-skill.md。
+   * 返回写入的上下文 Skill 内容字符串，或 null（若超时/失败/Skill文件缺失）。
+   * @param {object} session - 录制会话对象
+   * @param {object|null} browser - 已打开的浏览器实例（用于快照）
+   */
+  async #runMonitorPhase(session, browser = null) {
+    const MONITOR_TIMEOUT_MS = Number(process.env.MONITOR_PI_TIMEOUT_MS || 90000); // 默认 90秒
+    const recordingId = session.id;
+
+    const monitorSkillText = await readMonitorSkill();
+    if (!monitorSkillText) {
+      logPiOnly(`监控 PI Skill 文件缺失，跳过侦察阶段 recording=${recordingId}`);
+      return null;
+    }
+
+    await this.evidence.setStatus(recordingId, {
+      publicMessage: "监控 PI 正在侦察目标系统（约 30–60 秒）...",
+    }).catch(() => {});
+
+    const monitorTools = createMonitorPiToolHost({
+      recordingId,
+      evidence: this.evidence,
+      files: this.files,
+      getBrowser: () => browser,  // 浏览器已就绪，可做只读快照
+    });
+
+    const monitorInstructions = buildMonitorPiInstructions(monitorSkillText, {
+      targetUrl: session.targetUrl,
+      goal: session.goal,
+    });
+
+    const MONITOR_TOOL_NAMES = [
+      "list_recording_manifest",
+      "list_recording_index",
+      "read_request_shape",
+      "read_evidence_item",
+      "control_in_app_browser",
+      "write_context_skill",
+    ];
+
+    const monitorPi = await this.createPi({
+      recording: session,
+      tools: monitorTools,
+      instructions: monitorInstructions,
+      onThought: null,                        // 监控 PI 思维过程静默，不推送前台
+      toolSpecs: describeMonitorPiTools(),    // 监控 PI 专属工具描述（含 write_context_skill）
+      agentToolNames: MONITOR_TOOL_NAMES,     // 只暴露只读工具，不含 submit_recording_capability 等
+      agentDirOverride: monitorPiAgentDir(),  // 独立目录，避免 close() 时清理影响主 PI 的 agentDir
+    });
+
+    if (!monitorPi?.alive) {
+      logPiOnly(`监控 PI 无法启动，跳过侦察阶段 recording=${recordingId}`);
+      return null;
+    }
+
+    try {
+      await Promise.race([
+        monitorPi.beginLiveDrive({
+          targetUrl: session.targetUrl,
+          goal: `侦察目标系统，写入上下文 Skill。仅做 snapshot + network_since，写入后立即终止。目标：${session.goal}`,
+          timeoutMs: MONITOR_TIMEOUT_MS,
+          hasResult: () => this.files.hasContextSkill(recordingId),
+        }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("监控 PI 超时")), MONITOR_TIMEOUT_MS + 5000),
+        ),
+      ]);
+    } catch (error) {
+      // 超时或失败都可降级，不阻断主录制
+      logPiOnly(`监控 PI 结束（可能超时）: ${error?.message || error} recording=${recordingId}`);
+    } finally {
+      try { await monitorPi.close?.(); } catch { /* ignore */ }
+    }
+
+    return this.files.readContextSkill(recordingId);
   }
 
   #buildPiTools(recordingId) {
@@ -357,24 +445,13 @@ export class RecordingController {
         browserStatus: "idle",
         publicMessage: "正在启动 PI 会话",
       });
-      const tools = this.#buildPiTools(session.id);
-      const pi = await this.createPi({ recording: session, tools, onThought: slot.onThought });
-      if (!pi || !pi.alive) {
-        throw new PiRequiredError("PI 无法启动");
-      }
-      slot.pi = pi;
-      logPiOnly(`PI 会话已就绪 session=${pi.sessionId}`);
-      await this.evidence.setStatus(session.id, {
-        piStatus: "ready",
-        piSessionId: pi.sessionId,
-        publicMessage: "PI 已启动，正在打开浏览器",
-      });
-      this.#attachPiExit(session.id, pi);
 
+      // ── Phase 0: 先打开浏览器，让页面自然加载（生成初始证据）────────
       slot.browserStartAttempted = true;
       await this.evidence.setStatus(session.id, {
         status: "starting_browser",
         browserStatus: "starting",
+        publicMessage: "正在打开浏览器...",
       });
       const appendEvidence = attachBlobSaver(
         async (kind, payload) => this.#append(session.id, kind, payload),
@@ -391,6 +468,49 @@ export class RecordingController {
         authVaultPath: path.join(this.files.directory(session.id), "auth-vault.json"),
       });
       slot.browser = browser;
+
+      // 给浏览器约 4 秒加载初始页面，让网络请求证据有机会被记录
+      await new Promise((r) => setTimeout(r, 4000));
+
+      // ── Phase 0b: 监控 PI 侦察阶段（浏览器已就绪）─────────────────
+      // 轻量 Monitor PI 读取初始证据和页面快照，写入系统特征到 context-skill.md。
+      // 若监控 PI 失败，降级继续（不影响主录制流程）。
+      let piInstructions = buildPiInstructionsWithContext(BASE_RECORDING_SKILLS, null);
+      try {
+        const contextSkill = await this.#runMonitorPhase(session, browser);
+        if (contextSkill) {
+          piInstructions = buildPiInstructionsWithContext(BASE_RECORDING_SKILLS, contextSkill);
+          logPiOnly(`监控 PI 已写入上下文 Skill recording=${session.id} bytes=${Buffer.byteLength(contextSkill, "utf8")}`);
+        }
+      } catch (monitorError) {
+        logPiOnly(`监控 PI 失败，降级为通用模板 recording=${session.id} ${monitorError?.message || monitorError}`);
+      }
+
+      // ── Phase 1: 主录制 PI（含上下文 Skill 或通用模板）────────────
+      await this.evidence.setStatus(session.id, {
+        status: "starting_pi",
+        piStatus: "starting",
+        publicMessage: "正在启动主 PI 会话",
+      });
+      const tools = this.#buildPiTools(session.id);
+      const pi = await this.createPi({
+        recording: session,
+        tools,
+        instructions: piInstructions,  // 含上下文 Skill（或降级为通用）
+        onThought: slot.onThought,
+      });
+      if (!pi || !pi.alive) {
+        throw new PiRequiredError("PI 无法启动");
+      }
+      slot.pi = pi;
+      logPiOnly(`PI 会话已就绪 session=${pi.sessionId}`);
+      await this.evidence.setStatus(session.id, {
+        piStatus: "ready",
+        piSessionId: pi.sessionId,
+        publicMessage: "PI 正在自动操作，预览你也可以点",
+      });
+      this.#attachPiExit(session.id, pi);
+
       await this.evidence.setStatus(session.id, {
         status: "recording",
         browserStatus: "recording",
@@ -563,7 +683,9 @@ export class RecordingController {
     if (session.frozen || session.status === "failed" || session.status === "succeeded") {
       return null;
     }
-    if (!slot?.pi?.alive) {
+    // slot.pi 为 null 意味着 PI 尚未启动（浏览器先于 PI 开启阶段的初始证据）——
+    // 允许证据写入，不要误判"PI 已退出"。只有 PI 曾经活跃但现在已退出才是错误。
+    if (slot && slot.pi !== null && !slot.pi?.alive) {
       await this.#fail(recordingId, "PI 在录制期间退出");
       return null;
     }
@@ -579,14 +701,17 @@ export class RecordingController {
         // 助手输出失败不得中断采集
       }
     }
-    if (shouldSteerHumanAct(kind, nextPayload)) {
-      Promise.resolve(slot.pi.notifyHumanAct?.({ seq: event.seq })).catch(() => {});
-    }
-    if (shouldNotifyPi(kind, payload)) {
-      Promise.resolve(slot.pi.notifyEvidence({ seq: event.seq }))
-        .catch(async (error) => {
-          await this.#fail(recordingId, `PI 工具调用失败且未恢复：${error.message || error}`);
-        });
+    // PI 尚未就绪时不通知（初始页面加载阶段），待 PI 就绪后自行读取证据索引
+    if (slot?.pi?.alive) {
+      if (shouldSteerHumanAct(kind, nextPayload)) {
+        Promise.resolve(slot.pi.notifyHumanAct?.({ seq: event.seq })).catch(() => {});
+      }
+      if (shouldNotifyPi(kind, payload)) {
+        Promise.resolve(slot.pi.notifyEvidence({ seq: event.seq }))
+          .catch(async (error) => {
+            await this.#fail(recordingId, `PI 工具调用失败且未恢复：${error.message || error}`);
+          });
+      }
     }
     return event;
   }

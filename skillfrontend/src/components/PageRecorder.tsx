@@ -685,12 +685,7 @@ function recorderWebSocketUrl() {
   const configured = String(import.meta.env.VITE_DANO_RECORDING_WS_URL || "").trim();
   if (configured) return configured;
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  if (
-    import.meta.env.DEV
-    && ["localhost", "127.0.0.1", "::1"].includes(location.hostname)
-  ) {
-    return "ws://127.0.0.1:8077/onboarding/page/record";
-  }
+  // DEV 模式：通过 Vite 代理（/onboarding → Pi_check 18080），避免依赖 Python 网关
   return `${proto}://${location.host}/onboarding/page/record`;
 }
 
