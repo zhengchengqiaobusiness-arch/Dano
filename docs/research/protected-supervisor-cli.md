@@ -218,3 +218,24 @@ synthetic JWTs and offline memory configuration, not model, OAuth or browser
 acceptance. Old-token reacquisition and no command replay are separately
 covered by the supervisor RPC tests. The later SYSTEM.md fix is not in this
 image and requires its own updated-image validation.
+
+## Latest configuration regression (2026-09-20)
+
+After the deployment SYSTEM.md/settings fixes through `b0f135ba`, the first
+parallel regression run passed 1,502 tests and skipped one, but the anonymous
+release-gate fixture failed its fixed 150ms idle-cleanup observation. Its six
+tests passed when rerun alone. The fixture now waits up to three seconds for
+actual cleanup while checking that the active SSE user's resources remain;
+production cleanup timing and behavior were not changed.
+
+The same four-worker regression then passed all 132 files: 1,503 tests passed,
+one skipped (`/private/tmp/dano465-observed-full-regression.log`). The separately
+run deployment suite passed 61 tests with `PI_CODING_AGENT_DIR` unset
+(`/private/tmp/dano465-latest-deploy-regression.log`). Thus 1,564 distinct tests
+passed and one remained skipped. Type checking and the 12 targeted protected/
+detached-session tests passed before this fixture-only adjustment.
+
+The latest image build was not executed: automatic approval review reported an
+account usage limit before launching Podman. The verified image above therefore
+still excludes the SYSTEM.md/settings fixes. Updated-image, OAuth, rendered
+browser, model and remaining release gates are outstanding.

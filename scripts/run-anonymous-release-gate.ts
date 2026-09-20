@@ -205,7 +205,13 @@ async function idleSweep(req: http.IncomingMessage, selectedSlot: Slot, resoluti
   const a = requiredResource("a"), b = requiredResource("b");
   if (resolution.context.user.id !== b.userId) throw new HttpFailure(403, "observer User mismatch");
   acceptanceNow += 2_000;
-  await delay(150);
+  // Cleanup includes asynchronous runtime disposal and filesystem work. Observe
+  // completion instead of assuming it finishes within one short timer tick.
+  const deadline = Date.now() + 3_000;
+  while (!removed(a) && Date.now() < deadline) {
+    if (!exists(b)) throw new HttpFailure(409, "active SSE protection did not occur");
+    await delay(25);
+  }
   if (!removed(a) || !exists(b)) throw new HttpFailure(409, "idle cleanup or active SSE protection did not occur");
   const command = await request(req, `/api/clients/${encodeURIComponent(b.clientId)}/messages`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "command", payload: { id: "retained-b", type: "get_state" } }) });
   const preview = await request(req, b.previewUrl); const body = await preview.text();
