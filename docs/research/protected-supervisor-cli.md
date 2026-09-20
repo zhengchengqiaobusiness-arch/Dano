@@ -130,3 +130,26 @@ process reclamation. Both ephemeral containers were removed. This image predates
 completed application compilation but failed fetching the open-websearch Skill
 from GitHub with `gnutls_handshake() failed: An unexpected TLS packet was
 received`. The newer image and real model/browser gates remain unverified.
+
+### Updated image and regression — 2026-09-20
+
+After providing a temporary proxy forward bound only to Podman VM loopback,
+the full repository Dockerfile build succeeded as
+`8b016bdf2ac77ccef5ba0e8feab56fac2f2533d59022ab86847d3fec08ee24f8`.
+This image includes the host-model configuration fix. Inspection confirms its
+root supervisor entrypoint. The actual `--cli --memory` fixture passed on this
+image: non-root HTTP host, separate worker UIDs, exclusive supervisor lock,
+default-off/per-user memory settings and graceful shutdown reclaiming children.
+The fixture container was automatically removed. This run did not exercise
+forced-host death on the updated image or real model/browser flows.
+
+Current regression covers all 132 test files: 1550 tests passed, one skipped.
+The first run had nine failures: six Python tests lacked `httpx`, two deployment
+tests inherited the externally supplied Pi directory instead of their own
+runtime paths, and one collector test timed out. Revalidation used the isolated
+Python environment with httpx and limited concurrency to four workers. The 131
+non-deployment files passed (1489 tests, one skipped) with an empty private Pi
+directory; `deploy-compose.test.ts` passed separately (61 tests) without an
+inherited `PI_CODING_AGENT_DIR`. No product behavior or timeout was changed to
+make these checks pass. Compose overlay configuration was separately validated
+with synthetic values; actual Compose/browser and release gates remain open.
