@@ -6,7 +6,7 @@ export interface SupervisorRpcLimits {
   maxConcurrentOperations: number;
   maxMessageBytes: number;
 }
-type Supervisor = Pick<WorkerSupervisor, "acquire" | "release" | "retire" | "close">;
+type Supervisor = Pick<WorkerSupervisor, "acquire" | "use" | "release" | "retire" | "close">;
 interface Lease { owner: string; value: SupervisedWorker }
 const validId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(value);
 const validOwner = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value);
@@ -74,13 +74,18 @@ export function serveWorkerSupervisor(supervisor: Supervisor, channel: WorkerBro
     if (!lease || releasing.has(lease.owner)) throw new Error();
     if (request.type === "execute" && (typeof request.name !== "string" || !workerOperations.has(request.name)
       || !request.parameters || typeof request.parameters !== "object" || Array.isArray(request.parameters))) throw new Error();
-    await lease.value.worker.assertIsolated();
-    signal.throwIfAborted();
-    if (leases.get(request.token) !== lease) throw new Error();
-    return request.type === "assert" ? null : lease.value.worker.execute(
-      request.name as Parameters<SupervisedWorker["worker"]["execute"]>[0],
-      request.parameters as Record<string, unknown>, signal,
-      value => send({ type: "update", id: request.id, value }));
+    return supervisor.use(lease.owner, lease.value.workspace, async current => {
+      signal.throwIfAborted();
+      if (leases.get(request.token as string) !== lease || current.agentDir !== lease.value.agentDir
+        || current.stateDir !== lease.value.stateDir) throw new Error();
+      await current.worker.assertIsolated();
+      signal.throwIfAborted();
+      if (leases.get(request.token as string) !== lease) throw new Error();
+      return request.type === "assert" ? null : current.worker.execute(
+        request.name as Parameters<SupervisedWorker["worker"]["execute"]>[0],
+        request.parameters as Record<string, unknown>, signal,
+        value => send({ type: "update", id: request.id, value }));
+    });
   };
   const receive = (message: unknown) => {
     if (closed || !message || typeof message !== "object" || Array.isArray(message)) return;

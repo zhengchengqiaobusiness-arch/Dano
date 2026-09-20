@@ -21,6 +21,14 @@ entries. Environment or credential fields in the profile are rejected. The
 existing root supervisor validates installation ownership, path separation,
 NSS collisions and procfs privacy before starting the host.
 
+`maxWorkers` bounds resident worker processes, not the number of users who have
+ever connected. At capacity, the supervisor closes the least recently used
+idle process before starting a replacement. An in-flight tool operation pins
+its process until completion. Logical IPC tokens retain their owner/workspace
+and reacquire a verified process when needed; eviction never replays a command.
+User state, consent and memory delivery remain in the HTTP host and continue
+independently of worker residency. Failed cleanup prevents replacement.
+
 Host configuration and credentials remain in the trusted launch environment or
 private host storage. They are not written into the supervisor JSON or copied
 into the worker environment. SIGINT and SIGTERM abort the supervisor operation;
@@ -177,3 +185,14 @@ This is a supplemental real-model/service integration test with synthetic JWT
 identities. It did not perform OAuth login, rendered browser interaction,
 Compose deployment, image upload or quantitative quality/cost acceptance.
 Those gates remain required before #474/#465 can close.
+
+## Search startup validation (2026-09-20)
+
+The image built from `db2e1c4d` passed the disposable Linux
+`protected-supervisor-http.mjs --cli --memory` fixture. It verified the real
+search daemon and HTTP host run under the host UID, two separate worker UIDs,
+memory settings isolation and graceful shutdown without remaining children.
+The log is `/private/tmp/dano465-search-startup.log`. This run did not yet verify
+the subsequent process-group cleanup or idle-worker eviction changes. Their
+new image build and abnormal-exit checks remain pending; browser/model gates
+are not implied by this lifecycle fixture.

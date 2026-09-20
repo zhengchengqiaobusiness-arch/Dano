@@ -52,6 +52,24 @@ function harness(factory = async (_owner: string, workspace: string) => worker(w
   return { channel, pool, server, request };
 }
 
+it("keeps an old user token usable after idle worker eviction without replaying prior commands", async () => {
+  const created: SupervisedWorker[] = [];
+  const h = harness(async (_owner, workspace) => {
+    const value = worker(workspace); created.push(value); return value;
+  });
+  const first = (await h.request({ type: "acquire", owner: "alice", workspace: "/alice" }).result).value;
+  expect((await h.request({ type: "execute", token: first.token, name: "read", parameters: { value: "first" } }).result).type)
+    .toBe("result");
+  for (let i = 0; i < 6; i++) {
+    expect((await h.request({ type: "acquire", owner: `user${i}`, workspace: `/user${i}` }).result).type).toBe("result");
+  }
+  expect(created[0]!.worker.close).toHaveBeenCalledTimes(1);
+  const response = await h.request({ type: "execute", token: first.token, name: "read", parameters: { value: "second" } }).result;
+  expect(response).toMatchObject({ type: "result", value: { workspace: "/alice", value: "second" } });
+  expect(created[0]!.worker.execute).toHaveBeenCalledTimes(1);
+  expect(created.at(-1)!.worker.execute).toHaveBeenCalledTimes(1);
+});
+
 it("routes opaque leases to their own workspace and invalidates released tokens", async () => {
   const h = harness();
   const alice = (await h.request({ type: "acquire", owner: "alice", workspace: "/alice" }).result).value;

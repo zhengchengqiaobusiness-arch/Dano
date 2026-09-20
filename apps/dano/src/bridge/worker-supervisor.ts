@@ -18,7 +18,8 @@ export interface WorkerSupervisorOptions {
   broker: Omit<WorkerBrokerProfile, "workspace" | "agentDir" | "stateDir" | "workerUid" | "workerGid">;
 }
 type Factory = (ownerId: string, workspace: string) => Promise<SupervisedWorker>;
-interface Slot { ownerId: string; creating: Promise<SupervisedWorker>; cleanup?: Promise<void>; cleanupFailed?: boolean }
+interface Slot { ownerId: string; creating: Promise<SupervisedWorker>; value?: SupervisedWorker;
+  active: number; used: number; cleanup?: Promise<void>; cleanupFailed?: boolean }
 
 /** Root supervisor lifecycle, separate from the non-root HTTP host. Retiring
  * an owner blocks new acquisitions for this supervisor lifetime; persistent
@@ -32,6 +33,8 @@ export class WorkerSupervisor {
   #closing?: Promise<void>;
   readonly #retirements = new Map<string, Promise<void>>();
   readonly #releases = new Map<string, Promise<void>>();
+  readonly #releasingSlots = new Set<Slot>();
+  #clock = 0;
 
   constructor(options: WorkerSupervisorOptions, factory?: Factory) {
     if (!Number.isSafeInteger(options.maxWorkers) || options.maxWorkers <= 0) throw new Error("INVALID_WORKER_SUPERVISOR_LIMIT");
@@ -56,9 +59,21 @@ export class WorkerSupervisor {
     const canonical = resolve(workspace);
     const key = JSON.stringify([ownerId, canonical]);
     const existing = this.#slots.get(key);
-    if (existing) return existing.creating;
-    if (this.#slots.size >= this.#maxWorkers) throw new Error("WORKER_SUPERVISOR_LIMIT");
-    const slot: Slot = { ownerId, creating: Promise.resolve().then(async () => {
+    if (existing && !existing.cleanup) { existing.used = ++this.#clock; return existing.creating; }
+    if (existing?.cleanup) {
+      await existing.cleanup;
+      if (this.#slots.get(key) === existing) this.#slots.delete(key);
+      return this.acquire(ownerId, canonical);
+    }
+    if (this.#slots.size + this.#releasingSlots.size >= this.#maxWorkers) {
+      const victim = [...this.#slots.entries()].filter(([, slot]) => slot.value && !slot.active && !slot.cleanup)
+        .sort((a, b) => a[1].used - b[1].used)[0];
+      if (!victim) throw new Error("WORKER_SUPERVISOR_LIMIT");
+      await this.#closeLease(victim[1], victim[1].value!);
+      if (this.#slots.get(victim[0]) === victim[1]) this.#slots.delete(victim[0]);
+      return this.acquire(ownerId, canonical);
+    }
+    const slot: Slot = { ownerId, active: 0, used: ++this.#clock, creating: Promise.resolve().then(async () => {
       const lease = await this.#factory(ownerId, canonical);
       if (this.#closed || this.#retired.has(ownerId) || this.#slots.get(key) !== slot
         || lease.workspace !== canonical || lease.worker.workspace !== canonical) {
@@ -70,13 +85,28 @@ export class WorkerSupervisor {
         await this.#closeLease(slot, lease);
         throw new Error("WORKER_SUPERVISOR_CLOSED");
       }
-      return Object.freeze(lease);
+      slot.value = Object.freeze(lease);
+      return slot.value;
     }).catch(error => {
       if (!slot.cleanupFailed && this.#slots.get(key) === slot) this.#slots.delete(key);
       throw error;
     }) };
     this.#slots.set(key, slot);
     return slot.creating;
+  }
+
+  /** Pin the current process only for an operation. Logical IPC leases and
+   * host-owned memory queues survive eviction of an idle worker process. */
+  async use<T>(ownerId: string, workspace: string, operation: (lease: SupervisedWorker) => Promise<T>): Promise<T> {
+    while (true) {
+      const lease = await this.acquire(ownerId, workspace);
+      const slot = this.#slots.get(JSON.stringify([ownerId, resolve(workspace)]));
+      // Another acquisition may have started eviction before our await resumed.
+      if (!slot || slot.value !== lease || slot.cleanup) continue;
+      slot.active++;
+      try { return await operation(lease); }
+      finally { slot.active--; slot.used = ++this.#clock; }
+    }
   }
 
   retire(ownerId: string): Promise<void> {
@@ -93,8 +123,9 @@ export class WorkerSupervisor {
     const previous = this.#releases.get(ownerId);
     if (previous) return previous;
     const slots = [...this.#slots.entries()].filter(([, slot]) => slot.ownerId === ownerId);
-    for (const [key] of slots) this.#slots.delete(key);
+    for (const [key, slot] of slots) { this.#releasingSlots.add(slot); this.#slots.delete(key); }
     const closing = this.#closeSlots(slots.map(([, slot]) => slot)).then(() => {
+      for (const [, slot] of slots) this.#releasingSlots.delete(slot);
       this.#releases.delete(ownerId);
     });
     // Keep failures registered: no replacement worker until cleanup succeeds.

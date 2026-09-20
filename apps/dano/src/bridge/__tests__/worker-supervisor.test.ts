@@ -136,3 +136,46 @@ it("waits for other workers even when one cleanup fails", async () => {
   pending.resolve();
   await check;
 });
+
+it("reclaims idle processes for sequential owners while retaining only the configured capacity", async () => {
+  const created: SupervisedWorker[] = [];
+  const pool = supervisor(async (_owner, workspace) => {
+    const item = lease(workspace); created.push(item); return item;
+  }, 2);
+  for (let i = 0; i < 8; i++) await pool.acquire(`user${i}`, `/users/user${i}/workspaces/default`);
+  expect(created).toHaveLength(8);
+  expect(created.filter(item => !vi.mocked(item.worker.close).mock.calls.length)).toHaveLength(2);
+  await pool.use("user0", "/users/user0/workspaces/default", async current => {
+    await expect(current.worker.execute("read", {})).resolves.toEqual({});
+  });
+  expect(created).toHaveLength(9);
+  await pool.close();
+  expect(created.every(item => vi.mocked(item.worker.close).mock.calls.length === 1)).toBe(true);
+});
+
+it("never evicts a process while an operation is in flight", async () => {
+  const held = deferred<void>(), entered = deferred<void>();
+  const item = lease();
+  const pool = supervisor(async (_owner, workspace) => workspace === item.workspace ? item : lease(workspace), 1);
+  const operation = pool.use("alice", item.workspace, async current => {
+    entered.resolve(); await held.promise; await current.worker.assertIsolated();
+  });
+  await entered.promise;
+  await expect(pool.acquire("bob", "/users/bob/workspaces/default")).rejects.toThrow("LIMIT");
+  expect(item.worker.close).not.toHaveBeenCalled();
+  held.resolve(); await operation;
+  await pool.acquire("bob", "/users/bob/workspaces/default");
+  expect(item.worker.close).toHaveBeenCalledTimes(1);
+  await pool.close();
+});
+
+it("does not replace an idle process until cleanup has succeeded", async () => {
+  const item = lease();
+  vi.mocked(item.worker.close).mockRejectedValue(new Error("CLOSE_FAILED"));
+  const factory = vi.fn(async () => item);
+  const pool = supervisor(factory, 1);
+  await pool.acquire("alice", item.workspace);
+  await expect(pool.acquire("bob", "/users/bob/workspaces/default")).rejects.toThrow("CLOSE_FAILED");
+  expect(factory).toHaveBeenCalledTimes(1);
+  await expect(pool.close()).rejects.toThrow("CLEANUP_FAILED");
+});
