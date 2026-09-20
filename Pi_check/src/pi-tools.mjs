@@ -131,7 +131,7 @@ async function responseView(evidence, recordingId, response) {
   return view;
 }
 
-const ASSIST_HOLD_ACTIONS = new Set(["click", "fill", "select", "press", "choose", "fill_fields", "open_page"]);
+const ASSIST_HOLD_ACTIONS = new Set(["click", "fill", "select", "press", "choose", "fill_fields", "open_page", "upload"]);
 
 function assistHoldError() {
   return {
@@ -447,8 +447,38 @@ export function createPiToolHost({
       if (kind === "fill_fields") {
         return browser.fillFields?.(fields);
       }
+      if (kind === "upload") {
+        // 文件上传（input[type=file]、附件、导入）需要人工操作：
+        // Pi agent 运行在沙箱中，无法访问用户本地文件路径，Playwright setInputFiles 无可用路径。
+        // 正确做法：暂停自动操作，让用户在预览里手动选择并上传文件，然后说继续。
+        // 继续后 Pi 应 snapshot 确认文件名已更新，再 network_since 取 multipart execute 证据。
+        const target = String(selector || ref || "").trim();
+        const uploadMessage = String(
+          reason ||
+          `请在预览里${target ? `点击文件上传控件（${target}）` : "点击上传按钮"}，选择文件并完成上传，上传成功后说继续。`,
+        );
+        try {
+          onAssist?.({ reason: uploadMessage });
+        } catch {
+          // 协助通知失败不得假装已送达
+        }
+        try {
+          onPauseForAssist?.({ reason: uploadMessage });
+        } catch {
+          // 暂停失败仍回协助已发出
+        }
+        return {
+          assist: true,
+          paused: true,
+          action: "upload",
+          message: uploadMessage,
+          human_can_click: true,
+          next_action:
+            "已暂停等待文件上传。用户上传完成并说继续后：先 snapshot 确认文件名已出现，再 network_since 确认 multipart 上传请求已发出，然后交给 Infer 建模。",
+        };
+      }
       return {
-        error: `不支持的 action: ${kind || "(empty)"}。可用：open_page, list_pages, snapshot, screenshot, click, fill, select, choose, press, fill_fields, network_since, assist。`,
+        error: `不支持的 action: ${kind || "(empty)"}。可用：open_page, list_pages, snapshot, screenshot, click, fill, select, choose, press, fill_fields, upload, network_since, assist。`,
       };
     },
     async get_recording_freeze_state() {

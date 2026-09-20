@@ -268,6 +268,60 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 15. **可增行按钮**：`control_kind=button` 且文案像「添加×× / 新增行」只证明行数可变，不是调用方字段。不要把它或它产生的行类型码写进 `input_schema`。
 16. **页签 / 折叠头不是字段**：只有文案、点了不改变 execute 形状、也没有独立 name/path 的「单据信息」一类页签或折叠头，不要编进 params 或 schema。
 17. **灰框带入值**：宿主锁死的下拉/类型，即使值来自 URL 或上一页，也是系统，不要再做成调用方枚举。
+18. **文件上传 / 附件 / 导入控件**（`control_kind=file`）：页面上可见且可点的文件输入是调用方字段，即使本场没有实际上传文件。具体处理规则见下方「文件上传能力建模」。
+
+### 文件上传能力建模
+
+文件上传、附件添加、表格导入等能力，execute 是 `multipart/form-data` 请求（而非 JSON）。建模时与 JSON 能力完全对称，只是字段类型和形状不同。
+
+#### 识别 execute
+
+- execute 是 `Content-Type: multipart/form-data` 的写请求（POST/PUT/PATCH）。
+- 该请求包含 `file_fields`（文件部分）和可选 `text_fields`（表单文本字段）。
+- URL 路径含 `upload` / `import` / `fileUpload` / `attachment` 等段的请求均属业务 execute，**不要当成基建流量过滤**。
+- 若 `network_since` 证据里有 multipart 请求，先用 `read_request_shape` 确认其 `content_type` 和 body 结构，再认定为 execute。
+- 若本场未真实上传（人跳过了 assist 的文件选择步骤），multipart 请求可能缺失：将该能力写入 `unresolved`，说明缺真实上传 execute，禁止用无文件的 JSON 提交冒充。
+
+#### 字段建模
+
+**文件字段**（`file_fields` 中的每一项）：
+```json
+{
+  "key": "file",
+  "path": "body.file",
+  "label": "附件",
+  "type": "string",
+  "format": "binary",
+  "source_kind": "user_input",
+  "exposed_to_user": true,
+  "required": false,
+  "reason": "调用方在文件上传控件选择文件，以 multipart/form-data 提交到 body.file。"
+}
+```
+`input_schema.properties` 中同名字段：`type=string`，`format=binary`，`x-dano-business-type=file_upload`。  
+多文件控件（`multiple=true`）：`type=array`，`items.type=string`，`items.format=binary`，`x-dano-business-type=file_upload`。
+
+**multipart 中的文本字段**（`value` 部分，即普通表单字段）：按正常控件规则建模（user_input / page_enum / api_option 等）。  
+**multipart 中只有文件、无文本字段**：能力只有文件字段一个调用方字段，其余（如业务单据 id 在 URL path 或 query 里）标系统。
+
+#### 绑定状态判读
+
+- `binding_status=bound` + `wire_path` 已填：文件字段已被确认绑定，建模正常交。
+- `binding_status=unresolved_non_executable`：本场未提交文件，wire 路径未知；写入 `unresolved` 说明缺什么，不要交残缺能力。
+- `binding_status=bound_unsupported`（旧证据可能仍有）：同上，写 unresolved，不阻塞同表单其他字段。
+
+#### 台账与能力区分
+
+- 「上传附件」与「提交表单」若是同一个 multipart 请求（一次提交里既含文件又含表单字段）→ 一项能力，execute 就是那条 multipart 请求。
+- 「先上传附件获得文件 ID，再用文件 ID 提交表单」→ 两步，上传是 preflight 或独立能力，提交是 execute；按实际请求链决定，看 `links`。
+- 「导入」功能（上传 Excel/CSV 批量写入）：上传请求本身就是 execute（服务端直接处理）；不要把它拆成「上传」+「导入」两项。
+
+#### 禁止
+
+- 禁止把文件字段标为 `source_kind=system` 并写死本场的文件名为 `constant`。
+- 禁止因为本场没有真实上传就把文件字段完全丢掉；可见可改的文件控件即使为空，也留调用方可选字段（写 unresolved 说明缺 wire path）。
+- 禁止把上传 URL（含 `upload` / `import` 路径段）误标为「鉴权/基建」；这些是业务 execute。
+- 禁止用无文件版本的 JSON 提交替代 multipart execute 建模。
 
 ### 弹层选人/选记录的对象数组
 
@@ -516,3 +570,5 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 - execute 响应不得 link 回同一 execute。
 - preflight 只认打开该表单的请求。
 - 页签/折叠头没有请求键 → 不是字段。
+- **文件上传 / 附件 / 导入**：execute 是 multipart/form-data 写请求；文件字段是调用方，`type=string`，`format=binary`，`x-dano-business-type=file_upload`；URL 含 `upload`/`import` 路径段不算基建；未真实上传则写 unresolved；`binding_status=bound` 才建模，`unresolved_non_executable` / `bound_unsupported` 写 unresolved 不阻塞其他字段。
+- **一次 multipart 同时含文件与文本字段** → 一项能力，不拆；「先传文件拿 ID 再提交」→ 两步，按请求链决定 preflight/links。

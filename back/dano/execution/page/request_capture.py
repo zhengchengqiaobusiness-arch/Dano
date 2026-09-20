@@ -28,11 +28,13 @@ _READ_NOISE = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".js", ".woff", 
                "/sse", "/socket", "/ws", "/heartbeat")
 # 鉴权/基建写请求识别(P0#3:用「URL 路径段 + 请求体内容」判,**绝不写死任何系统的业务路径**)。
 # 这类录制时放行真发、也绝不当成"提交候选"。提交请求改由"带最多用户填入值"识别(因果/值驱动,见 pick_submit_request)。
-# ① URL 路径**整段**命中通用鉴权/上传/流概念(跨框架通用,非某系统专属;整段匹配避免 'lesson' 含 'sso' 之类误伤):
+# ① URL 路径**整段**命中通用鉴权/流概念(跨框架通用,非某系统专属;整段匹配避免 'lesson' 含 'sso' 之类误伤):
+# 注意:"upload" 不列入此集合——业务附件上传、文件导入等 API 路径中常含 "upload" 段,
+# 这些是合法业务 execute,不应被归为基建流量;multipart/form-data 已由 recorder 单独放行真发。
 _INFRA_PATH_SEGS = frozenset({
     "login", "logout", "signin", "sign-in", "sso", "oauth", "oauth2", "auth",
     "token", "refresh", "refresh-token", "refresh_token", "refreshtoken",
-    "access-token", "id-token", "captcha", "upload", "sse", "socket", "ws",
+    "access-token", "id-token", "captcha", "sse", "socket", "ws",
 })
 # ② 或请求体里带密码/验证码/凭证/OAuth 字段(按内容判,最稳:登录体必带这些,跨系统通用):
 _AUTH_BODY_HINTS = ("password", "passwd", "captcha", "verifycode", "vcode", "credential",
@@ -308,7 +310,7 @@ def _all_keys(node) -> list[str]:
 
 def looks_like_auth_write(url: str, body=None) -> bool:
     """这条写请求是否登录/鉴权/基建(而非业务提交)。**通用判定,不依赖任何系统的业务路径名**:
-    ① URL 路径整段命中通用鉴权/上传/流概念(login/sso/oauth/token/captcha/upload…);
+    ① URL 路径整段命中通用鉴权/流概念(login/sso/oauth/token/captcha…; "upload" 已移出,业务附件上传 API 不算基建);
     ② 或请求体带密码/验证码/凭证/OAuth 字段。命中则:录制时放行真发、且不作为"提交候选"。
 
     body 可传已解析 dict 或原始 post_data 字符串(自动解析)。

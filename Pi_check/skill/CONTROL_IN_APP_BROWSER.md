@@ -87,6 +87,25 @@ PI 是操作者。人同时也可以点预览。你们共用同一只 Playwright
 
 只在这些情况用 `action=assist`：登录、验证码、授权写入、**写不进的那一个字段**、**点了不发网的那一个提交钮**、**加行后再 snapshot，这一列仍然没有可写控件**、**结果表详情入口 snapshot 没有对应 `region=table` 项，或已用该条 `ref=` 仍点不到**。选人/选部门的「选择」链接和选人弹层不是协助点。`reason` 写清楚要人做什么。当前 snapshot 已经是目标业务页时，禁止再 assist 登录或验证码。预览始终可以点。`assist` 会暂停自动点击，直到用户说继续；暂停期间再 click 会被拦住，回 `assist_hold`。不要把协助做成 takeover。禁止一次 assist 把整张表交出去然后自己空转。
 
+## 文件上传与导入
+
+文件控件（`control_kind=file`，即 `input[type=file]`）、附件上传按钮、表格导入按钮，PI 无法自动选择本地文件。必须走 `action=upload` 流程，不要用 `click` / `fill` 代替。
+
+**标准步骤（换任何页面都走这一遍）：**
+
+1. `snapshot` 确认文件控件存在（`control_kind=file` 或可见「上传/导入/选择文件」按钮），记下其 selector。
+2. 立刻 `action=upload`，`selector=` 该控件 selector，`reason=` 写清楚要人做什么（例如「请点击上传按钮选择测试附件（任意 xlsx 文件即可），上传成功后说继续」）。
+3. 等用户说继续，禁止在暂停期间再 click / fill / choose。
+4. 继续后：先 `snapshot` 确认文件名已出现在控件上；再 `network_since` 确认 multipart 上传请求已发出。
+5. 把 multipart 上传请求的 seq 告知 Investigator，由 Infer 认为本次能力的 execute 或 preflight。
+
+**禁止：**
+- 不要用 `click` 点上传按钮后自己等文件选择对话框；PI 无法操作系统原生文件选择窗口。
+- 不要用 `fill` 往文件输入框写路径；浏览器安全策略不允许脚本设置 input[type=file] 的值。
+- 不要在没有真实 multipart 请求的情况下点表单提交按钮（会导致文件字段为空，capture 收不到 wire contract）。
+- 不要跳过文件上传步骤直接提交表单，然后把无文件版本的提交当成这个能力的 execute。
+- 导入功能与附件功能同等处理，不区分"导入"和"上传"标签，只要涉及文件选择都走 `upload`。
+
 协助发出之后：禁止再 click / fill / choose。只读 `recentUserActions` 和 `network_since`。直到用户说继续，不要自己再点。人已经发出预期请求就停手，交给 Investigator 去调 Infer。不要整张表重做。
 
 人已经离开当前表单（回到列表、关掉弹层、打开另一页）：禁止再点刚才那张表的保存/确认。当前 snapshot 的 `region` 已经不是那张表，就不要再点。当前页目标还没做完：禁止 `open_page` 去下一页。保存已业务成功但当前落到 404 或非该入口页：`open_page` 回该入口列表继续行操作，不要当失败定稿。登录需要用户处理时保留当前会话。

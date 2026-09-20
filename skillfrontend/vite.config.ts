@@ -4,7 +4,7 @@ import { recordingResultsProxyTarget, shouldRouteToPiCheck } from "./src/api/piC
 
 // 出包/目录/token 必须先匹配 /v1/skills、/v1/settings/token，不能落到笼统的 /v1 网关。
 const gateway = process.env.DANO_GATEWAY || "http://localhost:8077";
-const piCheck = process.env.DANO_PI_CHECK || "http://127.0.0.1:18081";
+const piCheck = process.env.DANO_PI_CHECK || "http://127.0.0.1:18080";
 
 const longProxy = { timeout: 0, proxyTimeout: 0 };
 

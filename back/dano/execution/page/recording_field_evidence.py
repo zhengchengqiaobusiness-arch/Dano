@@ -960,29 +960,37 @@ def _associate_unsubmitted_file_controls(
         request_id = next(iter(candidates))
         wire_path = _existing_file_wire_path(request_by_id[request_id], evidence)
         observed_path = bool(wire_path)
-        evidence.update({
-            "binding_status": (
-                "bound_unsupported" if observed_path else "unresolved_non_executable"
-            ),
-            "binding_method": (
-                "exact_form_scope_existing_file_field"
-                if observed_path else "exact_form_scope_unsubmitted_file"
-            ),
-            "binding_reason": (
-                "file control belongs to the exact captured form, but no file "
-                "part was submitted during recording"
-            ),
-            # Preserve ownership without inventing a JSON/multipart field that
-            # was never present on the wire.  This remains review evidence and
-            # must block export until a real upload request is recorded.
-            "owner_request_id": request_id,
-            "wire_path_observed": observed_path,
-            "unsupported_execution": True,
-        })
         if observed_path:
-            evidence["request_id"] = request_id
-            evidence["wire_path"] = wire_path
+            # wire_path 已在请求中确认(file_fields 含该路径):文件上传请求已被录制且格式已知。
+            # 标为 bound，允许能力导出；调用方在 input_schema 中以 type=string/format=binary 提供文件。
+            evidence.update({
+                "binding_status": "bound",
+                "binding_method": "exact_form_scope_existing_file_field",
+                "binding_reason": (
+                    "file control belongs to the captured form; wire path confirmed "
+                    "from file_fields in the associated write request"
+                ),
+                "owner_request_id": request_id,
+                "wire_path_observed": True,
+                "request_id": request_id,
+                "wire_path": wire_path,
+            })
+            evidence.pop("unsupported_execution", None)
         else:
+            # 没有观察到文件 wire 路径：文件在本场录制中未被提交。
+            # 若控件可改且目标未排除，应在 Infer 写入 unresolved，不阻塞同表单的其他字段。
+            evidence.update({
+                "binding_status": "unresolved_non_executable",
+                "binding_method": "exact_form_scope_unsubmitted_file",
+                "binding_reason": (
+                    "file control belongs to the exact captured form, but no file "
+                    "part was submitted during recording; use assist to let the human "
+                    "upload a real file so the wire contract can be captured"
+                ),
+                "owner_request_id": request_id,
+                "wire_path_observed": False,
+                "unsupported_execution": True,
+            })
             evidence.pop("request_id", None)
             evidence.pop("wire_path", None)
 
