@@ -774,9 +774,9 @@ export function createMonitorPiToolHost({
       return { found: true, event };
     },
 
-    /** 只读快照（监控阶段不允许点击/填写） */
-    async control_in_app_browser({ action, selector, ref } = {}) {
-      const allowedActions = ["snapshot", "screenshot", "network_since"];
+    /** 快照/导航（监控阶段不允许点击/填写，允许 open_page 以侦察多页面） */
+    async control_in_app_browser({ action, selector, ref, url: urlParam } = {}) {
+      const allowedActions = ["snapshot", "screenshot", "network_since", "open_page"];
       const kind = String(action || "snapshot").toLowerCase();
       if (!allowedActions.includes(kind)) {
         return {
@@ -788,7 +788,7 @@ export function createMonitorPiToolHost({
       if (!browser) {
         return { available: false, error: "浏览器尚未打开，稍后重试或使用 list_recording_index 读已有证据。" };
       }
-      logTool("control_in_app_browser", `action=${kind}`);
+      logTool("control_in_app_browser", `action=${kind}${kind === "open_page" ? ` url=${urlParam || selector || ""}` : ""}`);
       if (kind === "snapshot") {
         const shot = await browser.snapshot?.({ selector, ref });
         return compactInspect(shot);
@@ -799,6 +799,22 @@ export function createMonitorPiToolHost({
       if (kind === "network_since") {
         const since = await browser.networkSince?.({ seq: 0 });
         return since ?? { requests: [] };
+      }
+      if (kind === "open_page") {
+        // 允许导航到其他页面以侦察系统特征，但不允许填写表单
+        const targetUrl = String(urlParam || selector || ref || "").trim();
+        if (!targetUrl) {
+          return { ok: false, error: "open_page 需要提供目标 URL（通过 url 或 selector 参数传入）" };
+        }
+        const result = await browser.openPage?.(targetUrl);
+        if (!result?.available && result?.available !== undefined) return result;
+        // 额外等待 3 秒让页面请求充分记录
+        await new Promise((r) => setTimeout(r, 3000));
+        return {
+          ok: true,
+          url: result?.url || targetUrl,
+          message: "页面已导航。可调用 list_recording_index 获取新增证据 seq，再用 read_request_shape 分析各请求。",
+        };
       }
       return { ok: false, error: "未知动作" };
     },
@@ -957,13 +973,14 @@ export function describeMonitorPiTools() {
     },
     {
       name: "control_in_app_browser",
-      label: "页面快照（只读）",
-      description: "仅允许 action=snapshot / screenshot / network_since。监控阶段禁止 click/fill 等写操作。",
+      label: "页面快照与导航（只读）",
+      description: "允许 action=snapshot / screenshot / network_since / open_page。open_page 可导航到新页面以侦察其初始证据（不填写任何表单）。监控阶段禁止 click/fill 等写操作。",
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", enum: ["snapshot", "screenshot", "network_since"] },
-          selector: { type: "string" },
+          action: { type: "string", enum: ["snapshot", "screenshot", "network_since", "open_page"] },
+          url: { type: "string", description: "action=open_page 时填写目标 URL" },
+          selector: { type: "string", description: "action=snapshot/screenshot 时的选择器（可选）；也可作为 open_page 的 URL 传入" },
           ref: { type: "string" },
         },
         required: ["action"],

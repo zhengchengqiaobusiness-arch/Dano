@@ -237,7 +237,7 @@ export class RecordingController {
       await Promise.race([
         monitorPi.beginLiveDrive({
           targetUrl: session.targetUrl,
-          goal: `侦察目标系统，写入上下文 Skill。仅做 snapshot + network_since，写入后立即终止。目标：${session.goal}`,
+          goal: `侦察目标系统所有页面，写入上下文 Skill。先读初始证据，再对 goal 中的每个额外 URL 调用 open_page 侦察，汇总后写入，立即终止。目标：${session.goal}`,
           timeoutMs: MONITOR_TIMEOUT_MS,
           hasResult: () => this.files.hasContextSkill(recordingId),
         }),
