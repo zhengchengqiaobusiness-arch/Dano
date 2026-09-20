@@ -1,4 +1,5 @@
-// Development contract check in a disposable Linux container. Not browser/model acceptance.
+// Disposable Linux contract check. Optional --real-service performs model calls;
+// synthetic JWT authentication never establishes OAuth/browser acceptance.
 import assert from 'node:assert/strict';
 import { mkdtemp, chmod, chown, mkdir, writeFile, readdir, readFile, rm } from 'node:fs/promises';
 import { createHash, createHmac } from 'node:crypto';
@@ -31,6 +32,17 @@ const environment = { PATH: process.env.PATH, NODE_ENV: 'test', HOME: options.ru
 const crashHost = process.argv.includes('--crash-host');
 const useCli = process.argv.includes('--cli');
 const withMemory = process.argv.includes('--memory');
+const realService = process.argv.includes('--real-service');
+if (realService) {
+  assert(withMemory && useCli, 'Real service mode requires --cli --memory');
+  const agentDir = join(root, 'host-agent');
+  await mkdir(agentDir, { mode: 0o700 }); await chown(agentDir, hostUid, hostGid);
+  const modelsPath = join(agentDir, 'models.json');
+  await writeFile(modelsPath, await readFile(process.env.DANO_FIXTURE_MODELS), { mode: 0o600 });
+  await chown(modelsPath, hostUid, hostGid);
+  environment.PI_CODING_AGENT_DIR = agentDir;
+  environment.NODE_EXTRA_CA_CERTS = process.env.NODE_EXTRA_CA_CERTS;
+}
 if (withMemory) {
   options.memoryConfigDirectory = join(root, 'private-config');
   await mkdir(options.memoryConfigDirectory, { mode: 0o700 });
@@ -39,7 +51,7 @@ if (withMemory) {
     const path = join(root, name), bytes = JSON.stringify(value); await writeFile(path, bytes, { mode: 0o644 });
     return { path, sha256: createHash('sha256').update(bytes).digest('hex') };
   };
-  const config = { version: 1, baseUrl: 'http://127.0.0.1:1', accountId: 'fixture', managementKey: 'SYNTHETIC_MANAGEMENT_KEY',
+  const config = realService ? JSON.parse(await readFile(process.env.DANO_FIXTURE_MEMORY_CONFIG, 'utf8')) : { version: 1, baseUrl: 'http://127.0.0.1:1', accountId: 'fixture', managementKey: 'SYNTHETIC_MANAGEMENT_KEY',
     encryptionKey: 'ab'.repeat(32), encryptionKeyVersion: 'v1', requestTimeoutMs: 100, maxContentBytes: 16384, policyVersion: 'v1',
     policy: { maxPayloadBytes: 4096, recallTimeoutMs: 1000, recallTokenBudget: 1500, recallLimit: 5, minimumScore: 0.5 },
     scheduler: { pollIntervalMs: 1000, initialBackoffMs: 1000, maxBackoffMs: 5000, maxAttemptsPerPhase: 5, maxOperationsPerTick: 4 },
@@ -99,7 +111,7 @@ try {
     const response = await fetch(`${origin}/api/clients`, { method: 'POST',
       headers: { authorization: `Bearer ${token(id)}`, 'content-type': 'application/json' }, body: '{}' });
     assert.equal(response.status, 201);
-    clients.push({ id, client: (await response.json()).client });
+    clients.push({ id, ...await response.json() });
   }
   if (withMemory) {
     const settings = async (entry, enabled) => {
@@ -114,6 +126,10 @@ try {
     }
     assert.equal((await settings(clients[0], true)).enabled, true);
     assert.equal((await settings(clients[1])).enabled, false);
+    if (realService) {
+      const { verifyMemoryHttpFlow } = await import('./protected-memory-http-flow.mjs');
+      await verifyMemoryHttpFlow({ origin, clients, token });
+    }
     assert.equal((await settings(clients[0], false)).enabled, false);
     const foreign = await fetch(`${origin}/api/clients/${clients[0].client.id}/memory/settings`, {
       headers: { authorization: `Bearer ${token(clients[1].id)}` } });
@@ -132,7 +148,7 @@ try {
     || p.cmdline.includes('/protected-host-entry.js') || p.cmdline.includes('/worker-broker-entry.js'));
   assert.deepEqual(remaining, []);
   console.log(JSON.stringify({ actualHttpHost: true, cliEntrypoint: useCli, hostNonRoot: true, twoWorkerIdentities: true,
-    exclusiveSupervisor: true, memorySettingsVerified: withMemory, shutdownMode: crashHost ? 'host-killed' : 'graceful', shutdownReclaimsChildren: true, browserVerified: false, modelVerified: false }));
+    exclusiveSupervisor: true, memorySettingsVerified: withMemory, shutdownMode: crashHost ? 'host-killed' : 'graceful', shutdownReclaimsChildren: true, browserVerified: false, modelVerified: realService }));
 } finally {
   stop.abort();
   await serving.catch(() => {});

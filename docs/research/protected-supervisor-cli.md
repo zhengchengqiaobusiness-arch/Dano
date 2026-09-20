@@ -153,3 +153,27 @@ directory; `deploy-compose.test.ts` passed separately (61 tests) without an
 inherited `PI_CODING_AGENT_DIR`. No product behavior or timeout was changed to
 make these checks pass. Compose overlay configuration was separately validated
 with synthetic values; actual Compose/browser and release gates remain open.
+
+### Real Dano HTTP/SSE memory flow — 2026-09-20
+
+The updated image above passed `--cli --memory --real-service` using the real
+OpenViking server and model gateway. This mode reads private fixture inputs
+from `DANO_FIXTURE_MEMORY_CONFIG` and `DANO_FIXTURE_MODELS`; an explicit
+`NODE_EXTRA_CA_CERTS` path supplies the existing trusted CA bundle. The model
+configuration is copied into the HTTP host's private agent directory, outside
+both users' tool workspaces. The service uses a fresh test account's ADMIN key
+for provisioning, with a fresh encryption key for its per-user credentials.
+
+`fixtures/protected-memory-http-flow.mjs` drives Dano's actual HTTP command and
+SSE event protocol: select the configured model, ask it to save the synthetic
+report-title/language preference, poll the operation until `ready`, verify
+source IDs/time and actual content, reject Bob's read of Alice's content with
+HTTP 403, create a new session and verify the model recalls both facts. The
+surrounding fixture verifies default-off settings, separate unapproved automatic
+collection, per-user settings, pause and complete process reclamation. The
+container completed successfully and was automatically removed.
+
+This is a supplemental real-model/service integration test with synthetic JWT
+identities. It did not perform OAuth login, rendered browser interaction,
+Compose deployment, image upload or quantitative quality/cost acceptance.
+Those gates remain required before #474/#465 can close.
