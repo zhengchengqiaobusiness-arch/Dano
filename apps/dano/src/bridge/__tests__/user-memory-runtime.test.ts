@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -37,7 +37,7 @@ async function harness() {
   const registered = vi.fn((_context, value: UserMemoryRuntime | undefined) => { runtime = value; });
   const create = withUserMemory(async () => profile, services, registered);
   async function start() { const bound = await create(context); profiles.push(bound); return bound; }
-  return { context, workspace, worker, services, release, registered, create, start, runtime: () => runtime! };
+  return { context, workspace, worker, profile, services, release, registered, create, start, runtime: () => runtime! };
 }
 function bind(profile: ProtectedSessionTools, worker: Awaited<ReturnType<ProtectedSessionTools["resolveWorker"]>>) {
   const handlers = new Map<string, (...args: any[]) => any>();
@@ -48,6 +48,39 @@ function bind(profile: ProtectedSessionTools, worker: Awaited<ReturnType<Protect
   profile.createMemoryExtension!(worker.workspace, worker)(pi);
   return { handlers, tools };
 }
+
+it("preserves isolated tools and damaged memory data when memory state cannot load", async () => {
+  const h = await harness();
+  const directory = join(h.profile.memoryStateDirectory!, "memory");
+  await mkdir(directory, { recursive: true });
+  const path = join(directory, "state.json");
+  await writeFile(path, "{damaged", { mode: 0o600 });
+  const profile = await h.start();
+  expect(profile.memory).toBeUndefined();
+  expect(profile.createMemoryExtension).toBeUndefined();
+  expect(await profile.resolveWorker(h.workspace)).toBe(h.worker);
+  expect(h.release).not.toHaveBeenCalled();
+  expect(h.registered).not.toHaveBeenCalled();
+  expect(await readFile(path, "utf8")).toBe("{damaged");
+  expect(h.services.provisioner.provision).not.toHaveBeenCalled();
+});
+
+it("retains ordinary tools when the memory owner registry is unavailable", async () => {
+  const h = await harness();
+  vi.mocked(h.services.owners.get).mockRejectedValue(new Error("OWNER_STORE_UNREADABLE"));
+  const profile = await h.start();
+  expect(profile.memory).toBeUndefined();
+  expect(await profile.resolveWorker(h.workspace)).toBe(h.worker);
+  expect(h.release).not.toHaveBeenCalled();
+});
+
+it("still rejects and releases a profile when tool isolation cannot be verified", async () => {
+  const h = await harness();
+  h.worker.assertIsolated.mockRejectedValue(new Error("ISOLATION_FAILED"));
+  await expect(h.start()).rejects.toThrow("ISOLATION_FAILED");
+  expect(h.release).toHaveBeenCalledTimes(1);
+  expect(h.services.owners.get).not.toHaveBeenCalled();
+});
 
 it("keeps default-disabled sessions offline and does not expose private fields in status", async () => {
   const h = await harness();

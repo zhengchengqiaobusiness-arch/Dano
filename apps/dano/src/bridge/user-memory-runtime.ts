@@ -160,7 +160,16 @@ export function withUserMemory(
       const workspace = join(context.folderPath, "workspaces", "default");
       const worker = await profile.resolveWorker(workspace);
       if (resolve(worker.workspace) !== resolve(workspace)) throw new Error("MEMORY_WORKER_WORKSPACE_MISMATCH");
-      runtime = await UserMemoryRuntime.create(context, profile.memoryStateDirectory, worker, options);
+      await worker.assertIsolated();
+      try {
+        runtime = await UserMemoryRuntime.create(context, profile.memoryStateDirectory, worker, options);
+      } catch {
+        // Memory persistence is optional for chat. Never repair or overwrite
+        // failed owner/state data here, and never fall back to unisolated tools.
+        // Recheck the boundary in case initialization failed on isolation itself.
+        await worker.assertIsolated();
+        return profile;
+      }
       onRuntime(context, runtime);
       const bound = runtime;
       let disposing: Promise<void> | undefined;
