@@ -7,6 +7,7 @@ import {
   createReadToolDefinition,
   createWriteToolDefinition,
   SettingsManager,
+  ModelRuntime,
   type AgentSessionRuntime,
   type CreateAgentSessionRuntimeFactory,
   type CreateAgentSessionFromServicesOptions,
@@ -84,7 +85,15 @@ export async function createDetachedAgentSessionRuntime(
     const services = await createAgentSessionServices({
       cwd: runtimeOptions.cwd,
       agentDir: runtimeOptions.agentDir,
-      modelRuntime: options.modelRuntime,
+      // User resource directories must not become model credential stores.
+      // Resolve deployment model configuration in the trusted host only.
+      modelRuntime: options.modelRuntime ?? (protectedProfile
+        ? await ModelRuntime.create({
+            authPath: join(getAgentDir(), "auth.json"),
+            modelsPath: join(getAgentDir(), "models.json"),
+            signal: lifetime.signal,
+          })
+        : undefined),
       settingsManager: protectedSettings ?? options.settingsManager,
       resourceLoaderOptions: protectedResources ?? {
         additionalExtensionPaths: [HEIMDALL_EXTENSION_PATH],

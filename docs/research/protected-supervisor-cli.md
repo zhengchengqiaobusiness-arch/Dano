@@ -28,6 +28,15 @@ its existing shutdown path stops the HTTP host and reclaims worker processes.
 The normal `start` command is unchanged; this entry does not switch an existing
 deployment or bypass memory release gates.
 
+Protected sessions keep their resource/settings directory separate from model
+configuration. Unless a model runtime is explicitly supplied, the HTTP host
+loads `models.json` and `auth.json` from its deployment agent directory
+(`getAgentDir()`, including `PI_CODING_AGENT_DIR`). Provision that directory as
+host-private storage. Credentials are not copied into per-user agent directories
+or tool workers. The startup/reload regression checks model discovery and
+configured authentication without making a provider request; real model calls
+remain a separate acceptance requirement.
+
 ## Validation scope
 
 Configuration tests cover complete input, nested secret/environment rejection,

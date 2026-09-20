@@ -85,6 +85,35 @@ it("routes file and interactive Shell operations through the worker without load
   expect(h.bindMemory).toHaveBeenCalledOnce();
 }, 30_000);
 
+it("loads deployment models from the host without copying credentials into the protected user directory", async () => {
+  const h = await harness();
+  const hostAgentDir = join(h.root, "host-agent");
+  await mkdir(hostAgentDir);
+  vi.stubEnv("PI_CODING_AGENT_DIR", hostAgentDir);
+  await writeFile(join(hostAgentDir, "models.json"), JSON.stringify({ providers: {
+    "host-model-fixture": {
+      baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "synthetic-host-key",
+      models: [{ id: "host-model", name: "Host model", reasoning: false, input: ["text"],
+        contextWindow: 16000, maxTokens: 1024,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+    },
+  } }));
+  const result = await createDetachedAgentSessionRuntime(h.workspace, SessionManager.inMemory(h.workspace),
+    { settingsManager: h.settingsManager, protectedTools: h.profile });
+  created.push(result);
+  const checkModel = () => {
+    expect(result.runtime.session.modelRuntime.getModel("host-model-fixture", "host-model"))
+      .toMatchObject({ id: "host-model", provider: "host-model-fixture" });
+    expect(result.runtime.session.modelRuntime.hasConfiguredAuth("host-model-fixture")).toBe(true);
+  };
+  checkModel();
+  await result.runtime.session.reload();
+  checkModel();
+  for (const name of ["models.json", "auth.json"]) {
+    await expect(readFile(join(h.profile.agentDir, name))).rejects.toMatchObject({ code: "ENOENT" });
+  }
+}, 30_000);
+
 it("retains explicitly approved Skills across reload without discovering workspace Skills", async () => {
   const h = await harness();
   const trusted = join(h.root, "approved-skill");
