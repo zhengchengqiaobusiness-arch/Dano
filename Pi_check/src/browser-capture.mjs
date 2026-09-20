@@ -1134,6 +1134,110 @@ export class PlaywrightBrowser {
     return { ok: results.every((item) => item.ok), filled: results.filter((item) => item.ok).length, results };
   }
 
+  /**
+   * 文件上传 —— Playwright 无头浏览器下的唯一可靠路径。
+   *
+   * 无头模式中：
+   *   · 拖拽 OS 文件 → Chromium 把 file:// 当导航 URL 打开，不触发 drop
+   *   · 点"选择文件" → Playwright 拦截 filechooser，原生 OS 对话框不弹出
+   * 解决方案：跳过人工干预，直接用 Playwright setInputFiles() 注入探针文件，
+   * 触发真实的 multipart 上传请求，录下完整的 wire contract。
+   *
+   * @param {string} selector  ref= / label= / placeholder= 等；为空则全页搜索 input[type=file]
+   * @param {string} [filePath] 本地文件路径；省略时使用 upload-probe.png 探针
+   */
+  async handleFileUpload(selector, filePath) {
+    return this.enqueue(async () => {
+      const page = this.livePage();
+      if (this.closed || !page) return { ok: false, error: "浏览器未打开" };
+
+      // ── 确定探针文件路径 ──
+      const { createRequire: _cr, ...nodeModule } = await import("node:module").catch(() => ({}));
+      const pathMod  = await import("node:path");
+      const urlMod   = await import("node:url");
+      const fsMod    = await import("node:fs");
+      const here     = pathMod.dirname(urlMod.fileURLToPath(import.meta.url));
+      const probeDef = pathMod.resolve(here, "upload-probe.png");
+      const targetFile = (filePath && fsMod.existsSync(String(filePath)))
+        ? String(filePath) : probeDef;
+      if (!fsMod.existsSync(targetFile)) {
+        return { ok: false, error: `探针文件不存在: ${targetFile}` };
+      }
+
+      // ── 定位 input[type=file] ──
+      const frames = [page, ...page.frames()];
+      let fileInput = null;
+      const token = String(selector || "").trim();
+
+      for (const frame of frames) {
+        try {
+          if (token) {
+            // 先看 selector 本身是否为 file input，再看其内部
+            for (const sel of [
+              `${token}`,
+              `${token} input[type="file"]`,
+              `${token} ~ input[type="file"]`,
+            ]) {
+              const loc = frame.locator(sel).first();
+              if (await loc.count()) { fileInput = loc; break; }
+            }
+          }
+          if (!fileInput) {
+            const loc = frame.locator('input[type="file"]').first();
+            if (await loc.count()) { fileInput = loc; break; }
+          }
+          if (fileInput) break;
+        } catch { /* try next frame */ }
+      }
+
+      if (!fileInput) {
+        return {
+          ok: false,
+          error: "找不到 input[type=file]。上传对话框可能尚未打开，先 click 上传按钮再调用 upload。",
+        };
+      }
+
+      // ── setInputFiles（方案 A：直接注入） ──
+      let ok = false;
+      try {
+        await fileInput.setInputFiles(targetFile, { timeout: 5000 });
+        ok = true;
+      } catch (_e1) {
+        // 方案 B：拦截 filechooser 事件
+        try {
+          const chooserPromise = page.waitForEvent("filechooser", { timeout: 4000 });
+          await fileInput.click({ force: true, timeout: 2000 }).catch(() => null);
+          const chooser = await chooserPromise;
+          await chooser.setFiles(targetFile);
+          ok = true;
+        } catch (e2) {
+          return { ok: false, error: `setInputFiles 失败: ${e2.message}` };
+        }
+      }
+
+      // ── 记录上传交互证据 ──
+      if (ok && typeof this.appendEvidence === "function") {
+        await this.appendEvidence("interaction", {
+          actor: "pi",
+          kind: "upload",
+          selector: token || 'input[type="file"]',
+          filename: pathMod.basename(targetFile),
+        }).catch(() => null);
+      }
+      this.#scheduleControlResnapshot(page, "upload");
+      await page.waitForTimeout(600); // 等上传控件更新预览
+
+      return {
+        ok: true,
+        url: page.url(),
+        action: "upload",
+        file: targetFile,
+        filename: pathMod.basename(targetFile),
+        note: "已通过 setInputFiles 注入文件。请用 network_since 确认 multipart 请求已发出，再交 Infer 建模。",
+      };
+    });
+  }
+
   async applyInput(event) {
     return this.#applyInputNow(event);
   }

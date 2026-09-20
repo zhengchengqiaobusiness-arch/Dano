@@ -348,6 +348,7 @@ export function createPiToolHost({
       after_seq = 0,
       fields = [],
       reason = "",
+      filePath = "",
     } = {}) {
       const kind = String(action || "").trim();
       if (kind === "network_since") {
@@ -448,33 +449,50 @@ export function createPiToolHost({
         return browser.fillFields?.(fields);
       }
       if (kind === "upload") {
-        // 文件上传（input[type=file]、附件、导入）需要人工操作：
-        // Pi agent 运行在沙箱中，无法访问用户本地文件路径，Playwright setInputFiles 无可用路径。
-        // 正确做法：暂停自动操作，让用户在预览里手动选择并上传文件，然后说继续。
-        // 继续后 Pi 应 snapshot 确认文件名已更新，再 network_since 取 multipart execute 证据。
+        // 文件上传：Playwright 无头浏览器中原生文件选择器永远不会弹出，
+        // 拖拽 OS 文件也会被 Chromium 当成 URL 导航。
+        // 正确做法：直接调用 browser.handleFileUpload() 用 setInputFiles() 注入探针文件，
+        // 触发真实的 multipart 上传请求，录下完整的 wire contract，无需人工介入。
         const target = String(selector || ref || "").trim();
+        if (browser?.handleFileUpload) {
+          const result = await browser.handleFileUpload(target, filePath || null).catch((e) => ({
+            ok: false,
+            error: e.message,
+          }));
+          if (result?.ok) {
+            return {
+              ...result,
+              next_action:
+                "文件已注入。请立即 network_since 确认 multipart 上传请求已发出（含 file_fields），再 snapshot 确认控件显示了文件名，然后交 Infer 建模。",
+            };
+          }
+          // setInputFiles 失败（对话框未打开 / input 未渲染）→ 提示先 click 打开再 upload
+          if (result?.error?.includes("找不到")) {
+            return {
+              ok: false,
+              action: "upload",
+              error: result.error,
+              hint: "上传对话框尚未打开。先用 click 点击「上传附件」按钮打开对话框，对话框出现后再调用 upload。",
+            };
+          }
+          // 其他失败 → 回退到 assist 让人工处理
+        }
+        // 回退：browser.handleFileUpload 不可用或失败，保留 assist 兜底
         const uploadMessage = String(
           reason ||
           `请在预览里${target ? `点击文件上传控件（${target}）` : "点击上传按钮"}，选择文件并完成上传，上传成功后说继续。`,
         );
-        try {
-          onAssist?.({ reason: uploadMessage });
-        } catch {
-          // 协助通知失败不得假装已送达
-        }
-        try {
-          onPauseForAssist?.({ reason: uploadMessage });
-        } catch {
-          // 暂停失败仍回协助已发出
-        }
+        try { onAssist?.({ reason: uploadMessage }); } catch { /* ignore */ }
+        try { onPauseForAssist?.({ reason: uploadMessage }); } catch { /* ignore */ }
         return {
           assist: true,
           paused: true,
           action: "upload",
           message: uploadMessage,
           human_can_click: true,
+          note: "浏览器不支持 setInputFiles，已暂停。用户手动上传后说继续。",
           next_action:
-            "已暂停等待文件上传。用户上传完成并说继续后：先 snapshot 确认文件名已出现，再 network_since 确认 multipart 上传请求已发出，然后交给 Infer 建模。",
+            "用户完成后：先 snapshot 确认文件名已出现，再 network_since 确认 multipart 上传请求已发出，然后交给 Infer 建模。",
         };
       }
       return {
@@ -647,7 +665,7 @@ export function describePiTools() {
     {
       name: "control_in_app_browser",
       label: "Control In App Browser",
-      description: "操作应用内浏览器。细节看 Skill 2。screenshot 设 as_image=true 才把图像送给模型。",
+      description: "操作应用内浏览器。细节看 Skill 2。screenshot 设 as_image=true 才把图像送给模型。\naction=upload：直接用 setInputFiles 注入探针文件，无需人工选文件（无头浏览器里原生文件选择器永远不弹）。先 click 打开上传对话框，再 upload。selector 填上传控件的 ref=/label= 即可；filePath 省略时自动用探针 PNG。",
       parameters: {
         type: "object",
         properties: {
@@ -661,6 +679,7 @@ export function describePiTools() {
           after_seq: { type: "integer" },
           fields: { type: "array" },
           reason: { type: "string" },
+          filePath: { type: "string", description: "本地文件绝对路径；省略则用内置探针 PNG" },
         },
         required: ["action"],
         additionalProperties: false,

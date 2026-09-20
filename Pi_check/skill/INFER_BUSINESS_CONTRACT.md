@@ -75,7 +75,9 @@ Investigator 叫你认一项产物时立刻工作。该项已按目标做完且�
 - `option_source`：只挂**当前能力表单或筛选条上真实存在的下拉/选择器**的选项接口。附件列表、审批时间线、流程定义、权限菜单、字典总表，都不是 option_source。
 - `fact_check`：打开查看后带出的详情、附件、审批进度，或提交后回读**该业务对象**。不要把“只带分页的列表刷新”挂进来，否则页面会把页码/每页条数画进该能力的系统字段。
 
-页面把该能力**所有 step** 的 `params` 平铺成「系统自动处理」。因此：写入/提交类能力的系统栏**只许来自 execute**。`preflight` / `option_source` 的 `params` 必须是空数组 `[]`。禁止把选项接口或打开表单请求里的页码、每页条数、排序、状态过滤、占位业务 ID 写进该能力任何 step 的 `params`。查询类能力的分页只写在它自己的 execute 上。
+页面把该能力**所有 step** 的 `params` 平铺成「系统自动处理」。因此：写入/提交类能力的系统栏**只许来自 execute**。`option_source` 的 `params` 必须是空数组 `[]`。只读性 `preflight`（GET，打开表单/载入记录）的 `params` 也必须是空数组。禁止把选项接口或打开表单请求里的页码、每页条数、排序、状态过滤、占位业务 ID 写进该能力任何 step 的 `params`。查询类能力的分页只写在它自己的 execute 上。
+
+> **例外——上传 preflight（multipart POST）**：若 `preflight` 是 `multipart/form-data` 文件上传请求（"两步上传"中先上传、再提交的那步），该步骤的 `params` **必须**包含文件字段（`source_kind=user_input, exposed_to_user=true, type=string, format=binary`）。不得写成空数组——否则调用方字段缺失，页面显示「调用方提供 0」且无法传入文件。详见「文件上传能力建模 → 两步上传模式」。
 
 ## 先建动作台账，再切能力
 
@@ -313,14 +315,72 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 #### 台账与能力区分
 
 - 「上传附件」与「提交表单」若是同一个 multipart 请求（一次提交里既含文件又含表单字段）→ 一项能力，execute 就是那条 multipart 请求。
-- 「先上传附件获得文件 ID，再用文件 ID 提交表单」→ 两步，上传是 preflight 或独立能力，提交是 execute；按实际请求链决定，看 `links`。
+- 「先上传附件获得文件 ID，再用文件 ID 提交表单」→ 两步，上传是 `preflight`（multipart POST），提交是 `execute`（JSON POST）；按实际请求链决定。见下方「两步上传模式」。
 - 「导入」功能（上传 Excel/CSV 批量写入）：上传请求本身就是 execute（服务端直接处理）；不要把它拆成「上传」+「导入」两项。
+
+#### 两步上传模式（先上传获得 URL，再提交）
+
+当录制中出现"先 `POST multipart` 上传文件 → 得到文件 URL/元数据 → 再 `POST JSON` 提交业务表单"的两步链时：
+
+**upload step（`usage=preflight`，`multipart/form-data`）**：
+
+`params` **必须**包含文件字段，不得为空数组：
+
+```json
+{
+  "key": "file",
+  "path": "body.file",
+  "label": "附件",
+  "type": "string",
+  "format": "binary",
+  "source_kind": "user_input",
+  "exposed_to_user": true,
+  "required": false,
+  "reason": "调用方在附件控件选择文件，系统在前置步骤以 multipart/form-data 上传，获取文件元数据后传入提交步骤。录制时使用探针文件占位，运行时由调用方传入真实文件。"
+}
+```
+
+该字段同时进 `input_schema.properties`（`type=string, format=binary, x-dano-business-type=file_upload`）。多文件控件用 `type=array, items.type=string, items.format=binary`。
+
+**execute step（`usage=execute`，JSON POST）**：
+
+execute 里的附件容器字段来自 preflight 响应，标为系统自动处理：
+
+```json
+{
+  "key": "attachments",
+  "path": "body.attachments",
+  "label": "附件元数据",
+  "type": "array",
+  "source_kind": "previous_response",
+  "exposed_to_user": false,
+  "from_step_id": "步骤ID（上传步骤的 step_id）",
+  "from_path": "response.data",
+  "required": false,
+  "reason": "前置上传步骤返回的附件元数据，原样带入提交请求，调用方无需额外处理。"
+}
+```
+
+`exposed_to_user=false`，**不**进 `input_schema.properties`，显示在「系统自动处理」。
+
+> **命名规则（防止两个"附件"混淆）**：upload preflight 的文件字段 `label` 用控件原文（如"附件"），而 execute 里的附件容器字段 `label` **必须**区别命名，使用"附件元数据"、"附件信息"、"附件（上传结果）"等，禁止与 preflight 文件字段同名。两者字段名相同会导致页面「调用方提供」和「系统自动处理」各出现一个"附件"，令用户困惑。
+
+**预期效果**：
+
+| 分区 | 字段 | 来源 |
+|------|------|------|
+| 调用方提供 | `file`（附件，binary） | 调用方在上传控件选择文件 |
+| 系统自动处理 | `attachments`（附件元数据） | 前置上传步骤响应 |
+
+> 这正确区分了「调用方提供文件」和「系统自动搬运上传结果」。调用方只关心"传什么文件"，不需要关心 URL 格式或元数据结构。
 
 #### 禁止
 
-- 禁止把文件字段标为 `source_kind=system` 并写死本场的文件名为 `constant`。
+- **禁止把两步上传的 preflight 步骤 params 写成空数组 `[]`**——文件字段缺失会导致页面「调用方提供」里没有文件字段，调用方无法传入文件。
+- 禁止把文件字段标为 `source_kind=system` 并写死本场的文件名为 `constant`——探针文件只是录制占位，不代表运行时也用探针。
+- 禁止把两步上传的文件字段和附件元数据字段都标成 `exposed_to_user=false`——调用方必须知道要传什么文件。
 - 禁止因为本场没有真实上传就把文件字段完全丢掉；可见可改的文件控件即使为空，也留调用方可选字段（写 unresolved 说明缺 wire path）。
-- 禁止把上传 URL（含 `upload` / `import` 路径段）误标为「鉴权/基建」；这些是业务 execute。
+- 禁止把上传 URL（含 `upload` / `import` 路径段）误标为「鉴权/基建」；这些是业务 execute 或 preflight。
 - 禁止用无文件版本的 JSON 提交替代 multipart execute 建模。
 
 ### 弹层选人/选记录的对象数组
@@ -495,7 +555,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 1. 先列出本场点过的独立业务动作。数量必须等于 `capabilities` + 仍缺证据的 `unresolved`。
 2. 每个能力都有互不相同的 `capability_id`、`name`、`title`，以及恰好一个不与其它能力共用的 `execute`。同名且同一 execute path 不得出现两份（含 `_v2`）。补 relation 用原 id 覆盖，不要新编 step。
 3. 每个能力的 `request_refs` 都是 `{step_id, usage}` 对象，并能在 `steps` 里找到同名 `step_id`。没有单独交只有 `capability_relations`、没有 `request_refs` 的项。
-4. 每个 step 的 `params` 都是数组。有元素时每个元素都有 `key` 和 `path`。`preflight` / `option_source` 必须是空数组 `[]`，不要为了凑这条去抄选项接口或打开表单的 query。
+4. 每个 step 的 `params` 都是数组。有元素时每个元素都有 `key` 和 `path`。`option_source` 和只读性 `preflight`（GET，打开表单）必须是空数组 `[]`，不要为了凑这条去抄选项接口或打开表单的 query。**例外**：`preflight` 若是 multipart 上传步骤（两步上传模式），params 必须包含 `exposed_to_user=true` 的文件字段，不得为空数组。
 5. 结果里没有 `capabilities[].fields`。
 6. 人能填/能选的筛选、表单、下拉、树、页签、日期、附件都在调用方字段里，并且都在 `input_schema`；`visible_control` 里可改的控件没有被写成系统。每个 `exposed_to_user=true` 的 param 都能在 schema 里找到同名 key。灰框/计算/自动编号/行主键/行类型码只在 params 且 `exposed_to_user=false`。
 7. 从列表行或上一步响应带出的主键/流程实例 ID 是系统字段，不是调用方输入，不要写进 `input_schema`。
@@ -524,7 +584,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 30. 确认弹层可填意见：有请求键则建成调用方，没有则写入 `unresolved`，没有编造写请求里没有的键。
 31. 弹层选人/选记录若对应对象数组：调用方 schema 是带实时候选的多选；execute step 有同容器的 `multi + label_subkey + element_template`；每个对象键来自常量或选项响应（含嵌套路径）；没有复制本场人员对象，也没有新增别名容器。
 32. 该动作已按目标把可见字段写上并点出 execute；需要证明绑定的键已经改过值，或已写入 `unresolved`。没有用空表保存换请求形状。没有只靠字段名相似、值相等或排除法定绑定。来源没看清没有写成已经理解业务。
-33. 写入/提交类能力的系统栏 params 只许来自 execute。`preflight` / `option_source` 的 params 是空数组。没有把页码、每页条数、排序、状态过滤、占位业务 ID 写成该能力的系统字段。
+33. 写入/提交类能力的系统栏 params 只许来自 execute。只读性 `preflight`（GET）和 `option_source` 的 params 是空数组。没有把页码、每页条数、排序、状态过滤、占位业务 ID 写成该能力的系统字段。**例外**：`preflight` 若是 multipart 上传步骤（两步上传模式），file 字段必须在 preflight.params 且 `exposed_to_user=true`，体现在「调用方提供」；execute 里的 attachments 标 `previous_response` 体现在「系统自动处理」。
 34. 协助之后没有再 click 同名提交/搜索钮。人已经发出 execute 的，按那条请求交，不要再点一遍。
 35. 首屏自动加载没有被当成已经查询。目标要求先查询后新增时，查询条件设齐并看到该查询 execute 之前没有进入新增。
 36. 没有在表单仍空、或目标要求的加行还没写上时点保存。

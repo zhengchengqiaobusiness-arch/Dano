@@ -89,22 +89,34 @@ PI 是操作者。人同时也可以点预览。你们共用同一只 Playwright
 
 ## 文件上传与导入
 
-文件控件（`control_kind=file`，即 `input[type=file]`）、附件上传按钮、表格导入按钮，PI 无法自动选择本地文件。必须走 `action=upload` 流程，不要用 `click` / `fill` 代替。
+文件控件（`control_kind=file`，即 `input[type=file]`）、附件上传按钮、表格导入按钮，**必须走 `action=upload`**，不要用 `click` / `fill` 代替。
+
+> **为什么人工拖拽/选择文件在预览里无效？**
+> Pi 使用 Playwright **无头（headless）浏览器**。无头模式下：
+> - 拖拽 OS 文件 → Chromium 把 `file://` 当导航 URL，不触发 drop 事件
+> - 点"选择文件" → Playwright 拦截 `filechooser`，原生 OS 对话框不会弹出
+>
+> 因此 `action=upload` **自动**用 Playwright `setInputFiles()` 注入探针文件，
+> 直接触发真实 multipart 上传请求，无需任何人工介入。
 
 **标准步骤（换任何页面都走这一遍）：**
 
-1. `snapshot` 确认文件控件存在（`control_kind=file` 或可见「上传/导入/选择文件」按钮），记下其 selector。
-2. 立刻 `action=upload`，`selector=` 该控件 selector，`reason=` 写清楚要人做什么（例如「请点击上传按钮选择测试附件（任意 xlsx 文件即可），上传成功后说继续」）。
-3. 等用户说继续，禁止在暂停期间再 click / fill / choose。
-4. 继续后：先 `snapshot` 确认文件名已出现在控件上；再 `network_since` 确认 multipart 上传请求已发出。
-5. 把 multipart 上传请求的 seq 告知 Investigator，由 Infer 认为本次能力的 execute 或 preflight。
+1. 若上传对话框尚未打开：先 `click` 点击「上传附件 / 导入 / 选择文件」按钮打开对话框。
+2. `snapshot` 确认对话框已出现（含 `input[type=file]` 或上传区域），记下 `ref=` 或 `label=`。
+3. `action=upload`，`selector=` 该控件的 ref/label（省略则全页搜 `input[type=file]`）。
+   - 系统自动找到隐藏的 `input[type=file]` 并调用 `setInputFiles()` 注入探针 PNG。
+   - 返回 `ok:true` 说明注入成功；返回 `error:找不到` 说明对话框未渲染 file input，先 `click` 再 `upload`。
+4. 立刻 `network_since` 确认 multipart 上传请求已发出（含 `file_fields`）。
+5. `snapshot` 确认控件显示了文件名（上传成功的 UI 反馈）。
+6. 把 multipart 请求 seq 告知 Infer，认为本次能力的 `file_upload` 步骤（`execute` 或 `preflight`）。
 
 **禁止：**
-- 不要用 `click` 点上传按钮后自己等文件选择对话框；PI 无法操作系统原生文件选择窗口。
-- 不要用 `fill` 往文件输入框写路径；浏览器安全策略不允许脚本设置 input[type=file] 的值。
-- 不要在没有真实 multipart 请求的情况下点表单提交按钮（会导致文件字段为空，capture 收不到 wire contract）。
-- 不要跳过文件上传步骤直接提交表单，然后把无文件版本的提交当成这个能力的 execute。
-- 导入功能与附件功能同等处理，不区分"导入"和"上传"标签，只要涉及文件选择都走 `upload`。
+- 不要用 `click` 点上传按钮后"等文件选择对话框"——无头模式下对话框不会出现。
+- 不要用 `fill` 往文件输入框写路径——安全策略禁止脚本直接设 `input[type=file].value`。
+- 不要在没有真实 multipart 请求的情况下提交表单（文件字段为空，录不到 wire contract）。
+- 不要跳过 `upload` 步骤直接提交，然后把无文件版本当该能力的 execute。
+- 不要因 `upload` 返回 `ok:true` 就跳过 `network_since`——必须确认请求确实发出。
+- 导入与附件同等处理，不区分标签，只要涉及文件选择都走 `action=upload`。
 
 协助发出之后：禁止再 click / fill / choose。只读 `recentUserActions` 和 `network_since`。直到用户说继续，不要自己再点。人已经发出预期请求就停手，交给 Investigator 去调 Infer。不要整张表重做。
 
