@@ -16,6 +16,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { askUserQuestionTool } from "./ask-user-question.js";
@@ -71,6 +72,7 @@ export async function createDetachedAgentSessionRuntime(
     disposeCredentialBinding?.();
     disposeCredentialBinding = undefined;
     const protectedProfile = options.protectedTools;
+    const hostSystemPromptPath = join(getAgentDir(), "SYSTEM.md");
     const protectedSettings = protectedProfile
       ? options.settingsManager ?? SettingsManager.create(runtimeOptions.cwd, protectedProfile.agentDir)
       : undefined;
@@ -95,7 +97,18 @@ export async function createDetachedAgentSessionRuntime(
           })
         : undefined),
       settingsManager: protectedSettings ?? options.settingsManager,
-      resourceLoaderOptions: protectedResources ?? {
+      resourceLoaderOptions: protectedResources ? {
+        ...protectedResources,
+        // Keep the deployment prompt in the trusted host configuration. A
+        // user's isolated resource directory must not replace the host prompt.
+        systemPromptOverride: () => {
+          try { return readFileSync(hostSystemPromptPath, "utf8"); }
+          catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+            throw error;
+          }
+        },
+      } : {
         additionalExtensionPaths: [HEIMDALL_EXTENSION_PATH],
         extensionsOverride: loaded => {
           if (options.credentialBroker && options.credentialBrokerScope) {

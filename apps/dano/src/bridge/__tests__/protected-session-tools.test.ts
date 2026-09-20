@@ -114,6 +114,21 @@ it("loads deployment models from the host without copying credentials into the p
   }
 }, 30_000);
 
+it("loads the deployment system prompt and refreshes it without copying it into user resources", async () => {
+  const h = await harness();
+  const hostAgentDir = join(h.root, "host-agent");
+  await mkdir(hostAgentDir);
+  vi.stubEnv("PI_CODING_AGENT_DIR", hostAgentDir);
+  await writeFile(join(hostAgentDir, "SYSTEM.md"), "Trusted deployment prompt one.");
+  await writeFile(join(h.profile.agentDir, "SYSTEM.md"), "User resource prompt.");
+  const runtime = await h.start();
+  expect(runtime.session.resourceLoader.getSystemPrompt()).toBe("Trusted deployment prompt one.");
+  await writeFile(join(hostAgentDir, "SYSTEM.md"), "Trusted deployment prompt two.");
+  await runtime.session.reload();
+  expect(runtime.session.resourceLoader.getSystemPrompt()).toBe("Trusted deployment prompt two.");
+  expect(await readFile(join(h.profile.agentDir, "SYSTEM.md"), "utf8")).toBe("User resource prompt.");
+}, 30_000);
+
 it("retains explicitly approved Skills across reload without discovering workspace Skills", async () => {
   const h = await harness();
   const trusted = join(h.root, "approved-skill");
