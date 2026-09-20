@@ -36,6 +36,34 @@ The #474–#477 release gates remain open.
 
 ## Current result
 
+### Standard Pi real-service acceptance — 2026-09-20
+
+The published `@josephyoung/pi-openviking@0.1.1` standard entry passed its
+ordinary Pi public RPC CLI flow in the Linux image
+`ce5fda72f0f76e1c387f2457637591d2072b855a052496c9027780543a2e0daf`:
+default-off status, interactive confirmation to enable, a model-triggered
+`memory_save`, background delivery reaching `ready`, `/memory show` displaying
+saved content and source, a new session recalling the synthetic title and
+language preference, and `/memory pause`. Automatic collection remained
+unapproved. The test found no memory API key in RPC events or captured stderr.
+The disposable container exited successfully and was configured for removal.
+
+The checked-in `fixtures/linux-cli-memory.mjs` and `fixtures/cli-memory-host.mjs`
+are the executed independent-repository fixtures adapted to installed-package
+ESM resolution and the repository image layout. Copy them under
+`/app/acceptance`, tokenizer assets under `/app/tokenizer`, and supply private
+model/USER-credential files as the two fixture arguments. They use a fresh
+`extension-test-*` account and write sanitized results to `/evidence/result.json`.
+The host callback rejects different model identities; the recall deadline is
+2 seconds. The gateway alias's tokenizer equivalence and aggregate token/cost
+quality still require separate verification.
+
+Connectivity used temporary SSH reverse forwards bound only to Podman VM
+loopback: the container connected to the existing loopback OpenViking service.
+This is standard Pi functional evidence, not Dano browser or clean Compose
+acceptance. The image predates the Dano host-model configuration fix; rebuilding
+the updated repository image continues separately.
+
 2026-09-18: **feasibility review passed for the selected Linux profile**;
 [PR #480](https://github.com/zhengchengqiaobusiness-arch/Dano/pull/480) merged as
 `eab2a9cb6e0d638e564e77cf957a233d531a0952` and #473 is closed. No memory runtime feature
