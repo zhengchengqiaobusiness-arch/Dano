@@ -264,3 +264,38 @@ downloads. Dockerfile now uses the same options. The full resulting image is
 its build log confirms zero downloads during deployment packaging.
 Logs: `/private/tmp/dano465-deploy-store-probe.log` and
 `/private/tmp/dano474-protected-offline-store-build.log`.
+
+## Fresh-user real-service regression and review (2026-09-20)
+
+The first capacity-plus-real-service run timed out waiting for ready. A reduced
+two-user run reached `failed` with the host-only code
+`MEMORY_NO_EXTRACTED_FACT`. Both reused the same remote account/user identities
+and the same fact from earlier successful runs, while discarding local state.
+The fixture now assigns fresh authenticated Dano identities for each real run,
+so prior remote facts cannot suppress extraction or satisfy recall assertions.
+It also fails immediately on a terminal failed receipt instead of polling it
+until the ready timeout. Production delivery behavior was not changed.
+
+On image `ef36dec85897d4c7170b581a94ad2a2439b93efbf777a43a630059fef1698ada`,
+both fresh-user runs passed: ordinary two-user save/ready/source/content/foreign
+denial/new-session recall, then the original capacity scenario with six extra
+sequential users and two worker slots. Both reclaimed all child processes.
+Logs: `/private/tmp/dano465-fresh-isolated.log` and
+`/private/tmp/dano465-fresh-worker-capacity.log`. Temporary diagnostic logging
+was removed after verification. These remain synthetic-JWT HTTP/SSE checks.
+
+Independent review of fixes through `0b612c18b`:
+
+- **Standards:** original missing-search-daemon finding resolved; zero new
+  proven hard violations. Duplicated ordinary/protected search supervision is
+  a maintainability observation, not a new release failure.
+- **Spec:** original memory-failure/chat and worker-capacity findings resolved;
+  zero new deterministic findings. Active operations, failed cleanup and old
+  logical-token reacquisition were reviewed.
+
+Neither review substitutes for the remaining browser/OAuth/Compose gates.
+The configured gateway lists only `qwen35`; an actual synthetic image request
+returned HTTP 400 with `qwen35 is not a multimodal model`. A vision-capable
+configuration and the real OAuth/OA configuration are still needed for the
+required browser image and authenticated-memory acceptance. No credentials or
+real user images were included in these diagnostic artifacts.

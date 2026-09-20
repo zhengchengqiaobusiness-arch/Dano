@@ -2,7 +2,7 @@
 // synthetic JWT authentication never establishes OAuth/browser acceptance.
 import assert from 'node:assert/strict';
 import { mkdtemp, chmod, chown, mkdir, writeFile, readdir, readFile, rm } from 'node:fs/promises';
-import { createHash, createHmac } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -35,6 +35,13 @@ const crashSearch = process.argv.includes('--crash-search');
 const useCli = process.argv.includes('--cli');
 const withMemory = process.argv.includes('--memory');
 const realService = process.argv.includes('--real-service');
+// The remote service outlives disposable containers. Use new authenticated
+// test identities so a prior run's extracted facts cannot satisfy or suppress
+// this run's save/recall assertions.
+const runIdentity = randomUUID();
+const primaryUsers = realService
+  ? [`alice-fixture-${runIdentity}`, `bob-fixture-${runIdentity}`]
+  : ['alice-fixture', 'bob-fixture'];
 const memoryFailure = process.argv.includes('--memory-failure');
 let memoryAccountId, corruptOwnerPath;
 if (memoryFailure) assert(realService, 'Memory failure check requires the real model/service configuration');
@@ -115,12 +122,12 @@ try {
   if (memoryFailure) {
     const directory = join(options.hostStateRoot, 'memory-service', 'owners');
     await mkdir(directory, { recursive: true, mode: 0o700 }); await chown(directory, hostUid, hostGid);
-    const digest = createHash('sha256').update(JSON.stringify([memoryAccountId, 'alice-fixture'])).digest('hex');
+    const digest = createHash('sha256').update(JSON.stringify([memoryAccountId, primaryUsers[0]])).digest('hex');
     corruptOwnerPath = join(directory, `${digest}.json`);
     await writeFile(corruptOwnerPath, '{damaged', { mode: 0o600 }); await chown(corruptOwnerPath, hostUid, hostGid);
   }
   const clients = [];
-  for (const id of ['alice-fixture', 'bob-fixture']) {
+  for (const id of primaryUsers) {
     const response = await fetch(`${origin}/api/clients`, { method: 'POST',
       headers: { authorization: `Bearer ${token(id)}`, 'content-type': 'application/json' }, body: '{}' });
     assert.equal(response.status, 201);

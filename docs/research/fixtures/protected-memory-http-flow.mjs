@@ -69,7 +69,11 @@ export async function verifyMemoryHttpFlow({ origin, clients, token, memoryUnava
       return;
     }
     await turn('请记住我的稳定偏好：验收报告以“竹影验收”作为标题，正文使用简体中文。请调用 memory_save 保存。');
-    const receipt = await wait(async () => (await read(endpoint)).items.find(item => item.phase === 'ready'), 180000);
+    const receipt = await wait(async () => {
+      const items = (await read(endpoint)).items;
+      assert(!items.some(item => item.phase === 'failed'), 'Memory extraction reached failed instead of ready');
+      return items.find(item => item.phase === 'ready');
+    }, 180000);
     assert(receipt.source?.sessionId && receipt.source?.entryId && receipt.createdAt);
     const contentPath = `${endpoint}/${receipt.id}/content/0`;
     const content = await read(contentPath);
