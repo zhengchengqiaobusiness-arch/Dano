@@ -93,3 +93,13 @@ EXPOSE 8080
 USER node
 ENTRYPOINT ["./deploy/docker-entrypoint.sh"]
 CMD ["node", "./dist/server/main.js"]
+
+# Explicit opt-in for the root supervisor. It drops HTTP-host privileges before
+# loading Dano; secrets belong in the separately provisioned private config.
+FROM runtime AS protected-runtime
+USER root
+ENTRYPOINT ["node", "./dist/server/protected-main.js"]
+CMD []
+
+# An ordinary build keeps the existing non-root entrypoint and startup behavior.
+FROM runtime AS default-runtime

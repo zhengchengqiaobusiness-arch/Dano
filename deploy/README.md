@@ -2,6 +2,34 @@
 
 This directory contains deployment-specific defaults and proxy config.
 
+## Protected memory image (acceptance only)
+
+Build the opt-in supervisor target from the same repository Dockerfile:
+
+```sh
+podman build --target protected-runtime -t dano-protected:acceptance .
+```
+
+This target starts `node ./dist/server/protected-main.js` as the root supervisor.
+Supply one root-owned supervisor JSON path as the container command. The
+supervisor validates installation/configuration ownership, prepares the isolated
+user roots and drops the HTTP host to the configured non-root UID/GID. See
+[the supervisor configuration contract](../docs/research/protected-supervisor-cli.md)
+and [private memory configuration](../docs/research/memory-host-configuration.md).
+Do not put credentials in the image, command line or supervisor JSON.
+
+Provision the supervisor file and host-private configuration with the required
+Linux ownership; a macOS bind mount does not establish that ownership. Use
+dedicated Linux named volumes for user runtime/state and keep private config
+separate. Production enablement remains gated on the full #465 acceptance,
+including governance, real-service/browser flows and backup/rollback. This
+target supplies the executable image entry; it does not provision the complete
+deployment automatically.
+
+The default Dockerfile target remains `default-runtime`, inheriting the existing
+non-root app entrypoint. Selecting `protected-runtime` is explicit and does not
+change ordinary deployments.
+
 ## Product Site Sidecar
 
 `apps/sites` is released independently from the Dano application and is served

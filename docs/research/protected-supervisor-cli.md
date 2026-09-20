@@ -86,3 +86,21 @@ browser behavior or the #474 end-to-end acceptance gate.
 The associated type check and server build pass. Full regression passes all
 132 test files: 1549 tests passed, one skipped. The two test containers, test
 image and its four new layers were removed; the reusable base image remains.
+
+### Repository Dockerfile image result — 2026-09-20
+
+The actual repository Dockerfile `protected-runtime` target built successfully
+as image `ce5fda72f0f76e1c387f2457637591d2072b855a052496c9027780543a2e0daf`.
+Image inspection confirms the root supervisor entrypoint
+`node ./dist/server/protected-main.js`, with no inherited command arguments.
+An ephemeral container with networking disabled successfully imported the
+published extension's `host` and `bootstrap` exports. Its installed package is
+`@josephyoung/pi-openviking@0.1.1` and includes both `pi-package` and
+`pi-extension` keywords. The built supervisor entry file exists.
+
+The selected deployment Dockerfile regression passed (one test; 60 unrelated
+tests skipped). The image is retained for subsequent isolated acceptance.
+These checks establish image construction and module loading only; they do
+not establish Compose provisioning, model calls, real OpenViking delivery or
+browser acceptance. The default Dockerfile target still inherits the ordinary
+non-root runtime entrypoint.
