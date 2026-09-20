@@ -124,6 +124,9 @@ export async function runProtectedSupervisor(options: ProtectedSupervisorOptions
     const child = spawn(guard, ["--reuid", String(host.hostUid), "--regid", String(host.hostGid),
       "--clear-groups", "--no-new-privs", "--", node, entry, JSON.stringify(host), ...args], {
       cwd: installation,
+      // Own a separate process group so a killed HTTP host cannot orphan its
+      // managed search daemon. Worker brokers have their own supervisor leases.
+      detached: true,
       env: { ...hostEnvironment, DANO_RUNTIME_DIR: options.runtimeRoot, DANO_SESSIONS_ROOT: options.sessionsRoot },
       stdio: ["ignore", "inherit", "inherit", "ipc"],
     });
@@ -144,7 +147,12 @@ export async function runProtectedSupervisor(options: ProtectedSupervisorOptions
     finally {
       signal?.removeEventListener("abort", stop);
       if (deadline) clearTimeout(deadline);
-      await rpc.close();
+      try {
+        if (child.pid) {
+          try { process.kill(-child.pid, "SIGKILL"); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+        }
+      } finally { await rpc.close(); }
     }
   } finally {
     try {

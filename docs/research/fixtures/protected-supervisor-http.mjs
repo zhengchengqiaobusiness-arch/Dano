@@ -30,6 +30,7 @@ const environment = { PATH: process.env.PATH, NODE_ENV: 'test', HOME: options.ru
   DANO_HOST: '127.0.0.1', DANO_PORT: '18710', DANO_PRODUCT_NAME: 'Supervisor Fixture', DANO_CONFIG_PATH: join(root, 'dano.config.json'),
   DANO_AUTH_JWT_SECRET: 'synthetic-supervisor-http-test-key' };
 const crashHost = process.argv.includes('--crash-host');
+const crashSearch = process.argv.includes('--crash-search');
 const useCli = process.argv.includes('--cli');
 const withMemory = process.argv.includes('--memory');
 const realService = process.argv.includes('--real-service');
@@ -137,18 +138,32 @@ try {
   }
   const live = await identities();
   assert(live.some(p => p.uid === hostUid && p.cmdline.includes('/protected-host-entry.js')));
+  const search = live.filter(p => p.cmdline.includes('open-websearch') && p.cmdline.includes('serve'));
+  assert(search.length > 0, 'managed search daemon missing');
+  assert(search.every(p => p.uid === hostUid), 'search daemon must run as the non-root host');
   assert(live.some(p => p.uid === 10001));
   assert(live.some(p => p.uid === 10002));
   if (crashHost) {
     const host = live.find(p => p.uid === hostUid && p.cmdline.includes('/protected-host-entry.js'));
     process.kill(Number(host.pid), 'SIGKILL');
+  } else if (crashSearch) {
+    process.kill(Number(search[0].pid), 'SIGKILL');
   } else stop.abort();
-  assert.equal(await serving, crashHost ? 1 : 0);
-  const remaining = (await identities()).filter(p => [10001, 10002].includes(p.uid)
-    || p.cmdline.includes('/protected-host-entry.js') || p.cmdline.includes('/worker-broker-entry.js'));
+  assert.equal(await serving, crashHost || crashSearch ? 1 : 0);
+  let remaining;
+  const cleanupDeadline = Date.now() + 5000;
+  do {
+    remaining = (await identities()).filter(p => [10001, 10002].includes(p.uid)
+      || p.cmdline.includes('/protected-host-entry.js') || p.cmdline.includes('/worker-broker-entry.js')
+      || (p.cmdline.includes('open-websearch') && p.cmdline.includes('serve')));
+    if (!remaining.length) break;
+    await delay(50);
+  } while (Date.now() < cleanupDeadline);
   assert.deepEqual(remaining, []);
   console.log(JSON.stringify({ actualHttpHost: true, cliEntrypoint: useCli, hostNonRoot: true, twoWorkerIdentities: true,
-    exclusiveSupervisor: true, memorySettingsVerified: withMemory, shutdownMode: crashHost ? 'host-killed' : 'graceful', shutdownReclaimsChildren: true, browserVerified: false, modelVerified: realService }));
+    exclusiveSupervisor: true, searchNonRoot: true, memorySettingsVerified: withMemory,
+    shutdownMode: crashHost ? 'host-killed' : crashSearch ? 'search-killed' : 'graceful',
+    shutdownReclaimsChildren: true, browserVerified: false, modelVerified: realService }));
 } finally {
   stop.abort();
   await serving.catch(() => {});
