@@ -14,10 +14,11 @@ const root = await mkdtemp('/tmp/dano-supervisor-http-');
 await chmod(root, 0o711);
 await writeFile(join(root, 'dano.config.json'), '{}\n', { mode: 0o644 });
 const hostUid = 1000, hostGid = 1000;
+const capacityMode = process.argv.includes('--worker-capacity');
 const options = {
   runtimeRoot: join(root, 'runtime'), sessionsRoot: join(root, 'sessions'), hostStateRoot: join(root, 'host-state'),
-  identities: { directory: join(root, 'identities'), firstUid: 10001, firstGid: 10001, count: 4, lockTimeoutMs: 5000 },
-  maxWorkers: 4,
+  identities: { directory: join(root, 'identities'), firstUid: 10001, firstGid: 10001, count: capacityMode ? 12 : 4, lockTimeoutMs: 5000 },
+  maxWorkers: capacityMode ? 2 : 4,
   broker: { installationDir, hostUid, hostGid,
     piPackageContext: join(installationDir, 'package.json'), privilegeGuard: '/usr/bin/setpriv',
     path: process.env.PATH, startupTimeoutMs: 30000, operationTimeoutMs: 10000,
@@ -114,6 +115,18 @@ try {
     assert.equal(response.status, 201);
     clients.push({ id, ...await response.json() });
   }
+  if (capacityMode) {
+    for (let index = 0; index < 6; index++) {
+      const id = `capacity-user-${index}`;
+      const headers = { authorization: `Bearer ${token(id)}`, 'content-type': 'application/json' };
+      const response = await fetch(`${origin}/api/clients`, { method: 'POST', headers, body: '{}' });
+      assert.equal(response.status, 201, 'sequential user could not acquire an idle worker slot');
+      const entry = await response.json();
+      const disconnected = await fetch(`${origin}/api/clients/${entry.client.id}/disconnect`, {
+        method: 'POST', headers, body: '{}' });
+      assert.equal(disconnected.status, 202);
+    }
+  }
   if (withMemory) {
     const settings = async (entry, enabled) => {
       const response = await fetch(`${origin}/api/clients/${entry.client.id}/memory/settings`, {
@@ -141,8 +154,14 @@ try {
   const search = live.filter(p => p.cmdline.includes('open-websearch') && p.cmdline.includes('serve'));
   assert(search.length > 0, 'managed search daemon missing');
   assert(search.every(p => p.uid === hostUid), 'search daemon must run as the non-root host');
-  assert(live.some(p => p.uid === 10001));
-  assert(live.some(p => p.uid === 10002));
+  const workerUid = uid => uid >= options.identities.firstUid && uid < options.identities.firstUid + options.identities.count;
+  if (capacityMode) {
+    const resident = new Set(live.filter(p => workerUid(p.uid)).map(p => p.uid));
+    assert(resident.size > 0 && resident.size <= options.maxWorkers, 'resident worker capacity exceeded');
+  } else {
+    assert(live.some(p => p.uid === 10001));
+    assert(live.some(p => p.uid === 10002));
+  }
   if (crashHost) {
     const host = live.find(p => p.uid === hostUid && p.cmdline.includes('/protected-host-entry.js'));
     process.kill(Number(host.pid), 'SIGKILL');
@@ -153,7 +172,7 @@ try {
   let remaining;
   const cleanupDeadline = Date.now() + 5000;
   do {
-    remaining = (await identities()).filter(p => [10001, 10002].includes(p.uid)
+    remaining = (await identities()).filter(p => workerUid(p.uid)
       || p.cmdline.includes('/protected-host-entry.js') || p.cmdline.includes('/worker-broker-entry.js')
       || (p.cmdline.includes('open-websearch') && p.cmdline.includes('serve')));
     if (!remaining.length) break;
@@ -161,7 +180,7 @@ try {
   } while (Date.now() < cleanupDeadline);
   assert.deepEqual(remaining, []);
   console.log(JSON.stringify({ actualHttpHost: true, cliEntrypoint: useCli, hostNonRoot: true, twoWorkerIdentities: true,
-    exclusiveSupervisor: true, searchNonRoot: true, memorySettingsVerified: withMemory,
+    exclusiveSupervisor: true, searchNonRoot: true, memorySettingsVerified: withMemory, sequentialCapacityVerified: capacityMode,
     shutdownMode: crashHost ? 'host-killed' : crashSearch ? 'search-killed' : 'graceful',
     shutdownReclaimsChildren: true, browserVerified: false, modelVerified: realService }));
 } finally {

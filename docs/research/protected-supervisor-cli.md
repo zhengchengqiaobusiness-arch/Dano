@@ -196,3 +196,25 @@ The log is `/private/tmp/dano465-search-startup.log`. This run did not yet verif
 the subsequent process-group cleanup or idle-worker eviction changes. Their
 new image build and abnormal-exit checks remain pending; browser/model gates
 are not implied by this lifecycle fixture.
+
+## Idle capacity and abnormal-exit validation (2026-09-20)
+
+Image `238a04213dda7ea8766d6667e3371ff8e07cb29ca1bb4e91b2515b7d1114cad5`
+contains the worker-pool and process-group cleanup changes. Three disposable
+Linux runs of `protected-supervisor-http.mjs --cli --memory` passed:
+
+- `--worker-capacity`: two retained clients plus six sequentially connected and
+  disconnected users, with at most two resident worker identities. Existing
+  users' memory settings remained accessible and isolated.
+- `--crash-host`: SIGKILL of the HTTP host produced exit code 1 and no remaining
+  host, search daemon, broker or worker processes.
+- `--crash-search`: SIGKILL of the search daemon stopped Dano with exit code 1
+  and reclaimed the same process set.
+
+Logs: `/private/tmp/dano465-worker-capacity.log`,
+`/private/tmp/dano465-crash-host.log`, `/private/tmp/dano465-crash-search.log`.
+All three containers used `--rm`. These are real process/HTTP checks with
+synthetic JWTs and offline memory configuration, not model, OAuth or browser
+acceptance. Old-token reacquisition and no command replay are separately
+covered by the supervisor RPC tests. The later SYSTEM.md fix is not in this
+image and requires its own updated-image validation.
