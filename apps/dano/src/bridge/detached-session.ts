@@ -74,7 +74,7 @@ export async function createDetachedAgentSessionRuntime(
     const protectedProfile = options.protectedTools;
     const hostSystemPromptPath = join(getAgentDir(), "SYSTEM.md");
     const protectedSettings = protectedProfile
-      ? options.settingsManager ?? SettingsManager.create(runtimeOptions.cwd, protectedProfile.agentDir)
+      ? options.settingsManager ?? SettingsManager.create(runtimeOptions.cwd, getAgentDir(), { projectTrusted: false })
       : undefined;
     const protectedResources = protectedProfile && protectedSettings
       ? protectedMemoryResources(protectedSettings,

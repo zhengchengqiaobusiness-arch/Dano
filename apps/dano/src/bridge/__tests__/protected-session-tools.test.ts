@@ -114,6 +114,33 @@ it("loads deployment models from the host without copying credentials into the p
   }
 }, 30_000);
 
+it("retains deployment settings without trusting workspace settings or copying host configuration", async () => {
+  const h = await harness();
+  const hostAgentDir = join(h.root, "host-agent");
+  await mkdir(hostAgentDir);
+  vi.stubEnv("PI_CODING_AGENT_DIR", hostAgentDir);
+  await writeFile(join(hostAgentDir, "settings.json"), JSON.stringify({
+    defaultProvider: "deployment-provider", defaultModel: "deployment-model", defaultThinkingLevel: "high",
+    defaultProjectTrust: "always",
+  }));
+  await mkdir(join(h.workspace, ".pi"));
+  await writeFile(join(h.workspace, ".pi/settings.json"), JSON.stringify({ defaultModel: "untrusted-workspace-model" }));
+  const result = await createDetachedAgentSessionRuntime(h.workspace, SessionManager.inMemory(h.workspace),
+    { modelRuntime: h.modelRuntime, protectedTools: h.profile });
+  created.push(result);
+  const check = () => {
+    const settings = result.runtime.session.settingsManager;
+    expect(settings.getDefaultProvider()).toBe("deployment-provider");
+    expect(settings.getDefaultModel()).toBe("deployment-model");
+    expect(settings.getDefaultThinkingLevel()).toBe("high");
+    expect(settings.isProjectTrusted()).toBe(false);
+  };
+  check();
+  await result.runtime.session.reload();
+  check();
+  await expect(readFile(join(h.profile.agentDir, "settings.json"))).rejects.toMatchObject({ code: "ENOENT" });
+}, 30_000);
+
 it("loads the deployment system prompt and refreshes it without copying it into user resources", async () => {
   const h = await harness();
   const hostAgentDir = join(h.root, "host-agent");
