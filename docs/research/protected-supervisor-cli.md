@@ -235,10 +235,11 @@ run deployment suite passed 61 tests with `PI_CODING_AGENT_DIR` unset
 passed and one remained skipped. Type checking and the 12 targeted protected/
 detached-session tests passed before this fixture-only adjustment.
 
-The latest image build was not executed: automatic approval review reported an
-account usage limit before launching Podman. The verified image above therefore
-still excludes the SYSTEM.md/settings fixes. Updated-image, OAuth, rendered
-browser, model and remaining release gates are outstanding.
+At this checkpoint, automatic approval review prevented the image build from
+launching because of an account usage limit. This temporary build blocker was
+subsequently resolved: the images and real-model checks documented below include
+the SYSTEM.md/settings fixes. OAuth, rendered browser and the remaining release
+gates are still outstanding.
 
 ## Memory-only initialization failure (2026-09-20)
 
@@ -299,3 +300,21 @@ returned HTTP 400 with `qwen35 is not a multimodal model`. A vision-capable
 configuration and the real OAuth/OA configuration are still needed for the
 required browser image and authenticated-memory acceptance. No credentials or
 real user images were included in these diagnostic artifacts.
+
+## Published CLI metadata and scoped cleanup (2026-09-20)
+
+GitHub Actions run `35336512204` reports successful publication of `0.1.1`.
+Although its npm log warns that the CLI bin was invalid and removed, direct
+registry metadata still maps `pi-openviking` to `dist/cli.js`. The downloaded
+published tarball also contains the bin mapping (`./dist/cli.js`) and the target
+file with a Node shebang. This inspection resolves the suspected missing-entry
+metadata defect; it does not replace an installed CLI execution check. Both
+`pi-package` and `pi-extension` are present in registry keywords.
+
+After confirming there were no containers and matching the recorded image IDs,
+the four superseded acceptance tags (`acceptance-20260920`,
+`acceptance-db2e1c4d`, `acceptance-worker-pool`, `acceptance-d816b948`) were
+removed successfully. A subsequent inspect confirms the current
+`acceptance-offline-store` image still resolves to
+`ef36dec85897d4c7170b581a94ad2a2439b93efbf777a43a630059fef1698ada`.
+No shared storage repair or global prune was performed.
