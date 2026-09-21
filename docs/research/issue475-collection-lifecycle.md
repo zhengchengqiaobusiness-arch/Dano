@@ -865,3 +865,23 @@ session root and its affected child directory were tightened to 0700 using
 no-follow directory handles, retaining UID and content. This fixture repair is
 not proof that the new source fix has been rebuilt. Automatic delivery, recall,
 withdrawal and concurrent pause gates remain pending until observed end to end.
+
+After the fixture permission repair, a fresh synthetic request registered one
+source session, reached collection `processed`, and produced an `automatic`
+operation at `ready`. The browser showed the new ready record. Withdrawing
+collection then displayed automatic collection unauthorized while long-term
+memory stayed enabled (consent revision 2). In a new chat, the real model
+correctly recalled the newly collected final-section preference, “松岚回顾”.
+Screenshot: `/private/tmp/dano475-automatic-recall-browser.png`.
+These observations are from image c42da19c with the scoped permission repair;
+the newly committed creation fix 887afae2 is being rebuilt separately. No
+concurrent pause/race, two-user or full parent release gate is implied.
+
+The 887afae2 image subsequently built and replaced the local app through Compose.
+Image digest: `63a9257c76350f8a72e753ad91e6152cd418b3107f3044fbb65b52f884ee34ec`.
+Its HTTPS/API/SSE smoke passed (`/private/tmp/dano475-887afae2-smoke.log`). After
+reconnecting the same authenticated browser, main memory remained enabled,
+automatic collection remained unauthorized at revision 2, and all three ready
+records remained visible. This proves persisted withdrawal survived this app
+replacement; crash/claim races and a fresh real OA transfer still need their
+separate acceptance cases.
