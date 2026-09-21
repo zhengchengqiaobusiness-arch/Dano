@@ -19,7 +19,7 @@ const root = await mkdtemp('/private/tmp/dano475-settlement-');
 let session;
 try {
   const cwd = join(root, 'workspace'), agentDir = join(root, 'agent');
-  await mkdir(cwd); await mkdir(agentDir);
+  await mkdir(cwd); await mkdir(agentDir); await mkdir(join(root, 'sessions'), { mode: 0o700 });
   await writeFile(join(agentDir, 'models.json'), await readFile(process.argv[3]), { mode: 0o600 });
   const owner = { accountId: 'settlement-probe', userId: 'synthetic' };
   const stateStore = new memory.FileStateStore({ owner, directory: join(root, 'private'), policyVersion: 'probe-v1' });
@@ -32,6 +32,8 @@ try {
     boundaries: [{ sessionId: manager.getSessionId(), entryId: manager.getLeafId(), branchId: manager.getLeafId() }] });
   const host = memory.createOpenVikingExtension({ owner, client, stateStore,
     assertToolIsolation: async () => {}, wakeDelivery() {},
+    collection: { sessions: new memory.CollectionSessionRegistry({ store: stateStore, sessionRoot: join(root, 'sessions') }),
+      lifecycleTimeoutMs: 5000, wake() {} },
     policy: { maxPayloadBytes: 8192, recallTimeoutMs: 100, recallTokenBudget: 100,
       recallLimit: 1, minimumScore: 0.5, countTokens: text => text.length } });
   const observations = [];

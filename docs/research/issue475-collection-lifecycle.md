@@ -350,3 +350,58 @@ Still pending: production host session registry/recovery and model wiring,
 cross-batch confirmation context, declassified task-fact projection, separate
 consent UI, status projection and the full lifecycle/browser acceptance gates.
 The independently published package and Dano pin remain `0.1.2`; #475 stays open.
+
+### Protected source recovery and standard-host consent wiring
+
+Extension commit `fdb88f1` adds `CollectionSessionRegistry`, which persists only
+the original pi session ID/file reference in owner state. The configured owner
+session root must be private and outside tool access. Registration/recovery
+reject foreign roots, symlink escapes, mismatched IDs, invalid ancestry and
+old-format sources. Recovery uses pi 0.85.1's public `parseSessionEntries` and
+`SessionManager.inMemory` APIs. It deliberately avoids `SessionManager.open`,
+which can repair empty files or migrate older sessions. Empty/corrupt sources
+remain unchanged when recovery fails.
+
+The extension now registers its source before a request and wakes collection only
+after durable `agent_settled`. These hooks require collection host configuration.
+Their separate `lifecycleTimeoutMs` bounds bookkeeping, including lock waits;
+late work cannot mutate state after cancellation. A fixed error callback reports
+failure without source text or blocking normal chat. An intermediate full-suite
+run exposed the incorrect reuse of a 50 ms recall budget for settlement; this was
+removed in favor of the explicit collection deadline, and the final suite passed.
+
+Standard pi gains separately confirmed `auto-enable` and `auto-disable` memory
+commands. Resume preserves an existing separate grant with fresh source
+boundaries; it does not grant collection implicitly. The launcher starts/stops an
+optional owner collection scheduler. The acceptance host script wires configured
+pi model/auth files, key screening, source recovery and both schedulers from its
+private configuration. Dano's production adapter has not yet been updated.
+
+Validation: all 145 extension tests pass, including original-source reopening,
+foreign roots and symlinks, corruption without repair, missing collected sources,
+live branch boundaries, completed-event wakeup, foreground timeout, separate
+confirmation/revocation and resume boundaries. Log:
+`/private/tmp/dano475-host-sessions-tests.log`.
+
+[The real host-restart fixture](fixtures/pi-collection-host-restart.mjs) runs real
+pi `AgentSession` requests against `mimo-v2.5`. It kills the chat process after two
+completed requests and their source references are durable. A separate process
+with no live session manager or Viewer recovers the original files and runs the
+selection scheduler. One real model call creates one queued operation from the
+stable preference; the synthetic credential message is excluded before the
+selection model. This assertion concerns the background selector, not the user's
+original chat request, which the chat model necessarily receives.
+
+The final run passed: `/private/tmp/dano475-real-host-restart-final.log`, with
+private synthetic evidence retained under
+`/private/tmp/dano475-host-restart-W9xdSv`. Selection reported 63 input, 29 output,
+832 cached-read and 924 total tokens. An earlier run also passed under
+`/private/tmp/dano475-real-host-restart.log`. This fixture does not exercise
+OpenViking delivery, protected Linux worker isolation or browser consent; those
+are separate gates. The existing settlement fixture was updated to supply the
+now-explicit collection host configuration.
+
+Remaining work includes Dano adapter/UI wiring, cross-batch confirmation context,
+declassified task-fact projection, standard CLI and browser full-flow acceptance,
+publishing the independent extension, exact Dano integration and the remaining
+#475 ACs. No published version or production deployment changed in this step.
