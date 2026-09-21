@@ -318,3 +318,30 @@ removed successfully. A subsequent inspect confirms the current
 `acceptance-offline-store` image still resolves to
 `ef36dec85897d4c7170b581a94ad2a2439b93efbf777a43a630059fef1698ada`.
 No shared storage repair or global prune was performed.
+
+## MiMo tokenizer preparation (2026-09-21)
+
+The requested browser model is now `mimo-v2.5`. Official public tokenizer assets
+from `XiaomiMiMo/MiMo-V2.5` were pinned to revision
+`63651580ca774f8504f676040460aed3e1244ac1`:
+
+- `tokenizer.json`: 7,033,572 bytes, SHA-256
+  `633518aad78f9f61bae2ae420d621215754a4424c918b052cd8c22a3b59e99d2`.
+- `tokenizer_config.json`: 15,167 bytes, SHA-256
+  `fd34b805f75a890a5c123d79a2982bbe240b3b6efb156d22401bd619484d9bd2`.
+
+A network-disabled disposable container using the retained `ef36dec8...` image
+loaded these assets through the actual built `MemoryTokenizers` service. Empty,
+Chinese, English, mixed symbol/emoji and XML-like quoted text yielded counts
+`0, 10, 11, 18, 9`, matching Python Hugging Face tokenizers 0.23.2 on the same
+assets with special tokens disabled. This proves asset/runtime compatibility
+for those samples, not API model identity or provider billing-token equivalence.
+Artifacts are under `/private/tmp/dano465-browser-nibutlhc/tokenizer`, with the
+probe script at the run root. The disposable container exited zero and was
+removed. No credentials were involved.
+
+The isolated Compose configuration is prepared at that run root with app/nginx,
+Linux runtime volumes and loopback ports 18710/18711. It has not been launched.
+Production OAuth/MiMo credential transfer was rejected by automatic approval
+review; a concrete scoped authorization question is pending. Production remains
+unchanged, and no secrets were copied by the rejected command.
