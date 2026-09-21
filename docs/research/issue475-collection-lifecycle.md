@@ -885,3 +885,66 @@ automatic collection remained unauthorized at revision 2, and all three ready
 records remained visible. This proves persisted withdrawal survived this app
 replacement; crash/claim races and a fresh real OA transfer still need their
 separate acceptance cases.
+
+### Multi-chat pause/resume and real transport reconciliation
+
+On image 887afae2, two in-app Browser tabs shared the authenticated owner but
+used separate chats. A new separate collection grant was visible in both at
+revision 3. Pausing in the first chat made a real `memory_save` in the second
+return `blocked / MEMORY_DISABLED`. Reopening settings in the second chat
+showed main memory paused and collection authorization retained but suspended.
+The save-record refresh button only reloads records; it does not refresh an
+already-open authorization panel. The server enforcement was verified directly
+through the second chat's real tool call.
+
+Resuming in the first chat advanced the collection receipt to revision 4. The
+second chat then collected a new synthetic quarterly-report preference
+(“溪桥复盘”) to `ready`. A read-only audit matched the single paused synthetic
+user entry (“雾杉收束”) against collection requests and operation sources:
+zero selected and zero delivered. The two automatic operations both remained
+ready, with no extra operation for paused history. Screenshots:
+`/private/tmp/dano475-peer-paused-browser.png`,
+`/private/tmp/dano475-peer-resumed-browser.png`.
+
+The new [real reconciliation fixture](fixtures/openviking-pause-reconciliation.mjs)
+imports the installed published 0.1.3 extension and uses isolated OpenViking
+0.4.20 with fresh synthetic Alice/Bob identities. It intercepts only responses
+after real append/commit mutations have succeeded. Verified results:
+
+- Pause before claim prevents any remote mutation and clears the unsent body.
+- A real append with a lost response remains `message_unknown`; a reopened
+  store reconciles by reading, then blocks further commit and clears its body.
+  Resume cannot replay it; exactly one append occurred.
+- A real commit with a lost response remains `commit_unknown`; a reopened
+  store queries the actual task and reaches `ready` while main memory is still
+  paused. Exactly one commit occurred, with terminal body cleanup.
+- Bob concurrently reaches ready while Alice is paused. Bob recalls only his
+  own synthetic fact, not Alice's.
+
+Evidence: `/private/tmp/dano475-real-pause-reconciliation.log`, private result
+`/private/tmp/dano475-pause-reconciliation-s19eKr/result.json`. This fixture
+reopens actual files but does not itself kill a process or prove browser
+isolation; those remain separate from the existing SIGKILL fixtures and browser
+checks. Full current Dano regression: 1591 passed, one skipped across 136 files
+(`/private/tmp/dano475-current-full-tests.log`).
+
+### Real branch lifecycle follow-up
+
+In the same protected browser chat, a non-factual greeting was edited through
+the product's real message editor (`navigate_tree`), preserving the earlier
+quarterly-report preference as an ancestor. The edited response completed.
+After selection, all four source requests were processed while only two
+automatic operations and two collected source receipts existed: the shared
+ancestor was not saved again. Screenshot:
+`/private/tmp/dano475-edited-tree-browser.png`.
+
+The [branch fixture](fixtures/pi-collection-branches.mjs) uses the installed
+published extension 0.1.3 and locked pi 0.85.1, with real MiMo chat and selection
+calls. It performs real runtime fork, tree navigation, reload and disposal.
+Checkpoint operation counts are 1, 1, 2, 2: the original preference is collected
+once, the fork greeting adds none, a new tree fact adds one, and the reload
+greeting adds none. Original ancestor source IDs remain stable and occur once
+in the operation ledger. No provider, selector output or pi transition is
+mocked; the fixture deliberately claims no remote memory delivery.
+Evidence: `/private/tmp/dano475-real-branches.log`,
+`/private/tmp/dano475-real-branches-LIkOW8/result.json`.
