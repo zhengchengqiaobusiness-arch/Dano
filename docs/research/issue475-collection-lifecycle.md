@@ -405,3 +405,46 @@ Remaining work includes Dano adapter/UI wiring, cross-batch confirmation context
 declassified task-fact projection, standard CLI and browser full-flow acceptance,
 publishing the independent extension, exact Dano integration and the remaining
 #475 ACs. No published version or production deployment changed in this step.
+
+### Cross-batch confirmation without replaying history
+
+Extension commit `c56fd2c` links a new request to its adjacent completed assistant
+proposition when the owner, scope, authorization epoch and collection revision
+match. The journal retains the proposition's entry ID, original timestamp and
+message digest, not its body. A copied fork ancestor can retain its original
+provenance; a short-ID collision, changed timestamp or changed content cannot
+borrow it. Input screening still runs on the original reference text.
+
+Only the new user's confirmation is an eligible collection source. The prior
+assistant message is evidence and cannot enqueue itself; the processed request
+and its receipt remain unchanged. The builder includes no older user messages.
+Merged batches deduplicate a shared reference, and the selector checks the actual
+branch's next user message so omitted rejection cannot become confirmation.
+Pause/resume or renewed automatic consent prevents importing an old reference.
+Receipt replay after pause remains truthful and cannot restore cleared payloads.
+
+All 155 extension tests pass (`/private/tmp/dano475-cross-batch-tests.log`). New
+coverage includes processed empty batches, positive confirmation and atomic
+handoff, missing confirmation, credential-containing references, intervening
+rejection, policy boundaries, shared-reference deduplication, copied fork
+provenance, ID/timestamp mismatch and a proposition modified after request start.
+These fork cases exercise copied original pi entries; full interactive fork/tree
+acceptance remains part of the overall lifecycle gate.
+
+[The real cross-batch probe](fixtures/pi-collection-cross-batch.mjs) passed all
+four cases with `mimo-v2.5`: confirmation after a processed batch, rejection,
+credential exclusion and an intervening rejection. Each batch performs real
+selection and durable handoff before the next request starts; the fixture does
+not inject a fake empty prior result. Only the positive case creates one queued
+operation, anchored to the new confirmation. The other cases create none.
+
+Dataset SHA-256:
+`1331bb40a90d27b97ee096f9b3bbf46fbd5e574d18bf8a13f5d5eed1f85db351`.
+The prompt remains
+`3043eb3c409ea0805af7fea6dddd37330139fed7bc76a036230d28d4af815430`.
+Both `/private/tmp/dano475-real-cross-batch.log` and the final-code repeat
+`/private/tmp/dano475-real-cross-batch-final.log` passed 4/4. The final run records
+nine model calls and token counts; each entire case took about 1.8–4.8 seconds.
+This is a synthetic semantic/handoff probe, not OpenViking delivery, browser
+acceptance or the full T-14 dataset. Dano wiring, declassified task-fact projection,
+the independent release and remaining #475 acceptance still need completion.
