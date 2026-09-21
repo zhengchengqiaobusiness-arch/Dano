@@ -478,7 +478,10 @@ async function mergeSessionDirectory(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
-  await fs.promises.mkdir(targetRoot, { recursive: true });
+  await ensureSafeDirectory(targetRoot, {
+    recursive: true,
+    unsafeDirectoryError: () => new Error("User session path is not a safe directory"),
+  });
   const sourceEncoded = sourceUserFolder
     .replace(/^[/\\]/, "")
     .replace(/[/\\:]/g, "-");

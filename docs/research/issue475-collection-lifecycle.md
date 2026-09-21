@@ -827,3 +827,41 @@ The Spec reviewer confirmed the P1 closed after inspecting the production
 UserRuntimeRegistry/withUserMemory/create path and these tests. Final review
 summary: Standards zero findings; Spec zero remaining source findings (one P1
 fixed). Image/browser gates remain outstanding.
+
+### Protected image and first browser collection gate (2026-09-21)
+
+The routed build of c42e08a8 finished successfully but was not deployed. The
+corrected c42da19c image then built successfully using the same real Dockerfile,
+official npm registry and TLS-verifying routes. Image digest:
+`e4d9267057b2e785c5cbf462f9a2737b05aa9f3b0af3b7ab88684da3189bfbfd`.
+Log: `/private/tmp/dano475-c42da19c-image-build-routed.log`.
+
+Only the existing local acceptance app was replaced through Compose. Its private
+configuration was backed up before enabling the configured MiMo collector.
+The fixed localhost ports, named volumes and trusted certificate were retained.
+The deployed HTTPS/API/anonymous Cookie/SSE smoke passed
+(`/private/tmp/dano475-c42da19c-smoke.log`). Both active owner workspaces passed
+the real Bubblewrap preflight on XFS with their separate worker UIDs.
+
+The authenticated in-app Browser proved main enable leaves automatic collection
+unauthorized. Separate consent displayed policy `dano-collection-v1`, revision 1
+and its effective timestamp. A synthetic preference was then submitted without
+an explicit save tool. The ordinary answer completed, but no collection session
+or request was registered; an assistant's claim to have recorded it is not
+delivery evidence.
+
+Diagnosis found the OA ownership-transfer path creates the destination session
+root with default 0755 permissions. The public collection registry correctly
+requires an owner-private 0700 root. The source provenance receipt was present.
+The fix uses the existing safe-directory helper when creating that destination.
+A regression test exercises ownership transfer with a separate protected session
+root, checks content retention and the private permissions. All eight registry
+tests and the server type check passed:
+`/private/tmp/dano475-session-transfer-permissions-tests.log`,
+`/private/tmp/dano475-session-transfer-typecheck.log`.
+
+For continued diagnosis, only the identified synthetic acceptance owner's
+session root and its affected child directory were tightened to 0700 using
+no-follow directory handles, retaining UID and content. This fixture repair is
+not proof that the new source fix has been rebuilt. Automatic delivery, recall,
+withdrawal and concurrent pause gates remain pending until observed end to end.

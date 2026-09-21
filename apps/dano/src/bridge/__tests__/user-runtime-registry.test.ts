@@ -15,6 +15,26 @@ afterEach(() => {
 });
 
 describe("UserRuntimeRegistry owner transfer", () => {
+  it("keeps a newly transferred protected session root private for collection", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-private-session-transfer-"));
+    runtimeRoots.push(root);
+    const source = userContext(root, "anonymous-source");
+    const target = userContext(root, "authenticated-target");
+    const sessionsRootPath = path.join(root, "protected-sessions");
+    const sourceRoot = path.join(sessionsRootPath, path.basename(source.folderPath));
+    const targetRoot = path.join(sessionsRootPath, path.basename(target.folderPath));
+    writeText(path.join(sourceRoot, "session.jsonl"), "synthetic session\n");
+    const registry = new UserRuntimeRegistry(async () => {
+      throw new Error("transfer must not create a backend");
+    }, { sessionsRootPath });
+    await registry.transferOwnership(source, target, {
+      assertIdle() {}, async commitOwnership() {},
+    });
+    expect(fs.statSync(targetRoot).mode & 0o777).toBe(0o700);
+    expect(fs.readFileSync(path.join(targetRoot, "session.jsonl"), "utf8")).toBe("synthetic session\n");
+    await registry.dispose();
+  });
+
   it("binds each server user context to its own protected backend profile", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-protected-users-"));
     runtimeRoots.push(root);
