@@ -98,6 +98,7 @@ export async function runProtectedSupervisor(options: ProtectedSupervisorOptions
   for (const resource of [...host.trustedSkillPaths, host.providerPythonModuleDirectory]) {
     if (!inside(installation, await realpath(resource))) throw unsafe();
   }
+  host.trustedSkillPaths = await Promise.all(host.trustedSkillPaths.map(path => realpath(path)));
   const [passwd, groups] = await Promise.all([
     execute("/usr/bin/getent", ["passwd"], { timeout: 10000, maxBuffer: 1024 * 1024 }),
     execute("/usr/bin/getent", ["group"], { timeout: 10000, maxBuffer: 1024 * 1024 }),
@@ -120,7 +121,7 @@ export async function runProtectedSupervisor(options: ProtectedSupervisorOptions
     await prepareLinuxProcessPrivacy(host.hostUid, host.hostGid);
     signal?.throwIfAborted();
     const pool = new WorkerSupervisor({ usersRoot, hostStateRoot: options.hostStateRoot, identities,
-      maxWorkers: options.maxWorkers, broker: options.broker });
+      maxWorkers: options.maxWorkers, broker: options.broker, trustedReadPaths: [...host.trustedSkillPaths, await realpath(host.providerPythonModuleDirectory)] });
     const child = spawn(guard, ["--reuid", String(host.hostUid), "--regid", String(host.hostGid),
       "--clear-groups", "--no-new-privs", "--", node, entry, JSON.stringify(host), ...args], {
       cwd: installation,

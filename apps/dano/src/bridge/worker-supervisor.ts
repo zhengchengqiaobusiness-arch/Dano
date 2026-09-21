@@ -15,6 +15,8 @@ export interface WorkerSupervisorOptions {
   hostStateRoot: string;
   identities: WorkerIdentityRegistry;
   maxWorkers: number;
+  /** Root-validated read-only resource roots, never supplied over host RPC. */
+  trustedReadPaths?: readonly string[];
   broker: Omit<WorkerBrokerProfile, "workspace" | "agentDir" | "stateDir" | "workerUid" | "workerGid">;
 }
 type Factory = (ownerId: string, workspace: string) => Promise<SupervisedWorker>;
@@ -42,7 +44,8 @@ export class WorkerSupervisor {
     this.#factory = factory ?? (async (ownerId, workspace) => {
       const provisioned = await provisionWorkerWorkspace({ usersRoot: options.usersRoot,
         hostStateRoot: options.hostStateRoot, identities: options.identities,
-        hostUid: options.broker.hostUid, hostGid: options.broker.hostGid, userId: ownerId, workspace });
+        hostUid: options.broker.hostUid, hostGid: options.broker.hostGid, userId: ownerId, workspace,
+        trustedReadPaths: options.trustedReadPaths });
       const { startWorkerBroker } = await import("./start-worker-broker.js");
       const worker = await startWorkerBroker({ ...options.broker,
         workspace: provisioned.workspace, agentDir: provisioned.agentDir, stateDir: provisioned.stateDir,

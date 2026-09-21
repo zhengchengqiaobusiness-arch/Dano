@@ -13,8 +13,20 @@ interface Options {
   hostUid: number;
   hostGid: number;
   identities: WorkerIdentityRegistry;
+  /** Canonical read-only installation resources approved by the privileged launcher. */
+  trustedReadPaths?: readonly string[];
 }
 const unsafe = () => new Error("UNSAFE_WORKER_WORKSPACE");
+
+export function workerSandboxPolicy(workspace: string, trustedReadPaths: readonly string[] = []) {
+  const paths: Record<string, { mode: "read" | "write" }> = { [workspace]: { mode: "write" } };
+  for (const path of trustedReadPaths) {
+    if (!isAbsolute(path) || resolve(path) !== path || path === workspace
+      || workspace.startsWith(path + "/") || path.startsWith(workspace + "/") || path === "/") throw unsafe();
+    paths[path] = { mode: "read" };
+  }
+  return { disabled: [], sandbox: { enabled: true, userNamespace: false, paths } };
+}
 
 async function directory(path: string, hostUid: number, gid: number, mode: number, allowedGroups: number[]): Promise<FileHandle> {
   try { await mkdir(path, { mode: 0o700 }); }
@@ -106,9 +118,8 @@ export async function provisionWorkerWorkspace(options: Options): Promise<{ work
     await ensure(configuration, identity.gid, 0o750);
     await ensure(join(configuration, "agent"), identity.gid, 0o750);
     await policyFile(join(configuration, "agent/heimdall.json"), {}, options.hostUid, identity.gid);
-    await policyFile(join(configuration, "heimdall.json"), { disabled: [], sandbox: {
-      enabled: true, userNamespace: false, paths: { [workspace]: { mode: "write" } },
-    } }, options.hostUid, identity.gid);
+    await policyFile(join(configuration, "heimdall.json"),
+      workerSandboxPolicy(workspace, options.trustedReadPaths), options.hostUid, identity.gid);
     const privateRoot = join(hostStateRoot, createHash("sha256").update(options.userId).digest("hex"));
     await ensure(privateRoot, options.hostGid, 0o700);
     const agentDir = join(privateRoot, "agent"), stateDir = join(privateRoot, "state");
