@@ -45,7 +45,7 @@ installation paths are not granted access by this projection.
 The private reader and parser have automated coverage for normal reads,
 configuration absence, corrupt input, permission violations, symlinks and hard
 links. Runtime service construction and protected-host startup wiring now use
-the published and pinned extension `0.1.4`. The supervisor's optional
+the published and pinned extension `0.1.5`. The supervisor's optional
 `memoryConfigDirectory` supplies only a private path; the non-root host reads
 the configuration, constructs owner/credential/provisioning services and starts
 the explicitly configured tokenizer workers. It composes these services with

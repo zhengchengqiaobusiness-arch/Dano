@@ -1294,3 +1294,51 @@ receipt, while `collectSelection` only checks the automatic source ledger.
 Resolve this same-source overlap before #475 sign-off; do not skip an entire
 turn, which could discard additional facts that were not explicitly saved.
 The remote no-extraction result alone does not prove why OpenViking returned it.
+
+### Explicit/automatic overlap correction
+
+Independent extension [PR #3](https://github.com/josephyoung/pi-openviking/pull/3)
+merged as `b05c47d922de8dc407fc5c3dae462ef9db45af0a`, with candidate version
+`0.1.5`; the remote PR branch was deleted. The input builder now verifies an
+explicit save against protected owner state and the native user entry/content,
+scope and authorization epoch before presenting exclusion-only context to the
+selector. Signing and verification share the same source encoder. This context
+undergoes local secret screening, carries no operation ID to the model and
+cannot itself become a selected source. The model omits overlapping facts,
+including paraphrases, without skipping other eligible facts in the same turn.
+Failed or unverifiable explicit saves do not suppress candidates. Inference and
+handoff recheck state changes so that a failed explicit save cannot silently
+discard automatic candidates.
+
+The 194 extension tests passed, including partial overlap, invalid receipts,
+different source/scope/version, local secret screening and failure races.
+The real MiMo overlap probe passed 6/6 cases (three repeated paraphrase trials,
+partial overlap, failed receipt, forged receipt). The existing task-fact 12/12
+and conversation 7/7 semantic regressions also passed. Standards and Spec
+incremental reviews found zero remaining findings. Evidence:
+`/private/tmp/dano475-extension015-tests.log`,
+`/private/tmp/dano475-explicit-dedup-semantic.log`,
+`/private/tmp/dano475-dedup-task-regression.log`, and
+`/private/tmp/dano475-dedup-conversation-regression.log`.
+
+Overlap dataset hash:
+`04522699136f41671ba3d83fffd459b7759d73207c4a9eb9b32074259f54d875`;
+new prompt hash:
+`cecb970f4cbe9ee9a4a705d70432b67353c8f3f63c6115eeabcd846bb85e754c`.
+Semantic equivalence remains a model decision; these results do not prove
+arbitrary paraphrase coverage. Publication, exact Dano integration and both
+the mixed-save and two-fact browser cases remain required before sign-off.
+
+Automatic npm publish run `35626565050` succeeded. After registry propagation,
+official metadata and the downloaded `0.1.5` tarball verified integrity
+`sha512-vSgHpdqXkLkJSNWvVdymmahTzzEIDeD5DW6txDKmBdXl/cVVFi+aIwYit94wvAJpJ46EA0XaOpq5JykrNz7lng==`.
+The CLI mapping, executable source and required package keywords remain present.
+Evidence: `/private/tmp/pi-openviking015-publish.log`,
+`/private/tmp/pi-openviking015-registry.json`, and
+`/private/tmp/pi-openviking015-artifact/package.tgz`.
+
+Dano now pins official `0.1.5` in its manifest and lockfile without other
+dependency changes. Type/Svelte checks and all 91 memory-related tests across
+14 files pass (`/private/tmp/dano475-extension015-dano-check.log` and
+`/private/tmp/dano475-extension015-dano-tests.log`). Rebuilt-browser validation
+is still pending at this checkpoint.
