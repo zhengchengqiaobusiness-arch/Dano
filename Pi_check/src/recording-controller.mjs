@@ -184,7 +184,7 @@ export class RecordingController {
    * @param {object|null} browser - 已打开的浏览器实例（用于快照）
    */
   async #runMonitorPhase(session, browser = null) {
-    const MONITOR_TIMEOUT_MS = Number(process.env.MONITOR_PI_TIMEOUT_MS || 90000); // 默认 90秒
+    const MONITOR_TIMEOUT_MS = Number(process.env.MONITOR_PI_TIMEOUT_MS || 30000); // 默认 30秒（缩短以减少黑屏时间）
     const recordingId = session.id;
 
     const monitorSkillText = await readMonitorSkill();
@@ -405,6 +405,7 @@ export class RecordingController {
     onComplete = null,
     onAssist = null,
     onFailed = null,
+    onBrowserReady = null,  // 浏览器打开后立即回调，用于提前开始推流截图（消除黑屏）
   }) {
     assertNeverStartLegacy();
     await readRequiredSkills();
@@ -468,6 +469,11 @@ export class RecordingController {
         authVaultPath: path.join(this.files.directory(session.id), "auth-vault.json"),
       });
       slot.browser = browser;
+
+      // 浏览器已就绪 → 立即回调前端开始推流截图，消除黑屏等待
+      if (typeof onBrowserReady === "function") {
+        try { onBrowserReady(browser); } catch { /* ignore */ }
+      }
 
       // 给浏览器约 4 秒加载初始页面，让网络请求证据有机会被记录
       await new Promise((r) => setTimeout(r, 4000));

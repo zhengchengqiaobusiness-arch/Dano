@@ -322,6 +322,18 @@ export function attachFrontendBridge(httpServer, { controller, catalog, disconne
               storageState: message.storage_state || null,
               viewport: message.viewport || null,
               onThought: think,
+              onBrowserReady: (browser) => {
+                // 浏览器打开后立即开始推流，消除监控 PI 期间的黑屏
+                if (message.viewport) {
+                  browser?.setViewport?.(message.viewport).catch(() => {});
+                }
+                startFrames(browser);
+                send(ws, snapshot("recording", {
+                  label: "正在打开业务页面...",
+                  progress: { step: "capturing", label: "监控 PI 正在侦察目标系统（约 20–30 秒）..." },
+                }));
+                logPiOnly("浏览器已就绪，提前开始推送截图帧");
+              },
               onComplete: async (payload) => {
                 try {
                   await publishResult(payload, { subsystem: message.subsystem });
