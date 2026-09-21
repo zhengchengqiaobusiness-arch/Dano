@@ -1036,3 +1036,88 @@ These are deterministic/integration results, not final release acceptance. The
 new source still needs final review, a verified actual OA response contract in
 the isolated deployment, real model/OpenViking task-fact evidence and a rebuilt
 protected image. Do not label the prior P2 fully accepted from these tests alone.
+
+### Task-fact image and acceptance follow-up
+
+Both review axes completed their follow-up on `4b8c6c53`: no new findings;
+the Spec reviewer considered the production task-fact wiring gap fixed in code,
+with real provider/model/delivery acceptance still outstanding. The source build
+passed. The protected image `localhost/dano475-protected-image:4b8c6c53` built
+successfully (image ID
+`8ee73868b7eac71f5bd897e74cf94e6d041b11fffab8c9bb672adc59a67b3bab`)
+and replaced only the existing isolated local acceptance deployment.
+
+The first smoke attempt timed out creating a client during startup. Once the
+browser reconnected, the repeated smoke passed health, anonymous cookie, client
+creation, SSE, command/response and disconnect. Evidence:
+`/private/tmp/dano475-4b8c6c53-smoke.log` and
+`/private/tmp/dano475-4b8c6c53-smoke-ready.log`. Both active worker workspaces
+passed the existing Bubblewrap preflight on XFS with exit code zero. The browser
+reconnected at the persistent trusted `https://localhost:18711/` origin without
+a new certificate trust operation.
+
+The attempted browser OA schema probe did **not** execute a provider request:
+the application model declined it because the corresponding OA capability was
+not configured. This is neither an OA response-contract result nor task-fact
+acceptance. The deployment still has no approved task-fact contract; real
+contract verification, selection/delivery and new-image product gates remain
+open. No production deployment was performed.
+
+### Production task-fact adapter to real model and OpenViking
+
+`docs/research/fixtures/dano-task-fact-delivery.mjs` passed using the installed
+pi `0.85.1`, published extension `0.1.3`, Dano's actual `CredentialBroker` and
+`MemoryTaskFacts`, real `mimo-v2.5`, and the isolated real OpenViking service.
+The business HTTP server and Assistant Turn events are explicitly synthetic.
+The fixture does not claim real OA semantics or a model-initiated business call.
+
+The broker sent three authenticated loopback HTTP requests using host-held
+synthetic credentials. The owned successful response produced one signed
+allowlisted projection. After reopening the native on-disk pi session and
+constructing a new receipt verifier, the real selector chose one fact sourced
+from the tool-result entry. Real delivery reached `ready`, and real recall
+returned the synthetic `REPORT-731` template. A foreign actor produced zero
+receipts and zero selected facts. After consent withdrawal the business request
+still succeeded, but no collection request or receipt was produced. Assertions
+also excluded raw private response fields and provider credentials from selector
+input and collection state.
+
+Evidence: `/private/tmp/dano475-task-delivery.log` and
+`/private/tmp/dano475-task-delivery-rywXR7/result.json`. Two real selector calls
+took 1900 ms and 2266 ms. These isolated timings are not the full T14 benchmark.
+The private synthetic remote-owner credentials are retained only in the mode-0600
+run artifact for scoped cleanup; they are not source or report data.
+
+### New-image browser regression and actual OA response shape
+
+The `4b8c6c53` image passed real in-app-browser plain chat, model-triggered
+`bash ls`, and upload/vision. MiMo returned the requested chat marker, executed
+`ls`, and correctly described the fixed synthetic upload as red circle, blue
+square and yellow triangle from left to right. Screenshots:
+`/private/tmp/dano475-4b8c6c53-chat-bash-browser.png` and
+`/private/tmp/dano475-4b8c6c53-image-browser.png`. This used the same persistent
+HTTPS origin and one upload of the existing approved synthetic image.
+
+A separate administrator diagnostic ran inside the isolated container against
+the configured real profile endpoint. It reused the encrypted server-side
+login credential in process memory and emitted only HTTP/business status,
+field names/types and whether the actor matched the authenticated owner. It
+did not print identifiers, credentials or profile values and did not collect
+memory. The initial direct request returned HTTP 200 with business code 401;
+unlike the application's broker path, this diagnostic did not refresh tokens.
+After normal browser logout and real OA login back to the clean fixed origin,
+the repeated request returned HTTP 200, business code 0, and verified that
+`data.id` maps to the stored authenticated Dano owner. The response has scalar
+profile fields plus nested company/department objects and role arrays.
+
+Evidence: `/private/tmp/dano475-oa-contract-shape-current.log`; the earlier 401
+is retained in `/private/tmp/dano475-oa-contract-shape.log`. The browser showed
+the existing memory records after re-login; screenshot:
+`/private/tmp/dano475-4b8c6c53-relogin-memory-browser.png`.
+
+This proves a real read-only response/actor contract, not a real task mutation
+or production collection policy. The isolated profile has no trusted OA Skills
+and no `collection.taskFacts` contract yet. Deployment contract configuration,
+its new-policy consent boundary, and protected-runtime task-fact capture remain
+to be exercised before signing off #475. Real personal profile values must not
+be used as synthetic acceptance facts.
