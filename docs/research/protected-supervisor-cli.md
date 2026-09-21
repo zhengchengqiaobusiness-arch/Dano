@@ -399,3 +399,38 @@ bypass was needed. The previous request for user certificate trust is withdrawn.
 AGENTS.md now requires reuse and retention of these persistent assets, and
 renewing leaves under the same CA. This resolves TLS navigation only; OAuth
 and the memory/browser flow remain separate acceptance gates.
+
+## Actual MiMo browser image and bash acceptance (2026-09-21)
+
+The persisted model configuration initially supplied the environment variable
+name as a literal API key. Pi 0.85.1 requires `$XIAOMI_TOKEN_PLAN_CN_API_KEY`
+for environment resolution. Correcting the persisted and mounted configuration
+resolved the observed browser authentication error; the real configured auth
+key was compared to the process environment without logging either value.
+
+The in-app Browser then received `DANO465_MIMO_BROWSER_OK` from MiMo V2.5.
+A real upload of the fixed synthetic `shapes.png` produced the correct ordered
+description: red circle, blue square, yellow triangle. A subsequent model turn
+actually invoked bash with `ls`; the rendered executed-command card and reply
+showed `uploads`. Screenshots are `mimo-image-browser.png` and
+`mimo-bash-browser.png` under `/private/tmp/dano465-browser-nibutlhc`.
+
+A direct bwrap bind/write/read/ls preflight used the active broker's actual
+workspace, Linux xfs mount, and worker UID 10002 and exited zero. The initial
+fixture unnecessarily requested fresh proc/devpts mounts, which the container
+denied. The minimal fixture uses only the workspace, read-only executable
+libraries and `/dev/null`; no application sandbox policy, capabilities or
+Compose security settings were relaxed. The actual model-triggered bash turn
+separately proves the shipped integration.
+
+Opening Long-term Memory in that anonymous session displayed the login-required
+message and exposed no enable/save controls. Its screenshot is
+`anonymous-memory-browser.png` in the same run directory.
+
+These browser turns use the existing anonymous session. OA autofill was visible
+in a screenshot and login was submitted, but OA presented a slider CAPTCHA.
+Action-time confirmation for that challenge remains pending; no CAPTCHA was
+bypassed. Authenticated OAuth callback and authenticated memory save/read/recall
+remain unproven. The isolated stack and both browser tabs are retained for
+continued acceptance. Persistent credentials and trusted TLS assets remain
+excluded from cleanup.
