@@ -305,3 +305,48 @@ The final small payload-deduplication and missing-receipt guards were covered by
 the 120-test suite after that service run. Runtime scheduling, browser consent
 and the remaining acceptance gates above are still pending. This does not close
 #475 or publish the extension.
+
+### Durable background selection scheduler
+
+Extension commit `d41ddaa` adds the owner-level `CollectionScheduler`. It uses
+configurable merge/max-wait windows, a per-batch request limit, durable selection
+attempts and expiring claim tokens. One owner claim prevents concurrent inference
+by other instances; a replaced or expired token cannot commit a result. Sibling
+pi branches are processed separately. Missing sessions, failed inference and
+non-cooperative callbacks have bounded attempts and an observable
+`selection_failed` state. Pause invalidates active claims; processed requests are
+not read or selected again on startup.
+
+The original pi entries remain the source of truth. The trusted host supplies an
+owner-bound session resolver and model adapter; this scheduler does not infer
+session ownership from arbitrary paths. File-state reads and transactions now
+accept cancellation while waiting for their lock. Cancellation before mutation
+cannot become a delayed write after the lock is released; an atomic write already
+started completes its durable commit.
+
+Validation: all 135 extension tests and TypeScript checks pass. In addition to
+the actual pi input/selector/handoff pipeline, coverage includes two scheduler
+instances, merge/max-wait behavior, batch limits, sibling branches, SIGKILL after
+a persisted claim, expired-claim replacement, pause during inference, exhausted
+retries, non-cooperative callbacks, late handoff and real filesystem lock
+contention. Log: `/private/tmp/dano475-scheduling-tests.log`.
+
+[The scheduled real-service probe](fixtures/openviking-collection-scheduler.mjs)
+also passed. Real `mimo-v2.5` selected both synthetic user preferences with one
+call (383 input, 74 output, 512 cached-read, 969 total reported tokens). The
+collection scheduler produced one operation from two sources. After SIGKILL,
+the delivery scheduler reopened the same owner state and reached OpenViking
+`ready`. Alice recalled the fixed report ending, Bob's own scope was empty, and
+forged cross-user read/write/search each returned 403. A restarted collection
+scheduler did not reopen processed sources or call the model again.
+
+Evidence: `/private/tmp/dano475-real-scheduler.log`; private audit directory:
+`/var/folders/nw/mhq_0_3x2rdbj8qpbl3xt3gr0000gn/T/dano475-collection-scheduler-g4ENNN`.
+The probe ran before the subsequent lock-cancellation addition; the full suite
+passed after that addition. The probe uses synthetic pi message entries and the
+real selection model/service, not the browser's automatic-collection UI.
+
+Still pending: production host session registry/recovery and model wiring,
+cross-batch confirmation context, declassified task-fact projection, separate
+consent UI, status projection and the full lifecycle/browser acceptance gates.
+The independently published package and Dano pin remain `0.1.2`; #475 stays open.
