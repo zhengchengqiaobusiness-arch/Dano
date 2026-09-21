@@ -95,3 +95,41 @@ these fields from actual entries, durably capture request completion and enforce
 source boundaries before selection. Sources rejected before enqueue, coalesced
 batches, privacy filtering and interrupted-request recovery are not implemented
 by this receipt table. Package version remains 0.1.2 and this work is unpublished.
+
+## Request lifecycle integration (2026-09-21)
+
+Independent extension commit `e53bbf5` connects a metadata-only request journal
+to `before_agent_start` and `agent_settled`. It snapshots the current original
+entry boundary before the new user message is persisted. Retries/continuations
+may retain an in-process request token; a new process cannot silently resume an
+unfinished request as though it had settled. Tree divergence invalidates an old
+anchor, and forks start after their copied ancestors. Successful settlement
+requires a new user message and a final assistant message with `stopReason=stop`;
+error, aborted, length-limited and unfinished tool rounds are not accepted.
+Blocking extension UI prompts defer settlement. Pause or collection revocation
+blocks running and settled requests in the same transaction as delivery policy.
+
+The journal stores IDs and policy metadata only. Completed records remain in the
+owner store across service reconstruction for the forthcoming selection worker.
+Shutdown is not the sole persistence point. An interrupted run without a durable
+settlement is not inferred to have completed; starting a fresh run discards that
+unfinished record and establishes a current boundary.
+
+Validation: 75 extension tests pass (`/private/tmp/dano475-lifecycle-tests.log`).
+The additional [real AgentSession probe](fixtures/pi-collection-settlement.mjs)
+ran two actual `mimo-v2.5` requests through installed pi 0.85.1 and the unpublished
+extension. Observed message counts before each request were 0 and 2. At both
+`turn_end` and `agent_end`, the newest journal record remained running; at
+`agent_settled`, it was durably settled. Both requests had two distinct source
+references with no overlap. Probe log: `/private/tmp/dano475-real-settlement.log`.
+The initial probe import failed before any request because the package exposes
+an ESM-only entrypoint; the corrected probe reads the manifest's import export.
+
+This probe disables all tools and uses an empty recall transport. It proves pi
+lifecycle ordering with a real model, not isolation, privacy selection, automatic
+OpenViking delivery, cancellation races or Dano UI acceptance. The final type
+export/shutdown-reference cleanup and malformed-journal test were verified by the
+75-test suite after the model probe. Privacy filtering, bounded coalescing,
+selection-worker recovery, Dano form-wait integration, bounded unavailable-store
+behavior and the separate authenticated consent UI remain outstanding. Neither
+package publication nor the Dano exact dependency has changed.
