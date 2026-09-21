@@ -198,3 +198,80 @@ assistant proposals), allowlisted/declassified task facts, bounded merge and
 selection-worker recovery, runtime credential snapshot wiring, separate consent
 UI, and complete real-service/browser acceptance. Package publication and Dano's
 exact installed `0.1.2` remain unchanged.
+
+## Source-backed fact selection (2026-09-21)
+
+Independent extension commit `7c60c31` adds `CollectionFactSelector` over the
+screened inputs. It orders settled requests using original pi entry positions,
+rejects mixed branches/overlapping source sets, and gives the model opaque local
+message labels rather than owner IDs or internal session metadata. Accepted
+quotes must exist verbatim in a screened source. A confirmed assistant proposal
+must point to the next actual user entry on that branch, including entries
+omitted from the batch or excluded by screening. Its source anchor is that user
+confirmation; both quoted evidence references are retained. A user-source item
+cannot claim the assistant-confirmation structure. Duplicate facts collapse.
+
+The model is told that automatic consent is already enforced by the host, so a
+stable direct user preference does not need a second request to remember it.
+Assistant references remain unconfirmed until the model identifies explicit
+confirmation and the deterministic evidence/ordering checks pass. Those checks
+prove provenance and structural eligibility, not semantic truth by themselves.
+Model output has byte/count limits, a deadline and an abort signal; one complete
+JSON code fence is normalized safely. Errors return fixed codes, and policy is
+rechecked before inference and after its result. The selector only returns
+candidates: it does not persist selected payloads or enqueue OpenViking writes.
+
+Validation: all 109 extension tests pass. New coverage includes exact references,
+forged source/text, confirmation order, omitted intermediate rejection, foreign
+branches, already-aborted work, an actually invoked non-cooperative model,
+late results after pause/resume, scanner-eliminated inputs, and JSON fences.
+A full-suite run also exposed a pre-existing test cleanup race: fixture removal
+preceded scheduler shutdown. The fixture now drains its tracked schedulers before
+removing its own directory. No scheduler production behavior was changed.
+Log: `/private/tmp/dano475-selection-tests.log`.
+
+### Real MiMo semantic probe and failed attempts
+
+[The fixed semantic fixture](fixtures/pi-collection-selection.mjs) uses actual
+pi state/lifecycle/input screening and `ModelRuntime.completeSimple` against
+`mimo-v2.5`. It covers a stated preference, a question, an unconfirmed inference,
+an explicitly confirmed assistant proposal, rejection, quoted injection and a
+hypothetical. Its seven-case dataset SHA-256 stayed unchanged throughout:
+`2424843ca73365308fc43e8019c5d53b0d810eb9c7c94ce18d249b71e18847e1`.
+
+Failures were retained rather than counted as success:
+
+- Default MiMo settings passed 4/7; three calls hit the unchanged 45-second
+  deadline. Several empty results consumed hundreds of output tokens.
+  `/private/tmp/dano475-real-selection.log`.
+- Disabling thinking alone passed 4/7, then a diagnostic reproduction passed
+  6/7. Missing direct preferences, JSON fences and an incorrect proposal anchor
+  were observed. Logs: `dano475-real-selection-disabled.log` and
+  `dano475-real-selection-diagnostic.log` under `/private/tmp`.
+- Clarifying automatic consent and accepting JSON fences passed 6/7. The remaining
+  wrong anchor selected the initial request for advice rather than the confirmed
+  assistant proposition. `/private/tmp/dano475-real-selection-v2.log`.
+- The final prompt adds a general confirmed-proposal example using ISO date
+  formatting (not a dataset answer), and validation rejects a confirmation
+  structure attached to a user-source item. The probe requests disabled thinking
+  and temperature 0 through the public model API, retaining the same cases,
+  expected outcomes, 45-second deadline, maximum facts and output budget.
+  These parameters are supported by the
+  [official MiMo API](https://mimo.mi.com/docs/en-US/api/chat/openai-api).
+
+The final prompt hash is
+`3043eb3c409ea0805af7fea6dddd37330139fed7bc76a036230d28d4af815430`.
+The first final-profile run passed 7/7 in about 0.58–2.06 seconds per case,
+recording input/output/cache token counts. Its log is
+`/private/tmp/dano475-real-selection-v3.log`. An unchanged repeat also passed
+7/7 (0.62–3.96 seconds per case), recorded in
+`/private/tmp/dano475-real-selection-v3-repeat.log`. The fixed fixture remains a small
+component check, not the Spec T-14 dataset, a privacy proof, a price calculation,
+or real automatic OpenViking delivery.
+
+Remaining implementation includes durable selection results and atomic outbox
+handoff, owner-level bounded coalescing/recovery, confirmation context across
+already-processed batches, safe allowlisted task-fact projection, host model and
+credential-snapshot wiring, bounded unavailable-store behavior, separate consent
+UI and real multi-user/pause/browser/service acceptance. Dano still installs the
+published `0.1.2`; this feature remains unpublished.
