@@ -38,6 +38,8 @@ Promise<{ services: UserMemoryServices; close(): Promise<void> } | undefined> {
       scheduler: config.scheduler,
       ...(config.collection ? { collection: { ...config.collection,
         selector: memoryCollectionModel(config.collection, modelRuntime!, [config.managementKey, config.encryptionKey]),
+        taskFacts: config.collection.taskFacts ? { config: config.collection.taskFacts,
+          key: Buffer.from(config.encryptionKey, "hex") } : undefined,
       } } : {}),
     };
     return { services, close: () => tokenizers.close() };

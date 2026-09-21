@@ -7,6 +7,7 @@ import { withUserMemory, type UserMemoryRuntime, type UserMemoryServices } from 
 import type { ProtectedSessionTools } from "../protected-session-tools.js";
 import { FileStateStore, DeliveryScheduler, CollectionSessionRegistry, CollectionLifecycle, CollectionScheduler, MemoryDelivery } from "@josephyoung/pi-openviking/host";
 import { LazyMemoryClient } from "../lazy-memory-client.js";
+import { oauthUserId } from "../oauth-user-id.js";
 
 const roots: string[] = [];
 const profiles: ProtectedSessionTools[] = [];
@@ -309,6 +310,25 @@ function configureCollection(services: UserMemoryServices) {
     scheduler: { pollIntervalMs: 1000, mergeWindowMs: 20, maxWaitMs: 50, workTimeoutMs: 2000,
       leaseMs: 5000, initialBackoffMs: 50, maxBackoffMs: 100, maxAttempts: 2, maxRequestsPerBatch: 5 } };
 }
+
+it("binds provider fact capture to the authenticated runtime grant and disposal", async () => {
+  const h = await harness(); configureCollection(h.services); h.context.user.id = oauthUserId("oa-alice");
+  h.services.collection!.taskFacts = { key: Buffer.alloc(32, 9), config: { maxResponseBytes: 8192, maxFactBytes: 1024,
+    contracts: [{ id: "report", method: "GET", path: "/report", success: { path: ["code"], equals: 0 },
+      actorPath: ["data", "owner"], fields: [{ label: "reference", path: ["data", "reference"], type: "string" }] }] } };
+  const profile = await h.start();
+  const input = { toolName: "provider_request" as const, toolCallId: "call", loginSessionBound: true,
+    request: { method: "GET", path: "/report" }, response: { ok: true as const, status: 200, headers: {},
+      body: JSON.stringify({ code: 0, data: { owner: "oa-alice", reference: "REPORT-42" } }) } };
+  expect(await profile.captureTaskFact!(input)).toBeUndefined();
+  await profile.memory!.setEnabled(true);
+  expect(await profile.captureTaskFact!(input)).toBeUndefined();
+  await profile.memory!.setAutomaticCollection(true, "collection-v1");
+  expect(await profile.captureTaskFact!(input)).toMatchObject({ data: expect.stringContaining("REPORT-42"), signature: expect.any(String) });
+  await profile.memory!.setAutomaticCollection(false);
+  expect(await profile.captureTaskFact!(input)).toBeUndefined();
+  await profile.dispose!(); expect(await profile.captureTaskFact!(input)).toBeUndefined();
+});
 
 it("requires a separate current-policy grant and preserves its scope across pause/resume and revocation", async () => {
   const h = await harness(); configureCollection(h.services);

@@ -142,7 +142,7 @@ export async function createDetachedAgentSessionRuntime(
         danoVersionTool,
         options.askUserQuestionTool ?? askUserQuestionTool,
         ...(options.credentialBroker && options.credentialBrokerScope
-          ? [options.credentialBroker.createTool(options.credentialBrokerScope)]
+          ? [options.credentialBroker.createTool(options.credentialBrokerScope, protectedProfile?.captureTaskFact)]
           : []),
       ] as unknown as ToolDefinition[],
     });

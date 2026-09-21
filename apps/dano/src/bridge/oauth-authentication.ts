@@ -8,6 +8,7 @@ import {
 import * as fs from "node:fs";
 import type * as http from "node:http";
 import * as path from "node:path";
+import { oauthUserId } from "./oauth-user-id.js";
 import { writeFile as writeFileAtomically } from "atomically";
 import type {
   BridgeAuthenticationState,
@@ -890,7 +891,7 @@ function externalIdentityUser(identity: ExternalIdentity): AuthenticatedUser {
   const username = identity.displayName?.trim() || "已登录用户";
   const avatarUrl = safeAvatarUrl(identity.avatarUrl);
   return {
-    id: `oauth_${digest(identity.userId)}`,
+    id: oauthUserId(identity.userId),
     username,
     ...(avatarUrl ? { avatarUrl } : {}),
   };

@@ -5,6 +5,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { ProviderCredential } from "./oauth-provider.js";
+import type { CaptureProviderTaskFact, ProviderTaskFactReceipt } from "./memory-task-facts.js";
 
 const AUTHENTICATION_REQUIRED = {
   ok: false,
@@ -338,7 +339,7 @@ export class CredentialBroker {
     state.awaitingTurn = undefined;
   }
 
-  createTool(scope: string) {
+  createTool(scope: string, captureTaskFact?: CaptureProviderTaskFact) {
     return defineTool({
       name: "provider_request",
       label: "Provider Request",
@@ -353,21 +354,21 @@ export class CredentialBroker {
       prepareArguments: prepareProviderRequestArguments,
       executionMode: "sequential",
       execute: async (
-        _toolCallId,
+        toolCallId,
         request,
         signal,
         _onUpdate,
         context,
-      ): Promise<AgentToolResult<ProviderResponse>> => {
-        const response = await this.request(
-          scope,
-          context.sessionManager.getSessionId(),
-          request,
-          signal,
-        );
+      ): Promise<AgentToolResult<ProviderResponse & { danoTaskFacts?: ProviderTaskFactReceipt[] }>> => {
+        const sends: ProviderSendEvidence[] = [];
+        const response = await this.bindRequest(scope, context.sessionManager.getSessionId())(
+          request, signal, evidence => sends.push(evidence));
+        const receipt = await captureTaskFact?.({ toolName: "provider_request", toolCallId, request, response,
+          loginSessionBound: sends.length > 0 && sends.every(send => send.authorizationMatched && send.targetMatched),
+          signal }).catch(() => undefined);
         return {
           content: [{ type: "text", text: JSON.stringify(response) }],
-          details: response,
+          details: captureTaskFact ? { ...response, danoTaskFacts: receipt ? [receipt] : [] } : response,
         };
       },
     });

@@ -4,6 +4,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import type { UserMemoryServices } from "./user-memory-runtime.js";
 import type { MemoryTokenizerBinding, MemoryTokenizerLimits } from "./memory-tokenizer.js";
 import type { UserMemoryCollectionOptions } from "./user-memory-collection.js";
+import { parseMemoryTaskFactConfig, type MemoryTaskFactConfig } from "./memory-task-facts.js";
 
 export interface MemoryCollectionHostConfig {
   policyVersion: string;
@@ -11,6 +12,7 @@ export interface MemoryCollectionHostConfig {
   model: { provider: string; id: string; maxTokens: number; temperature: number; thinking?: "enabled" | "disabled" };
   selector: Pick<UserMemoryCollectionOptions["selector"], "maxInputBytes" | "maxFacts" | "timeoutMs">;
   scheduler: Omit<UserMemoryCollectionOptions["scheduler"], "onError">;
+  taskFacts?: MemoryTaskFactConfig;
 }
 
 /** Host-private file contents. Never put this object in argv, RPC, logs or browser state. */
@@ -56,7 +58,7 @@ function asset(value: unknown) {
 }
 
 function collectionConfig(value: unknown): MemoryCollectionHostConfig {
-  const raw = object(value, ["policyVersion", "lifecycleTimeoutMs", "model", "selector", "scheduler"]);
+  const raw = object(value, ["policyVersion", "lifecycleTimeoutMs", "model", "selector", "scheduler", "taskFacts"]);
   const model = object(raw.model, ["provider", "id", "maxTokens", "temperature", "thinking"]);
   if (typeof model.temperature !== "number" || !Number.isFinite(model.temperature) || model.temperature < 0
     || model.temperature > 2 || (model.thinking !== undefined && model.thinking !== "enabled" && model.thinking !== "disabled")) throw invalid();
@@ -77,7 +79,7 @@ function collectionConfig(value: unknown): MemoryCollectionHostConfig {
     model: { provider: text(model.provider), id: text(model.id), maxTokens: positive(model.maxTokens), temperature: model.temperature,
       ...(model.thinking === undefined ? {} : { thinking: model.thinking }) },
     selector: { maxInputBytes: positive(selector.maxInputBytes), maxFacts: positive(selector.maxFacts), timeoutMs: positive(selector.timeoutMs) },
-    scheduler };
+    scheduler, ...(raw.taskFacts === undefined ? {} : { taskFacts: parseMemoryTaskFactConfig(raw.taskFacts) }) };
 }
 
 export function parseMemoryHostConfig(input: unknown): MemoryHostConfig {

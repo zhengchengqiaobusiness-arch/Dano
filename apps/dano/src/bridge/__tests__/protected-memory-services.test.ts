@@ -69,6 +69,9 @@ it("wires configured collection lazily and requires a trusted deployment model f
   Object.assign(f.config, { collection: { policyVersion: "collection-v1", lifecycleTimeoutMs: 1000,
     model: { provider: "fixture", id: "selector", maxTokens: 512, temperature: 0, thinking: "disabled" },
     selector: { maxInputBytes: 8192, maxFacts: 5, timeoutMs: 1000 },
+    taskFacts: { maxResponseBytes: 8192, maxFactBytes: 1024, contracts: [{ id: "report", method: "GET", path: "/report",
+      success: { path: ["code"], equals: 0 }, actorPath: ["data", "owner"],
+      fields: [{ label: "reference", path: ["data", "reference"], type: "string" }] }] },
     scheduler: { pollIntervalMs: 10, mergeWindowMs: 20, maxWaitMs: 50, workTimeoutMs: 2000,
       leaseMs: 5000, initialBackoffMs: 50, maxBackoffMs: 100, maxAttempts: 2, maxRequestsPerBatch: 5 } } });
   await f.save();
@@ -77,6 +80,8 @@ it("wires configured collection lazily and requires a trusted deployment model f
   const service = (await createProtectedMemoryServices(f.directory, f.stateDirectory, factory))!;
   services.push(service);
   expect(service.services.collection?.policyVersion).toBe("collection-v1");
+  expect(service.services.collection?.taskFacts?.config.contracts[0]?.id).toBe("report");
+  expect(service.services.collection?.taskFacts?.key).toEqual(Buffer.from(f.config.encryptionKey, "hex"));
   expect(factory).not.toHaveBeenCalled();
   await expect(service.services.collection!.selector.sensitiveValues!()).rejects.toThrow(/^MEMORY_COLLECTION_MODEL_UNAVAILABLE$/);
   expect(factory).toHaveBeenCalledOnce();

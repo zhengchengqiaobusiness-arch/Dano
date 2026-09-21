@@ -2,6 +2,7 @@ import { CollectionFactSelector, CollectionScheduler, CollectionSessionRegistry,
   type CollectionSchedulerOptions, type FileStateStore, type MemoryDelivery,
   type MemoryExtensionOptions } from "@josephyoung/pi-openviking/host";
 import type { MemoryUserProvenance } from "./memory-user-provenance.js";
+import type { MemoryTaskFactConfig } from "./memory-task-facts.js";
 
 type SelectorOptions = ConstructorParameters<typeof CollectionFactSelector>[0];
 export interface UserMemoryCollectionOptions {
@@ -9,6 +10,7 @@ export interface UserMemoryCollectionOptions {
   lifecycleTimeoutMs: number;
   selector: Pick<SelectorOptions, "maxInputBytes" | "maxFacts" | "timeoutMs" | "complete" | "sensitiveValues" | "taskFacts">;
   scheduler: Omit<CollectionSchedulerOptions, "store" | "delivery" | "selector" | "resolveSession" | "wakeDelivery" | "scope">;
+  taskFacts?: { config: MemoryTaskFactConfig; key: Uint8Array };
 }
 
 /** One owner-level collector. Recovery reads only original protected pi files. */

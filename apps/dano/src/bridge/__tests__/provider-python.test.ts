@@ -14,6 +14,9 @@ import {
 import { afterEach, expect, it, vi } from "vitest";
 import { CredentialBroker } from "../credential-broker.js";
 import { withProviderPython, wrapProviderBash } from "../provider-python.js";
+import { FileStateStore, MemoryDelivery } from "@josephyoung/pi-openviking/host";
+import { MemoryTaskFacts } from "../memory-task-facts.js";
+import { oauthUserId } from "../oauth-user-id.js";
 
 const executeFile = promisify(execFile);
 const execute = (file: string, args: string[], options: ExecFileOptions = {}) =>
@@ -351,7 +354,7 @@ it("marks oversized real bash output as truncated without inventing provider suc
   expect(text).toContain("0 provider requests observed; 0 HTTP 2xx");
 });
 
-async function pythonHarness() {
+async function pythonHarness(responseBody?: unknown) {
   const observed: {
     auth?: string;
     url?: string;
@@ -389,7 +392,7 @@ async function pythonHarness() {
       "content-type": "application/json",
     });
     res.end(
-      JSON.stringify({
+      JSON.stringify(responseBody ?? {
         code: req.url === "/business-denied" ? 403 : 0,
         data: "ok",
       }),
@@ -462,6 +465,44 @@ async function pythonHarness() {
     },
   };
 }
+
+it("captures signed facts from both real provider transports and replaces forged worker metadata", async () => {
+  const h = await pythonHarness({ code: 0, data: { owner: "oa-a", reference: "REPORT-42", private: "PRIVATE_BODY" } });
+  h.session("user", "agent", "login-a");
+  const owner = { accountId: "fixture", userId: "memory-a" };
+  const store = new FileStateStore({ owner, directory: join(h.cwd, "private-state"), policyVersion: "v1" });
+  const delivery = new MemoryDelivery({ store, transport: { owner } as never, maxPayloadBytes: 8192 });
+  await delivery.enable("v1"); await delivery.authorizeCollection({ policyVersion: "v1", scope: null, boundaries: [] });
+  const facts = new MemoryTaskFacts({ store, userId: oauthUserId("oa-a"), policyVersion: "v1", timeoutMs: 1000,
+    key: Buffer.alloc(32, 1), config: { maxResponseBytes: 8192, maxFactBytes: 1024, contracts: [{
+      id: "report", method: "GET", path: "/report", success: { path: ["code"], equals: 0 },
+      actorPath: ["data", "owner"], fields: [{ label: "reference", path: ["data", "reference"], type: "string" }],
+    }] } });
+  cleanup.push(async () => facts.close());
+  const captureTaskFact = facts.capture.bind(facts);
+  const context = { sessionManager: { getSessionId: () => "agent" }, cwd: h.cwd } as never;
+  const base = createBashTool(h.cwd);
+  const wrapped = wrapProviderBash({ ...base, async execute(_id, params) {
+    const output = await execute("bash", ["-c", (params as { command: string }).command]);
+    return { content: [{ type: "text", text: output.stdout }], details: { danoTaskFacts: [{ data: "FORGED", signature: "0".repeat(64) }] } };
+  } } as ToolDefinition, { broker: h.broker, scope: "user", cwd: h.cwd, captureTaskFact });
+  const command = `python3 - <<'PY'\nfrom urllib.request import urlopen\nwith urlopen('${h.origin}/report') as r: print(r.read().decode())\nPY`;
+  for (const [toolName, result] of [
+    ["bash", await wrapped.execute("bash-call", { command }, undefined, undefined, context)],
+    ["provider_request", await h.broker.createTool("user", captureTaskFact).execute("direct-call", { method: "GET", path: "/report" }, undefined, undefined, context)],
+  ] as const) {
+    const text = await facts.policy().tools.get(toolName)!({ role: "toolResult", toolName,
+      toolCallId: toolName === "bash" ? "bash-call" : "direct-call", content: result.content,
+      details: result.details, isError: false, timestamp: Date.now() }, { owner, scope: null });
+    expect(text).toContain("REPORT-42");
+    expect(text).not.toContain("PRIVATE_BODY"); expect(text).not.toContain("FORGED");
+    expect(JSON.stringify(result.details)).not.toContain("token-a");
+  }
+  await delivery.revokeCollection();
+  const denied = await wrapped.execute("after-revoke", { command }, undefined, undefined, context);
+  expect(denied.details).toMatchObject({ danoTaskFacts: [] });
+  expect(denied.content).toEqual([expect.objectContaining({ text: expect.stringContaining("REPORT-42") })]);
+});
 
 async function pythonRequest(
   prefix: string,

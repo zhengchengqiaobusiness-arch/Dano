@@ -99,3 +99,57 @@ current owner's stored USER key. The owner runtime verifies worker isolation
 before screening and inference. No remote identity is provisioned merely for
 screening. Runtime stop cancels/settles collection before delivery and worker
 teardown. Model/provider errors never become browser-visible configuration.
+
+### Confirmed provider task facts
+
+`collection.taskFacts` opts specific provider response contracts into collection.
+Keep this configuration in the protected memory file, never a Skill or user
+workspace. Without an approved contract, provider results remain excluded.
+Add or change a contract only with a new `collection.policyVersion`, so existing
+consent is invalidated before the new collector starts.
+
+The following is a **synthetic contract**, not a shipped OA route. Replace it
+only after verifying the provider's actual response semantics:
+
+```json
+{
+  "taskFacts": {
+    "maxResponseBytes": 65536,
+    "maxFactBytes": 4096,
+    "contracts": [{
+      "id": "confirmed-report",
+      "method": "POST",
+      "path": "/reports/submit",
+      "success": { "path": ["code"], "equals": 0 },
+      "actorPath": ["data", "owner"],
+      "fields": [{ "label": "report", "path": ["data", "reference"], "type": "string" }]
+    }]
+  }
+}
+```
+
+Contracts match an exact method and pathname; query strings are not projected.
+Ambiguous/encoded routes, duplicate routes, executable adapters and arbitrary
+object fields are rejected. Field paths are arrays of own-property names;
+selected values must match `string`, finite `number`, or `boolean`. Missing,
+wrong-type and oversized results produce no candidate. HTTP 2xx is necessary
+but insufficient: the configured success field must also match exactly.
+
+`actorPath` identifies the immutable OA/OAuth subject of the business result's
+owner. It must map to the authenticated Dano user through the same canonical
+subject mapping used at login. It is not a username, credential or request-body
+assertion. Results for other people are excluded even when the caller is allowed
+to view them. Do not configure a result contract without a verifiable actor.
+
+Both direct `provider_request` and provider HTTP calls intercepted during
+Python/bash execution use the initiating login's trusted send evidence. The
+host projects allowlisted fields from the actual response; it never extracts
+facts from bash stdout. A domain-separated HMAC receipt binds the minimal
+projection to the memory owner, tool name/call, policy, grant revision and epoch.
+Only these receipts are persisted with the original pi tool result. The
+collector verifies them again after restart/fork and after permission changes;
+forged worker metadata, failed tool results and stale receipts are excluded.
+Raw response bodies and credentials are not copied into a collection receipt.
+The extension's existing secret screening still runs before any selected task
+fact is sent to the selection model. Ordinary business requests remain usable
+when optional memory is unconfigured, revoked, timed out or unavailable.

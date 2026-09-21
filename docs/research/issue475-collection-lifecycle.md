@@ -992,3 +992,47 @@ Python-through-bash paths need coverage, including forged metadata, failure,
 foreign actor, revoked authorization and sensitive fields. Deployment-owned
 contracts and policy revisions must drive the allowlist; do not hardcode an OA
 endpoint or business decision to satisfy this acceptance case.
+
+### Confirmed task result implementation follow-up
+
+Dano now exposes optional deployment-owned `collection.taskFacts` contracts:
+exact method/path, an explicit business success predicate, a result actor field
+and typed scalar field allowlist with byte limits. The result actor must map to
+the same immutable OAuth subject mapping used at login. The canonical mapping
+was extracted without changing existing user identifiers. Unknown routes,
+unsuccessful/malformed responses, foreign actors and arbitrary object fields are
+excluded rather than interpreted by a model.
+
+The owner runtime provides a capture callback to both direct provider_request
+and the protected Python/bash wrapper. It requires separate current consent and
+trusted evidence that the actual HTTP send used the initiating login and provider
+origin. The raw body is projected locally; stdout is not a fact source. A
+domain-separated HMAC receipt binds only the approved projection to owner,
+tool/call, policy, epoch, scope and consent revision. The receipt lives in the
+protected original pi result, enabling restart/fork verification without a
+second raw-result database. The selector verifies signatures and the current
+grant, then applies the extension's existing task-fact and secret screening.
+Runtime disposal disables capture and erases its derived signing key.
+
+Validation so far:
+
+- First related suite: 101 passed across six files.
+- Real loopback HTTP and real Python integration exercised both transport paths,
+  forged worker metadata replacement and withdrawal preserving business output:
+  39 passed across the transport/core files at that revision
+  (`/private/tmp/dano475-task-facts-transports-tests.log`).
+- Public extension input-builder screening: five core tests passed, including
+  projected credential rejection before inference, failed tool result rejection,
+  foreign owner/call, stale grant/epoch, malformed routes and receipt tampering
+  (`/private/tmp/dano475-task-facts-screening-tests.log`).
+- Type/Svelte check passed with zero errors/warnings
+  (`/private/tmp/dano475-task-facts-check.log`).
+- Full regression reached 1597 passed, one skipped, one failure caused by the old
+  detached-session mock expecting a single argument instead of the new optional
+  capture argument. Its assertion was updated and all three detached-session
+  tests then passed (`/private/tmp/dano475-task-facts-detached-tests.log`).
+
+These are deterministic/integration results, not final release acceptance. The
+new source still needs final review, a verified actual OA response contract in
+the isolated deployment, real model/OpenViking task-fact evidence and a rebuilt
+protected image. Do not label the prior P2 fully accepted from these tests alone.

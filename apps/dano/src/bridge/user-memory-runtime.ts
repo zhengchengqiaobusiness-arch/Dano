@@ -14,6 +14,7 @@ import type { UserMemoryOperation, UserMemoryOperationPage, UserMemoryContent } 
 import { memoryOperationPage, projectMemoryOperation } from "./memory-operation-page.js";
 import { MemoryUserProvenance } from "./memory-user-provenance.js";
 import { UserMemoryCollection, type UserMemoryCollectionOptions } from "./user-memory-collection.js";
+import { MemoryTaskFacts, type ProviderTaskFactInput } from "./memory-task-facts.js";
 
 type SchedulerPolicy = Omit<ConstructorParameters<typeof DeliveryScheduler>[0], "store" | "delivery">;
 export interface UserMemoryServices {
@@ -39,6 +40,7 @@ export class UserMemoryRuntime implements UserMemoryControls {
   readonly #options: UserMemoryServices;
   readonly provenance: MemoryUserProvenance;
   readonly #collection?: UserMemoryCollection;
+  #taskFacts?: MemoryTaskFacts;
   #settings: Promise<void> = Promise.resolve();
   #closed = false;
   #closing?: Promise<void>;
@@ -68,7 +70,10 @@ export class UserMemoryRuntime implements UserMemoryControls {
       connect: () => identity.connect(context), assertToolIsolation: () => worker.assertIsolated() });
     const store = new FileStateStore({ owner, directory: join(stateDirectory, "memory"), policyVersion: options.policyVersion });
     const configured = options.collection;
+    const taskFacts = configured?.taskFacts ? new MemoryTaskFacts({ ...configured.taskFacts, store,
+      userId: context.user.id, policyVersion: configured.policyVersion, timeoutMs: configured.lifecycleTimeoutMs }) : undefined;
     const collection = configured ? { ...configured, selector: { ...configured.selector,
+      ...(taskFacts ? { taskFacts: taskFacts.policy() } : {}),
       async sensitiveValues(signal?: AbortSignal) {
         await worker.assertIsolated();
         signal?.throwIfAborted();
@@ -85,6 +90,7 @@ export class UserMemoryRuntime implements UserMemoryControls {
       },
     } } : undefined;
     const runtime = new UserMemoryRuntime(store, client, { ...options, collection }, sessionRoot);
+    runtime.#taskFacts = taskFacts;
     try {
       // Runtime creation completes before this user's authenticated controls or
       // sessions are published by UserRuntimeRegistry. Invalidate an obsolete
@@ -138,6 +144,11 @@ export class UserMemoryRuntime implements UserMemoryControls {
     } catch { /* Missing memory metadata must not prevent ordinary chat. */ }
     finally { clearTimeout(timer); }
     return () => {};
+  }
+
+  async captureTaskFact(input: ProviderTaskFactInput) {
+    if (this.#closed) return undefined;
+    return this.#taskFacts?.capture(input);
   }
 
   /** Server-authenticated settings calls only; never exposed as model tools. */
@@ -239,6 +250,7 @@ export class UserMemoryRuntime implements UserMemoryControls {
     if (this.#closing) return this.#closing;
     this.#closed = true;
     this.provenance.clear();
+    this.#taskFacts?.close();
     this.#closing = (async () => {
       try { await this.#collection?.stop(); }
       finally {
@@ -287,6 +299,7 @@ export function withUserMemory(
       let disposing: Promise<void> | undefined;
       return { ...profile, memory: bound,
         captureMemoryInput: bound.captureInput.bind(bound),
+        captureTaskFact: bound.captureTaskFact.bind(bound),
         createMemoryExtension: (_workspace, sessionWorker) => bound.extension(sessionWorker),
         dispose: () => disposing ??= (async () => {
           try { await bound.close(); }

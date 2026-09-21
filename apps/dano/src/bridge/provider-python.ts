@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { isAbsolute, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { CaptureProviderTaskFact, ProviderTaskFactReceipt } from "./memory-task-facts.js";
 import type {
   CredentialBroker,
   ProviderRequest,
@@ -17,6 +18,8 @@ interface ProviderPythonOptions {
   agentSessionId: string;
   cwd: string;
   signal?: AbortSignal;
+  captureTaskFact?: CaptureProviderTaskFact;
+  toolCallId?: string;
   /** Protected, read-only installation path provisioned by the trusted launcher. */
   moduleDirectory?: string;
   /** Run artifact redaction with the same filesystem authority as the tool. */
@@ -37,6 +40,7 @@ export async function withProviderPython<T>(
     redact: <V>(value: V) => V,
     requests: ProviderPythonRequest[],
     redactFile: (path: string) => Promise<void>,
+    taskFacts: ProviderTaskFactReceipt[],
   ) => Promise<T>,
 ): Promise<T> {
   if (options.moduleDirectory !== undefined) {
@@ -60,6 +64,7 @@ export async function withProviderPython<T>(
       ? value
       : JSON.parse(JSON.stringify(value).replaceAll(capability, "[redacted]"));
   const requests: ProviderPythonRequest[] = [];
+  const taskFacts: ProviderTaskFactReceipt[] = [];
   const redactFile = async (path: string) => {
     if (options.redactOutputFile) {
       await options.redactOutputFile(path, capability, options.signal);
@@ -167,6 +172,13 @@ export async function withProviderPython<T>(
           ? { status: response.status }
           : { error: response.error.code }),
       });
+      if (options.captureTaskFact && options.toolCallId && taskFacts.length < 128) {
+        const receipt = await options.captureTaskFact({ toolName: "bash", toolCallId: options.toolCallId,
+          request: input as ProviderRequest, response,
+          loginSessionBound: sends.length > 0 && sends.every(send => send.authorizationMatched && send.targetMatched),
+          signal }).catch(() => undefined);
+        if (receipt) taskFacts.push(receipt);
+      }
       res.end(JSON.stringify(response));
     } catch {
       res
@@ -203,6 +215,7 @@ export async function withProviderPython<T>(
       redact,
       requests,
       redactFile,
+      taskFacts,
     );
   } catch (error) {
     throw new Error(
@@ -248,9 +261,10 @@ export function wrapProviderBash(
         {
           ...options,
           agentSessionId: context.sessionManager.getSessionId(),
+          toolCallId: id,
           signal: executionSignal,
         },
-        async (prefix, redact, requests, redactFile) => {
+        async (prefix, redact, requests, redactFile, taskFacts) => {
           const input = params as { command: string };
           const artifacts = new Set<string>();
           const artifactPath = (value: { details?: unknown }) => {
@@ -320,6 +334,7 @@ export function wrapProviderBash(
             details: {
               ...(redact(result.details) as object),
               providerRequests: requests,
+              danoTaskFacts: taskFacts,
             },
           };
         },

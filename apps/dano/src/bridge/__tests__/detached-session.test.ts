@@ -204,7 +204,7 @@ describe("detached-session", () => {
     expect(
       createAgentSessionFromServicesMock.mock.calls[0]?.[0].customTools,
     ).not.toContainEqual(expect.objectContaining({ name: "curl" }));
-    expect(credentialBroker.createTool).toHaveBeenCalledWith("user-a");
+    expect(credentialBroker.createTool).toHaveBeenCalledWith("user-a", undefined);
     expect(credentialBroker.observe).toHaveBeenCalledWith(
       "user-a",
       sessionResult.session,
