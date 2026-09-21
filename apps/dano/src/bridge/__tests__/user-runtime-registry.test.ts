@@ -37,8 +37,8 @@ describe("UserRuntimeRegistry owner transfer", () => {
       expect(repeated).toBe(a);
       expect(b).not.toBe(a);
       expect(protectedToolsForUser).toHaveBeenCalledTimes(2);
-      expect(protectedToolsForUser).toHaveBeenCalledWith(alice);
-      expect(protectedToolsForUser).toHaveBeenCalledWith(bob);
+      expect(protectedToolsForUser).toHaveBeenCalledWith(alice, { sessionsRootPath: path.join(alice.folderPath, "sessions") });
+      expect(protectedToolsForUser).toHaveBeenCalledWith(bob, { sessionsRootPath: path.join(bob.folderPath, "sessions") });
       for (const context of [alice, bob]) {
         expect(backend).toHaveBeenCalledWith(expect.objectContaining({
           cwd: path.join(context.folderPath, "workspaces", "default"),

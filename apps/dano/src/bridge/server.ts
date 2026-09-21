@@ -511,6 +511,8 @@ export class BridgeServer {
           throw new UserContextError(401, "请先登录后再使用长期记忆");
         }
         let enabled: boolean | undefined;
+        let automaticCollection: boolean | undefined;
+        let collectionPolicyVersion: string | undefined;
         if (req.method === "PUT") {
           if (req.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
             throw new HttpError(415, "记忆设置需要 JSON 请求");
@@ -518,21 +520,39 @@ export class BridgeServer {
           let body: unknown;
           try { body = await readJsonBody(req); }
           catch { throw new HttpError(400, "记忆设置无效"); }
-          if (!body || typeof body !== "object" || Array.isArray(body)
-            || Object.keys(body).some(key => key !== "enabled")
-            || typeof (body as { enabled?: unknown }).enabled !== "boolean") {
+          if (!body || typeof body !== "object" || Array.isArray(body)) {
             throw new HttpError(400, "记忆设置无效");
           }
-          enabled = (body as { enabled: boolean }).enabled;
+          const settings = body as Record<string, unknown>;
+          const keys = Object.keys(settings);
+          if (keys.length === 1 && typeof settings.enabled === "boolean") {
+            enabled = settings.enabled;
+          } else if (typeof settings.automaticCollection === "boolean"
+            && keys.every(key => key === "automaticCollection" || key === "collectionPolicyVersion")
+            && (settings.automaticCollection
+              ? typeof settings.collectionPolicyVersion === "string" && Boolean(settings.collectionPolicyVersion.trim())
+                && settings.collectionPolicyVersion.length <= 16384
+              : !Object.hasOwn(settings, "collectionPolicyVersion"))) {
+            automaticCollection = settings.automaticCollection;
+            collectionPolicyVersion = settings.collectionPolicyVersion as string | undefined;
+          } else throw new HttpError(400, "记忆设置无效");
         }
         await this.withUserWrite(clientId, async () => {
           try {
             const runtime = await this.userRuntimeRegistry?.get(user);
             if (!runtime?.memory) throw new Error("MEMORY_UNAVAILABLE");
             if (enabled !== undefined) await runtime.memory.setEnabled(enabled);
+            if (automaticCollection !== undefined) await runtime.memory.setAutomaticCollection(automaticCollection, collectionPolicyVersion);
             const status = await runtime.memory.status();
             writeJson(res, 200, { enabled: status.enabled, automaticCollection: status.automaticCollection,
-              effectiveAt: status.effectiveAt, policyVersion: status.policyVersion, revision: status.revision }, "no-store");
+              effectiveAt: status.effectiveAt, policyVersion: status.policyVersion, revision: status.revision,
+              ...(status.collection ? { collection: {
+                availablePolicyVersion: status.collection.availablePolicyVersion,
+                consent: status.collection.consent ? {
+                  policyVersion: status.collection.consent.policyVersion, scope: status.collection.consent.scope,
+                  effectiveAt: status.collection.consent.effectiveAt, revision: status.collection.consent.revision,
+                } : null,
+              } } : {}) }, "no-store");
           } catch { throw new HttpError(503, "长期记忆暂时不可用，普通聊天可继续"); }
         });
         return;

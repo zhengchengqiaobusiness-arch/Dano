@@ -3,8 +3,9 @@
   import * as Dialog from "$lib/components/ui/dialog";
   import * as Alert from "$lib/components/ui/alert";
   import { Button } from "$lib/components/ui/button";
+  import { Separator } from "$lib/components/ui/separator";
   import { t } from "../i18n";
-  import { requestMemorySettings } from "../utils/memorySettings";
+  import { requestMemorySettings, type MemorySettingsChange } from "../utils/memorySettings";
   import MemoryOperations from "./MemoryOperations.svelte";
 
   let { open = false, authenticated = false, url = null, operationsUrl = null, themeStyle = "", onClose = () => {} }:
@@ -31,13 +32,13 @@
     return () => { generation++; controller.abort(); saveController?.abort(); };
   });
 
-  async function changeEnabled(enabled: boolean) {
+  async function changeSettings(change: MemorySettingsChange) {
     if (!url || !status || saving) return;
     const current = generation;
     saving = true; error = false;
     const controller = new AbortController(); saveController = controller;
     try {
-      const result = await requestMemorySettings(url, controller.signal, enabled);
+      const result = await requestMemorySettings(url, controller.signal, change);
       if (generation === current) status = result;
     } catch {
       if (generation === current && !controller.signal.aborted) { status = null; error = true; }
@@ -67,10 +68,45 @@
         <p>{t("memory.pauseDescription")}</p>
       </div>
       <Dialog.Footer>
-        <Button disabled={saving} onclick={() => changeEnabled(!status!.enabled)}>
+        <Button disabled={saving} onclick={() => changeSettings({ enabled: !status!.enabled })}>
           {saving ? t("memory.saving") : status.enabled ? t("memory.pause") : t("memory.enable")}
         </Button>
       </Dialog.Footer>
+      {#if status.collection}
+        <Separator />
+        <section class="flex flex-col gap-3" aria-label={t("memory.collectionTitle")}>
+          <h3>{t("memory.collectionTitle")}</h3>
+          <p>{t("memory.collectionConsent")}</p>
+          <p>{t("memory.collectionScope")}</p>
+          <p role="status">
+            {#if !status.automaticCollection}{t("memory.collectionOff")}
+            {:else if !status.enabled}{t("memory.collectionPaused")}
+            {:else if !status.collection.availablePolicyVersion}{t("memory.collectionUnavailable")}
+            {:else if status.collection.consent?.policyVersion !== status.collection.availablePolicyVersion}{t("memory.collectionPolicyChanged")}
+            {:else}{t("memory.collectionOn")}{/if}
+          </p>
+          {#if status.collection.availablePolicyVersion}
+            <p>{t("memory.collectionPolicy", { version: status.collection.availablePolicyVersion })}</p>
+          {/if}
+          {#if status.collection.consent}
+            <p>{t("memory.collectionReceipt", { version: status.collection.consent.policyVersion,
+              revision: status.collection.consent.revision, time: status.collection.consent.effectiveAt })}</p>
+          {/if}
+          <div class="flex flex-wrap gap-2">
+            {#if !status.automaticCollection || status.collection.consent?.policyVersion !== status.collection.availablePolicyVersion}
+              <Button disabled={saving || !status.enabled || !status.collection.availablePolicyVersion}
+                onclick={() => changeSettings({ automaticCollection: true, collectionPolicyVersion: status!.collection!.availablePolicyVersion! })}>
+                {t("memory.collectionEnable")}
+              </Button>
+            {/if}
+            {#if status.automaticCollection}
+              <Button variant="outline" disabled={saving} onclick={() => changeSettings({ automaticCollection: false })}>
+                {t("memory.collectionDisable")}
+              </Button>
+            {/if}
+          </div>
+        </section>
+      {/if}
       {#if operationsUrl}<MemoryOperations url={operationsUrl} />{/if}
     {/if}
   </Dialog.Content>

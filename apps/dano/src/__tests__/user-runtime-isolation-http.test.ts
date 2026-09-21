@@ -824,11 +824,11 @@ it("authenticates memory settings, isolates owners and projects only safe status
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-memory-settings-http-"));
   runtimeRoots.push(root);
   const setup = authenticatedServerSetup(root);
-  const states = new Map<string, { enabled: boolean; fail: boolean }>();
+  const states = new Map<string, { enabled: boolean; automaticCollection: boolean; fail: boolean }>();
   const controller = await startDanoServer(setup.config, {
     captureSigint: false, userContextResolver: setup.resolver,
     protectedToolsForUser: async context => {
-      const state = { enabled: false, fail: false }; states.set(context.user.id, state);
+      const state = { enabled: false, automaticCollection: false, fail: false }; states.set(context.user.id, state);
       const agentDir = path.join(root, "private", context.user.id);
       fs.mkdirSync(agentDir, { recursive: true });
       return { agentDir, trustedSkillPaths: [], resolveWorker: async workspace => ({
@@ -836,10 +836,14 @@ it("authenticates memory settings, isolates owners and projects only safe status
       }), memory: {
         async status() {
           if (state.fail) throw new Error("SYNTHETIC_PRIVATE_ERROR");
-          return { enabled: state.enabled, automaticCollection: false, effectiveAt: "2026-09-18T00:00:00Z",
+          return { enabled: state.enabled, automaticCollection: state.automaticCollection, effectiveAt: "2026-09-18T00:00:00Z",
             policyVersion: "v1", revision: 1, apiKey: "SYNTHETIC_PRIVATE_KEY", owner: "PRIVATE_OWNER" };
         },
         async setEnabled(enabled) { state.enabled = enabled; },
+        async setAutomaticCollection(enabled, policyVersion) {
+          if (enabled && policyVersion !== "collection-v1") throw new Error("PRIVATE_POLICY_CHANGED");
+          state.automaticCollection = enabled;
+        },
         async operations() {
           if (state.fail) throw new Error("SYNTHETIC_PRIVATE_ERROR");
           return { items: [await this.operation(context.user.id)].filter(item => item !== undefined), nextCursor: null };
@@ -871,12 +875,25 @@ it("authenticates memory settings, isolates owners and projects only safe status
   const initial = await fetch(url(alice), { headers: headers(aliceToken) });
   expect(initial.headers.get("cache-control")).toBe("no-store");
   expect(await initial.json()).toEqual({ enabled: false, automaticCollection: false, effectiveAt: "2026-09-18T00:00:00Z", policyVersion: "v1", revision: 1 });
-  for (const body of [{ enabled: "false" }, { enabled: true, owner: "bob" }, { automaticCollection: true }]) {
+  for (const body of [{ enabled: "false" }, { enabled: true, owner: "bob" }, { automaticCollection: true },
+    { enabled: true, automaticCollection: true, collectionPolicyVersion: "collection-v1" },
+    { automaticCollection: false, collectionPolicyVersion: "collection-v1" }]) {
     expect((await fetch(url(alice), { method: "PUT", headers: headers(aliceToken), body: JSON.stringify(body) })).status).toBe(400);
   }
   const enabled = await fetch(url(alice), { method: "PUT", headers: headers(aliceToken), body: JSON.stringify({ enabled: true }) });
   expect(enabled.status).toBe(200);
   expect(await enabled.json()).toMatchObject({ enabled: true });
+  const consent = { automaticCollection: true, collectionPolicyVersion: "collection-v1" };
+  expect((await fetch(url(alice), { method: "PUT", headers: headers(bobToken), body: JSON.stringify(consent) })).status).toBe(403);
+  const granted = await fetch(url(alice), { method: "PUT", headers: headers(aliceToken), body: JSON.stringify(consent) });
+  expect(granted.status).toBe(200);
+  expect(await granted.json()).toMatchObject({ enabled: true, automaticCollection: true });
+  const stale = await fetch(url(alice), { method: "PUT", headers: headers(aliceToken),
+    body: JSON.stringify({ ...consent, collectionPolicyVersion: "stale" }) });
+  expect(stale.status).toBe(503);
+  expect(await stale.text()).not.toContain("PRIVATE");
+  const revoked = await fetch(url(alice), { method: "PUT", headers: headers(aliceToken), body: JSON.stringify({ automaticCollection: false }) });
+  expect(await revoked.json()).toMatchObject({ enabled: true, automaticCollection: false });
   const peer = await fetch(url(bob), { headers: headers(bobToken) });
   expect(await peer.json()).toMatchObject({ enabled: false });
   expect((await fetch(url(alice), { method: "PUT", headers: headers(aliceToken), body: JSON.stringify({ enabled: false }) })).status).toBe(200);
@@ -934,7 +951,7 @@ it("rejects anonymous memory settings even when a host profile accidentally expo
     userContextResolver: { resolve: async () => ({ user: { id: "guest" }, folderPath: path.join(root, "users/guest") }) },
     protectedToolsForUser: async () => {
       const agentDir = path.join(root, "private"); fs.mkdirSync(agentDir);
-      return { agentDir, trustedSkillPaths: [], memory: { status: read, setEnabled: async () => {}, operation: async () => undefined,
+      return { agentDir, trustedSkillPaths: [], memory: { status: read, setEnabled: async () => {}, setAutomaticCollection: async () => {}, operation: async () => undefined,
         operations: async () => ({ items: [], nextCursor: null }), content: async () => undefined },
         resolveWorker: async workspace => ({ workspace, assertIsolated: async () => {}, execute: async () => ({}) }) };
     },

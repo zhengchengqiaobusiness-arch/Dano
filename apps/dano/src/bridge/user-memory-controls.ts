@@ -4,6 +4,7 @@ export type { UserMemoryStatus } from "../../types/memory.js";
 export interface UserMemoryControls {
   status(): Promise<UserMemoryStatus>;
   setEnabled(enabled: boolean): Promise<void>;
+  setAutomaticCollection(enabled: boolean, policyVersion?: string): Promise<void>;
   operation(id: string): Promise<UserMemoryOperation | undefined>;
   operations(cursor?: string): Promise<UserMemoryOperationPage>;
   content(id: string, index: number): Promise<UserMemoryContent | undefined>;

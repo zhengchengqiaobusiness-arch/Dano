@@ -689,3 +689,49 @@ returned stale metadata and 404 for this version; direct version verification
 resolved the discrepancy without republishing. The remote extension PR branch
 was verified absent after merge. Dano's exact upgrade is the next integration
 gate. This PR does not close Dano #475/#465.
+
+### Dano 0.1.3 integration and separate consent surface
+
+Dano now pins the published `@josephyoung/pi-openviking` version `0.1.3` exactly;
+its lockfile integrity matches the npm publication above. The owner runtime
+constructs the public collection registry/selector/scheduler with the registry's
+caller-owned protected session root. Its selector projects only the user prefix
+proven by Dano's persisted provenance receipts. Two tests use real pi files and a
+fresh collector with no live source map: attributed input reaches a local outbox,
+while unproven template expansion never reaches the selector model.
+
+The authenticated settings endpoint accepts separate automatic-consent mutations.
+Grant requests must carry the displayed collection policy version; mixed main
+and automatic mutations, missing versions and caller-supplied owner/scope fields
+are rejected. The runtime compares the version with its trusted configuration,
+requires main memory to be enabled and snapshots current source boundaries.
+Revocation remains possible when collection configuration is absent. Pause and
+resume retain the separate grant while replacing its source boundary, and
+revocation survives runtime recreation. Browser-safe status exposes only the
+available policy and consent version/scope/time/revision, excluding source paths
+and boundaries. The dialog has a distinct consent action, withdrawal while
+paused, and policy-change state; its main enable action does not grant collection.
+
+Before background screening or model selection, the owner runtime rechecks tool
+isolation. Screening combines configured sensitive values with the current
+owner's existing USER key without provisioning a key. Regression tests prove
+that a message containing that exact private value, or a loss of isolation,
+never reaches model selection or produces an outbox operation.
+
+Validation under Node 22:
+- Four collector/runtime/HTTP files: 39 tests passed
+  (`/private/tmp/dano475-collection-consent-tests.log`).
+- Settings component: 6 tests passed
+  (`/private/tmp/dano475-collection-ui-tests.log`).
+- Full suite with the existing acceptance Python venv on PATH: 1578 passed,
+  1 skipped across 135 files (`/private/tmp/dano475-collection-full-tests.log`).
+  The initial system-Python run lacked `httpx`; all 34 provider-Python tests
+  passed using the existing venv (`/private/tmp/dano475-pin-013-python-tests.log`).
+- After adding the owner-secret/isolation checks, all 21 runtime tests passed
+  (`/private/tmp/dano475-collection-owner-tests.log`); final full type/Svelte
+  diagnostics are recorded in `/private/tmp/dano475-collection-final-check.log`.
+
+The production service factory still does not configure the collection model.
+Wiring the protected MiMo configuration and performing real rendered-browser
+acceptance remain required before this surface is considered delivered. These
+unit/integration results do not close #475 or replace its real-service gates.

@@ -58,3 +58,41 @@ it("aborts an unfinished request when the dialog is destroyed", async () => {
   await unmount(component); components.splice(components.indexOf(component), 1);
   expect(signal!.aborted).toBe(true);
 });
+
+it("keeps automatic consent separate and sends the displayed policy only after its own action", async () => {
+  const available = { ...status, collection: { availablePolicyVersion: "collection-v2", consent: null } };
+  const granted = { ...available, enabled: true, automaticCollection: true, collection: {
+    availablePolicyVersion: "collection-v2", consent: { policyVersion: "collection-v2", scope: null,
+      revision: 1, effectiveAt: "2026-09-21T12:00:00Z" },
+  } };
+  const fetch = vi.fn().mockResolvedValueOnce(Response.json(available))
+    .mockResolvedValueOnce(Response.json({ ...available, enabled: true }))
+    .mockResolvedValueOnce(Response.json(granted))
+    .mockResolvedValueOnce(Response.json({ ...granted, automaticCollection: false }));
+  vi.stubGlobal("fetch", fetch);
+  await render();
+  await vi.waitFor(() => expect(button("单独同意")).toBeDefined());
+  expect(button("单独同意").disabled).toBe(true);
+  button("同意并启用长期记忆").click();
+  await vi.waitFor(() => expect(button("单独同意").disabled).toBe(false));
+  expect(fetch.mock.calls[1]?.[1]?.body).toBe('{"enabled":true}');
+  expect(document.body.textContent).toContain("自动采集未授权");
+  button("单独同意").click();
+  await vi.waitFor(() => expect(button("撤回自动采集授权")).toBeDefined());
+  expect(fetch.mock.calls[2]?.[1]?.body).toBe('{"automaticCollection":true,"collectionPolicyVersion":"collection-v2"}');
+  expect(document.body.textContent).toContain("2026-09-21T12:00:00Z");
+  button("撤回自动采集授权").click();
+  await vi.waitFor(() => expect(button("单独同意")).toBeDefined());
+  expect(fetch.mock.calls[3]?.[1]?.body).toBe('{"automaticCollection":false}');
+  expect(button("暂停长期记忆")).toBeDefined();
+});
+it("requires renewed consent when the available policy differs and permits withdrawal while paused", async () => {
+  const changed = { ...status, automaticCollection: true, collection: { availablePolicyVersion: "v2",
+    consent: { policyVersion: "v1", scope: null, revision: 1, effectiveAt: "2026-09-21T12:00:00Z" } } };
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json(changed)));
+  await render();
+  await vi.waitFor(() => expect(button("撤回自动采集授权")).toBeDefined());
+  expect(button("单独同意").disabled).toBe(true);
+  expect(button("撤回自动采集授权").disabled).toBe(false);
+  expect(document.body.textContent).toContain("授权保留");
+});

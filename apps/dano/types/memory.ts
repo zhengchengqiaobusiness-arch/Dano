@@ -4,6 +4,10 @@ export interface UserMemoryStatus {
   effectiveAt: string;
   policyVersion: string;
   revision: number;
+  collection?: {
+    availablePolicyVersion: string | null;
+    consent: { policyVersion: string; scope: string | null; effectiveAt: string; revision: number } | null;
+  };
 }
 
 /** Local delivery receipt. Remote identifiers and pending payloads stay private. */
