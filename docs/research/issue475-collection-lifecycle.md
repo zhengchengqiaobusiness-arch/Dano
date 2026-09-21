@@ -581,3 +581,27 @@ The configured OpenViking key was absent from RPC events and stderr. This is one
 real MiMo/OpenViking CLI flow, not the full T-14 dataset, restart/pause-race suite,
 Dano browser acceptance, or a clean release build. The disposable container was
 removed after collecting evidence; the existing Dano stack was retained.
+
+### Host user-text attribution interface
+
+Extension commit `74aab9d` adds `projectUserText({ source, text, signal })` to the
+collection input/selector API. A trusted host can resolve a user-authored span
+from protected attribution records; an unavailable projection excludes the
+entry, and non-string or non-contiguous output fails closed. Original source
+identity/content digest remain unchanged, and projected text still passes secret
+screening and the post-await consent check. Callback errors expose no source or
+private diagnostics. This is a host interface, not a model-defined projector.
+
+All 183 tests passed after the input implementation
+(`/private/tmp/dano475-user-projection-tests.log`). An additional selector test
+then proved that an exact quote from excluded template text is rejected; the
+55 affected input/selector tests passed
+(`/private/tmp/dano475-user-projection-targeted.log`).
+
+Dano's `prompt`, `steer` and `follow_up` dispatch paths each know the original
+input before file-reference injection. However, `TranscriptProjector` only keeps
+its pending structured-message map in memory; it is not durable attribution for
+collection recovery. Dano must connect protected, digest-bound provenance to the
+new interface without copying conversation bodies into the outbox. That adapter
+and restart/fork validation remain pending; the original cross-host P2 finding is
+not claimed fully resolved by the interface alone.
