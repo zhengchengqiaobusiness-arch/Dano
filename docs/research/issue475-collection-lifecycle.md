@@ -506,3 +506,30 @@ private audit directory:
 The business tool contract is synthetic; this does not establish real OA business
 operation acceptance, browser acceptance or a production deployment. Dano remains
 pinned to published `0.1.2` pending independent release and full integration.
+
+### Independent pre-release review: input provenance
+
+Review baseline: `b2e576341bba2355d206190c0f171beb5a809663`;
+reviewed head: `d28288eda897445f161fd8656720d3d07dfc51b6`.
+
+**Standards:** no confirmed documented-standard violation. One P3 maintainability
+finding concerns repeated authorization tuple predicates across collection phases.
+
+**Spec:** one P2 finding: pi expands Skill/prompt-template commands before
+persisting the resulting user message. Treating the whole persisted message as
+user-authored evidence can collect example preferences from those resources.
+A controlled-selector reproduction demonstrated this for a Skill; it is not a
+measurement of real-model failure rate.
+
+The initial fix uses pi's public `parseSkillBlock` to retain only the separate
+user suffix. Skill-only, malformed and nested wrappers provide no user evidence;
+original entry identity and content digest still identify the source. All 177
+extension tests pass, including four added provenance regressions
+(`/private/tmp/dano475-skill-provenance-tests.log`). Unmarked prompt-template
+expansion still requires an input-provenance solution, so the P2 finding remains
+open and independent release is not approved yet.
+
+Standard CLI automatic-collection acceptance and Dano browser integration remain
+pending. Read-only Podman inventory found the existing three acceptance containers
+running, but image enumeration failed with `readlink .../storage/overlay: invalid
+argument`. No shared container storage was repaired or removed.
