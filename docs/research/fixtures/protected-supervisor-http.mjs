@@ -43,14 +43,27 @@ const primaryUsers = realService
   ? [`alice-fixture-${runIdentity}`, `bob-fixture-${runIdentity}`]
   : ['alice-fixture', 'bob-fixture'];
 const memoryFailure = process.argv.includes('--memory-failure');
-let memoryAccountId, corruptOwnerPath;
+let memoryAccountId, corruptOwnerPath, realModel;
 if (memoryFailure) assert(realService, 'Memory failure check requires the real model/service configuration');
 if (realService) {
   assert(withMemory && useCli, 'Real service mode requires --cli --memory');
+  realModel = { provider: process.env.DANO_FIXTURE_PROVIDER, modelId: process.env.DANO_FIXTURE_MODEL };
+  assert(realModel.provider && realModel.modelId, 'Set DANO_FIXTURE_PROVIDER and DANO_FIXTURE_MODEL');
+  const modelsBytes = await readFile(process.env.DANO_FIXTURE_MODELS);
+  const providerConfig = JSON.parse(modelsBytes).providers?.[realModel.provider];
+  assert(providerConfig?.models?.some(model => model.id === realModel.modelId), 'Selected model is absent from fixture models.json');
+  // Forward only the selected provider's declared environment credential.
+  // Never copy the whole process environment into the fixture host.
+  const keyReference = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$/.exec(providerConfig.apiKey ?? '');
+  if (keyReference) {
+    const name = keyReference[1] ?? keyReference[2];
+    assert(process.env[name], 'Selected model credential environment is missing');
+    environment[name] = process.env[name];
+  }
   const agentDir = join(root, 'host-agent');
   await mkdir(agentDir, { mode: 0o700 }); await chown(agentDir, hostUid, hostGid);
   const modelsPath = join(agentDir, 'models.json');
-  await writeFile(modelsPath, await readFile(process.env.DANO_FIXTURE_MODELS), { mode: 0o600 });
+  await writeFile(modelsPath, modelsBytes, { mode: 0o600 });
   await chown(modelsPath, hostUid, hostGid);
   environment.PI_CODING_AGENT_DIR = agentDir;
   environment.NODE_EXTRA_CA_CERTS = process.env.NODE_EXTRA_CA_CERTS;
@@ -166,7 +179,7 @@ try {
     assert.equal((await settings(clients[1])).enabled, false);
     if (realService) {
       const { verifyMemoryHttpFlow } = await import('./protected-memory-http-flow.mjs');
-      await verifyMemoryHttpFlow({ origin, clients, token, memoryUnavailable: memoryFailure });
+      await verifyMemoryHttpFlow({ origin, clients, token, model: realModel, memoryUnavailable: memoryFailure });
     }
     if (!memoryFailure) assert.equal((await settings(clients[0], false)).enabled, false);
     else assert.equal(await readFile(corruptOwnerPath, 'utf8'), '{damaged');

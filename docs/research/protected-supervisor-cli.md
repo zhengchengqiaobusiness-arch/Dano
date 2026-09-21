@@ -434,3 +434,24 @@ bypassed. Authenticated OAuth callback and authenticated memory save/read/recall
 remain unproven. The isolated stack and both browser tabs are retained for
 continued acceptance. Persistent credentials and trusted TLS assets remain
 excluded from cleanup.
+
+## MiMo explicit-memory HTTP/SSE acceptance (2026-09-21)
+
+The real-service fixture now requires `DANO_FIXTURE_PROVIDER` and
+`DANO_FIXTURE_MODEL`, validates the selection against its private models.json,
+and forwards only the selected provider's referenced credential environment
+variable. Both initial and new-session model selections use those inputs;
+the fixture no longer silently selects qwen35.
+
+Using `xiaomi-token-plan-cn` / `mimo-v2.5`, the retained protected image completed
+`--cli --memory --real-service` with fresh synthetic users. The real model saved
+the synthetic preference through Dano HTTP/SSE; OpenViking extraction reached
+`ready`, returned content/source/time, denied the other user's direct content
+read with 403, and supplied the preference to a new chat. Default-off settings,
+per-user authorization, pause and graceful child-process reclamation also
+passed. The container exited zero and was removed. Evidence:
+`/private/tmp/dano465-browser-nibutlhc/mimo-memory-http.log`.
+
+This verifies MiMo as Dano's chat/tool model. It does not assert that the separate
+OpenViking extraction provider was changed, and synthetic JWT users do not
+prove OAuth or the authenticated browser memory path. Those gates remain open.

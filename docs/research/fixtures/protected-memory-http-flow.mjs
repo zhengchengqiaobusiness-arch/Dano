@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 
-export async function verifyMemoryHttpFlow({ origin, clients, token, memoryUnavailable = false }) {
+export async function verifyMemoryHttpFlow({ origin, clients, token, model, memoryUnavailable = false }) {
+  assert(model?.provider && model?.modelId, 'Real memory flow requires an explicit model');
   const [alice, bob] = clients;
   const events = [];
   let failure, request, nextId = 0;
@@ -57,7 +58,7 @@ export async function verifyMemoryHttpFlow({ origin, clients, token, memoryUnava
       await wait(() => events.slice(from).find(event => event.type === 'event' && event.payload.type === 'agent_end'));
       return events.slice(from).filter(event => event.type === 'event').map(event => event.payload);
     };
-    await command('set_model', { provider: 'cestc', modelId: 'qwen35' });
+    await command('set_model', model);
     if (memoryUnavailable) {
       const completed = await turn('请只回复：普通聊天正常');
       const messages = completed.filter(event => event.type === 'agent_end').flatMap(event => event.messages ?? []);
@@ -80,7 +81,7 @@ export async function verifyMemoryHttpFlow({ origin, clients, token, memoryUnava
     assert(content.text.includes('竹影验收'));
     assert.equal((await fetch(origin + contentPath, { headers: headers(bob) })).status, 403);
     await command('new_session');
-    await command('set_model', { provider: 'cestc', modelId: 'qwen35' });
+    await command('set_model', model);
     const recalled = await turn('我的验收报告标题和语言有什么稳定偏好？');
     const messages = recalled.filter(event => event.type === 'agent_end').flatMap(event => event.messages ?? []);
     const text = messages.filter(message => message.role === 'assistant').flatMap(message => message.content ?? [])
