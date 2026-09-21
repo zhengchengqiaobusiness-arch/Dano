@@ -32,6 +32,14 @@ environment overrides and arbitrary module paths cannot be provided in JSON.
 The parsing result contains secrets and must remain confined to the trusted
 HTTP host; never serialize it into argv, worker RPC, browser state or logs.
 
+The protected supervisor also projects its approved Skill roots and Provider
+Python module directory into each worker's Heimdall policy as read-only paths.
+These resources must resolve inside the root-owned installation tree already
+verified by the supervisor. The HTTP host's RPC cannot add paths. Discovery of
+a Skill alone is insufficient: its instructions and scripts must remain
+readable in the worker and mounted read-only for Shell execution. Other
+installation paths are not granted access by this projection.
+
 ## Current scope
 
 The private reader and parser have automated coverage for normal reads,

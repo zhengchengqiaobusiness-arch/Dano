@@ -1121,3 +1121,65 @@ and no `collection.taskFacts` contract yet. Deployment contract configuration,
 its new-policy consent boundary, and protected-runtime task-fact capture remain
 to be exercised before signing off #475. Real personal profile values must not
 be used as synthetic acceptance facts.
+
+### Policy upgrade and real protected task-fact capture
+
+The isolated deployment now has an administrator-owned read-only OA connectivity
+Skill and a `dano-collection-v2` contract. The only projected value is the numeric
+business success code; real profile values are excluded. Original private
+configuration files were backed up beside the deployed files before the change.
+The browser proved startup revoked the old v1 collection grant (revision 5)
+while preserving the main memory switch. Explicit reauthorization created a v2
+grant at revision 6. Screenshot:
+`/private/tmp/dano475-policy-v2-revoked-browser.png`.
+
+The first actual Skill invocation exposed a production integration defect:
+approved Skills were discoverable but neither their files nor the Provider
+Python module directory were included in the worker's Heimdall path policy.
+Read and Shell calls returned `SUPERVISOR_OPERATION_FAILED`. The attempted turn
+was stopped rather than left repeating failures.
+
+Commit `d63df28a` passes canonical root-validated installation resources from
+the privileged launcher to workspace policy generation as read-only paths.
+No host RPC accepts additional paths. Tests exercise the actual Heimdall access
+rules and Bubblewrap mount arguments, including unrelated-directory exclusion
+and workspace/resource overlap rejection. Related suite: 21 passed; full
+type/Svelte check passed. Standards and Spec follow-up reviews found no new
+code findings. Evidence: `/private/tmp/dano475-approved-resource-tests.log` and
+`/private/tmp/dano475-approved-resource-check.log`.
+
+The rebuilt protected image and the same test-only Skill overlay are running as
+`localhost/dano475-protected-image:d63df28a-taskfact` (image
+`b83a6713a4a90178aca4578e1c902874b91390bdabae8b447dd7b022a86a0beb`).
+The repeated real browser invocation read the Skill and executed its Python
+through the protected wrapper. Actual OA returned HTTP success and business code
+0. Source audit found one signed receipt, a valid HMAC, one login-bound successful
+request, and only the approved status field. Both collection requests subsequently
+reached `processed`. Real model-triggered Shell checks confirmed approved Skill
+read succeeds, write is denied, an unapproved installation file is inaccessible,
+and host-private configuration cannot be opened. These checks opened descriptors
+only and did not read private contents or alter any file.
+
+Evidence: `/private/tmp/dano475-d63-smoke.log`,
+`/private/tmp/dano475-taskfact-runtime-audit-details.log`,
+`/private/tmp/dano475-oa-taskfact-success-browser.png`, and
+`/private/tmp/dano475-approved-resources-isolation-browser.png`.
+
+**Negative-case failure remains:** the selector chose the complete transient
+status projection as a fact. The resulting automatic operation terminated with
+`MEMORY_NO_EXTRACTED_FACT`; OpenViking produced no usable fact. This is a real
+false-positive selection, not a successful durable-memory test. The first
+independent semantic replay excluded the same transient projection (7/7 cases
+passed), so it does not erase the deployed failure. The semantic fixture now
+includes the actual request wording and repeated trials to investigate stability.
+Do not sign off the task-fact quality gate until this discrepancy is resolved.
+
+The expanded replay reproduced the deployed failure in all five trials with
+the actual OA request wording: 7/12 total cases passed, and every
+`readonly-connectivity-status-*` trial incorrectly selected the full status
+projection. This is now a repeatable semantic regression, not merely a
+nonreproducible model response. Evidence:
+`/private/tmp/dano475-task-transient-repeated.log`; dataset hash
+`608e41881ca24d22bbd85165d06680d888f79f5ff1a37c3199bbcba82cec3171`.
+The deployed negative result remains failed pending an extension-level
+selection fix, published integration and repeated browser acceptance.
