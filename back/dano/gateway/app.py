@@ -12,17 +12,20 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import io
 import os
 from pathlib import Path
 import re
 import shutil
+import tempfile
 import time
 from typing import Literal
 from urllib.parse import urlsplit
 import uuid
+import zipfile
 
 import structlog
-from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -96,6 +99,10 @@ def _recording_subsystem(tenant: str, configured: object, start_url: str) -> str
         raise ValueError("无法从业务网址识别系统标识")
     return slug
 
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_PI_CHECK_DATA = _REPO_ROOT / "Pi_check" / "data"
+_SKILL_IMPORTS_DIR = _PI_CHECK_DATA / "skill-imports"  # 上传解压暂存目录
 
 _registry = InMemoryRegistry()       # DB 就绪换 PgRegistry(lifespan)
 _auth_store = InMemoryAuthStore()     # DB 就绪换 PgAuthStore(lifespan)
@@ -2179,6 +2186,76 @@ async def put_export_directory(
         raise HTTPException(status_code=400, detail="out_dir 不能为空")
     save_export_dir(cleaned)
     return {"out_dir": _current_export_dir()}
+
+
+
+def _find_skill_root(base: Path) -> Path | None:
+    """解压目录中找到 skill 包根（含 SKILL.md 的最浅层目录）。"""
+    if (base / "SKILL.md").exists():
+        return base
+    for child in sorted(base.iterdir()):
+        if child.is_dir() and (child / "SKILL.md").exists():
+            return child
+    return None
+
+
+@app.post("/v1/skills/upload")
+async def upload_skill_package(
+    file: UploadFile = File(...),
+    x_tenant_key: str | None = Header(default=None),
+) -> dict:
+    """上传 skill 包（zip）→ 解压 → 校验 → 自动导出到配置目录 → 注册到目录。
+
+    前端直接 multipart/form-data 上传 .zip 文件，无需手动填路径。
+    上传成功后包已写入导出目录，列表刷新即可看到新 skill。
+    """
+    await _auth_tenant(x_tenant_key)
+    from dano.onboarding.pi_check_sidecar import get_sidecar
+
+    # ── 1. 接收文件 ─────────────────────────────────────────────────────────
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+
+    # ── 2. 解压到暂存目录 ────────────────────────────────────────────────────
+    import_id = f"imp_{uuid.uuid4().hex[:12]}"
+    extract_dir = _SKILL_IMPORTS_DIR / import_id
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            # 安全检查：拒绝路径穿越条目
+            for member in zf.namelist():
+                if ".." in member or member.startswith("/"):
+                    raise HTTPException(status_code=400, detail=f"zip 包含非法路径: {member}")
+            zf.extractall(extract_dir)
+    except zipfile.BadZipFile as exc:
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=f"不是有效的 zip 文件: {exc}") from exc
+
+    # ── 3. 定位 skill 根目录 ────────────────────────────────────────────────
+    skill_root = _find_skill_root(extract_dir)
+    if skill_root is None:
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=422,
+            detail="zip 内未找到 skill 包（缺少 SKILL.md）；请确认打包了正确的目录",
+        )
+
+    # ── 4. 转发给 Pi_check sidecar（校验 + 自动导出 + 写目录）──────────────
+    sidecar = get_sidecar()
+    result = await sidecar.import_skill(str(skill_root))
+
+    # 暂存目录：导入成功后 Pi_check 已复制到 outDir，清理暂存
+    if result.get("ok"):
+        shutil.rmtree(extract_dir, ignore_errors=True)
+    # 导入失败时保留暂存目录供排查（有 TTL 清理逻辑可单独加）
+
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=422,
+            detail={"errors": result.get("errors", ["导入失败"]), "issues": result.get("issues", [])},
+        )
+    return result
 
 
 @app.post("/export/agent-skills")

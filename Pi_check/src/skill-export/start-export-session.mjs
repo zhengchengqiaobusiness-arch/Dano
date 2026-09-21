@@ -355,8 +355,15 @@ export async function reexportCatalogSkills({
   const errors = [];
   for (const [index, row] of rows.entries()) {
     const recordingId = String(row.recording_id || "").trim();
-    logExport(`目录快速导出 ${index + 1}/${rows.length} name=${row.name || "-"} recording_id=${recordingId || "-"}`, started);
+    logExport(`目录快速导出 ${index + 1}/${rows.length} name=${row.name || "-"} recording_id=${recordingId || "-"} source=${row.source || "-"}`, started);
     if (!recordingId) {
+      // 导入包：已在磁盘，不需要重导；直接计入 written
+      if (row.source === "imported") {
+        const existingPath = String(row.export_path || row.package_dir || "").trim();
+        if (existingPath) written.push(existingPath);
+        logExport(`目录快速导出 ${row.name} source=imported 已在磁盘，跳过重导`, started);
+        continue;
+      }
       errors.push(`${row.name}: 缺少 recording_id`);
       logExport(`目录快速导出跳过 ${row.name} 缺少 recording_id`, started);
       continue;

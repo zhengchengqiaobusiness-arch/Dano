@@ -1,4 +1,4 @@
-import { api } from "./client";
+import { api, TENANT_KEY } from "./client";
 
 // 与后端 catalog/manifest.SkillManifest 对齐
 export interface SkillManifest {
@@ -21,6 +21,7 @@ export interface SkillManifest {
   result_id?: string;
   version?: number;
   export_path?: string;
+  source?: string;            // "pi_check_recording" | "imported"
   call_metadata?: SkillCallMetadata;
   parameters: JSONSchema;  // 输入 JSON Schema
   output_schema?: Record<string, unknown>;
@@ -182,6 +183,45 @@ export async function saveExportDirectory(out_dir: string): Promise<string> {
 export async function exportAgentSkills(out_dir: string, tenant = ""): Promise<{ out_dir: string; mode: string; count: number; written: string[]; errors?: string[]; removed_frozen_folders?: string[] }> {
   const { data } = await api.post("/v1/skills/export", { out_dir, tenant });
   return data;
+}
+
+export interface ImportSkillIssue {
+  severity: string;
+  code: string;
+  message: string;
+  path?: string;
+}
+
+export interface ImportSkillResult {
+  ok: boolean;
+  skill?: SkillManifest;
+  exported_to?: string | null;
+  errors?: string[];
+  issues?: ImportSkillIssue[];
+}
+
+/**
+ * 上传 zip 包导入 skill：multipart/form-data，自动解压校验并导出。
+ * 使用原生 fetch 发起 multipart（axios 处理 FormData 跨平台差异较多）。
+ */
+export async function uploadSkillZip(file: File): Promise<ImportSkillResult> {
+  const form = new FormData();
+  form.append("file", file);
+  const tenantKey = localStorage.getItem(TENANT_KEY) || "";
+  const resp = await fetch("/v1/skills/upload", {
+    method: "POST",
+    headers: tenantKey ? { "X-Tenant-Key": tenantKey } : {},
+    body: form,
+  });
+  const data: Record<string, unknown> = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    const detail = data?.detail as Record<string, unknown> | string | undefined;
+    const errors: string[] = Array.isArray((detail as Record<string, unknown>)?.errors)
+      ? ((detail as Record<string, unknown>).errors as string[])
+      : [typeof detail === "string" ? detail : `HTTP ${resp.status}`];
+    return { ok: false, errors, issues: (detail as Record<string, unknown>)?.issues as ImportSkillIssue[] | undefined };
+  }
+  return data as unknown as ImportSkillResult;
 }
 
 // ── 运行期 token(录制型 skill 请求鉴权):录制自动抓 → 存 PG;过期前端换一份即可,免重录 ──

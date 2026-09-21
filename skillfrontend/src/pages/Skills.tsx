@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { Table, Tag, Button, Space, Typography, message, Empty, Modal, Input, Alert, Popconfirm, Pagination } from "antd";
+import { Table, Tag, Button, Space, Typography, message, Empty, Modal, Input, Alert, Popconfirm, Pagination, Upload } from "antd";
 import { useNavigate } from "react-router-dom";
-import { ReloadOutlined, ExportOutlined, DeleteOutlined, KeyOutlined, PauseCircleOutlined, CheckCircleOutlined } from "@ant-design/icons";
-import { listSkillsPage, exportAgentSkills, getExportDirectory, saveExportDirectory, deleteSkill, freezeSkill, resumeSkill, SkillManifest } from "../api/skills";
+import { ReloadOutlined, ExportOutlined, DeleteOutlined, KeyOutlined, PauseCircleOutlined, CheckCircleOutlined, ImportOutlined, InboxOutlined } from "@ant-design/icons";
+import { listSkillsPage, exportAgentSkills, getExportDirectory, saveExportDirectory, deleteSkill, freezeSkill, resumeSkill, uploadSkillZip, ImportSkillIssue, SkillManifest } from "../api/skills";
 import TokenModal from "../components/TokenModal";
 import { TENANT_NAME } from "../api/client";
 import { rememberExportDir, rememberedExportDir } from "../api/recording";
@@ -52,6 +52,11 @@ export default function Skills() {
   const [exportDir, setExportDir] = useState("");
   const [exporting, setExporting] = useState(false);
   const [tokenSub, setTokenSub] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importErrors, setImportErrors] = useState<string[]>([]);
+  const [importIssues, setImportIssues] = useState<ImportSkillIssue[]>([]);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(8);
   const [total, setTotal] = useState(0);
@@ -86,6 +91,35 @@ export default function Skills() {
     }
   }
 
+  function resetImport() {
+    setImportFile(null);
+    setImportErrors([]);
+    setImportIssues([]);
+  }
+
+  async function doImport() {
+    if (!importFile) { message.warning("请先选择 skill zip 包"); return; }
+    setImporting(true);
+    setImportErrors([]);
+    setImportIssues([]);
+    try {
+      const r = await uploadSkillZip(importFile);
+      if (r.ok) {
+        message.success(`已导入 ${r.skill?.title || r.skill?.name || importFile.name}${r.exported_to ? `，已写出到 ${r.exported_to}` : ""}`);
+        setImportOpen(false);
+        resetImport();
+        void load(page, pageSize);
+      } else {
+        setImportErrors(r.errors || ["导入失败"]);
+        setImportIssues(r.issues || []);
+      }
+    } catch (e: any) {
+      setImportErrors([e?.message || "导入失败"]);
+    } finally {
+      setImporting(false);
+    }
+  }
+
   async function doExport() {
     const outDir = exportDir.trim();
     if (outDir) await persistExportDir(outDir);
@@ -113,7 +147,7 @@ export default function Skills() {
 
   async function doDelete(skill: SkillManifest) {
     try {
-      const r = await deleteSkill(skill.name);
+      await deleteSkill(skill.name);
       message.success(`已删除 ${skillDisplayId(skill)}`);
       const nextPage = data.length <= 1 && page > 1 ? page - 1 : page;
       if (nextPage !== page) setPage(nextPage);
@@ -202,7 +236,11 @@ export default function Skills() {
                 </div>
               ) : (
                 <div>
-                  <div>{r.title || r.name}{r.frozen && <Tag color="default" style={{ marginLeft: 8 }}>已冻结</Tag>}</div>
+                  <div>
+                    {r.title || r.name}
+                    {r.frozen && <Tag color="default" style={{ marginLeft: 8 }}>已冻结</Tag>}
+                    {r.source === "imported" && <Tag color="cyan" style={{ marginLeft: 8 }}>导入包</Tag>}
+                  </div>
                   <div style={{ fontSize: 12, color: "#999" }}>{skillDisplayId(r)}</div>
                 </div>
               ),
@@ -214,6 +252,9 @@ export default function Skills() {
             title: (
               <Space size={8} wrap={false}>
                 <span>操作</span>
+                <Button size="small" icon={<ImportOutlined />} onClick={() => { setImportIssues([]); setImportOpen(true); }}>
+                  导入 skill 包
+                </Button>
                 <Button size="small" icon={<ExportOutlined />} onClick={() => setExportOpen(true)} disabled={!data.length}>
                   导出为 pi skill
                 </Button>
@@ -269,6 +310,59 @@ export default function Skills() {
         />
       </div>
       <TokenModal tenant={tenant} subsystem={tokenSub || ""} open={!!tokenSub} onClose={() => setTokenSub(null)} outDir={exportDir || rememberedExportDir()} />
+
+      <Modal
+        title="导入 skill 包"
+        open={importOpen}
+        onCancel={() => { setImportOpen(false); resetImport(); }}
+        onOk={doImport}
+        okText="导入"
+        okButtonProps={{ disabled: !importFile }}
+        confirmLoading={importing}
+        destroyOnClose
+      >
+        <Alert
+          type="info" showIcon style={{ marginBottom: 12 }}
+          message="上传 skill zip 包（支持 Dano 录制包或通用 Agent Skill）。校验通过后自动写出到配置目录，列表实时更新。"
+        />
+        {importErrors.length > 0 && (
+          <Alert
+            type="error" showIcon style={{ marginBottom: 12 }}
+            message="导入失败"
+            description={<ul style={{ margin: 0, paddingLeft: 16 }}>{importErrors.map((e, i) => <li key={i}>{e}</li>)}</ul>}
+          />
+        )}
+        {importIssues.filter(i => i.severity === "error").length > 0 && (
+          <Alert
+            type="warning" showIcon style={{ marginBottom: 12 }}
+            message="包结构问题"
+            description={
+              <ul style={{ margin: 0, paddingLeft: 16 }}>
+                {importIssues.filter(i => i.severity === "error").map((issue, i) => (
+                  <li key={i}><Typography.Text code>{issue.code}</Typography.Text> {issue.message}</li>
+                ))}
+              </ul>
+            }
+          />
+        )}
+        <Upload.Dragger
+          accept=".zip"
+          maxCount={1}
+          showUploadList={!!importFile}
+          beforeUpload={(file) => {
+            setImportFile(file);
+            setImportErrors([]);
+            setImportIssues([]);
+            return false; // 阻止自动上传，点「导入」时才上传
+          }}
+          onRemove={() => { setImportFile(null); }}
+          fileList={importFile ? [{ uid: "-1", name: importFile.name, status: "done" }] : []}
+        >
+          <p className="ant-upload-drag-icon"><InboxOutlined /></p>
+          <p className="ant-upload-text">点击或拖拽 skill zip 包到此处</p>
+          <p className="ant-upload-hint">仅支持 .zip 格式；包内须含 SKILL.md（frontmatter 含 name/description 字段）</p>
+        </Upload.Dragger>
+      </Modal>
 
       <Modal
         title="导出为 pi 文件式 skill"

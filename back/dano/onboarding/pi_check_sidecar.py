@@ -606,6 +606,31 @@ class PiCheckSidecar:
             data.setdefault("errors", [str(data.get("error") or response.text or "导出失败")])
         return data
 
+    async def import_skill(self, package_dir: str) -> dict[str, Any]:
+        """将本地 skill 包目录注册到 Pi_check 目录，不移动文件。"""
+        d = str(package_dir or "").strip()
+        if not d:
+            return {"ok": False, "errors": ["package_dir 不能为空"]}
+        try:
+            base = await self.ensure_export_api()
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "errors": [str(exc)]}
+        try:
+            async with sidecar_http_client(30.0) as client:
+                response = await client.post(
+                    f"{base}/v1/skills/import",
+                    json={"package_dir": d},
+                )
+            data = response.json() if response.content else {}
+            if not isinstance(data, dict):
+                data = {"ok": False, "errors": [str(data)]}
+            data.setdefault("ok", response.is_success)
+            if not response.is_success and "errors" not in data:
+                data["errors"] = [response.text or "导入失败"]
+            return data
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "errors": [str(exc)]}
+
     async def list_exported_skills(self) -> list[dict[str, Any]]:
         try:
             base = await self.ensure_export_api()

@@ -33,6 +33,7 @@ export {
   skillManifestFromExport,
 } from "./skill-catalog.mjs";
 export { exportRecordingSkill, dumpRecordingSkill, reexportCatalogSkills, stableSkillId, hydrateAuthFromRecordings } from "./start-export-session.mjs";
+export { importSkillPackage, readSkillPackageMeta } from "../skill-import.mjs";
 export {
   consumerContract,
   materializePackageTexts,
