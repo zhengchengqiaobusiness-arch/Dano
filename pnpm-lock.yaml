@@ -57,8 +57,8 @@ importers:
         specifier: 0.2.17
         version: 0.2.17(@earendil-works/pi-coding-agent@0.85.1(ws@8.21.0)(zod@4.4.3))
       '@josephyoung/pi-openviking':
-        specifier: 0.1.1
-        version: 0.1.1(@earendil-works/pi-coding-agent@0.85.1(ws@8.21.0)(zod@4.4.3))
+        specifier: 0.1.2
+        version: 0.1.2(@earendil-works/pi-coding-agent@0.85.1(ws@8.21.0)(zod@4.4.3))
       atomically:
         specifier: 2.1.1
         version: 2.1.1
@@ -1374,8 +1374,8 @@ packages:
     peerDependencies:
       '@earendil-works/pi-coding-agent': '*'
 
-  '@josephyoung/pi-openviking@0.1.1':
-    resolution: {integrity: sha512-8GKiWKSVNaib6DsTH9G/R5kukjqCCJPLvsMy2/CFU2qHfAue1vNw/RZnipnNCydW2NF4Z+h04CVeekIxgwtFkQ==}
+  '@josephyoung/pi-openviking@0.1.2':
+    resolution: {integrity: sha512-5a3kDtvooU3sUx5gtpBi6ns2NGcrqC6y6I+MVyxDoLQG/jdeGs+u7t/PWR3sVwehFuX6yhdXRkkKneFPY8+7Dg==}
     engines: {node: '>=22.19.0'}
     hasBin: true
     peerDependencies:
@@ -6321,7 +6321,7 @@ snapshots:
       '@earendil-works/pi-coding-agent': 0.85.1(ws@8.21.0)(zod@4.4.3)
       shell-quote: 1.8.4
 
-  '@josephyoung/pi-openviking@0.1.1(@earendil-works/pi-coding-agent@0.85.1(ws@8.21.0)(zod@4.4.3))':
+  '@josephyoung/pi-openviking@0.1.2(@earendil-works/pi-coding-agent@0.85.1(ws@8.21.0)(zod@4.4.3))':
     dependencies:
       '@earendil-works/pi-coding-agent': 0.85.1(ws@8.21.0)(zod@4.4.3)
       '@openviking/sdk': 0.1.0

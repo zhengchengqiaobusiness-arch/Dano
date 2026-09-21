@@ -66,7 +66,7 @@ starts the configured tokenizer workers and composes owner-bound memory with the
 supervised tool profiles. Startup does not provision remote users or enable
 memory. Missing configuration leaves memory unavailable; invalid configuration
 fails startup. Runtime disposal drains user deliveries before shared tokenizers
-close. These paths now use the published and exactly pinned extension `0.1.1`.
+close. These paths now use the published and exactly pinned extension `0.1.2`.
 Do not enable production memory from these CLI checks.
 
 ### Actual Linux result — 2026-09-18
@@ -555,3 +555,39 @@ At this checkpoint the local npm metadata response still reports latest
 `0.1.1`, so Dano remains pinned to `0.1.1` pending registry availability.
 Evidence: `/private/tmp/dano465-extension-tests.log` and
 `/private/tmp/dano465-browser-nibutlhc/save-receipt-mimo-result.json`.
+
+## Published 0.1.2 integration and real outbox restart (2026-09-21)
+
+The registry subsequently made both the `0.1.2` metadata and tarball available.
+Dano now pins `@josephyoung/pi-openviking@0.1.2` in its application manifest
+and lockfile. Frozen installation succeeded; importing the installed host
+factory confirmed version `0.1.2` and both Pi discovery keywords. `pnpm run
+check` passed with zero Svelte errors/warnings, and the five affected memory,
+protected-tool and detached-session suites passed all 36 tests. The initial
+local test attempt found a stale native `fs-ext` binary for another Node ABI;
+rebuilding that dependency for Node 22 resolved it without a product change.
+
+`fixtures/openviking-outbox-restart.mjs` then exercised the installed release
+against the isolated real OpenViking 0.4.20/MiMo service with a fresh synthetic
+account and separate Alice/Bob USER credentials:
+
+- A child process reliably enqueued an explicit fact without a remote transport,
+  acknowledged persistence, and was killed with SIGKILL.
+- A new process reopened the same private owner state. Bob could neither read
+  that state nor construct a delivery service for Alice's queue. A Bob key
+  paired with Alice's declared owner failed real server identity verification.
+- Alice resumed the queued operation to actual extracted/retrievable `ready`.
+  Alice recalled the synthetic fact; Bob's own-scope search remained empty.
+- Bob's forged-identity direct read, direct write and targeted search each
+  returned HTTP 403. Alice's memory content remained unchanged.
+- Repeating the same source returned the existing ready receipt and left one
+  operation, rather than enqueuing it again.
+
+Evidence: `/private/tmp/dano465-outbox-restart.log` (all assertions passed),
+`/private/tmp/dano465-pin012-check.log`, and
+`/private/tmp/dano465-pin012-tests.log`. This verifies enqueue-before-crash
+recovery and owner-bound replay against a real service; it is not evidence for
+all network-loss windows, governance, deployment rollback or browser behavior.
+The first fixture attempt exited after an unsettled top-level await; it was
+excluded. The successful injection keeps the child alive until the parent
+sends SIGKILL and asserts that exact exit signal.
