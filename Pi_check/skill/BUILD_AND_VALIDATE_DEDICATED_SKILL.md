@@ -26,10 +26,15 @@
 - 写能力 `system_params` 里 `required=true` 且 `source_kind=page_default`（或 `constant`）却没有 `default_value`，runtime 填不出。
 - 写能力系统栏 `current_user` 的 key 不是登录身份真实字段（例如把打开表单时写入的时间戳标成当前用户）。
 - `option_source` / `caller_fields.dataSource.endpoint` 等于另一能力的 execute path，空参无法返回候选。
+- `input_schema` / `caller_fields` 出现了该能力 `exposed_to_user=false` 的同名 key（点行身份一边系统一边又做成树）。
 - 冻结提问 JSON 的字段 id 少于该能力 `caller_fields`（确认卡会比原页瘦）。
 - 合同里同时有「列表查询」和「点结果看详情」两项读能力，但 `routes.default.steps` 跳过了详情，只剩查询→写入。
 - `project_contract_to_request` 对写能力用仅含调用方字段的合法输入无法投影出必填系统键。
 - `unresolved` 仍覆盖写入行的可见表头列（例如加行后才出现的进度），却仍把该写能力标成可执行。
+- 写能力 execute 的 `params` 只有附件和一个常量、却没有登录身份类系统键，而 caller 已有整张可写表单：这是丢掉了请求体身份键，回到录制重交。
+- 查询能力 intent 写了查看详情 / 应填 / 已填 / 未填，合同却没有独立详情能力，默认链只有查询→写入。
+- 可增行数组 title 含拆不开的「A和B」；或 `items.properties` 用合并列名顶替表头原文；或加行后可见的进度列既不在 properties 也不在 unresolved。
+- 写请求行对象里的类型码 / 行序号 / 前端行键只出现在 reason，未作为系统 param。
 
 ## 运输层已经写好的包
 

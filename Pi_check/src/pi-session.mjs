@@ -184,16 +184,18 @@ export function buildLiveDrivePrompt({ targetUrl = "", goal = "" } = {}) {
     `你是 Business Skill Investigator。按 Skill 1–3 交能力。\n` +
     `目标：${String(goal || "").trim() || "把该页独立业务动作做成可调用能力"}\n` +
     `入口：${String(targetUrl || "").trim()}\n` +
-    `人也可以点预览。台账齐了就立刻 submit_recording_result({final:true, use_draft:true}) 并停止自动操作。不要等人说结束，不要再 snapshot 空转。\n` +
+    `人也可以点预览。某一行已有真实 execute：立刻 Skill 3 交该项，禁止先换页、禁止点附件预览。列表查询与点结果后的详情请求若 path 或粒度不同，是两项能力。目标点名多种数量列则每列都要点。台账齐了就立刻 submit_recording_result({final:true, use_draft:true}) 并停止。不要等人说结束，不要再 snapshot 空转。\n` +
     `不要写消费者包，不要调 Skill 4。不要把完整 JSON 写在对话里。`
   );
 }
 
 export function buildFinalAnalysisPrompt(latestSeq) {
   return (
-    `用户已结束。证据已冻结，最新 seq=${Number(latestSeq) || 0}。\n` +
-    `按 Skill 1 对台账，Skill 3 认产物。台账齐了就提交能力。不要写消费者包，不要调 Skill 4。\n` +
-    `未交出完整能力不要 submit_recording_result。不要把 JSON 写在对话里。`
+    `自动操作已停止。证据已冻结，最新 seq=${Number(latestSeq) || 0}。\n` +
+    `不要再 click，不要再读证据，不要点预览附件。按 Skill 1 对台账，Skill 3 认产物。\n` +
+    `列表查询与点结果后的详情请求若 path 或粒度不同，必须分别交能力或写入 unresolved。禁止只交查询+新增。\n` +
+    `有真实 execute 的项立刻 submit_recording_capability；已有草稿立刻 submit_recording_result({final:true, use_draft:true})。\n` +
+    `不要写消费者包，不要调 Skill 4。不要把 JSON 写在对话里。`
   );
 }
 
@@ -627,9 +629,10 @@ export class LivePiSession {
         return;
       }
       if (Date.now() >= deadline) {
-        this.#emitThought({ kind: "text", text: "自动点击超时，预览你继续点" });
         this.lastStopReason = "timeout";
         this.#driveStopped = true;
+        this.#emitThought({ kind: "text", text: "自动操作超时，停止自动点击，转入根据证据提交能力" });
+        this.#abortLeftoverTurn();
         settleOk();
         return;
       }
@@ -709,7 +712,11 @@ export class LivePiSession {
       this.lastStopReason = "timeout";
       this.#driveStopped = true;
       this.status = this.alive ? "ready" : "closed";
-      this.#emitThought({ kind: "text", text: `自动点击不可用，预览你继续点：${this.lastError}` });
+      this.#emitThought({
+        kind: "text",
+        text: `自动操作超时，停止自动点击，转入根据证据提交能力：${this.lastError}`,
+      });
+      await this.#abortLeftoverTurn();
       return;
     } finally {
       this.#driveSettleOk = null;

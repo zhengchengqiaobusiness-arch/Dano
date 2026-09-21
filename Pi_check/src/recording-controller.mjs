@@ -160,8 +160,28 @@ export class RecordingController {
       hasResult: () => this.files.hasPiResult(recordingId),
     })).then(async () => {
       if (slot.failed || slot.completing) return;
-      if (!await this.files.hasPiResult(recordingId)) return;
-      await this.#succeed(recordingId);
+      if (await this.files.hasPiResult(recordingId)) {
+        await this.#succeed(recordingId);
+        return;
+      }
+      if (slot.pi?.lastStopReason === "timeout") {
+        logPiOnly(`自动操作超时，转入根据证据提交能力 recording=${recordingId}`);
+        try {
+          slot.onThought?.({
+            kind: "text",
+            text: "自动操作超时，停止自动点击，正在根据已有证据提交能力",
+          });
+        } catch {
+          // 超时提示失败仍要定稿
+        }
+        try {
+          await this.#finalizeFromEvidence(recordingId, {
+            publicMessage: "自动操作超时，正在根据已有证据提交能力",
+          });
+        } catch {
+          // #fail 已写入状态
+        }
+      }
     }).catch(async (error) => {
       if (slot.failed || slot.completing) return;
       logPiOnly(`自动点击不可用，人手点预览继续 recording=${recordingId} ${error?.message || error}`);
@@ -551,23 +571,57 @@ export class RecordingController {
     if (session.status === "failed") {
       throw new RecordingFailedError(publicFailureMessage());
     }
+    if (slot?.finalizing) return slot.finalizing;
     try {
       await slot.pi.stopLiveDrive?.();
     } catch {
       // 结束自动操作失败仍要冻结并定稿
     }
+    return this.#finalizeFromEvidence(recordingId, {
+      publicMessage: "自动操作已结束，等待 PI 提交能力",
+    });
+  }
+
+  async #finalizeFromEvidence(recordingId, { publicMessage = "等待 PI 提交能力" } = {}) {
+    const slot = this.#active.get(recordingId);
+    const session = this.evidence.snapshot(recordingId);
+    if (!slot) {
+      await this.#fail(recordingId, "PI 在录制期间退出");
+      throw new RecordingFailedError(publicFailureMessage());
+    }
+    if (slot.failed || slot.completing) {
+      return {
+        session: this.view(recordingId),
+        result: await this.files.readPiResult(recordingId).catch(() => null),
+        receipt: await this.files.readReceipt(recordingId).catch(() => null),
+      };
+    }
+    if (slot.finalizing) return slot.finalizing;
+    slot.finalizing = this.#runFinalAnalysis(recordingId, { publicMessage, session });
+    return slot.finalizing;
+  }
+
+  async #runFinalAnalysis(recordingId, { publicMessage, session } = {}) {
+    const slot = this.#active.get(recordingId);
     if (!this.evidence.snapshot(recordingId).frozen) {
       await this.evidence.freeze(recordingId);
     }
     if (await this.files.hasPiResult(recordingId)) {
       return this.#succeed(recordingId);
     }
+    if (!slot?.pi?.alive) {
+      await this.#fail(recordingId, "PI 在录制期间退出");
+      throw new RecordingFailedError(publicFailureMessage());
+    }
+    if ((session || this.evidence.snapshot(recordingId)).status === "failed") {
+      throw new RecordingFailedError(publicFailureMessage());
+    }
     logPiOnly("自动操作已结束，浏览器保持打开，等待 PI 提交已完成的能力");
     await this.evidence.setStatus(recordingId, {
       status: "pi_finalizing",
       browserStatus: "inspecting",
       piStatus: "finalizing",
-      publicMessage: "自动操作已结束，等待 PI 提交能力",
+      publicMessage,
     });
     const analysisOpts = this.#finalAnalysisOpts(recordingId);
     try {

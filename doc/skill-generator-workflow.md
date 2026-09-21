@@ -18,6 +18,8 @@
 
 `CONTRACT.json` 必须有 `routes[]`。合同里有 ≥2 个能力时，必须有一条多步默认路线。这些由运输层写出；你只核对，不要另编一份。
 
+`input_schema` / `caller_fields` 不得出现该能力系统 params 的同名键。`dataSource.endpoint` 不得等于另一能力的 execute path。出现即合同不可执行，停止出包，回到录制用原 id 重交。
+
 ## 冻结入口
 
 ```text

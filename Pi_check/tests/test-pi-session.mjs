@@ -320,6 +320,44 @@ test("自动点击空转时只停自动点，不把会话打成失败", async ()
   assert.equal(pi.status, "ready");
 });
 
+test("自动操作超时会中止残留轮并标 timeout", async () => {
+  const prompts = [];
+  let rejectPending;
+  const pending = new Promise((_, reject) => {
+    rejectPending = reject;
+  });
+  const session = {
+    prompts,
+    aborted: 0,
+    async prompt(text, options = {}) {
+      prompts.push({ text, options });
+      if (options.streamingBehavior === "steer") return;
+      await pending;
+    },
+    async abort() {
+      this.aborted += 1;
+      rejectPending?.(new Error("aborted"));
+    },
+  };
+  const pi = new LivePiSession({
+    session,
+    sessionId: "pi_drive_timeout",
+    dispose: () => {},
+  });
+  await pi.beginLiveDrive({
+    targetUrl: "http://example.com",
+    goal: "目标",
+    timeoutMs: 80,
+    idleSubmitMs: 1000,
+    hasResult: async () => false,
+  });
+  assert.equal(pi.alive, true);
+  assert.notEqual(pi.status, "failed");
+  assert.equal(pi.lastStopReason, "timeout");
+  assert.equal(pi.driveStopped, true);
+  assert.ok(session.aborted >= 1);
+});
+
 test("录制中不打断 PI，冻结后只发一次最终提示，忙时改用 followUp", async () => {
   const session = busySession();
   const pi = new LivePiSession({

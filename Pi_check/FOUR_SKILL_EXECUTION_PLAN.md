@@ -36,7 +36,7 @@ submit_recording_result({final:true, use_draft:true}) 交出能力并停
 
 不是阻断：人没有说话、人没有点预览、人没有说结束、PI 还想再确认一遍。这些都继续自动做。
 
-做完后禁止为「再验证一下」换页空转到超时。超时只停自动点，不是失败；台账已齐仍应定稿。
+做完后禁止为「再验证一下」换页空转到超时。超时只停自动点，不是失败；台账已齐仍应定稿。自动操作超时后运输层转入最终分析，PI 不得再读证据空转，必须把已经发出的 execute（含与列表查询不同的详情请求）交齐。
 
 ---
 
@@ -56,6 +56,7 @@ submit_recording_result({final:true, use_draft:true}) 交出能力并停
 1. 目标原文要求的每一页、每一行已经做完，或已写入 `unresolved`
 2. 台账每行有合同或 `unresolved`
 3. 写入行没有「未识别却当可执行」，也没有系统必填却填不出
+4. 每个 execute 业务键都在 params 或 unresolved；schema 没有系统键或假 option_source
 
 出包另开会话。Skill 4 必须读完 `doc/` 四份规范，写出流程、鉴权槽位和活选项；运输层只注入冻结 client/auth 并写入 Skills 目录。禁止已有 SKILL.md 就复用。
 

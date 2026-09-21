@@ -245,6 +245,32 @@ test("自动操作中定稿必须先通知前台，拆现场不得卡住当前�
   }
 });
 
+test("自动操作超时后自动根据证据定稿并通知前台", async () => {
+  let completed = 0;
+  const harness = await createHarness({ piBehavior: "drive_timeout" });
+  try {
+    const started = await harness.controller.start({
+      targetUrl: "http://example.com",
+      goal: "目标",
+      onComplete: () => {
+        completed += 1;
+      },
+    });
+    await waitUntil(() => (
+      completed > 0
+      && harness.controller.view(started.id).status === "succeeded"
+      && harness.getPi()?.submitReturned
+    ));
+    assert.equal(completed, 1);
+    assert.equal(harness.controller.view(started.id).hasFinalResult, true);
+    assert.equal(await harness.files.hasPiResult(started.id), true);
+    await waitUntil(() => harness.getPi()?.alive === false);
+    assert.equal(harness.getPi().closeDuringTool, false);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test("自动操作超时后定稿仍要收口并通知前台", async () => {
   let completed = 0;
   const harness = await createHarness({ piBehavior: "drive_fail" });

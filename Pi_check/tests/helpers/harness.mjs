@@ -191,6 +191,12 @@ export class ScriptedPiSession {
     if (this.behavior === "drive_fail") {
       throw new Error("PI 连续空转未自动操作");
     }
+    if (this.behavior === "drive_timeout") {
+      this.driveStopped = true;
+      this.lastStopReason = "timeout";
+      this.status = "ready";
+      return;
+    }
     if (this.behavior === "submit_on_drive") {
       await this.#runTool("submit_recording_result", {
         recording_id: this.recordingId,
