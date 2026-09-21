@@ -1229,3 +1229,68 @@ preventing collection. It used a synthetic business endpoint, not a real OA
 write. Evidence: `/private/tmp/dano475-extension014-task-delivery.log` and
 `/private/tmp/dano475-task-delivery-213foa/result.json`. Both incremental review
 axes reported zero new findings; rebuilt-image browser acceptance remains open.
+
+### Rebuilt 0.1.4 browser negative-case acceptance
+
+Commit `7559556a` built successfully through the protected-runtime target. The
+same read-only Skill overlay is deployed as
+`localhost/dano475-protected-image:7559556a-taskfact`, image
+`1c27a7c15e46d67153ce249bb54d0bcd99802bf4f9d4fe59630a916ac1508c99`.
+The running package reports `0.1.4`. The fixed HTTPS entry, trusted certificate,
+named volumes and host credentials were retained. The private policy was backed
+up and advanced to `dano-collection-v3`; browser evidence shows the v2 grant
+revoked at revision 7 while the main switch remains enabled. New collection
+was separately authorized through the UI before the new test conversation.
+
+Initial startup smoke timed out creating a client while workers initialized;
+the real browser subsequently connected and a ready-state repeat passed all
+API/SSE checks. Actual worker preflight passed on XFS as non-root UIDs.
+Evidence: `/private/tmp/dano475-7559556a-image-build.log`,
+`/private/tmp/dano475-7559556a-smoke.log`,
+`/private/tmp/dano475-7559556a-smoke-ready.log`, and
+`/private/tmp/dano475-policy-v3-revoked-browser.png`.
+
+The actual OA connectivity prompt was repeated with marker
+`DANO475_OA_TASKFACT_V3`. The model read the Skill and performed the real
+login-bound request successfully. Host audit found exactly one signed receipt,
+a valid signature and only the permitted status field. Its collection request
+reached `processed` with **zero selected tool sources and zero memory
+operations**. This corrects the deployed negative-case failure recorded above;
+it does not imply a lasting business outcome was created by a connectivity
+check. Evidence: `/private/tmp/dano475-taskfact-v3-audit.log` and
+`/private/tmp/dano475-oa-taskfact-v3-browser.png`.
+
+The same rebuilt image also passed real browser plain-response, image-upload
+and model-triggered `bash ls` regression. MiMo correctly described the reused
+synthetic image as red circle, blue square and yellow triangle, left to right;
+the actual tool returned `uploads`. Screenshot:
+`/private/tmp/dano475-v014-image-bash-browser.png`.
+
+A fresh browser conversation supplied a stable synthetic report-title preference
+and explicitly requested no tool calls. The model only acknowledged it. Native
+session/state audit confirms zero tools, a processed revision-8 request, and one
+`automatic` operation reaching `ready` with one memory URI. A new conversation
+asked for the title without supplying it and correctly received
+`银杉巡检结论`. Evidence: `/private/tmp/dano475-v014-preference-audit.log`,
+`/private/tmp/dano475-v014-auto-preference-browser.png`,
+`/private/tmp/dano475-v014-auto-ready-browser.png`, and
+`/private/tmp/dano475-v014-auto-recall-browser.png`.
+
+**Separate mixed-path result still needs deduplication review:** a preceding
+preference trial allowed tools, and the model called `memory_save`. The explicit
+operation reached `ready`, but automatic collection of that turn also submitted
+an operation which failed with `MEMORY_NO_EXTRACTED_FACT`. This trial is not
+counted as proof of pure automatic collection. Audit:
+`/private/tmp/dano475-v014-mixed-save-audit.log`. The successful no-tool trial
+does not resolve the mixed explicit/automatic behavior or close #475.
+
+Follow-up source audit confirms both operations use the same user entry and
+scope, and both facts contain the known synthetic title. Their text digests
+differ (the explicit tool paraphrased the user's fact), so exact-string
+deduplication alone would not cover this observed case. The audit emits digests
+and booleans only: `/private/tmp/dano475-v014-mixed-source-audit.log`.
+The Spec review found that explicit `save` does not register an automatic source
+receipt, while `collectSelection` only checks the automatic source ledger.
+Resolve this same-source overlap before #475 sign-off; do not skip an entire
+turn, which could discard additional facts that were not explicitly saved.
+The remote no-extraction result alone does not prove why OpenViking returned it.
