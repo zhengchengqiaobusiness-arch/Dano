@@ -605,3 +605,24 @@ collection recovery. Dano must connect protected, digest-bound provenance to the
 new interface without copying conversation bodies into the outbox. That adapter
 and restart/fork validation remain pending; the original cross-host P2 finding is
 not claimed fully resolved by the interface alone.
+
+### Durable Dano provenance receipt primitive
+
+`MemoryUserProvenance` now records a host-only custom entry in the protected
+original pi session. The receipt contains owner digest, original entry ID,
+timestamp, content digest and the length of the user-authored prefix, never a
+copy of the message or injected file references. Recording requires the persisted
+user message to exactly match the dispatched text and the original browser text
+to be its prefix. Unmatched template expansion cannot obtain a receipt. Retrying
+the same receipt is idempotent; conflicting attribution is rejected.
+
+Three tests passed using real pi session persistence/reopen and `forkFrom`,
+including copied-ancestor recovery, foreign-owner rejection, no transcript copy,
+missing template provenance, changed digest/timestamp and conflicting capture.
+`pnpm run check:type` passed. Logs: `/private/tmp/dano475-provenance-tests.log` and
+`/private/tmp/dano475-provenance-types.log`.
+
+This primitive is not yet called by Dano dispatch or the extension selector.
+Connecting prompt/steer/follow-up capture, durable settlement ordering and source
+projection remains necessary. No runtime behavior or product version is changed
+by the currently unreferenced module alone.
