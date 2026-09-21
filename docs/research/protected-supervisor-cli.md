@@ -340,8 +340,46 @@ Artifacts are under `/private/tmp/dano465-browser-nibutlhc/tokenizer`, with the
 probe script at the run root. The disposable container exited zero and was
 removed. No credentials were involved.
 
-The isolated Compose configuration is prepared at that run root with app/nginx,
-Linux runtime volumes and loopback ports 18710/18711. It has not been launched.
-Production OAuth/MiMo credential transfer was rejected by automatic approval
-review; a concrete scoped authorization question is pending. Production remains
-unchanged, and no secrets were copied by the rejected command.
+The initial credential transfer was rejected by automatic approval review.
+The user then explicitly authorized persistence under `~/tmp/`. The allowlisted
+OAuth/MiMo configuration was saved to
+`/Users/joseph/tmp/dano465-acceptance-secrets/production-input.json`, with a
+0700 directory and 0600 files. This directory is excluded from temporary
+acceptance cleanup. Production services were not changed.
+
+## Isolated Compose startup and MiMo probes (2026-09-21)
+
+Project `dano465-browser-nibutlhc` now runs the retained protected image, nginx
+and a fixed-destination OpenViking TCP relay. The scoped config/data volumes are
+`dano465-browser-nibutlhc-config` and `dano465-browser-nibutlhc-data`; runtime
+workspaces use Linux volumes. Mac-to-VM forwarding exposes only
+`localhost:18710` and `localhost:18711`. The relay binds the VM's private
+interface and is reached from the rootless app via `host.containers.internal`;
+it forwards only to the existing VM-loopback OpenViking tunnel.
+
+Startup exposed two local configuration errors: the generated isolated OAuth
+encryption key initially used the wrong encoding, and a VM-host relay cannot
+bind an address belonging to the separate rootless bridge namespace. The key
+now uses unpadded base64url for exactly 32 random bytes. The relay address and
+app route were verified independently. After app recreation, nginx's upstream
+resolution was reloaded to clear the observed 502 response.
+
+HTTPS smoke then passed homepage, health, anonymous cookie, client creation,
+SSE connection, command response and disconnect. Evidence:
+`/private/tmp/dano465-browser-nibutlhc/smoke.log`. Inspection of the actual
+`protected-host-entry.js` process shows UID/GID 1000, zero effective capabilities
+and `NoNewPrivs: 1`; an unrelated `podman exec` process is not this evidence.
+
+A real `mimo-v2.5` API image probe identified the synthetic red circle, blue
+square and yellow triangle (HTTP 200, 5.28 seconds). A tool-call probe returned
+the expected function and exact fact after the prompt explicitly delimited
+that fact; the initial ambiguous prompt included the trailing instruction in
+its argument. These probes do not execute a Dano tool or prove browser upload.
+Evidence: `mimo-vision-result.json` and `mimo-tools-result.json` in the same run
+root.
+
+The in-app Browser failed to open the HTTPS origin with
+`ERR_CERT_AUTHORITY_INVALID`. Certificate trust was handed off to the user
+under the browser policy; no certificate validation was disabled. OAuth login,
+rendered chat/image/bash, authenticated memory and screenshots remain unproven.
+The stack is retained while this handoff is pending.
