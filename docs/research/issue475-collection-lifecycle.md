@@ -68,3 +68,30 @@ boundary. Shared ancestor entries must not be recollected after fork/tree/reload
 5. Publish the complete independent extension, pin the real artifact in Dano,
    bump Dano's runtime version, then complete regression, browser acceptance,
    independent reviews and the upstream PR/merge gate.
+
+## Durable source receipts (2026-09-21)
+
+Independent extension commit `cd19065` adds source receipts written in the same
+owner-store transaction as the automatic delivery operation. The source key uses
+owner, trusted scope, original entry ID, original entry timestamp and content
+version. Session and branch IDs remain in operation provenance but do not make a
+copied ancestor a new source. Consent changes do not erase these receipts. A
+repeated source returns its original operation, including a terminal paused or
+failed result; it cannot create another remote session by adopting a new grant.
+Receipts retain a payload digest, not a second copy of conversation text, so
+conflicting content remains detectable after payload removal.
+
+Validation: 64 extension tests pass on Node 22.22.3, plus TypeScript check.
+`/private/tmp/dano475-ledger-tests.log` records the run. New cases cover concurrent
+viewers, reopening the file store, pause/resume followed by fork replay, distinct
+messages with reused short IDs, transaction failure before commit, malformed
+receipt rejection without rewriting state, and the real pi 0.85.1
+`SessionManager.createBranchedSession` path with label entries removed and the
+ancestry chain rewritten. The real pi test confirms preserved entry identity;
+it does not prove full agent lifecycle or real OpenViking network behavior.
+
+This is a delivery-side foundation. The trusted collector still must derive
+these fields from actual entries, durably capture request completion and enforce
+source boundaries before selection. Sources rejected before enqueue, coalesced
+batches, privacy filtering and interrupted-request recovery are not implemented
+by this receipt table. Package version remains 0.1.2 and this work is unpublished.
