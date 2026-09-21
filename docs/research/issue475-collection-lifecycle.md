@@ -1385,3 +1385,38 @@ The observed same-source explicit/automatic overlap regression is therefore
 resolved for the original failure class and the partial-overlap preservation
 case using the official published package. This does not close the complete
 #475 lifecycle audit or the parent #465 release gates.
+
+### Real OA access-token refresh preserves memory ownership
+
+On the official `0.1.5` protected image, a read-only inventory found exactly one
+active local OAuth login session. Its encrypted record was backed up inside the
+private host-state directory. A fault-injection harness replaced only that
+local record's access token with a synthetic invalid value, retaining its real
+refresh token. The browser then invoked the same read-only OA Skill. Dano's
+real credential broker detected rejection, refreshed through the actual OAuth
+provider, validated the refreshed identity and retried the business request.
+The final actual OA result was HTTP success and business code 0.
+
+Read-only before/after audit confirms the access token differs from both the
+original and injected values; the login session and canonical Dano user remain
+unchanged. OA retained its refresh token, so this proves access-token renewal,
+not refresh-token rotation. Memory owner mapping, independent encrypted memory
+credential, memory encryption key and authorization are byte/digest-identical.
+All nine previously ready operations remain ready; total operations remain 11.
+The current v4 collection grant remains revision 10. No credentials or raw user
+IDs were printed. The valid refreshed credential is retained; the older token
+was not restored over it.
+
+The refreshed request produced one valid, correctly bound minimal task receipt;
+its collection request reached processed with zero selected sources and no new
+operation. A fresh browser conversation still recalled both previously saved
+synthetic report titles correctly. Evidence:
+`/private/tmp/dano475-credential-rotation-prepare.log`,
+`/private/tmp/dano475-credential-rotation-verify.log`,
+`/private/tmp/dano475-credential-rotation-task-audit.log`,
+`/private/tmp/dano475-credential-rotation-browser.png`,
+`/private/tmp/dano475-credential-rotation-consent-browser.png`, and
+`/private/tmp/dano475-credential-rotation-recall-browser.png`.
+The guarded private harness is `/private/tmp/dano475-credential-rotation.mjs`;
+encrypted recovery material remains under the isolated container's
+`host-state/acceptance-credential-rotation-v015` directory.
