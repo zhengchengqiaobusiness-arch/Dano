@@ -24,7 +24,9 @@ async function installed(name, entry) {
 }
 const { pkg: piPkg, module: pi } = await installed('@earendil-works/pi-coding-agent', '.');
 const { pkg: memoryPkg, module: memory } = await installed('@josephyoung/pi-openviking', './host');
-assert.equal(piPkg.version, '0.85.1'); assert.equal(memoryPkg.version, '0.1.3');
+const appManifest = JSON.parse(await readFile(join(appRoot, 'package.json'), 'utf8'));
+assert.equal(piPkg.version, appManifest.dependencies['@earendil-works/pi-coding-agent']);
+assert.equal(memoryPkg.version, appManifest.dependencies['@josephyoung/pi-openviking']);
 const credentials = JSON.parse(await readFile(credentialsPath, 'utf8'));
 for (const key of ['XIAOMI_TOKEN_PLAN_CN_API_KEY', 'XIAOMI_API_KEY']) if (credentials[key]) process.env[key] = credentials[key];
 const ov = JSON.parse(await readFile(ovPath, 'utf8'));

@@ -1183,3 +1183,49 @@ nonreproducible model response. Evidence:
 `608e41881ca24d22bbd85165d06680d888f79f5ff1a37c3199bbcba82cec3171`.
 The deployed negative result remains failed pending an extension-level
 selection fix, published integration and repeated browser acceptance.
+
+### Published selector durability correction (0.1.4)
+
+The independent extension now treats a verified `task_fact` as a candidate,
+not automatic evidence of lasting value. Successful connectivity, health and
+authentication checks, transient status codes and test markers are excluded;
+reusable business outcomes still require independent semantic selection.
+No OA route, field name or acceptance marker is hardcoded in the selector.
+
+The same 12-case MiMo replay passed, including all five previously failing
+connectivity trials and the reusable report-template positive case. The dataset
+hash remains `608e41881ca24d22bbd85165d06680d888f79f5ff1a37c3199bbcba82cec3171`;
+the new prompt hash is
+`02bc2c5a96d9af36fddb7413546c23ce0d8389d45250cfd09a007b369ba8b443`.
+The existing seven conversation-selection cases and 184 extension tests also
+passed. Logs: `/private/tmp/dano475-task-durability-repeated.log`,
+`/private/tmp/dano475-durability-conversation-selection.log`, and
+`/private/tmp/dano475-extension014-tests.log`.
+
+[Extension PR #2](https://github.com/josephyoung/pi-openviking/pull/2) merged as
+`8ca9d9616ecb90386eeb720689571952f86f8539`; its remote branch was removed.
+GitHub Actions run `35621630456` published version `0.1.4`. Fresh official
+registry metadata and the downloaded tarball agree on integrity
+`sha512-YU2vP33ypNctuY329MAZlkT8VkFnzI2eRTTbIeC3ijncZG52h9AGPoK4j+/zG3qNipGDFtKJz0dDdKL9yT4ReA==`.
+Both required keywords are present. Despite a publish-log normalization warning,
+registry metadata and the tarball retain the `pi-openviking` bin mapping; the
+referenced `dist/cli.js` exists with its Node shebang.
+
+This release and independent replay do not replace the rebuilt Dano browser
+negative-case gate or the complete T-14 evaluation.
+
+Dano's manifest and lockfile now pin this official `0.1.4` artifact. Installed
+CLI invocation reaches its expected fail-closed profile validation. Full
+type/Svelte checks pass. The full test run passed 1599 tests, skipped one and
+timed out in one anonymous-release test; that file then passed all six tests in
+an isolated retry. Logs: `/private/tmp/dano475-extension014-dano-check.log`,
+`/private/tmp/dano475-extension014-dano-tests.log`, and
+`/private/tmp/dano475-extension014-anonymous-retry.log`.
+
+The real MiMo/OpenViking task-delivery fixture also passed against the installed
+release: one confirmed reusable result reached ready and recall, a foreign actor
+produced no receipt/fact, and withdrawal preserved the business request while
+preventing collection. It used a synthetic business endpoint, not a real OA
+write. Evidence: `/private/tmp/dano475-extension014-task-delivery.log` and
+`/private/tmp/dano475-task-delivery-213foa/result.json`. Both incremental review
+axes reported zero new findings; rebuilt-image browser acceptance remains open.
