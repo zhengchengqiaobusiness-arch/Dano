@@ -58,7 +58,9 @@ try {
   const errors = [];
   await session.bindExtensions({ onError: error => errors.push(error) });
   for (let i = 0; i < 2; i++) {
-    await session.prompt(`Synthetic lifecycle probe ${i + 1}. Reply only SETTLEMENT_OK.`);
+    await session.prompt(i === 0
+      ? 'Synthetic lifecycle probe. I prefer concise reports. Reply only SETTLEMENT_OK.'
+      : 'Synthetic lifecycle probe. My password is SYNTHETIC_NOT_A_REAL_CREDENTIAL. Reply only SETTLEMENT_OK.');
   }
   assert.equal(errors.length, 0, 'Extension lifecycle error');
   const requests = Object.values((await stateStore.read()).collectionRequests ?? {});
@@ -70,8 +72,22 @@ try {
   assert(observations.filter(item => ['turn_end', 'agent_end'].includes(item.type)).every(item => item.requests.at(-1).phase === 'running'));
   assert(observations.filter(item => item.type === 'agent_settled').every(item => item.requests.at(-1).phase === 'settled'));
   assert.deepEqual((await stateStore.read()).operations, {});
+  const builder = new memory.CollectionInputBuilder({ store: stateStore, maxInputBytes: 8192 });
+  const screened = [];
+  for (const request of requests) {
+    const result = await builder.build(request.id, manager);
+    assert.equal(result.status, 'ready');
+    assert(!JSON.stringify(result).includes('SYNTHETIC_NOT_A_REAL_CREDENTIAL'));
+    screened.push({ userCandidates: result.messages.filter(message => message.role === 'user').length,
+      assistantReferences: result.messages.filter(message => message.role === 'assistant_reference').length,
+      excludedEntries: result.excludedEntries.length });
+  }
+  assert.equal(screened[0].userCandidates, 1);
+  assert.equal(screened[1].userCandidates, 0);
+  assert(screened[1].excludedEntries >= 1);
   console.log(JSON.stringify({ piVersion: piPackage.version, model: 'mimo-v2.5', realAgentSession: true, completedRequests: requests.length,
-    sourceCounts: requests.map(request => request.sourceEntries.length), observations,
+    sourceCounts: requests.map(request => request.sourceEntries.length), observations, screened,
+    localCredentialScreeningTested: true,
     remoteMemoryDeliveryTested: false, privacySelectionTested: false }, null, 2));
 } finally {
   if (session) await session.dispose();

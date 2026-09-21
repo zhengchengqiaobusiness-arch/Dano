@@ -133,3 +133,68 @@ export/shutdown-reference cleanup and malformed-journal test were verified by th
 selection-worker recovery, Dano form-wait integration, bounded unavailable-store
 behavior and the separate authenticated consent UI remain outstanding. Neither
 package publication nor the Dano exact dependency has changed.
+
+## Local candidate screening (2026-09-21)
+
+Independent extension commit `34c6c8e` adds `CollectionInputBuilder`. It reads only
+settled, still-authorized request IDs from the owner store and original pi
+entries from the matching session. Only text blocks from user messages and
+successful assistant responses are projected. Assistant text remains explicitly
+`assistant_reference`, never a confirmed fact. Thinking, images, raw tool
+arguments/results, failed assistant rounds and custom recall/form wrappers are
+not projected. Missing sources and oversized input block the entire request
+instead of silently truncating its meaning. Consent is rechecked after scanning
+and host credential discovery, closing concurrent pause/revoke races.
+
+### Detector choice and boundaries
+
+- [Secretlint core](https://github.com/secretlint/secretlint/tree/master/packages/%40secretlint/core)
+  supports in-memory text scanning in JavaScript. Exact `13.0.5` core and
+  recommended preset packages are runtime dependencies, with original MIT
+  license files retained. The wrapper supplies its own rules and virtual source;
+  conversation content does not select configuration or filesystem paths.
+- [The recommended preset](https://github.com/secretlint/secretlint/blob/master/packages/%40secretlint/secretlint-rule-preset-recommend/src/index.ts)
+  supplies maintained vendor detectors. Its comment-filter rule is excluded:
+  `secretlint-disable` in a conversation cannot authorize disclosure.
+- [Gitleaks](https://github.com/gitleaks/gitleaks) was considered as an established
+  alternative. Its separate executable/runtime would add packaging and process
+  boundaries to both standard pi and the Node host; Secretlint fits this existing
+  runtime without copying a vendor rule corpus into custom regexes.
+- Small additional declaration guards cover generic password/token/secret fields,
+  authorization and cookie headers, JWT syntax, and standard PEM private-key
+  headers. NFKC normalization and zero-width separator removal happen only in
+  the scanner view. Trusted host secret snapshots cover opaque configured values;
+  neither snapshots nor scanner diagnostics are returned or persisted.
+- The initial synthetic PEM test exposed the upstream detector's deliberate
+  placeholder heuristic. A private-key header now rejects the whole message even
+  when its body is malformed or incomplete. No placeholder exception is granted.
+
+Any detected credential excludes its entire message. This avoids treating text
+with removed spans as if it retained the user's original meaning. Scanner errors
+return a fixed code without source text or diagnostic causes. An undetected text
+is only a candidate: generic pattern matching does not prove universal secret
+absence or semantic confirmation. The future fact selector must still reject
+credential facts, unsupported inferences and unconfirmed assistant suggestions.
+Host-specific sensitive-value wiring is not yet installed in Dano/ordinary pi.
+
+Validation: 95 extension tests pass (`/private/tmp/dano475-input-tests.log`).
+Coverage includes vendor tokens, partial PEM blocks, generic English/Chinese
+credentials, environment variables, JSON credentials, cookie/auth headers,
+comment suppression attempts, normalized labels, known opaque credentials,
+excluded message types, scanner failures, missing sources, byte limits and
+concurrent pause/resume. `npm audit --omit=dev` reports zero findings in
+`/private/tmp/dano475-input-audit.json`; this is dependency advisory evidence,
+not a security proof. Existing dependency versions remain unchanged; npm moved
+unchanged `debug`/`ms` dependencies to the root during deduplication.
+
+The updated real pi 0.85.1 / `mimo-v2.5` probe passed twice-completed-request
+settlement plus screening over actual session entries. Its first request retained
+one ordinary user candidate; its second excluded the synthetic-password user
+message. Both retained assistant text solely as references. No automatic
+OpenViking operation was queued. Log: `/private/tmp/dano475-real-input.log`.
+
+Remaining: confirmed-fact selection (including explicit user confirmation of
+assistant proposals), allowlisted/declassified task facts, bounded merge and
+selection-worker recovery, runtime credential snapshot wiring, separate consent
+UI, and complete real-service/browser acceptance. Package publication and Dano's
+exact installed `0.1.2` remain unchanged.
