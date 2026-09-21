@@ -87,5 +87,7 @@ export function isUsefulAssistantThought(thought) {
   if (/^继续用 control_in_app_browser/.test(text)) return false;
   if (isNoiseNetworkPath(text)) return false;
   if (/采集可见控件 \d+ 个/.test(text)) return false;
+  // 模型原始推理文本（含英文）不在前台展示，保留在服务端日志即可
+  if (/^模型分析：/.test(text)) return false;
   return true;
 }

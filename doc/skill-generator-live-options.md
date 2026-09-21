@@ -34,6 +34,8 @@ python3 scripts/flow.py --list-options <capability_id> <field>
 
 选项接口和业务接口走同一套 `auth.local.json` / `DANO_AUTH_HEADERS`。401 按鉴权规范停问。
 
+`option_source` / `dataSource.endpoint` 必须是**本表单选择器自己的候选接口**。空参或仅选项内部参数时应返回候选。禁止把另一能力的 execute（还依赖部门/日期等业务条件的列表查询）挂成本字段选项源。那种接口空列表是正常的，不是调用方去猜 id 的理由。点行带出的人/单走 identity / `links`，不要做成 `treeSelect`。
+
 ## 失败即停
 
 选项接口失败、空列表、或无法映射到稳定 id：

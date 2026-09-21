@@ -55,7 +55,7 @@ submit_recording_result({final:true, use_draft:true}) 交出能力并停
 
 1. 目标原文要求的每一页、每一行已经做完，或已写入 `unresolved`
 2. 台账每行有合同或 `unresolved`
-3. 写入行没有「未识别却当可执行」
+3. 写入行没有「未识别却当可执行」，也没有系统必填却填不出
 
 出包另开会话。Skill 4 必须读完 `doc/` 四份规范，写出流程、鉴权槽位和活选项；运输层只注入冻结 client/auth 并写入 Skills 目录。禁止已有 SKILL.md 就复用。
 

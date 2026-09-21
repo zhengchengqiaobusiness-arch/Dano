@@ -127,6 +127,29 @@ export function thoughtFromAgentEvent(event) {
   return thought && isUsefulAssistantThought(thought) ? thought : null;
 }
 
+/** 将 DOM 选择器/探针文件转为可读标签 */
+function humanizeInteractionLabel(rawLabel, action) {
+  const s = String(rawLabel || "").trim();
+  if (!s) return "";
+  // 探针文件（内部实现细节）
+  if (/upload[-_]probe\./i.test(s)) return "附件";
+  // 纯文件路径
+  if (/\.(png|jpg|jpeg|gif|pdf|xlsx?|docx?|csv)$/i.test(s)) return s.split(/[/\\]/).pop() || "文件";
+  // DOM 选择器（含 = [ # > ~ 等技术符号）→ 提取 name / aria-label / 最后一段文字
+  if (/[=\[\]#>~]/.test(s)) {
+    const nameM  = s.match(/name=["']?([^"'\]]+)["']?/);
+    const ariaM  = s.match(/aria-label=["']?([^"'\]]+)["']?/);
+    const textM  = s.match(/text=["']?([^"'\]]+)["']?/);
+    const readable = nameM?.[1] || ariaM?.[1] || textM?.[1];
+    if (readable) return readable;
+    // 最后尝试提取引号内内容
+    const quotedM = s.match(/["']([^"']{1,30})["']/);
+    if (quotedM) return quotedM[1];
+    return action === "click" ? "按钮" : "元素";
+  }
+  return s;
+}
+
 export function thoughtFromEvidence(kind, payload = {}) {
   const body = payload && typeof payload === "object" ? payload : {};
   if (!isUsefulEvidenceThought(kind, body)) return null;
@@ -137,13 +160,17 @@ export function thoughtFromEvidence(kind, payload = {}) {
   if (kind === "interaction") {
     const action = String(body.kind || "click");
     const who = body.actor === "pi" ? "PI" : "人";
-    const label = compactText(body.label || body.text || body.placeholder || body.selector || body.name || body.tag || "", 80);
+    const rawLabel = body.label || body.text || body.placeholder || body.selector || body.name || body.tag || "";
+    const label = compactText(humanizeInteractionLabel(rawLabel, action), 60);
     return { kind: "text", text: label ? `${who} ${action} ${label}` : `${who} ${action}` };
   }
   if (kind === "network_request") {
+    const method = String(body.method || "").toUpperCase();
+    // HEAD 请求是浏览器预检噪声，不展示
+    if (method === "HEAD") return null;
     const path = compactText(body.path || body.url || "", 160);
     if (!path) return null;
-    return { kind: "text", text: `请求 ${String(body.method || "").toUpperCase()} ${path}`.trim() };
+    return { kind: "text", text: `请求 ${method} ${path}`.trim() };
   }
   if (kind === "visible_control") {
     const count = Number(body.count || body.controls?.length || 0);

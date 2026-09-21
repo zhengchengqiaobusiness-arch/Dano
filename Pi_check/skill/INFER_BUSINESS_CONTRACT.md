@@ -10,7 +10,7 @@ Investigator 叫你认一项产物时立刻工作。该项已按目标做完且�
 
 修正已交项：`submit_recording_capability` 用**同一个** `capability_id` 把整项再交一遍（含 steps / refs / relations）。运输层按 id 覆盖。禁止另起 `_v2` / `_2` /「含顺序关系」新 id。闸门报「两个能力不能共用同一个 execute step_id」只约束**两项不同能力**；那不是让你给同一动作新编 step。新建和编辑才拆两个 execute step。同一「新增并提交」只交一项。
 
-目标要求先 A 后 B：有值流写 `links`；没有值流也必须写 `capability_relations`（handoff），挂在**已有**写能力上再交同一 id。页内典型链（查询→新增、查询→编辑、查询→删除、新增→提交）只要本场都做完，必须挂 relation。Skill 4 靠这些关系编默认办理路线，不要自己写消费者包。
+目标要求先 A 后 B：有值流写 `links`；没有值流也必须写 `capability_relations`（handoff），挂在**已有**写能力上再交同一 id。页内典型链只要本场都做完，必须挂 relation：**查询→点结果看详情**、查询→新增、查询→编辑、查询→删除、新增→提交。列表查询和详情若 execute path 不同、返回粒度不同（例如计数 vs 逐条明细），两者都是独立能力，**禁止**只挂「查询→新增」而把详情留在原子路线外。Skill 4 靠这些关系编最长默认办理路线，不要自己写消费者包。
 
 ## 禁止把未识别来源冻成录制常量
 
@@ -72,7 +72,7 @@ Investigator 叫你认一项产物时立刻工作。该项已按目标做完且�
 
 - `execute`：真正完成该能力的主请求。每个能力必须恰好一个，且不得与其它能力共用。
 - `preflight`：打开**这一张**表单、带出记录、进入可写状态的那一次请求。打开表单附带的空抄送列表、附件计数不是新能力，也不是系统字段。上一页列表、通知未读、整站字典/菜单不是 preflight。
-- `option_source`：只挂**当前能力表单或筛选条上真实存在的下拉/选择器**的选项接口。附件列表、审批时间线、流程定义、权限菜单、字典总表，都不是 option_source。
+- `option_source`：只挂**当前能力表单或筛选条上真实存在的下拉/选择器**的选项接口。附件列表、审批时间线、流程定义、权限菜单、字典总表，都不是 option_source。禁止把另一能力的 execute 路径挂成本字段选项源。点行带出的人/单走 identity / `links`，不是树。
 - `fact_check`：打开查看后带出的详情、附件、审批进度，或提交后回读**该业务对象**。不要把“只带分页的列表刷新”挂进来，否则页面会把页码/每页条数画进该能力的系统字段。
 
 页面把该能力**所有 step** 的 `params` 平铺成「系统自动处理」。因此：写入/提交类能力的系统栏**只许来自 execute**。`option_source` 的 `params` 必须是空数组 `[]`。只读性 `preflight`（GET，打开表单/载入记录）的 `params` 也必须是空数组。禁止把选项接口或打开表单请求里的页码、每页条数、排序、状态过滤、占位业务 ID 写进该能力任何 step 的 `params`。查询类能力的分页只写在它自己的 execute 上。
@@ -135,12 +135,14 @@ Investigator 确认该项已按目标做完、并在 `list_action_timeline` 或 
 2. **摊开 execute 请求形状**：把这条请求的每个 query/body 键列出来。同一键出现几次就建几个 param，共用这个 path。一个数组只建一个数组 path；行差别写在行内字段。
 3. **摊开当前页控件**：读该动作所在页的**最近一次** `visible_control` 和点过的 interaction，并与当场 `snapshot` 对照。每个控件看 `region`（filter/form/table/dialog）、`label`/`placeholder`/`name`、`control_kind`（input/select/date/textarea/upload/button/readonly）、`required_mark`、`readonly`。`region=table` 的输入是加行后出现的行内框；`region=form` 的大段 textarea 是另一份补充说明；`region=dialog` 是确认/选择弹层。打开弹层、切换页签、加行后必须再 snapshot；`read_visible_controls` 不传 seq。不要带着打开弹层之前的 seq 去对字段。
    `readonly`/`disabled` 表示**整个控件当前不能改**（宿主带 disabled / aria-disabled / is-disabled）。自定义下拉、日期、级联、单选组的内部展示框常常带原生 `readonly`，那不是灰框。只有宿主锁死才是系统字段；点一下能出选项或能改选 → 可改 → 调用方。
+   带星号、旁边有日历/下拉箭头、能打开面板的日期和下拉，一律按可改处理。禁止因为入口 URL 已经带了类型/日期、或框里已有当天/默认选项，就写「从 URL 传入，调用方不可改」。reason 只有在 `visible_control` 上**整控件** `readonly=true` 或 `disabled=true` 时，才允许说锁死。
 4. **按目标写上再证明绑定**：Investigator 已按目标把该动作的可见字段写上并点出 execute 之后，再对还没对上的键建议改一个值看哪个请求键变了。值碰巧相等、字段名相似、同一个请求里仅剩两个字段，都不能单独定案。本场没改过、但控件可改：仍是调用方，不要写成 `constant` / 「无独立来源」。无法做这个实验（合法 selector 写不进、未授权写入）：该键写入 `unresolved`。禁止编 path，禁止 invent selector。来源没看清不能说成已经理解业务。录制值只可作 `sample_value`。
 5. **逐键对上控件，决定调用方还是系统**：
    - 对得上**可改**控件（input/select/date/textarea/upload，以及树、页签、分段器、单选组，且 `readonly`/`disabled` 都不是 true）→ **调用方**。即使本场没改、这次 query/body 没带这个键，也留下可选调用方字段。页面上已有默认选中（单选默认启用、下拉已有值）只要还能改，仍是调用方，禁止写成 `constant` / 「无独立来源」。`path` 用控件 `name` 或同页已发出请求里的同义键。对不上 path 就写入 `unresolved`，不要假装控件不存在。
    - 一个可见**日期区间**（`range=true` 或一个控件里两个起止输入）对上两个请求键时，两个键都是调用方，不要把起止收成系统。
    - 页面因切换类型/页签自动改了日期，只要日期控件仍能点，仍是调用方，不要当成计算公式。
-   - 入口 URL / 上一页带入的默认值：本页对应控件**仍能改** → 调用方，`source_kind=page_default`。`visible_control` 上该控件 `readonly=true` 或 `disabled=true` → **系统**，`source_kind=page_default`，reason 写清从哪次跳转/URL 带入；**禁止**再写进 `input_schema` 当调用方枚举。同一标签若既有只读下拉、又有一份看起来可改的空 input，认只读那条，不要把灰掉的类型收成调用方数字框。
+   - 入口 URL / 上一页带入的默认值：本页对应控件**仍能改** → **调用方**，`source_kind=page_default`，必须进 `input_schema`。日期页面默认当天时，调用方字段写 `page_default=today`（或等价说明），**不要**收进系统栏。`visible_control` 上该控件整项 `readonly=true` 或 `disabled=true` → **系统**，`source_kind=page_default`，且必须带运行时可执行的 `default_value`，reason 写清从哪次跳转/URL 带入；**禁止**再写进 `input_schema`。同一标签若既有只读下拉、又有一份看起来可改的空 input，认只读那条，不要把灰掉的类型收成调用方数字框。
+     **禁止**把可改日期/下拉做成系统 `page_default` 且没有 `default_value`：导出后 runtime 填不出，调用方 input-json 也改不了系统栏，写操作会直接失败。这种形状要么改回调用方，要么写入 `unresolved`，禁止当已解决。
    - 对得上灰框 / 自动编号 / 只读姓名单位 / `readonly=true` / `disabled=true` → **系统**。
    - 请求里有、控件上没有：登录用户/组织且初始加载请求就自动带上 → **系统**，`source_kind=current_user`，reason 写「运行时取当前登录身份」，**禁止**把本场的用户 ID、公司 ID 写成永远不变的 `constant` 固定值。
    - 请求里有、控件上没有：行类型判别、行序号、前端行键 → 仅当有加行按钮和分区证据时标 **系统**，reason 写清依据和 seq。前端时间戳或看不清的键 → `unresolved`，录制值只作 `sample_value`。禁止写成「无独立来源，按录制请求原值提交」并标已解决。
@@ -184,16 +186,37 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 - `user_input`：人在哪个控件填写；空值是否仍提交。
 - `page_enum`：选项来自页面本身；`enum_options` 必须列出**当场下拉里看到的全部** `{label,value}`。写清是否完整。
 - `api_option`：`source` 写 `source_method`、`source_url`、`label_key`、`value_key`；`enum_options` 写本场实际返回的选项。写清 `options_complete=true/false`（只截到一页就标 false）。调用方选显示值，提交接口值。
-- `page_default` / 可改的 `previous_response`：默认从哪一步哪条路径来（`from_step_id` + `from_path`），**调用方可以改**。编辑弹层里的日期、下拉、数字都属于这类，即使本场没改。
-- 只读回填的 `previous_response`：`source` 必须写 `from_step_id` + `from_path`，提交时原样带回，调用方不能改。同一条值流还要写进 `links`。导出从这些 `links` 投影传值。目标要求先 A 后 B、但没有值要传时，另写 `capability_relations`（见编排）。不要把本场主键/单号/正文当 `default_value`。
-- `selected_record_identity`：从列表哪一次点击/当前行哪个字段带出，提交到哪个 path。
+- `page_default` / 可改的 `previous_response`：默认从哪一步哪条路径来（`from_step_id` + `from_path`），**调用方可以改**。编辑弹层里的日期、下拉、数字都属于这类，即使本场没改。可改的 `page_default` 必须 `exposed_to_user=true` 并进 schema。只有整控件锁死的 `page_default` 才进系统栏，且必须带 `default_value`（分页页码这类已认清的数字缺省可以）。
+- 只读回填的 `previous_response`：`source` 必须写 `from_step_id` + `from_path`，提交时原样带回，调用方不能改。同一条值流还要写进 `links`。导出从这些 `links` 投影绑定。目标要求先 A 后 B、但没有值要传时，另写 `capability_relations`（见编排）。不要把本场主键/单号/正文当 `default_value`。
+- `selected_record_identity`：从列表哪一次点击/当前行哪个字段带出，提交到哪个 path。`reason` 若是「点结果表某行/某数字/某链接带出」，这就是 identity 或 `previous_response` + `links`，**禁止**再做成独立 `api_option` 树/下拉，也禁止把上一查询的 execute 路径挂成本字段 `option_source`。用户说「我 / 当前登录人」时，人维度的读请求用 `current_user` 的用户主键，不要再做一个全员选择器。
 - `computed`：计算规则写进 `reason` 和 `source.formula`。用页面标签和字段 key 写关系，例如「明细金额 = 数量 × 产品单价」。证据里看不出公式：写入 `unresolved`，不要编公式，不要用录制原值冒充已解决。
-- `generated`：谁生成、何时生成（例如保存后服务端生成单号）。看不出生成规则时写入 `unresolved`。
-- `constant`：已经认清、每次提交都相同且有业务含义的固定值。依据写清。没有认清不要用 `constant`。
+- `generated`：谁生成、何时生成（例如保存后服务端生成单号、打开表单时前端写入的时间戳）。看不出生成规则时写入 `unresolved`。禁止把这类键标成 `current_user`：登录身份接口里没有 `createTime` 这类时间戳。
+- `constant`：已经认清、每次提交都相同且有业务含义的固定值。依据写清。必须带 `default_value`。没有认清不要用 `constant`。
 - `selected_option_field`：随哪一个选项接口的哪一个字段带出。
 - **来源未识别**：请求里有、但页面上没有对应可填控件，也看不出公式或上游映射。写入 `unresolved`，`sample_value` 可记本场原值。禁止 `source_kind=constant` + 录制原值 + 已解决。
 
 不要追求每个字段都有一套来源规则。只有已经认清的字段才写成调用方或系统。其余写入 `unresolved`。
+
+### 系统字段必须运行时可填充
+
+`exposed_to_user=false` 的键，导出后只能由 runtime 按合同填充，调用方 `--input-json` **改不了**系统栏。因此交能力前必须能回答「下次执行这一键从哪来」。认不清就 `unresolved`，禁止为了看起来整齐收进系统栏。
+
+允许进系统栏的，只限已经认清且 runtime 填得出的：
+
+- `current_user`：仅登录身份真实有的键（创建人、姓名、部门、公司这类）。reason 写「运行时取当前登录身份」。禁止把前端时间戳、单据日期、类型下拉挂在这里。
+- `constant`：必须带 `default_value`。
+- `previous_response`：必须带 `from_step_id` + `from_path`，并有对应 `links`。
+- 锁死控件的 `page_default`：必须带 `default_value`（或已认清的分页数字缺省）。
+- 已认清的生成时间：`generated`，或键本身就是打开时写入的创建时间；不要标 `current_user`。
+
+下面这种形状 **禁止交成已解决写能力**：
+
+- 系统 `page_default` + `required=true` + 没有 `default_value`（可改日期被误收）
+- 系统 `current_user` 但权限接口根本没有该键
+- `option_source` 的 path 等于另一能力的 `execute` path，并且空参时拉不到候选
+- 数组 `items.properties` 里出现行类型码、行序号；或整表写死一个 `itemType`
+
+可增行：调用方只收行内真实输入（内容、只在某一分区出现的进度等）。行类型按点了哪个「添加××」或落在哪张分区表由系统补，不要让调用方填类型码，也不要把整份数组写成固定一种行。
 
 栏位在左还是在右不重要，**说明必须能让导出直接用**。人能填的控件缺标签/`path`、或把可改字段写成不可改，算出品不完整。看不出公式或来源的请求字段写入 `unresolved`，不算已解决。
 
@@ -206,7 +229,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 
 - 白底可改的输入、日期、数字、下拉、单选、页签、分段器、树、附件 → 调用方。编辑弹层里同样可改的字段，即使本场只改了备注，仍是调用方；来源用 `page_default` / `previous_response` / `api_option`（上游默认，可修改）。
 - 灰底只读、保存时自动生成的单号、合计行、金额/税额/优惠后金额这类算出来的格子 → 系统。来源 `computed` / `generated` / `previous_response`。不要标成“自动计算，可修改”，也不要放进 `input_schema`。
-- 列表行点进查看/编辑/删除/审批时带出的主键、明细行 ID、流程实例 ID → `selected_record_identity` 或 `previous_response`，**系统**。不要放进 `input_schema`。
+- 列表行点进查看/编辑/删除/审批时带出的主键、明细行 ID、流程实例 ID → `selected_record_identity` 或 `previous_response`，**系统**。不要放进 `input_schema`。不要把「点行带出的人/单」改造成一张与本页无关的用户树。
 - 选项接口顺便带回的显示名、条码、库存、单位等，人不能单独填 → 系统，`selected_option_field` / `previous_response`。
 - 打开编辑时 GET 详情回填、提交时原样带回、表单上根本没有对应可改控件的字段（创建人只读、入库数）→ 已认清则标系统。前端时间戳看不清生成规则 → `unresolved`。
 - 登录态、Cookie、分页、流程定义 Key → 系统。页面上能改的类型/状态下拉、日期、附件仍是调用方，不要因为本场没改就收成系统。
@@ -242,6 +265,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 - 表单上有、请求没带的只读提示（例如“保存时自动生成”）写成 `generated` 系统字段。
 - 可增行数组的 `reason` 必须写清「调用方按行填写添加行后出现的输入框，系统再组装成该数组」。
 - `option_source` 只挂**这个能力的表单**上真实存在的下拉。列表筛选的“创建人”选项不要挂到新增/编辑。页面加载时的权限/字典/菜单不要挂进业务能力。`option_source` / `preflight` 的 `params` 必须是空数组。
+- `option_source` 必须是**本表单选择器自己的候选接口**。空参或仅选项内部参数时就应返回候选。禁止把另一能力的 execute（例如上一张列表查询，还依赖部门/日期等业务条件）挂成本字段选项源。那种接口空列表是正常的，不是调用方去猜 id 的理由；点行带出的值走 identity / `links`。
 
 人在筛选框、表单、下拉里能填或能选的值，必须是调用方字段，不能丢。  
 筛选条上看得见的输入框，即使本场空着没进 query，也要留下调用方可选字段。`key`/`path` 必须能从控件的 name、placeholder 或同页已发出的请求看出来；看不出来就写入 `unresolved`，不要假装这个筛选项不存在，也不要编一个看起来像业务的 query 键。没打开过的下拉不要编 `enum_options`，也不要把整站无过滤的字典总表挂成该字段的 `option_source`。schema 已列出当场枚举时，params 必须同属 `page_enum`，不要再改口成无类型 `api_option`。  
@@ -448,10 +472,11 @@ execute 里的附件容器字段来自 preflight 响应，标为系统自动处�
 - `links` 必须用 `source_step_id` / `source_path` / `target_step_id` / `target_path` 写出**值怎么流**。例如创建响应里的流程实例 ID 进入撤回参数。不要把常量写成“上游映射”，也不要只写一句“有依赖”。`source_step_id` 与 `target_step_id` 不能是同一步。禁止「保存响应 data → 同一条保存的 body.id」。没有下一步用这个值：不要写 link；要回读该对象就挂 `fact_check`。
 - `option_source` 只声明候选项来源，禁止把选项列表路径（如 `data[].id`）写成值流 `links`。调用方筛选键留在 schema，由调用方选。选项接口只挂 `option_source`，不要再写 `data[].id → query.xxx`。
 - 跨能力的回填（保存后的主键进入提交、查询结果进入编辑）只写 `links`。导出从 `links` 投影绑定，不会把本场样例写成下次执行的常量。
-- 目标原文要求先做 A 再做 B、但两条能力之间没有值要传（先查询统计、再新增一笔）时，必须另写 `capability_relations`。不要指望导出从目标原文猜顺序。每项用能力的 `capability_id` 或 `name`：
+- 目标原文要求先做 A 再做 B、但两条能力之间没有值要传（先查询列表、再新增一笔）时，必须另写 `capability_relations`。不要指望导出从目标原文猜顺序。每项用能力的 `capability_id` 或 `name`：
   `{ "type": "suggested_call_chain", "mode": "handoff", "from_capability": "A", "to_capability": "B", "confirmed": true, "reason": "目标要求先 A 后 B" }`
   有值流仍只写 `links`，不要为同一条值流再编一份关系表。没有顺序要求就不要写组合关系；调用方可以单独只查或只增。
-  本场已经做完的页内典型链必须挂 relation：查询→新增、查询→编辑、查询→删除、新增→提交。有值流写 `links`；没有值流也要写 handoff。不要只交散点能力。
+  本场已经做完的页内典型链必须挂 relation：**查询→点结果看详情**、查询→新增、查询→编辑、查询→删除、新增→提交。有值流写 `links`；没有值流也要写 handoff。不要只交散点能力。
+  列表查询与详情 execute path 不同、返回粒度不同（计数/汇总 vs 逐条未办/明细）时，必须同时有「查询→详情」。禁止因为目标写了「先查再增」就只挂查询→新增、把详情排除出默认链。默认链应是关系连成的**最长**可办理路径；中间读能力不能丢。
   `capability_relations` 只能挂在已经交过、带真实 `request_refs` 的能力旁边。禁止单独再交一项只有关系、没有 execute 的能力。
 - `from_path` / `source_path` 必须能在那个响应里读到。提交返回 `{"data":61}` 就是单据 id，不是流程实例 id；流程实例要从随后的详情回读取。写错路径等于编排错误。
 - 搜索能力上的接口下拉必须挂 `option_source`。父表单没有的选项请求不要挂。
@@ -592,12 +617,16 @@ execute 里的附件容器字段来自 preflight 响应，标为系统自动处�
 38. 同一张表「保存/存草稿」与「提交/送审」若 path 或效果不同，已拆成两项能力，不要并进提交。
 39. 树单击是单值；schema type 与 param type 一致。多分区数组写了 `x-dano-section-titles`，合并行时带分区标题。
 40. 目标写了先 A 后 B：有值流则 `links` 已写；没有值流则 `capability_relations` 已写。没有把顺序留给导出去猜。没有把关系当成一项没有 execute 的能力单独交。
-41. 灰框/disabled 宿主没有进 `input_schema`。从 URL 带入且锁死的类型是系统 `page_default`。
+41. 灰框/disabled 宿主没有进 `input_schema`。从 URL 带入**且整控件锁死**的类型才是系统 `page_default`，并且必须有 `default_value`。带星号、能打开面板的日期/下拉即使 URL 预填，仍是调用方。
 42. 没有自指 links（execute 响应指回同一 execute）。没有下一步用到的 id 没有编成参数传递。
 43. preflight 对得上打开该表单的请求，没有把上一页列表加载挂进来。
 44. 多分区可增行：分区标题原文、表头原文、`x-dano-section-titles` 已写；只在一个分区出现的列没有写到所有行；行序号不在 schema。
-45. 前端时间戳、看不清的打开时写入键已进 `unresolved`，没有标系统结案。
+45. 前端时间戳、看不清的打开时写入键已进 `unresolved`，没有标系统结案，也没有标 `current_user`。
 46. schema type 与 param type、线上实际类型一致。该项 title/intent 没有压成半场短句。
+47. 系统栏每个 `required=true` 的键，runtime 都填得出：`current_user` 键在登录身份里真实存在；`constant` 有 `default_value`；`previous_response` 有 `from_step_id`+`from_path`；锁死的 `page_default` 有 `default_value`。可改日期/下拉没有被收进系统栏。缺一项就改回调用方或 `unresolved`，禁止交不可执行写能力。
+48. 每个 `option_source` 都是本表单选择器自己的候选接口，path 不等于另一能力的 execute。空参应能返回候选。点行带出的 id 没有被做成独立用户树。
+49. 本场已做完的列表查询和「点结果看详情」已有 query→detail 的 `links` 或 `capability_relations`。默认关系没有跳过粒度更细的那次读。
+50. 行类型码、行序号不在 `input_schema` / `items.properties`；没有把整份数组合并成固定一种 `itemType` 让调用方填。
 
 ## 最小补证
 
@@ -624,9 +653,13 @@ execute 里的附件容器字段来自 preflight 响应，标为系统自动处�
 - 跨能力有值流 → `links`。目标先 A 后 B 且没有值流 → `capability_relations`，且必须挂在已有 execute 的能力上。
 - 请求有、控件无、也看不出公式 → `unresolved`。
 - 打开写入表单附带的空列表、弹层内部翻页 → 不进写入能力系统栏；这些 step 的 params 必须是空数组。
-- 灰框/disabled 宿主 → 系统，不进 schema；URL 带入且锁死同样处理。
+- 灰框/disabled 宿主 → 系统，不进 schema；URL 带入且**整控件锁死**同样处理，且系统 `page_default` 必须有 `default_value`。带星号仍能点的日期/下拉 → 调用方，即使框里已有默认值。
+- 系统栏填不出的键（无 `default_value` 的必填 `page_default`、挂在 `current_user` 上的时间戳）→ 改回调用方或 `unresolved`，禁止当已解决写能力。
+- 点结果表带出的 id → identity / `links`，不要把上一查询 execute 当 option_source。
+- 列表查询与详情粒度不同 → 两项能力，默认链保留「查询→详情」，不要压成查询→新增。
 - 只在一个分区出现的列 → 只属于该分区行。
-- 前端时间戳、看不清的打开时写入键 → `unresolved`。
+- 行类型码、行序号 → 系统，不进 schema，不要整表写死一种类型。
+- 前端时间戳、看不清的打开时写入键 → `unresolved`，不要标 `current_user`。
 - execute 响应不得 link 回同一 execute。
 - preflight 只认打开该表单的请求。
 - 页签/折叠头没有请求键 → 不是字段。

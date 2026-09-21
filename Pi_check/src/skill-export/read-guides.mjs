@@ -23,7 +23,12 @@ export function generatorGuideDir(env = process.env) {
   return root ? path.resolve(root, configured) : path.resolve(configured);
 }
 
-async function walkMarkdown(dir, files = [], prefix = "") {
+/**
+ * 只读顶层目录中 skill-generator-*.md 和 REQUIRED_GUIDE_FILES 文件。
+ * 不递归子目录——子目录可能含有大量无关 .md（如 O2OA、CodeMirror 等），
+ * 全部读入会使 LLM 上下文爆炸导致 Skill4 卡死。
+ */
+async function listTopLevelGuides(dir) {
   let entries;
   try {
     entries = await readdir(dir, { withFileTypes: true });
@@ -33,16 +38,16 @@ async function walkMarkdown(dir, files = [], prefix = "") {
     }
     throw error;
   }
+  const files = [];
   for (const entry of entries) {
-    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await walkMarkdown(full, files, rel);
-      continue;
-    }
-    if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
-      files.push({ path: rel.replace(/\\/g, "/"), full });
-    }
+    if (!entry.isFile()) continue;
+    const name = entry.name;
+    if (!name.toLowerCase().endsWith(".md")) continue;
+    // 只收录：必须文件 或 skill-generator-*.md
+    const isRequired = REQUIRED_GUIDE_FILES.includes(name);
+    const isGuide = name.startsWith("skill-generator-") || name.startsWith("skill_generator_");
+    if (!isRequired && !isGuide) continue;
+    files.push({ path: name, full: path.join(dir, name) });
   }
   return files;
 }
@@ -58,11 +63,11 @@ export async function readGeneratorGuides({ env = process.env } = {}) {
       files: [],
     };
   }
-  const listed = await walkMarkdown(root);
+  const listed = await listTopLevelGuides(root);
   if (!listed.length) {
     return {
       ok: false,
-      error: `生成规范目录没有任何 .md: ${root}`,
+      error: `生成规范目录没有任何 skill-generator-*.md: ${root}`,
       dir: root,
       files: [],
     };

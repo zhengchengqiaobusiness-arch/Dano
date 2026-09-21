@@ -1830,8 +1830,9 @@ E09 和 E10 均在同一 Assistant Turn 中已提交。
 - `id` 必须与 capability 的调用方字段名逐字一致。
 - 长文本使用 `textarea`；日期使用 `date` 和正确 `dateFormat`；枚举使用 `select`/`radio`；多选使用 `multiple: true`。
 - 明细在能力层仍是 table。冻结提问必须是当前宿主可执行的控件。Dano 宿主支持 `text` / `textarea` / `date` / `radio` / `checkbox` / `select` / `treeSelect`，没有 `table`。因此对象数组冻结为同一字段 id 的 `textarea`（每行 `分区标题|||列值` 或 JSON 数组），由 runtime 组装回数组。禁止在冻结提问写 `inputType: table`，禁止改字段 id，禁止拆成多轮问卷。
-- 动态候选必须使用 `dataSource`，并完整声明 endpoint、method、params、resultPath、idField 和 labelField；用户看到 label，接口接收稳定 id 或合同声明的值。助手先运行 `python scripts/flow.py --list-options <capability_id> <field>`，不要让问句自己裸打选项接口。
-- 固定值、会话值、运行时生成值、计算值和上游响应不得向用户提问。系统常量按合同值由 runtime 自动填。
+- 动态候选必须使用 `dataSource`，并完整声明 endpoint、method、params、resultPath、idField 和 labelField；用户看到 label，接口接收稳定 id 或合同声明的值。助手先运行 `python scripts/flow.py --list-options <capability_id> <field>`，把返回的 `options` 写进该字段后再复制冻结 JSON 去 `ask_user_question`。不要让问句自己裸打选项接口。禁止把无 `options` 的 `treeSelect` / `select` 直接问出去。禁止把 `dataSource` 放进 `ask_user_question`。
+- 冻结提问的字段 id 必须覆盖该能力全部 `caller_fields`，一个不能少。确认卡比原页瘦 = 合同或冻结 JSON 丢了调用方字段，停止出包，不要另写更瘦表单。
+- 固定值、会话值、运行时生成值、计算值和上游响应不得向用户提问。系统常量必须带实际合同值，由 runtime 自动填。系统栏写着 `page_default` 却没有 `default_value`：合同不可执行，停止，不要向用户要这些键，不要改 `CONTRACT.json`。
 
 ## 4. 默认值
 
@@ -1840,8 +1841,8 @@ E09 和 E10 均在同一 Assistant Turn 中已提交。
 - 合同已写出 `default` / `default_value`：原样使用。
 - 写操作日期控件：页面默认 `today`，调用前换成当天 `yyyy-MM-dd`，用户可改。查询类日期没有页面默认，必须向用户收集真实周期。
 - 枚举和动态选项：只用合同 id 或本次 `--list-options` 用户选中的 id。
-- 正文、备注、意见：没有合同 default 就不写 default，不要编「请填写」「暂无」「请审批」。
-- 系统常量：写入合同值，由 runtime 自动填，不要向用户要，不要因为缺 default_value 让用户修合同。
+- 正文、备注、意见、可选空字段：没有合同 default 就不写 default，不要编「请填写」「暂无」「请审批」。可选空 = 省略或空字符串。
+- 系统常量：写入合同值，由 runtime 自动填，不要向用户要。缺 `default_value` 的必填系统 `page_default` 不是让用户修合同，而是合同不可执行。
 
 规则占位符 `today` 必须在工具调用前替换成真实日期。用户交回占位句视为未填，按同一张冻结表再问。
 
