@@ -448,3 +448,61 @@ nine model calls and token counts; each entire case took about 1.8–4.8 seconds
 This is a synthetic semantic/handoff probe, not OpenViking delivery, browser
 acceptance or the full T-14 dataset. Dano wiring, declassified task-fact projection,
 the independent release and remaining #475 acceptance still need completion.
+
+### Allowlisted business-task facts and rule-version consent
+
+Extension commit `d28288e` adds an optional host-installed `TaskFactPolicy`.
+Raw tool messages remain excluded by default. A projector is invoked only for an
+allowlisted name, one matching earlier call and one successful result within a
+completed request, under the separately granted rule version. The host verifies
+the business result/actor contract and returns necessary fact text; the adapter
+receives a copy, so it cannot change the original pi entry. The same credential
+scanner, host-secret snapshot, input budget and concurrent policy checks apply to
+the projected text before model selection.
+
+The model receives `task_fact` data with opaque source IDs, not raw tool arguments
+or output. Selected facts retain the original tool-result source and tool/policy
+provenance. The outbox wrapper is now `authorized_memory_facts`, since a verified
+task outcome is not a claim of explicit user confirmation. Only selected fact
+text is sent to OpenViking. No general-purpose shell-output projector is enabled
+by default; a trusted business contract is required for each configured tool.
+
+This exposed an authorization issue: main-switch resume previously replaced the
+collection grant's rule version. Resume now preserves the granted version while
+advancing its revision and source boundary. A newer task-fact policy stays
+unapproved until a separate collection grant. Standard pi can receive the current
+configured rule version, reports changed rules and confirms them through its
+separate collection command.
+
+All 173 extension tests pass (`/private/tmp/dano475-task-facts-tests.log`). Coverage
+includes safe projection/provenance/handoff, absent or mismatched allowlists,
+failed/unmatched/duplicate results, aborted requests, credentials in projected
+text, throwing/malformed adapters, caller allowlist mutation, pause during
+projection, byte limits, forged policy versions and separate rule-update consent.
+
+[The real task-fact selection fixture](fixtures/pi-task-fact-selection.mjs) passed
+6/6 with `mimo-v2.5`: completed template creation, unlisted tool, failed tool,
+foreign business actor, projected credential and projected instruction. Only
+verified creation queues a fact. Dataset SHA-256:
+`763fcff69658c595be39dfce01d0f9e7e0e08fff66ca512d609ef633d986cfd7`.
+Log: `/private/tmp/dano475-real-task-facts.log`.
+
+The updated prompt hash is
+`c7138e184dc30b9f91ac7ffe5f94345652dc6772709d2ec0eac4e991959ab6f4`.
+The unchanged seven-case semantic dataset passed 7/7 again, and the unchanged
+four-case cross-batch dataset passed 4/4. Logs:
+`/private/tmp/dano475-task-prompt-regression.log` and
+`/private/tmp/dano475-task-cross-regression.log`. These remain component datasets,
+not the full T-14 gate.
+
+[The scheduled OpenViking fixture](fixtures/openviking-collection-scheduler.mjs)
+now accepts an optional `task-fact` scenario. It passed real MiMo selection,
+atomic enqueue, SIGKILL/reopen, background delivery to `ready`, Alice recall of
+`REPORT-42`, an empty Bob scope and 403 responses to forged cross-user read,
+write and search. One model call reported 79 input, 50 output, 896 cached-read and
+1,025 total tokens. Evidence: `/private/tmp/dano475-real-task-delivery.log`;
+private audit directory:
+`/var/folders/nw/mhq_0_3x2rdbj8qpbl3xt3gr0000gn/T/dano475-collection-scheduler-6wEtgn`.
+The business tool contract is synthetic; this does not establish real OA business
+operation acceptance, browser acceptance or a production deployment. Dano remains
+pinned to published `0.1.2` pending independent release and full integration.

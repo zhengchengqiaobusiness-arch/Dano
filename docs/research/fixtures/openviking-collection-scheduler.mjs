@@ -1,5 +1,5 @@
 /** Real MiMo selection and scheduled OpenViking collection with crash recovery. Synthetic data only.
- * node fixture.mjs /absolute/extension/dist/host.js /isolated/ov.conf /private/models.json /private/production-input.json
+ * node fixture.mjs /absolute/extension/dist/host.js /isolated/ov.conf /private/models.json /private/production-input.json [user-facts|task-fact]
  * Leaves a private evidence directory and synthetic remote account for audit.
  */
 import assert from 'node:assert/strict';
@@ -12,10 +12,15 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const [modulePath, configPath, modelsPath, credentialPath, mode, directory, accountId] = process.argv.slice(2);
+const [modulePath, configPath, modelsPath, credentialPath, scenario = 'user-facts', mode, directory, accountId] = process.argv.slice(2);
 assert(modulePath && configPath, 'Pass the extension host module and isolated ov.conf');
 const { FileStateStore, MemoryDelivery, OwnerMemoryClient, CollectionLifecycle, CollectionFactSelector, CollectionScheduler, DeliveryScheduler } = await import(pathToFileURL(modulePath));
-const facts = ['我的验收报告固定使用简体中文。', '我的验收报告末尾固定加上“晴川验收完毕”。'];
+assert(['user-facts', 'task-fact'].includes(scenario));
+const taskFact = scenario === 'task-fact';
+const facts = taskFact ? ['用户已创建周报模板 REPORT-42，并将模板用途设置为每周项目进展汇报。'] : ['我的验收报告固定使用简体中文。', '我的验收报告末尾固定加上“晴川验收完毕”。'];
+const expectedSources = facts.length;
+const query = taskFact ? '已创建的周报模板编号和用途' : '验收报告的语言和末尾固定文字';
+const expectedTerm = taskFact ? 'REPORT-42' : '晴川验收完毕';
 const storeFor = (owner, root) => new FileStateStore({ owner, directory: root, policyVersion: 'probe-v1' });
 if (mode === 'enqueue') {
   const owner = { accountId, userId: 'alice' };
@@ -32,7 +37,14 @@ if (mode === 'enqueue') {
   const requestIds = [];
   for (const text of facts) {
     const requestId = await lifecycle.begin(session);
-    session.appendMessage({ role: 'user', content: text, timestamp: Date.now() });
+    session.appendMessage({ role: 'user', content: taskFact ? '请创建用于每周项目进展汇报的周报模板。' : text, timestamp: Date.now() });
+    if (taskFact) {
+      session.appendMessage({ role: 'assistant', stopReason: 'toolUse', timestamp: Date.now(),
+        content: [{ type: 'toolCall', id: 'call', name: 'create_report_template', arguments: { private: 'PRIVATE_ARGUMENT' } }] });
+      session.appendMessage({ role: 'toolResult', toolCallId: 'call', toolName: 'create_report_template', isError: false,
+        timestamp: Date.now(), content: [{ type: 'text', text: 'PRIVATE_RAW_TOOL_BODY' }],
+        details: { created: true, templateId: 'REPORT-42', createdBy: owner.userId, usage: 'weekly_project_report', secret: 'PRIVATE_RESULT_CREDENTIAL' } });
+    }
     session.appendMessage({ role: 'assistant', content: [{ type: 'text', text: '明白。' }], stopReason: 'stop', timestamp: Date.now() });
     await lifecycle.settle(requestId, session);
     requestIds.push(requestId);
@@ -45,8 +57,13 @@ if (mode === 'enqueue') {
   let modelCalls = 0; let usage;
   const selector = new CollectionFactSelector({ store, maxInputBytes: 16384, maxFacts: 5, timeoutMs: 45000,
     sensitiveValues: () => Object.values(credentials).filter(value => typeof value === 'string' && value.length >= 12),
+    taskFacts: taskFact ? { policyVersion: 'probe-v1', tools: new Map([['create_report_template', (result, context) => {
+      if (result.details.created !== true || result.details.createdBy !== context.owner.userId
+        || !/^REPORT-[0-9]+$/.test(result.details.templateId) || result.details.usage !== 'weekly_project_report') return;
+      return `用户已创建周报模板 ${result.details.templateId}，并将模板用途设置为每周项目进展汇报。`;
+    }]]) } : undefined,
     async complete({ systemPrompt, data, signal }) {
-      modelCalls++;
+      assert(!data.includes('PRIVATE_')); modelCalls++;
       const answer = await runtime.completeSimple(model, { systemPrompt,
         messages: [{ role: 'user', content: data, timestamp: Date.now() }] },
         { signal, maxTokens: 2048, temperature: 0, onPayload: payload => ({ ...payload, thinking: { type: 'disabled' } }) });
@@ -62,7 +79,7 @@ if (mode === 'enqueue') {
       void store.read().then(state => {
         const operations = Object.values(state.operations);
         assert.equal(operations.length, 1); assert.equal(operations[0].phase, 'queued');
-        assert.equal(operations[0].collectionSources.length, 2);
+        assert.equal(operations[0].collectionSources.length, expectedSources);
         assert.equal(modelCalls, 1);
         assert(requestIds.every(id => state.collectionRequests[id].phase === 'processed'));
         process.send({ queued: true, id: operations[0].id, requestIds, modelCalls, usage });
@@ -98,7 +115,7 @@ if (mode === 'enqueue') {
   const runRoot = await mkdtemp(join(tmpdir(), 'dano475-collection-scheduler-'));
   const stateRoot = join(runRoot, 'alice-state');
   await writeFile(join(runRoot, 'credentials.json'), JSON.stringify({ account, keys }), { mode: 0o600 });
-  const child = fork(fileURLToPath(import.meta.url), [modulePath, configPath, modelsPath, credentialPath, 'enqueue', stateRoot, account], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  const child = fork(fileURLToPath(import.meta.url), [modulePath, configPath, modelsPath, credentialPath, scenario, 'enqueue', stateRoot, account], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
   let stderr = '';
   child.stderr.on('data', data => { stderr += data; });
   const childExit = once(child, 'exit');
@@ -118,8 +135,8 @@ if (mode === 'enqueue') {
   const stateStore = storeFor(owner('alice'), stateRoot);
   const recovered = await stateStore.read();
   assert.equal(recovered.operations[receipt.id].phase, 'queued');
-  assert.equal(recovered.operations[receipt.id].collectionSources.length, 2);
-  assert.equal(Object.keys(recovered.collectedSources).length, 2);
+  assert.equal(recovered.operations[receipt.id].collectionSources.length, expectedSources);
+  assert.equal(Object.keys(recovered.collectedSources).length, expectedSources);
   assert(Object.values(recovered.collectionRequests).every(request => request.phase === 'processed'));
   await assert.rejects(storeFor(owner('bob'), stateRoot).read(), /INVALID_MEMORY_STATE/);
   assert.throws(() => new MemoryDelivery({ store: stateStore, transport: bob, maxPayloadBytes: 8192 }), /MEMORY_OWNER_MISMATCH/);
@@ -140,9 +157,9 @@ if (mode === 'enqueue') {
     }
     assert.equal(operation.phase, 'ready');
   } finally { await scheduler.stop(); }
-  const found = await alice.recall('验收报告的语言和末尾固定文字', 5);
-  assert(JSON.stringify(found).includes('晴川验收完毕'));
-  assert.equal((await bob.recall('验收报告的语言和末尾固定文字', 5)).length, 0);
+  const found = await alice.recall(query, 5);
+  assert(JSON.stringify(found).includes(expectedTerm));
+  assert.equal((await bob.recall(query, 5)).length, 0);
   const uri = operation.memoryUris[0];
   const before = await alice.readMemory(uri);
   const forged = { 'X-OpenViking-Account': account, 'X-OpenViking-User': 'alice' };
@@ -161,7 +178,7 @@ if (mode === 'enqueue') {
     initialBackoffMs: 100, maxBackoffMs: 1000, maxAttempts: 2, maxRequestsPerBatch: 10, wakeDelivery() {} });
   noReplay.start(); await delay(250); await noReplay.stop(); assert.equal(replayed, false);
   assert.equal(Object.keys((await stateStore.read()).operations).length, 1);
-  const report = { atomicSelectionAndOutboxThenSigkill: true, twoSourcesOneOperation: true, semanticSelectionTested: true, modelCalls: receipt.modelCalls, usage: receipt.usage, scheduledDelivery: true, reopenedOwnerState: true, wrongOwnerReplayRejected: true,
+  const report = { atomicSelectionAndOutboxThenSigkill: true, twoSourcesOneOperation: expectedSources === 2, sourceCount: expectedSources, taskFactProjectionTested: taskFact, semanticSelectionTested: true, modelCalls: receipt.modelCalls, usage: receipt.usage, scheduledDelivery: true, reopenedOwnerState: true, wrongOwnerReplayRejected: true,
     swappedCredentialRejected: true, resumedReady: true, aliceRecallsFact: true, bobOwnScopeEmpty: true,
     foreignReadStatus: read.status, foreignWriteStatus: write.status, foreignSearchStatus: search.status,
     ownerContentUnchanged: true, repeatedSourceDidNotEnqueue: true, browserVerified: false };
