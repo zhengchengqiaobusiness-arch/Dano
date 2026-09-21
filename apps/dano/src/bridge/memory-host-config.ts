@@ -3,6 +3,15 @@ import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import type { UserMemoryServices } from "./user-memory-runtime.js";
 import type { MemoryTokenizerBinding, MemoryTokenizerLimits } from "./memory-tokenizer.js";
+import type { UserMemoryCollectionOptions } from "./user-memory-collection.js";
+
+export interface MemoryCollectionHostConfig {
+  policyVersion: string;
+  lifecycleTimeoutMs: number;
+  model: { provider: string; id: string; maxTokens: number; temperature: number; thinking?: "enabled" | "disabled" };
+  selector: Pick<UserMemoryCollectionOptions["selector"], "maxInputBytes" | "maxFacts" | "timeoutMs">;
+  scheduler: Omit<UserMemoryCollectionOptions["scheduler"], "onError">;
+}
 
 /** Host-private file contents. Never put this object in argv, RPC, logs or browser state. */
 export interface MemoryHostConfig {
@@ -19,6 +28,7 @@ export interface MemoryHostConfig {
   scheduler: Omit<UserMemoryServices["scheduler"], "onStatus" | "onError">;
   tokenizerLimits: MemoryTokenizerLimits;
   tokenizers: MemoryTokenizerBinding[];
+  collection?: MemoryCollectionHostConfig;
 }
 const invalid = () => new Error("INVALID_MEMORY_HOST_CONFIG");
 function object(value: unknown, keys: readonly string[]): Record<string, unknown> {
@@ -45,10 +55,35 @@ function asset(value: unknown) {
   return { path, sha256 };
 }
 
+function collectionConfig(value: unknown): MemoryCollectionHostConfig {
+  const raw = object(value, ["policyVersion", "lifecycleTimeoutMs", "model", "selector", "scheduler"]);
+  const model = object(raw.model, ["provider", "id", "maxTokens", "temperature", "thinking"]);
+  if (typeof model.temperature !== "number" || !Number.isFinite(model.temperature) || model.temperature < 0
+    || model.temperature > 2 || (model.thinking !== undefined && model.thinking !== "enabled" && model.thinking !== "disabled")) throw invalid();
+  const selector = object(raw.selector, ["maxInputBytes", "maxFacts", "timeoutMs"]);
+  const schedule = object(raw.scheduler, ["pollIntervalMs", "mergeWindowMs", "maxWaitMs", "workTimeoutMs", "leaseMs",
+    "initialBackoffMs", "maxBackoffMs", "maxAttempts", "maxRequestsPerBatch"]);
+  const mergeWindowMs = schedule.mergeWindowMs;
+  if (typeof mergeWindowMs !== "number" || !Number.isSafeInteger(mergeWindowMs) || mergeWindowMs < 0) throw invalid();
+  const scheduler = { pollIntervalMs: positive(schedule.pollIntervalMs), mergeWindowMs,
+    maxWaitMs: positive(schedule.maxWaitMs), workTimeoutMs: positive(schedule.workTimeoutMs), leaseMs: positive(schedule.leaseMs),
+    initialBackoffMs: positive(schedule.initialBackoffMs), maxBackoffMs: positive(schedule.maxBackoffMs),
+    maxAttempts: positive(schedule.maxAttempts), maxRequestsPerBatch: positive(schedule.maxRequestsPerBatch) };
+  if (scheduler.maxWaitMs < scheduler.mergeWindowMs || scheduler.leaseMs <= scheduler.workTimeoutMs
+    || scheduler.maxBackoffMs < scheduler.initialBackoffMs) throw invalid();
+  const policyVersion = text(raw.policyVersion);
+  if (!policyVersion.trim()) throw invalid();
+  return { policyVersion, lifecycleTimeoutMs: positive(raw.lifecycleTimeoutMs),
+    model: { provider: text(model.provider), id: text(model.id), maxTokens: positive(model.maxTokens), temperature: model.temperature,
+      ...(model.thinking === undefined ? {} : { thinking: model.thinking }) },
+    selector: { maxInputBytes: positive(selector.maxInputBytes), maxFacts: positive(selector.maxFacts), timeoutMs: positive(selector.timeoutMs) },
+    scheduler };
+}
+
 export function parseMemoryHostConfig(input: unknown): MemoryHostConfig {
   try {
     const raw = object(input, ["version", "baseUrl", "accountId", "managementKey", "encryptionKey", "encryptionKeyVersion",
-      "requestTimeoutMs", "maxContentBytes", "policyVersion", "policy", "scheduler", "tokenizerLimits", "tokenizers"]);
+      "requestTimeoutMs", "maxContentBytes", "policyVersion", "policy", "scheduler", "tokenizerLimits", "tokenizers", "collection"]);
     const url = new URL(text(raw.baseUrl));
     const encryptionKey = text(raw.encryptionKey), managementKey = text(raw.managementKey);
     if (raw.version !== 1 || !["http:", "https:"].includes(url.protocol) || url.username || url.password
@@ -79,7 +114,8 @@ export function parseMemoryHostConfig(input: unknown): MemoryHostConfig {
       scheduler: { pollIntervalMs: positive(scheduler.pollIntervalMs), initialBackoffMs, maxBackoffMs,
         maxAttemptsPerPhase: positive(scheduler.maxAttemptsPerPhase), maxOperationsPerTick: positive(scheduler.maxOperationsPerTick) },
       tokenizerLimits: { maxAssetBytes: positive(limits.maxAssetBytes), maxInputBytes: positive(limits.maxInputBytes),
-        startupTimeoutMs: positive(limits.startupTimeoutMs) }, tokenizers };
+        startupTimeoutMs: positive(limits.startupTimeoutMs) }, tokenizers,
+      ...(raw.collection === undefined ? {} : { collection: collectionConfig(raw.collection) }) };
   } catch { throw invalid(); }
 }
 

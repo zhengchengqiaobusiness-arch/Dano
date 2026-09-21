@@ -37,7 +37,7 @@ HTTP host; never serialize it into argv, worker RPC, browser state or logs.
 The private reader and parser have automated coverage for normal reads,
 configuration absence, corrupt input, permission violations, symlinks and hard
 links. Runtime service construction and protected-host startup wiring now use
-the published and pinned extension `0.1.1`. The supervisor's optional
+the published and pinned extension `0.1.3`. The supervisor's optional
 `memoryConfigDirectory` supplies only a private path; the non-root host reads
 the configuration, constructs owner/credential/provisioning services and starts
 the explicitly configured tokenizer workers. It composes these services with
@@ -48,3 +48,54 @@ be mistaken for completed persistence. Supervisor-level forced termination must
 still be treated as crash recovery, not a successful drain.
 Startup does not turn memory on, does not create remote identities and does not establish a
 production deployment or completed #465 acceptance.
+
+## Optional automatic collection
+
+Add `collection` only when the protected deployment has a configured selector
+model. Omitting it preserves explicit memory without offering a new automatic
+grant. Configuration does not grant user consent: both main memory and the
+separate automatic switch still default off. Changing `collection.policyVersion`
+requires a new user grant. Keep that version tied to the reviewed selection
+policy, including any future trusted task-fact adapters.
+
+Example collection block (budgets are explicit administrator choices):
+
+```json
+{
+  "collection": {
+    "policyVersion": "collection-v1",
+    "lifecycleTimeoutMs": 5000,
+    "model": {
+      "provider": "xiaomi-token-plan-cn",
+      "id": "mimo-v2.5",
+      "maxTokens": 2048,
+      "temperature": 0,
+      "thinking": "disabled"
+    },
+    "selector": { "maxInputBytes": 16384, "maxFacts": 5, "timeoutMs": 45000 },
+    "scheduler": {
+      "pollIntervalMs": 500, "mergeWindowMs": 1000, "maxWaitMs": 5000,
+      "workTimeoutMs": 50000, "leaseMs": 110000,
+      "initialBackoffMs": 1000, "maxBackoffMs": 5000,
+      "maxAttempts": 3, "maxRequestsPerBatch": 10
+    }
+  }
+}
+```
+
+The protected host lazily uses the same deployment `getAgentDir()` model/auth
+configuration as protected chat, after normal Dano startup has resolved it.
+Per-user resources, model parameters and browser requests cannot replace these
+paths. Model catalog network refresh is disabled for this selector initialization.
+The selection call contains one quoted-data message, the extension's fixed
+selection prompt, and no tools. Only text from a completed response is returned;
+partial, error or tool-call responses fail with fixed error codes. Optional
+`thinking` only changes that provider request field; arbitrary payload overrides
+cannot replace messages, model identity, limits or tool declarations.
+
+Input screening includes the configured management/encryption secrets, the
+currently resolved model API key or credential-bearing auth headers, and the
+current owner's stored USER key. The owner runtime verifies worker isolation
+before screening and inference. No remote identity is provisioned merely for
+screening. Runtime stop cancels/settles collection before delivery and worker
+teardown. Model/provider errors never become browser-visible configuration.

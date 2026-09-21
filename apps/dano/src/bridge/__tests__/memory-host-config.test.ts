@@ -55,3 +55,25 @@ it("rejects shared directory/file permissions, symlinks and hard-linked secret f
   await chmod(file, 0o600); await chmod(root, 0o755);
   await expect(readMemoryHostConfig(root)).rejects.toThrow("INVALID_MEMORY_HOST_CONFIG");
 });
+
+it("accepts explicit bounded collection configuration and rejects model/tool payload overrides", () => {
+  const collection = { policyVersion: "collection-v1", lifecycleTimeoutMs: 1000,
+    model: { provider: "fixture", id: "selector", maxTokens: 512, temperature: 0, thinking: "disabled" },
+    selector: { maxInputBytes: 8192, maxFacts: 5, timeoutMs: 1000 },
+    scheduler: { pollIntervalMs: 10, mergeWindowMs: 20, maxWaitMs: 50, workTimeoutMs: 2000,
+      leaseMs: 5000, initialBackoffMs: 50, maxBackoffMs: 100, maxAttempts: 2, maxRequestsPerBatch: 5 } };
+  expect(parseMemoryHostConfig({ ...config(), collection }).collection).toEqual(collection);
+  for (const mutate of [
+    (value: any) => { value.model.payload = { tools: [{ name: "bash" }] }; },
+    (value: any) => { value.model.modelsPath = "/user/workspace/models.json"; },
+    (value: any) => { value.model.temperature = Infinity; },
+    (value: any) => { value.model.thinking = "perhaps"; },
+    (value: any) => { value.selector.complete = "untrusted-module"; },
+    (value: any) => { value.scheduler.leaseMs = value.scheduler.workTimeoutMs; },
+    (value: any) => { value.scheduler.mergeWindowMs = value.scheduler.maxWaitMs + 1; },
+    (value: any) => { value.policyVersion = " "; },
+  ]) {
+    const changed = structuredClone(collection); mutate(changed);
+    expect(() => parseMemoryHostConfig({ ...config(), collection: changed })).toThrow("INVALID_MEMORY_HOST_CONFIG");
+  }
+});

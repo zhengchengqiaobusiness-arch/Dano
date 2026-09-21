@@ -735,3 +735,29 @@ The production service factory still does not configure the collection model.
 Wiring the protected MiMo configuration and performing real rendered-browser
 acceptance remain required before this surface is considered delivered. These
 unit/integration results do not close #475 or replace its real-service gates.
+
+### Protected model configuration and real MiMo adapter proof
+
+The private host schema now accepts an explicit optional collection policy,
+selector limits, scheduler bounds and model provider/id/output/temperature/thinking
+settings. Arbitrary model-path and payload overrides are rejected. Protected
+startup injects a lazy deployment ModelRuntime factory, evaluated after Dano
+has resolved its agent configuration. The model adapter uses public pi APIs,
+no tools, and a fixed-error boundary. It reads `AuthResult.auth` (the actual
+0.85.1 contract) when refreshing sensitive credential values; tests cover secret
+rotation, cancellation, incomplete responses and startup remaining offline.
+
+Fourteen model/config/service tests passed, full type/Svelte checks passed, and
+build output is recorded in `/private/tmp/dano475-model-config-build.log`.
+The real-service fixture `fixtures/dano-collection-model.mjs` exercised this exact
+Dano adapter with the protected MiMo configuration. One real `mimo-v2.5` call
+completed in 1803 ms, matched the actual credential snapshot, had no tool
+capabilities, and returned only source-backed quotes. Evidence:
+`/private/tmp/dano475-model-binding-real.log` and
+`/private/tmp/dano475-model-binding-tmS6iN/result.json`. Initial harness attempts
+failed on ESM export/loading mechanics before any model call; the successful
+fixture resolves each package's declared import export and uses jiti for Dano TS.
+
+This closes the previously missing production service-factory wiring, not the
+#475 acceptance gate. A current clean image and real browser flows, including
+concurrent chats and pause/resume, remain necessary.

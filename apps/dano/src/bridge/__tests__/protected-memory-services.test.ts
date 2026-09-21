@@ -63,3 +63,21 @@ it("fails initialization when configured tokenizer assets do not match", async (
   const f = await fixture(); f.config.tokenizers[0]!.tokenizer.sha256 = "0".repeat(64); await f.save();
   await expect(createProtectedMemoryServices(f.directory, f.stateDirectory)).rejects.toThrow("MEMORY_TOKENIZER_UNAVAILABLE");
 });
+
+it("wires configured collection lazily and requires a trusted deployment model factory", async () => {
+  const f = await fixture();
+  Object.assign(f.config, { collection: { policyVersion: "collection-v1", lifecycleTimeoutMs: 1000,
+    model: { provider: "fixture", id: "selector", maxTokens: 512, temperature: 0, thinking: "disabled" },
+    selector: { maxInputBytes: 8192, maxFacts: 5, timeoutMs: 1000 },
+    scheduler: { pollIntervalMs: 10, mergeWindowMs: 20, maxWaitMs: 50, workTimeoutMs: 2000,
+      leaseMs: 5000, initialBackoffMs: 50, maxBackoffMs: 100, maxAttempts: 2, maxRequestsPerBatch: 5 } } });
+  await f.save();
+  await expect(createProtectedMemoryServices(f.directory, f.stateDirectory)).rejects.toThrow("MEMORY_COLLECTION_MODEL_REQUIRED");
+  const factory = vi.fn(async () => { throw new Error("PRIVATE_PROVIDER_DETAIL"); });
+  const service = (await createProtectedMemoryServices(f.directory, f.stateDirectory, factory))!;
+  services.push(service);
+  expect(service.services.collection?.policyVersion).toBe("collection-v1");
+  expect(factory).not.toHaveBeenCalled();
+  await expect(service.services.collection!.selector.sensitiveValues!()).rejects.toThrow(/^MEMORY_COLLECTION_MODEL_UNAVAILABLE$/);
+  expect(factory).toHaveBeenCalledOnce();
+});

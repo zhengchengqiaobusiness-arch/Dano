@@ -6,6 +6,8 @@ import { WorkerSupervisorClient } from "./worker-supervisor-client.js";
 import { createProtectedMemoryServices } from "./protected-memory-services.js";
 import { withUserMemory } from "./user-memory-runtime.js";
 import { startManagedSearch } from "./managed-search.js";
+import { ModelRuntime, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
 
 /** Spawned by the root supervisor after setpriv drops all host capabilities. */
 export async function runProtectedHost(): Promise<number> {
@@ -29,7 +31,17 @@ export async function runProtectedHost(): Promise<number> {
   let search: Awaited<ReturnType<typeof startManagedSearch>> | undefined;
   let searchFailed = false;
   try {
-    if (profile.memory) memory = await createProtectedMemoryServices(profile.memory.configurationDirectory, profile.memory.stateDirectory);
+    let collectionModels: Promise<ModelRuntime> | undefined;
+    if (profile.memory) memory = await createProtectedMemoryServices(profile.memory.configurationDirectory, profile.memory.stateDirectory,
+      () => {
+        // Resolve lazily, after runDanoMain has selected the deployment agent
+        // directory. Never use a per-user resource directory for credentials.
+        stopped.signal.throwIfAborted();
+        collectionModels ??= ModelRuntime.create({ authPath: join(getAgentDir(), "auth.json"),
+          modelsPath: join(getAgentDir(), "models.json"), refreshOnCreate: false, allowModelNetwork: false,
+          signal: stopped.signal }).catch(error => { collectionModels = undefined; throw error; });
+        return collectionModels;
+      });
     search = await startManagedSearch({ signal: stopped.signal,
       host: process.env.OPEN_WEBSEARCH_HOST, port: process.env.OPEN_WEBSEARCH_PORT,
       onFailure: () => { searchFailed = true; stopped.abort(new Error("SEARCH_DAEMON_EXITED")); } });
