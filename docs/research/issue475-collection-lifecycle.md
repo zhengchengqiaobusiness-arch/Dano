@@ -549,3 +549,23 @@ The acceptance host now forwards the configured collection policy version.
 Both scripts pass Node syntax checks; their new real-container scenario has not
 run yet. Podman image enumeration reproduced the same error on recheck; storage
 exists and has 14 GB free, so absence or disk exhaustion is not established.
+
+### Standard CLI Linux run preparation
+
+The known image `localhost/dano474-protected-image:memory-0.1.2` remains directly
+readable (ID `ffbffe96ea19d3cabf6fc6a1ab95fa2c5ed6cfbffb58a6be6a7ba1f359c888b8`).
+The disposable container `dano475-cli-auto` uses it with current extension dist
+and scripts, lockfile dependencies (`npm ci --include=dev --ignore-scripts`),
+and the existing same-ABI Linux fs-ext binary. This is an integration fixture,
+not a clean package-build or release proof. No new published ports or host runtime
+mounts are used. It connects to the isolated OpenViking loopback relay and a fresh
+synthetic account; private inputs are in `/private/tmp/dano475-cli-auto-input`.
+
+Two fixture startup faults were corrected inside that container: the base image's
+production environment omitted the pi dev dependency, and the copied public
+tokenizer directory needed read/traverse access for the unprivileged host. Secret
+file permissions were not relaxed. The subsequent run reached explicit consent
+through the actual standard RPC entry. The active run must still complete before
+any automatic-collection or full CLI success claim; its log is
+`/tmp/cli-acceptance.log` inside this container. Tokenizer revision:
+`63651580ca774f8504f676040460aed3e1244ac1`, model `mimo-v2.5`.
