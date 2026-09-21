@@ -948,3 +948,47 @@ in the operation ledger. No provider, selector output or pi transition is
 mocked; the fixture deliberately claims no remote memory delivery.
 Evidence: `/private/tmp/dano475-real-branches.log`,
 `/private/tmp/dano475-real-branches-LIkOW8/result.json`.
+
+### OA re-login boundary and final review gap
+
+The latest protected image was exercised through real logout, a fresh anonymous
+chat, and real OA authorization back to the fixed localhost origin. Anonymous
+memory settings said login was required and offered no memory grant. A synthetic
+anonymous preference (“匿名鹿鸣”) was retained in the conversation after login,
+but not collected. The logged-in account retained its own consent revision 4 and
+four ready records. A subsequent non-factual authenticated message completed.
+The source audit found one anonymous entry, zero selected/delivered references,
+five processed collection requests, and still only two automatic operations.
+Screenshot: `/private/tmp/dano475-oa-rebinding-browser.png`.
+This is an existing-account re-login, not creation of a second OA account or a
+forced token-refresh test. It does not replace the independent-browser identity
+gate in the parent release acceptance.
+
+Refetched upstream/main and origin work branch; both rebases were already
+up to date. Review base is `8056d71eabf0bfdeb6b67e16b8899f3fd4776520`, reviewed
+HEAD `2a481ccd8810b2fda98800c0a777f64c7e15fd14`.
+
+Standards review: zero actionable violations or heuristic findings. The existing
+safe-directory helper, public extension APIs and Pi ModelRuntime are reused;
+no ask_user_question contract changes require its guide to change.
+
+Spec review: one P2 functional gap remains. FR-02 requires collection from both
+conversation and confirmed task results; Spec §5.3 requires allowlisted,
+declassified task facts. Dano's protected services currently configure only the
+selection model and budgets, never `taskFacts`. The published extension's
+synthetic business-tool fixture proves its interface, not Dano's production
+integration. This gap belongs to #475 and prevents signing off or merging it.
+
+The next implementation must use Dano's actual authenticated provider path:
+`CredentialBroker` and `withProviderPython` observe real HTTP responses and
+binding evidence before returning them to the tool. `wrapProviderBash` already
+overwrites its own `providerRequests` metadata from trusted observations. A
+task-fact adapter must project only configured successful response fields with
+verified actor/owner binding, never parse arbitrary bash stdout or trust a
+model's claim of business success. The projection must remain available through
+the protected original pi result for restart/fork, while excluding raw response
+bodies and credentials from collection. Both direct `provider_request` and
+Python-through-bash paths need coverage, including forged metadata, failure,
+foreign actor, revoked authorization and sensitive fields. Deployment-owned
+contracts and policy revisions must drive the allowlist; do not hardcode an OA
+endpoint or business decision to satisfy this acceptance case.
