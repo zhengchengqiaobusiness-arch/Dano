@@ -591,3 +591,53 @@ all network-loss windows, governance, deployment rollback or browser behavior.
 The first fixture attempt exited after an unsettled top-level await; it was
 excluded. The successful injection keeps the child alive until the parent
 sends SIGKILL and asserts that exact exit signal.
+
+## 0.1.2 image and browser regression (2026-09-21)
+
+The repository Dockerfile produced protected-runtime image
+`ffbffe96ea19d3cabf6fc6a1ab95fa2c5ed6cfbffb58a6be6a7ba1f359c888b8`.
+An isolated no-network import confirmed the installed `0.1.2` package, both
+Pi keywords and host factory. The existing Compose acceptance project was
+switched to this image, retaining its data volumes, authenticated browser,
+fixed ports and persistent trusted TLS. The actual protected host still runs
+as UID/GID 1000 with zero effective capabilities and NoNewPrivs=1.
+
+On that image, the authenticated in-app Browser completed:
+
+- Explicitly resume memory; automatic collection remains unapproved.
+- Submit a new synthetic report-ending preference. MiMo's reply accurately
+  says queued, background processing unfinished and not yet remembered.
+- The operation subsequently reaches ready. The management UI shows the actual
+  content, source and submission/update times (17:20:43 / 17:21:28).
+- Create a genuinely blank new chat, then ask about the ending without supplying
+  its value. The model recalls the saved synthetic ending. An earlier attempt
+  submitted before the asynchronous new-chat transition finished and was
+  excluded from cross-session evidence.
+- Upload the previously approved synthetic shapes image through the real file
+  chooser. MiMo identifies red circle, blue square and yellow triangle, then
+  actually invokes `bash ls`; the rendered transcript shows the command and
+  the `uploads` directory result.
+
+Screenshots under `/private/tmp/dano465-browser-nibutlhc`:
+`memory012-queued-answer.png`, `memory012-ready-content.png`,
+`memory012-blank-before-recall.png`, `memory012-new-session-recall.png`,
+`memory012-image-bash.png`. Build log:
+`/private/tmp/dano465-pin012-image-build.log`.
+
+The immediate post-switch smoke first encountered startup HTTP 502; subsequent
+runs reached client creation but exceeded the default 15-second request limit.
+A separate measurement returned HTTP 201 in 16,883 ms. With the smoke script's
+existing `DANO_SMOKE_TIMEOUT_MS=30000` option, the complete HTTPS/anonymous
+cookie/client/SSE/command/disconnect path passed. No product timeout was
+changed. Evidence: `/private/tmp/dano465-pin012-smoke-30s.log`. This does not
+establish a 15-second startup guarantee or the later aggregate latency gate.
+
+Independent Standards and Spec reviews of `87244343` against `upstream/main`
+found no new hard violations or implementation defects. The pre-existing
+possible duplication between ordinary/protected search supervision remains a
+non-blocking maintainability observation, not proof of release readiness.
+
+After the updated-image flow, memory was paused and another genuinely blank
+chat was created. Asking about the report ending without its value did not
+recall the saved ending. Evidence: `memory012-paused-new-session.png` in the
+same screenshot directory. Memory remains paused at this checkpoint.
