@@ -1420,3 +1420,59 @@ synthetic report titles correctly. Evidence:
 The guarded private harness is `/private/tmp/dano475-credential-rotation.mjs`;
 encrypted recovery material remains under the isolated container's
 `host-state/acceptance-credential-rotation-v015` directory.
+
+
+### Final published 0.1.5 lifecycle and regression rerun
+
+The exact Dano-installed `@josephyoung/pi-openviking@0.1.5` and Pi `0.85.1`
+passed the real fork/tree/reload fixture (operation checkpoints 1, 1, 2, 2),
+the real Pi SIGKILL/reopen fixture (two durable requests; one safe source
+selected with MiMo after restart without a viewer), and real OpenViking
+response-loss/pause reconciliation with concurrent isolated Alice/Bob owners.
+The restart fixture now resolves both dependencies from the Dano app and
+asserts that their installed versions equal its manifest pins. These fixtures
+remain explicitly distinguished from browser evidence. Logs:
+`/private/tmp/dano475-v015-real-branches.log`,
+`/private/tmp/dano475-v015-real-host-restart.log`, and
+`/private/tmp/dano475-v015-real-pause.log`.
+
+The final full Dano regression used Node 22, the acceptance Python environment
+and `pnpm run test --maxWorkers=4`: 138 test files passed, 1600 tests passed and
+one skipped. Log: `/private/tmp/dano475-v015-final-full-tests.log`.
+
+
+### Browser-controlled service delay closes Spec 11.2(4)
+
+On the official 0.1.5 image, the actual browser/MiMo tool chain issued two
+`memory_save` calls for distinct synthetic preferences. The isolated relay
+forwarded the first real OpenViking commit and held its successful response.
+The first attempt used the ordinary 15-second request timeout: both operations
+were sent before the UI pause took effect, so it is not counted as unsent
+coverage. For the successful controlled run, only the isolated host request
+timeout was temporarily extended to 120 seconds. No delivery code or receipt
+was fabricated. The browser showed one waiting operation and one unknown
+result before the user-facing pause action.
+
+Immediately after browser pause, the durable audit showed the first operation
+`commit_unknown` and the second `blocked_by_pause` with no payload. Releasing
+the held real response let the first reach `ready` while still paused; the
+second remained blocked. After browser resume, both states remained unchanged.
+The relay recorded exactly one session creation, one append and one commit
+for the two tool requests, proving the unsent operation was neither delivered
+nor replayed on resume. The processed automatic request did not add a duplicate.
+
+Evidence: `/private/tmp/dano475-browser-delay-v2-paused.log`,
+`/private/tmp/dano475-browser-delay-v2-reconciled.log`,
+`/private/tmp/dano475-browser-delay-v2-resumed.log`, and
+`/private/tmp/dano475-browser-delay-v2-resumed-relay.log`. Browser captures:
+`/private/tmp/dano475-browser-delay-v2-before-pause.png`,
+`/private/tmp/dano475-browser-delay-v2-paused.png`,
+`/private/tmp/dano475-browser-delay-v2-reconciled.png`, and
+`/private/tmp/dano475-browser-delay-v2-resumed.png`. The private transport
+harness remains at `/private/tmp/dano475-browser-delay-relay.mjs`; it logs only
+request classes, timestamps and response status, with no bodies, credentials
+or remote identifiers. Original TCP relay and 15-second host timeout were
+restored after the run; the fixed HTTPS entry and trusted certificates were
+unchanged. This browser test complements the separate real-service append
+response-loss/reopen and concurrent-user fixtures, rather than claiming those
+fixtures themselves ran through the browser.

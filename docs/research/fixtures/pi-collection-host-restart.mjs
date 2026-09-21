@@ -1,6 +1,6 @@
 // Actual pi request hooks -> SIGKILL -> source recovery -> real configured model selection.
 // No OpenViking delivery or browser consent is claimed here.
-// Args: extension checkout, private models.json, private production-input.json.
+// Args: Dano app directory, private models.json, private production-input.json.
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -8,10 +8,14 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { fork } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
-const [extensionRoot, modelsPath, credentialPath, mode, existingRoot] = process.argv.slice(2);
-const piRoot = join(extensionRoot, 'node_modules/@earendil-works/pi-coding-agent');
+const [appRoot, modelsPath, credentialPath, mode, existingRoot] = process.argv.slice(2);
+const piRoot = join(appRoot, 'node_modules/@earendil-works/pi-coding-agent');
+const extensionRoot = join(appRoot, 'node_modules/@josephyoung/pi-openviking');
+const appManifest = JSON.parse(await readFile(join(appRoot, 'package.json'), 'utf8'));
+const extensionManifest = JSON.parse(await readFile(join(extensionRoot, 'package.json'), 'utf8'));
+assert.equal(extensionManifest.version, appManifest.dependencies['@josephyoung/pi-openviking']);
 const manifest = JSON.parse(await readFile(join(piRoot, 'package.json'), 'utf8'));
-assert.equal(manifest.version, '0.85.1');
+assert.equal(manifest.version, appManifest.dependencies['@earendil-works/pi-coding-agent']);
 const pi = await import(pathToFileURL(join(piRoot, manifest.exports['.'].import)));
 const memory = await import(pathToFileURL(join(extensionRoot, 'dist/host.js')));
 const secrets = JSON.parse(await readFile(credentialPath, 'utf8'));
@@ -57,7 +61,7 @@ if (mode === 'chat') {
   process.send({ settled: true, wakes });
   await new Promise(() => {});
 } else {
-  const child = fork(fileURLToPath(import.meta.url), [extensionRoot, modelsPath, credentialPath, 'chat', root], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  const child = fork(fileURLToPath(import.meta.url), [appRoot, modelsPath, credentialPath, 'chat', root], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
   let stderr = ''; child.stderr.on('data', data => { stderr += data; });
   const exited = once(child, 'exit'); let receipt;
   try {
