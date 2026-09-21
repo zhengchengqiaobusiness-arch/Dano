@@ -145,9 +145,12 @@ export function assertPageDisplayContract(result) {
     }
     for (const key of Object.keys(properties)) {
       if (callerKeys.size && !callerKeys.has(key)) {
+        const validKeys = [...callerKeys].join(", ");
         throw new SubmitRejectedError(
           "DISPLAY_CONTRACT",
-          `input_schema.properties.${key} 必须对应某个 exposed_to_user=true 的 param.key，不能编造 execute 请求里没有的键`,
+          `input_schema.properties.${key} 不存在于任何 exposed_to_user=true 的 param.key 中。` +
+          `当前能力中有效的 caller param key 为：[${validKeys}]。` +
+          `请确认 input_schema.properties 的每个键与 step.params 里某个 exposed_to_user=true 的 key 字段值完全一致（区分大小写）。`,
         );
       }
       const node = properties[key];

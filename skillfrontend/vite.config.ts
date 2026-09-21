@@ -56,7 +56,8 @@ export default defineConfig({
       },
       "/tenants": { target: gateway, changeOrigin: true },
       "/auth": { target: gateway, changeOrigin: true },
-      "/onboarding": { target: piCheck, changeOrigin: true, ws: true },
+      // 只代理录制 WebSocket，不代理整个 /onboarding（/onboarding/page 是 SPA 前端路由）
+      "/onboarding/page/record": { target: piCheck, changeOrigin: true, ws: true },
       "/settings/runtime": { target: gateway, changeOrigin: true },
       "/export": { target: gateway, changeOrigin: true },
       "/lifecycle": { target: gateway, changeOrigin: true },

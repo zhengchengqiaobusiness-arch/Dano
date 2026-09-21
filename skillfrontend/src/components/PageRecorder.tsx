@@ -1159,6 +1159,18 @@ export default function PageRecorder({
     };
   }, []);
 
+  // 安全兜底：若 connecting=true 但 5 秒内没有建立 WebSocket，自动重置为 false
+  // 防止按钮永久卡在 loading 状态（WS 建立前被取消或出现竞争时可能发生）
+  useEffect(() => {
+    if (!connecting) return undefined;
+    const timer = window.setTimeout(() => {
+      if (connecting && (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)) {
+        setConnecting(false);
+      }
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [connecting]);
+
   function stopReconnect() {
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
@@ -1331,11 +1343,17 @@ export default function PageRecorder({
     const generation = startHostGenRef.current;
     const begun = performance.now();
     const tryStart = () => {
-      if (startHostGenRef.current !== generation) return;
+      // 若本次启动已被更新的调用取代，重置 connecting 防止按钮永久 loading
+      if (startHostGenRef.current !== generation) {
+        setConnecting(false);
+        return;
+      }
       const host = previewHostRef.current;
       const ready = Boolean(host && host.clientWidth >= 640 && host.clientHeight >= 400);
       if (!ready && performance.now() - begun < 2000) {
-        window.requestAnimationFrame(tryStart);
+        // 使用 setTimeout 代替 requestAnimationFrame，保证在后台/隐藏标签页也能执行
+        // （rAF 在不可见标签页/内嵌 webview 中不会触发，导致 WebSocket 永远无法建立）
+        window.setTimeout(tryStart, 50);
         return;
       }
       const init = socketInitRef.current;
@@ -1343,7 +1361,8 @@ export default function PageRecorder({
       lastViewportRef.current = "";
       openRecordingSocket(action);
     };
-    window.requestAnimationFrame(tryStart);
+    // 使用 setTimeout 确保在后台也能执行（rAF 在隐藏 webview 中会被暂停）
+    window.setTimeout(tryStart, 0);
   }
 
   function editIdentity(edit: DraftEdit) {
