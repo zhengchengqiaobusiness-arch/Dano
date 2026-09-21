@@ -12,6 +12,7 @@ import {
   type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import type { BridgeEventBus } from "./bridge-event-bus.js";
+import type { MemoryInputCapture } from "./memory-user-provenance.js";
 import type {
   BridgeSessionActions,
   BridgeSessionEvents,
@@ -220,6 +221,7 @@ export interface BridgeRpcAdapterContext {
   askUserQuestion: AskUserQuestionRuntime;
   fieldAssist?: FieldAssistService;
   createFieldAssist?: (session: AgentSession) => FieldAssistService;
+  captureMemoryInput?: MemoryInputCapture;
 }
 
 /**
@@ -6311,6 +6313,17 @@ export class BridgeRpcAdapter {
   /**
    * Dispatch command to Pi extension API
    */
+  private async dispatchMemoryInput(session: AgentSession, originalText: string,
+    dispatchedText: string, dispatch: () => Promise<void>): Promise<void> {
+    const cancel = await this.context.captureMemoryInput?.(session.sessionManager, originalText, dispatchedText);
+    try {
+      await dispatch();
+      // Queue APIs return before delivery; retain those receipts until settlement.
+      // Handled slash commands and rejected/no-op inputs must not leave captures.
+      if (!session.isStreaming && session.pendingMessageCount === 0) cancel?.();
+    } catch (error) { cancel?.(); throw error; }
+  }
+
   private async dispatchCommand(
     command: RpcCommand,
     correlationId: string,
@@ -6410,7 +6423,8 @@ export class BridgeRpcAdapter {
             let promptOperation!: Promise<void>;
             const executePrompt = () =>
               Promise.resolve().then(() =>
-                session.prompt(injectedMessage, promptOptions),
+                this.dispatchMemoryInput(session, command.message, injectedMessage,
+                  () => session.prompt(injectedMessage, promptOptions)),
               );
             const startedPrompt =
               isQueuedFollowUp && this.credentialBroker
@@ -6524,8 +6538,8 @@ export class BridgeRpcAdapter {
         });
         if (this.sessionRuntime.hasDetachedSelection()) {
           const session = await this.sessionRuntime.ensureDetachedSession();
-          void session
-            .steer(injectedMessage, images)
+          void this.dispatchMemoryInput(session, command.message, injectedMessage,
+            () => session.steer(injectedMessage, images))
             .catch(error => {
               console.error(
                 `BridgeRpcAdapter[${this.client.id}]: Detached steer failed:`,
@@ -6583,7 +6597,8 @@ export class BridgeRpcAdapter {
             const binding = this.queueAssistantTurn(session.sessionId);
             const enqueueFollowUp = () =>
               Promise.resolve().then(() =>
-                session.followUp(injectedMessage, images),
+                this.dispatchMemoryInput(session, command.message, injectedMessage,
+                  () => session.followUp(injectedMessage, images)),
               );
             const startedFollowUp = this.credentialBroker
               ? this.credentialBroker.enqueueAssociatedAssistantTurn(

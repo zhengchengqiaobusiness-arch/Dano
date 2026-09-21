@@ -58,3 +58,49 @@ it("rejects conflicting capture and changed source digest or timestamp", () => {
   expect(provenance.project(session, { ...source, contentVersion: "0".repeat(64) })).toBeUndefined();
   expect(provenance.project(session, { ...source, entryTimestamp: "changed" })).toBeUndefined();
 });
+
+it("settles multiple queued inputs without claiming older entries or cancelled dispatches", () => {
+  const session = SessionManager.inMemory();
+  const provenance = new MemoryUserProvenance(owner);
+  const old = add(session, "First input [file]");
+  provenance.capture(session, "First input", "First input [file]");
+  provenance.capture(session, "Second input", "Second input [file]");
+  const cancel = provenance.capture(session, "Cancelled", "Cancelled");
+  cancel();
+  const first = add(session, "First input [file]");
+  const second = add(session, "Second input [file]");
+  const cancelled = add(session, "Cancelled");
+  provenance.settle(session);
+  expect(provenance.project(session, old)).toBeUndefined();
+  expect(provenance.project(session, first)).toBe("First input");
+  expect(provenance.project(session, second)).toBe("Second input");
+  expect(provenance.project(session, cancelled)).toBeUndefined();
+});
+
+it("old dispatch cleanup cannot remove a later request's pending capture", () => {
+  const session = SessionManager.inMemory();
+  const provenance = new MemoryUserProvenance(owner);
+  const cancelOld = provenance.capture(session, "First", "First");
+  add(session, "First");
+  provenance.settle(session);
+  provenance.capture(session, "Second", "Second");
+  cancelOld();
+  const second = add(session, "Second");
+  provenance.settle(session);
+  expect(provenance.project(session, second)).toBe("Second");
+});
+
+it("conflicting queued attribution fails closed and runtime disposal drops pending captures", () => {
+  const session = SessionManager.inMemory();
+  const provenance = new MemoryUserProvenance(owner);
+  provenance.capture(session, "Text", "Text wrapper");
+  provenance.capture(session, "Text wrapper", "Text wrapper");
+  const source = add(session, "Text wrapper");
+  expect(() => provenance.settle(session)).toThrow("MEMORY_PROVENANCE_CONFLICT");
+  expect(provenance.project(session, source)).toBeUndefined();
+  provenance.capture(session, "Later", "Later");
+  provenance.clear();
+  const later = add(session, "Later");
+  provenance.settle(session);
+  expect(provenance.project(session, later)).toBeUndefined();
+});

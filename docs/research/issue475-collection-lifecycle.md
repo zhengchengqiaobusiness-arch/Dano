@@ -626,3 +626,33 @@ This primitive is not yet called by Dano dispatch or the extension selector.
 Connecting prompt/steer/follow-up capture, durable settlement ordering and source
 projection remains necessary. No runtime behavior or product version is changed
 by the currently unreferenced module alone.
+
+### Dano dispatch provenance wiring
+
+The authenticated memory runtime now exposes capture to the backend context, and
+the RPC adapter invokes it for `prompt`, `steer` and `follow_up` immediately before
+dispatch. Pending captures retain only dispatched-text digests, user-prefix
+lengths and pre-dispatch entry IDs. Queue APIs keep captures until settlement;
+failed/no-op dispatches release them. The runtime's provenance `agent_settled`
+hook runs before its memory extension and writes receipts only for newly
+persisted matching entries. Runtime disposal clears pending captures. Ambiguous
+queued prefix attribution fails closed, and old dispatch cleanup cannot erase a
+new capture for the same session.
+
+Capture requires both main authorization and the independent automatic switch.
+Optional authorization reads have a foreground deadline and share one pending
+read, so a locked memory store cannot indefinitely block chat or accumulate a
+read per prompt. Root product version advances to `0.2.29` for this runtime wiring.
+
+The four affected test files passed 172 tests; `pnpm run check` reported no type
+or Svelte diagnostics. The additional foreground-lock test initially intercepted
+the independent delivery poller too; after isolating that poller, the 17 runtime
+tests passed. Logs: `/private/tmp/dano475-provenance-wiring-tests.log`,
+`/private/tmp/dano475-provenance-wiring-check.log`, and
+`/private/tmp/dano475-provenance-timeout-tests.log`. Use Node 22 for this checkout's
+existing fs-ext ABI; the initial bundled Node 24 run could not load that binary.
+
+The collection selector is not yet connected to this Dano receipt reader because
+Dano still pins published extension `0.1.2`. Independent release, exact-version
+upgrade, collection configuration/settings and real browser acceptance remain
+pending. Dispatch unit evidence is not a browser or complete #475 acceptance claim.

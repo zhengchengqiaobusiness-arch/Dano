@@ -12,6 +12,7 @@ import type { UserMemoryControls, UserMemoryStatus } from "./user-memory-control
 import type { UserContext } from "./user-context.js";
 import type { UserMemoryOperation, UserMemoryOperationPage, UserMemoryContent } from "../../types/memory.js";
 import { memoryOperationPage, projectMemoryOperation } from "./memory-operation-page.js";
+import { MemoryUserProvenance } from "./memory-user-provenance.js";
 
 type SchedulerPolicy = Omit<ConstructorParameters<typeof DeliveryScheduler>[0], "store" | "delivery">;
 export interface UserMemoryServices {
@@ -34,12 +35,15 @@ export class UserMemoryRuntime implements UserMemoryControls {
   readonly #scheduler: DeliveryScheduler;
   readonly #client: LazyMemoryClient;
   readonly #options: UserMemoryServices;
+  readonly provenance: MemoryUserProvenance;
   #settings: Promise<void> = Promise.resolve();
   #closed = false;
   #closing?: Promise<void>;
+  #captureAuthorizationRead?: ReturnType<FileStateStore["read"]>;
 
   private constructor(store: FileStateStore, client: LazyMemoryClient, options: UserMemoryServices) {
     this.#store = store; this.#client = client; this.#options = options;
+    this.provenance = new MemoryUserProvenance(store.owner);
     this.#delivery = new MemoryDelivery({ store, transport: client, maxPayloadBytes: options.policy.maxPayloadBytes });
     this.#scheduler = new DeliveryScheduler({ ...options.scheduler, store, delivery: this.#delivery });
     this.#scheduler.start();
@@ -61,9 +65,37 @@ export class UserMemoryRuntime implements UserMemoryControls {
 
   extension(worker: IsolatedToolExecutor) {
     this.#assertOpen();
-    return createOpenVikingExtension({ owner: this.#store.owner, client: this.#client, stateStore: this.#store,
+    const memory = createOpenVikingExtension({ owner: this.#store.owner, client: this.#client, stateStore: this.#store,
       policy: this.#options.policy, assertToolIsolation: async () => { this.#assertOpen(); await worker.assertIsolated(); },
       wakeDelivery: () => { if (!this.#closed) this.#scheduler.wake(); } });
+    return ((pi) => {
+      pi.on("agent_settled", (_event, ctx) => {
+        this.provenance.settle({
+          getSessionId: () => ctx.sessionManager.getSessionId(),
+          getEntry: id => ctx.sessionManager.getEntry(id),
+          getEntries: () => ctx.sessionManager.getEntries(),
+          getBranch: id => ctx.sessionManager.getBranch(id),
+          appendCustomEntry: (type, data) => { pi.appendEntry(type, data); return ""; },
+        });
+      });
+      return memory(pi);
+    }) satisfies ReturnType<typeof createOpenVikingExtension>;
+  }
+
+  async captureInput(...input: Parameters<MemoryUserProvenance["capture"]>): Promise<() => void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      this.#assertOpen();
+      // A locked optional-memory store must not stall ordinary chat. Share one
+      // pending read so repeated prompts cannot accumulate background lock waits.
+      this.#captureAuthorizationRead ??= this.#store.read().finally(() => { this.#captureAuthorizationRead = undefined; });
+      const state = await Promise.race([this.#captureAuthorizationRead,
+        new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), this.#options.policy.recallTimeoutMs); })]);
+      this.#assertOpen();
+      if (state?.authorization.enabled && state.authorization.automaticCollection) return this.provenance.capture(...input);
+    } catch { /* Missing memory metadata must not prevent ordinary chat. */ }
+    finally { clearTimeout(timer); }
+    return () => {};
   }
 
   /** Server-authenticated settings calls only; never exposed as model tools. */
@@ -130,6 +162,7 @@ export class UserMemoryRuntime implements UserMemoryControls {
   close(): Promise<void> {
     if (this.#closing) return this.#closing;
     this.#closed = true;
+    this.provenance.clear();
     this.#closing = (async () => {
       // Stop new scheduler claims, settle network requests, then let the active
       // tick persist its receipts before the host releases the user's workers.
@@ -174,6 +207,7 @@ export function withUserMemory(
       const bound = runtime;
       let disposing: Promise<void> | undefined;
       return { ...profile, memory: bound,
+        captureMemoryInput: bound.captureInput.bind(bound),
         createMemoryExtension: (_workspace, sessionWorker) => bound.extension(sessionWorker),
         dispose: () => disposing ??= (async () => {
           try { await bound.close(); }

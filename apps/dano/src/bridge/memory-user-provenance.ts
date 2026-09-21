@@ -7,6 +7,8 @@ const digest = (value: string) => createHash("sha256").update(value).digest("hex
 type Source = { entryId: string; entryTimestamp: string; contentVersion: string };
 type Session = Pick<SessionManager, "getEntry" | "getEntries" | "appendCustomEntry">;
 type Reader = Pick<SessionManager, "getEntry" | "getEntries">;
+type CaptureSession = Reader & Pick<SessionManager, "getSessionId" | "getBranch">;
+export type MemoryInputCapture = (...input: Parameters<MemoryUserProvenance["capture"]>) => (() => void) | Promise<() => void>;
 
 function userText(entry: SessionEntry | undefined): string | undefined {
   if (entry?.type !== "message" || entry.message.role !== "user") return undefined;
@@ -19,12 +21,42 @@ function userText(entry: SessionEntry | undefined): string | undefined {
  * A transformed message cannot acquire provenance merely by having role=user. */
 export class MemoryUserProvenance {
   readonly #ownerDigest: string;
+  readonly #pending = new Map<string, Map<symbol, { textDigest: string; userLength: number; baseline: Set<string> }>>();
   constructor(owner: MemoryOwner) {
     if (![owner.accountId, owner.userId].every(id => /^[A-Za-z0-9_-]{1,128}$/.test(id))) {
       throw new Error("MEMORY_OWNER_INVALID");
     }
     this.#ownerDigest = digest(JSON.stringify([owner.accountId, owner.userId]));
   }
+
+  /** Capture before dispatch; pending metadata contains no plaintext input. */
+  capture(session: CaptureSession, originalText: string, dispatchedText: string): () => void {
+    if (!originalText || !dispatchedText.startsWith(originalText)) return () => {};
+    const sessionId = session.getSessionId();
+    const pending = this.#pending.get(sessionId) ?? new Map();
+    const token = Symbol();
+    pending.set(token, { textDigest: digest(dispatchedText), userLength: originalText.length,
+      baseline: new Set(session.getEntries().map(entry => entry.id)) });
+    this.#pending.set(sessionId, pending);
+    return () => { pending.delete(token); if (!pending.size && this.#pending.get(sessionId) === pending) this.#pending.delete(sessionId); };
+  }
+
+  /** Run before collection's agent_settled hook, after pi persisted user entries. */
+  settle(session: CaptureSession & Pick<Session, "appendCustomEntry">): void {
+    const pending = this.#pending.get(session.getSessionId());
+    if (!pending) return;
+    this.#pending.delete(session.getSessionId());
+    for (const entry of session.getBranch()) {
+      const text = userText(entry);
+      if (text === undefined) continue;
+      const matching = [...pending.values()].filter(input => !input.baseline.has(entry.id) && input.textDigest === digest(text));
+      if (!matching.length) continue;
+      if (new Set(matching.map(input => input.userLength)).size !== 1) throw new Error("MEMORY_PROVENANCE_CONFLICT");
+      this.record(session, entry.id, text.slice(0, matching[0]!.userLength), text);
+    }
+  }
+
+  clear(): void { this.#pending.clear(); }
 
   /** Call only after matching the actual persisted entry to its dispatched input.
    * Dano appends file references, so user-authored text must be the exact prefix.

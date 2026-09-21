@@ -320,7 +320,7 @@ export async function createDanoBackend(
     result.disposeDanoLlmResilience,
   );
 
-  return createDanoBackendFromSession(
+  const backend = createDanoBackendFromSession(
     result.runtime.session,
     danoConfig,
     askUserQuestion,
@@ -328,4 +328,6 @@ export async function createDanoBackend(
     () => sessionRegistry.dispose(),
     sessionRegistry,
   );
+  backend.context.captureMemoryInput = options.protectedTools?.captureMemoryInput;
+  return backend;
 }

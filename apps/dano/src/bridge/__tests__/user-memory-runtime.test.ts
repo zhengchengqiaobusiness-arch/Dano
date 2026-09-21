@@ -2,10 +2,10 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { withUserMemory, type UserMemoryRuntime, type UserMemoryServices } from "../user-memory-runtime.js";
 import type { ProtectedSessionTools } from "../protected-session-tools.js";
-import { FileStateStore } from "@josephyoung/pi-openviking/host";
+import { FileStateStore, DeliveryScheduler } from "@josephyoung/pi-openviking/host";
 import { LazyMemoryClient } from "../lazy-memory-client.js";
 
 const roots: string[] = [];
@@ -48,6 +48,36 @@ function bind(profile: ProtectedSessionTools, worker: Awaited<ReturnType<Protect
   profile.createMemoryExtension!(worker.workspace, worker)(pi);
   return { handlers, tools };
 }
+
+it("does not record user provenance without a separate automatic-collection grant", async () => {
+  const h = await harness();
+  const profile = await h.start();
+  const session = SessionManager.inMemory();
+  for (const enabled of [false, true]) {
+    await profile.memory!.setEnabled(enabled);
+    await profile.captureMemoryInput!(session, "I prefer concise reports.", "I prefer concise reports.");
+    session.appendMessage({ role: "user", content: "I prefer concise reports.", timestamp: Date.now() });
+    h.runtime().provenance.settle(session);
+    expect(session.getEntries().filter(entry => entry.type === "custom")).toHaveLength(0);
+  }
+});
+
+it("bounds optional provenance authorization checks and shares stalled reads across prompts", async () => {
+  // Isolate foreground capture reads from the independent delivery poller.
+  vi.spyOn(DeliveryScheduler.prototype, "start").mockImplementation(() => {});
+  const h = await harness();
+  const profile = await h.start();
+  const session = SessionManager.inMemory();
+  const read = vi.spyOn(FileStateStore.prototype, "read").mockReturnValue(new Promise(() => {}));
+  try {
+    const cancellations = await Promise.all(["first", "second", "third"].map(text => profile.captureMemoryInput!(session, text, text)));
+    expect(cancellations).toHaveLength(3);
+    expect(read).toHaveBeenCalledOnce();
+    session.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
+    h.runtime().provenance.settle(session);
+    expect(session.getEntries().filter(entry => entry.type === "custom")).toHaveLength(0);
+  } finally { read.mockRestore(); }
+});
 
 it("preserves isolated tools and damaged memory data when memory state cannot load", async () => {
   const h = await harness();

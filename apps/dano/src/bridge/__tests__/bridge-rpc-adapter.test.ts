@@ -462,6 +462,8 @@ describe("BridgeRpcAdapter", () => {
     });
 
     it("binds prompt and follow-up ownership without letting steering change the active Turn", async () => {
+      const captureMemoryInput = vi.fn(() => vi.fn());
+      context.captureMemoryInput = captureMemoryInput;
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-turn-owner-"));
       const sessionManager = SessionManager.create(tmpDir, tmpDir);
       (
@@ -571,6 +573,9 @@ describe("BridgeRpcAdapter", () => {
         ).toHaveBeenCalled(),
       );
       expect(session.steer).toHaveBeenCalledOnce();
+      expect(captureMemoryInput).toHaveBeenCalledWith(sessionManager, "first", "first");
+      expect(captureMemoryInput).toHaveBeenCalledWith(sessionManager, "steer", "steer");
+      expect(captureMemoryInput).toHaveBeenCalledWith(sessionManager, "follow", "follow");
       expect(credentialBroker.queueAssistantTurn).toHaveBeenCalledTimes(2);
 
       await adapter.handleClientMessage({
