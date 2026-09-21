@@ -455,3 +455,26 @@ passed. The container exited zero and was removed. Evidence:
 This verifies MiMo as Dano's chat/tool model. It does not assert that the separate
 OpenViking extraction provider was changed, and synthetic JWT users do not
 prove OAuth or the authenticated browser memory path. Those gates remain open.
+
+## MiMo extraction provider acceptance (2026-09-21)
+
+After the preceding Dano flow, inspection found that OpenViking's separate VLM
+configuration still selected qwen35. All observed queue pending/in-progress
+counts were zero before the isolated service was stopped gracefully. Its VLM
+configuration now selects OpenAI-compatible MiMo V2.5 using the same authorized
+provider endpoint/key as the Dano model. Storage, embedding assets and the
+loopback port remain unchanged. The secret configuration is retained as
+`~/tmp/dano465-acceptance-secrets/openviking-acceptance.json` with mode 0600.
+
+The first sandboxed startup failed to create the local GGUF embedding context.
+The same service command outside the sandbox started successfully; no embedding
+replacement or application security-policy relaxation was made. The existing
+container relay health check returned HTTP 200 after restart.
+
+`openviking-model-extraction.py` used a fresh account and synthetic facts against
+this configuration. The task advanced from pending to running to completed in
+76.1 seconds, then search actually returned both requested preferences (technical
+plans state goals/non-goals and use Simplified Chinese). The probe exited zero.
+Evidence: `/private/tmp/dano465-browser-nibutlhc/mimo-extraction.log`, with private
+task/search artifacts under the sibling `mimo-extraction` directory. This is
+one extraction/recall sample, not the Spec quality or latency benchmark.
