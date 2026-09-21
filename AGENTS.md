@@ -88,6 +88,12 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 - 本地或 SSH 隧道访问的隔离镜像验收统一使用 `http://localhost:18710` 和
   `https://localhost:18711`，只绑定回环地址；重建镜像或容器时保持浏览器入口不变。
   本约定不改变开发服务器和生产服务的端口。
+- 本机 HTTPS 验收复用 `~/.local/share/dano/localhost-tls/localhost.pem`
+  和 `localhost-key.pem`，由同目录已信任的 `rootCA.pem` 签发；证书、私钥和
+  CA 均为持久资产，排除在临时验收清理之外。启动前验证有效期、localhost SAN
+  和系统信任；已有有效证书时直接复用，不因新任务或重启重新生成或要求信任。
+  叶证书到期时沿用原 CA 续签，不更换 CA；确实缺失 CA 或信任时才处理首次配置。
+  Node/Python 等独立信任库的检查使用该 CA，不关闭 TLS 校验。
 - 启动前检查端口占用及所属任务。仅复用已确认属于本次验收的服务；其他任务占用时
   优先协调或串行验收，不擅自终止进程或随机换端口。确需更换时提前说明原因和新入口。
 - 使用固定、无敏感信息的合成测试图片，放在代码仓库外的专用验收素材目录，并复用

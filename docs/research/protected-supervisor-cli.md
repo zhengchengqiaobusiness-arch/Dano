@@ -383,3 +383,19 @@ The in-app Browser failed to open the HTTPS origin with
 under the browser policy; no certificate validation was disabled. OAuth login,
 rendered chat/image/bash, authenticated memory and screenshots remain unproven.
 The stack is retained while this handoff is pending.
+
+## Reused persistent localhost certificate (2026-09-21)
+
+The certificate blocker was caused by generating a fresh temporary self-signed
+leaf instead of using the machine's existing trusted local CA. The persistent
+assets already exist under `~/.local/share/dano/localhost-tls/`: `localhost.pem`,
+`localhost-key.pem`, and `rootCA.pem`. System SSL verification succeeds for
+localhost. The existing leaf expires September 11, 2027; its CA expires
+September 8, 2036. The isolated nginx now mounts that existing leaf/key.
+
+A fresh in-app Browser tab opened `https://localhost:18711` and rendered Dano
+without a certificate warning. No new trust installation or certificate-check
+bypass was needed. The previous request for user certificate trust is withdrawn.
+AGENTS.md now requires reuse and retention of these persistent assets, and
+renewing leaves under the same CA. This resolves TLS navigation only; OAuth
+and the memory/browser flow remain separate acceptance gates.
