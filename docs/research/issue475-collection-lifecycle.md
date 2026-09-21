@@ -1342,3 +1342,46 @@ dependency changes. Type/Svelte checks and all 91 memory-related tests across
 14 files pass (`/private/tmp/dano475-extension015-dano-check.log` and
 `/private/tmp/dano475-extension015-dano-tests.log`). Rebuilt-browser validation
 is still pending at this checkpoint.
+
+The `c3b73631` protected image built successfully and its unchanged read-only
+Skill overlay is deployed as `localhost/dano475-protected-image:c3b73631-taskfact`
+(image `5c2d09e661b552f825c45e57f43667fe4c110198fdc7b9702043cede3498770d`).
+The running package reports `0.1.5`. Ready-state API/SSE smoke and actual XFS
+worker/Bubblewrap preflight pass. The browser shows v3 consent revoked at
+revision 9 with main memory still enabled; v4 was separately authorized before
+the new test conversations. Evidence:
+`/private/tmp/dano475-c3b73631-image-build.log`,
+`/private/tmp/dano475-c3b73631-smoke.log`,
+`/private/tmp/dano475-c3b73631-bwrap.log`, and
+`/private/tmp/dano475-policy-v4-revoked-browser.png`.
+
+The rebuilt browser mixed-save case used a fresh synthetic preference to avoid
+existing remote memory affecting the result. The model executed `memory_save`;
+its explicit operation reached `ready` with one memory URI. The same turn's
+revision-10 automatic request reached `processed` with **no automatic operation**.
+This demonstrates the source receipt works through the actual protected Dano
+runtime, rather than only a constructed test fixture. Evidence:
+`/private/tmp/dano475-v015-mixed-save-audit.log` and
+`/private/tmp/dano475-v015-mixed-save-browser.png`.
+
+A second fresh conversation provided two synthetic preferences and requested
+explicit saving of only the first. Native audit confirms one `memory_save` call,
+one explicit ready operation and one automatic ready operation, each with a
+memory URI. Source-digest audit confirms the explicit content contains only the
+first title and the automatic quote contains only the second title, from the
+same user entry and scope. The second fact was not lost by skipping the turn.
+Evidence: `/private/tmp/dano475-v015-two-facts-audit.log`,
+`/private/tmp/dano475-v015-two-fact-sources.log`, and
+`/private/tmp/dano475-v015-two-facts-browser.png`.
+
+The same image passed actual model image recognition (red circle, blue square,
+yellow triangle from left to right), plain response and `bash ls` returning
+`uploads`. Screenshot: `/private/tmp/dano475-v015-image-bash-browser.png`.
+
+A new browser conversation then asked for both titles without supplying either
+value. The answer correctly recalled `云杉预算结语` and `海棠培训复盘`.
+Screenshot: `/private/tmp/dano475-v015-two-facts-recall-browser.png`.
+The observed same-source explicit/automatic overlap regression is therefore
+resolved for the original failure class and the partial-overlap preservation
+case using the official published package. This does not close the complete
+#475 lifecycle audit or the parent #465 release gates.
