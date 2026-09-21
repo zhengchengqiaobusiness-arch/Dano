@@ -531,3 +531,27 @@ queued/processing does not mean remembered; the model still overstated it.
 The management UI correctly distinguished these states. This observed model
 wording must be addressed and revalidated rather than treating this flow as
 unqualified completion of #474 or #465.
+
+## Asynchronous save receipt correction (2026-09-21)
+
+The independent extension now distinguishes a submitted save request from a
+completed memory in the model-visible tool result. `remembered` is true only
+for `ready`; pending states explicitly say processing has not finished and
+must not be reported as saved or guaranteed recall. Terminal failure/pause
+receipts also prohibit reporting success. Existing status/error/operation
+fields are retained, without exposing owner, remote task/session or payload.
+
+Independent commit `b2e576341bba2355d206190c0f171beb5a809663` passes type checking
+and all 47 extension tests, including retries through every delivery phase.
+A real `mimo-v2.5` request, using the actual extension-generated queued receipt
+and a normal synthetic remember request, answered that it had submitted the
+request, background processing remained incomplete and recall was not yet
+confirmed. This targeted model probe is supplementary; it does not replace
+browser acceptance of the updated installed package.
+
+The existing version-change workflow successfully published `0.1.2`:
+https://github.com/josephyoung/pi-openviking/actions/runs/35580641158
+At this checkpoint the local npm metadata response still reports latest
+`0.1.1`, so Dano remains pinned to `0.1.1` pending registry availability.
+Evidence: `/private/tmp/dano465-extension-tests.log` and
+`/private/tmp/dano465-browser-nibutlhc/save-receipt-mimo-result.json`.
