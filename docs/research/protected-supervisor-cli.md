@@ -478,3 +478,56 @@ plans state goals/non-goals and use Simplified Chinese). The probe exited zero.
 Evidence: `/private/tmp/dano465-browser-nibutlhc/mimo-extraction.log`, with private
 task/search artifacts under the sibling `mimo-extraction` directory. This is
 one extraction/recall sample, not the Spec quality or latency benchmark.
+
+## OA registration repair and authenticated browser (2026-09-21)
+
+After the user confirmed the slider challenge, OA login succeeded but consent
+displayed no application name and did not redirect. The authenticated OA client
+list lacked `danoProduction`; a token request with the configured client
+authentication and a deliberately invalid synthetic code returned business
+error `1002020000` (OAuth2 client does not exist), despite HTTP 200.
+
+The user explicitly approved restoring the client, `user.read`, authorization
+code/refresh-token grants, and both callbacks. OA now contains enabled
+`danoProduction` with the existing Dano client secret and callbacks
+`https://1.15.173.22/api/auth/callback` and
+`https://localhost:18711/api/auth/callback`. Read-back confirmed both. Synthetic
+code probes now reach code validation (`1002022000`, code does not exist).
+No secret or production Dano configuration was changed.
+
+A fresh in-app Browser login displayed the Dano consent name, returned to the
+local app and showed the authenticated user plus logout control. Evidence:
+`/private/tmp/dano465-browser-nibutlhc/oauth-authenticated-browser.png`.
+The old CAPTCHA/registration blocker is resolved. Full production browser login
+is not established by the local flow.
+
+## Authenticated memory browser flow (2026-09-21)
+
+Using the real OA-authenticated user and MiMo V2.5 in the in-app Browser:
+
+- Memory settings initially showed disabled and no saved operations. Asking
+  `memory_save` to store a synthetic report preference was refused; settings
+  remained disabled and no operation appeared.
+- Explicitly enabling memory kept automatic collection unapproved. The earlier
+  request was not replayed. A new user confirmation submitted one operation.
+- The management UI showed processing, then ready, with submission/update times
+  and source session. Submission was 16:41:25 and ready was observed with update
+  time 16:42:11. Viewing content returned the actual extracted report title
+  preference `澄海九二一` and Simplified Chinese language preference.
+- A new blank chat, without repeating either value, recalled both preferences.
+- After pausing memory and creating another blank chat, the model did not recall
+  either value and stated it did not know the preferences. The account is left
+  paused, and the browser tab is retained.
+
+Screenshots under `/private/tmp/dano465-browser-nibutlhc`:
+`memory-processing-browser.png`, `memory-ready-content-browser.png`,
+`memory-new-session-recall-browser.png`, and
+`memory-paused-new-session-browser.png`.
+
+One acceptance defect remains: before the operation reached ready, the model's
+chat reply said the preference was successfully saved. The deployed extension
+returns the real queued phase and its tool description already warns that
+queued/processing does not mean remembered; the model still overstated it.
+The management UI correctly distinguished these states. This observed model
+wording must be addressed and revalidated rather than treating this flow as
+unqualified completion of #474 or #465.
