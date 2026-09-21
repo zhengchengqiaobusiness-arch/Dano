@@ -656,3 +656,36 @@ The collection selector is not yet connected to this Dano receipt reader because
 Dano still pins published extension `0.1.2`. Independent release, exact-version
 upgrade, collection configuration/settings and real browser acceptance remain
 pending. Dispatch unit evidence is not a browser or complete #475 acceptance claim.
+
+### Independent 0.1.3 release
+
+The independent extension release PR is
+https://github.com/josephyoung/pi-openviking/pull/1, merged as
+`bb09412260d3c89276e6e186c21585e7366953af` on 2026-09-21.
+Candidate `04c72400a24886c6a1360a53008156aec1a2e597` contains the reviewed
+implementation and the `0.1.3` version change. Both repositories were refreshed
+and rebased before pushing; no force push was used.
+
+**Standards:** no documented-contract breach or confirmed source-boundary defect;
+one P3 maintainability suggestion remains for repeated authorization predicates.
+**Spec:** the independent extension's prior P2 is closed. The public Skill parser,
+protected CLI template restriction and explicit host projection contract address
+the extension's responsibility; Dano-specific integration remains required.
+Summary: Standards one heuristic P3; Spec zero remaining extension findings.
+
+All 184 extension tests passed under Node 22
+(`/private/tmp/dano475-extension-release-tests.log`). Package dry-run found 47
+expected files and no unexpected paths (`/private/tmp/dano475-extension-pack.json`).
+The version change triggered Trusted Publishing run
+https://github.com/josephyoung/pi-openviking/actions/runs/35601803347.
+The run completed successfully, including clean dependency install, type check,
+184 tests and publish. The log explicitly reports
+`+ @josephyoung/pi-openviking@0.1.3`; preserved at
+`/private/tmp/dano475-publish-013.log`. npm's exact-version endpoint confirmed
+version `0.1.3`, keywords `pi-package`/`pi-extension`, and integrity
+`sha512-6XSqvdzg3uSGugIPMRPl/ePTxCDdDK1gBIkWBQGxI/bnxQf2wawyIktJrjAhgOexFQ+3krg0KdpV+pxddfMbKQ==`
+(`/private/tmp/dano475-npm-013-direct.json`). The initial package-index lookup
+returned stale metadata and 404 for this version; direct version verification
+resolved the discrepancy without republishing. The remote extension PR branch
+was verified absent after merge. Dano's exact upgrade is the next integration
+gate. This PR does not close Dano #475/#465.
