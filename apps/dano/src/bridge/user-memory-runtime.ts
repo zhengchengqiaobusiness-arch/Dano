@@ -55,8 +55,6 @@ export class UserMemoryRuntime implements UserMemoryControls {
         provenance: this.provenance, configuration: options.collection,
         wakeDelivery: () => { if (!this.#closed) this.#scheduler.wake(); } });
     }
-    this.#scheduler.start();
-    this.#collection?.start();
   }
 
   static async create(context: UserContext, stateDirectory: string, worker: IsolatedToolExecutor,
@@ -69,7 +67,6 @@ export class UserMemoryRuntime implements UserMemoryControls {
     const client = new LazyMemoryClient({ owner, baseUrl: options.baseUrl, timeoutMs: options.requestTimeoutMs,
       connect: () => identity.connect(context), assertToolIsolation: () => worker.assertIsolated() });
     const store = new FileStateStore({ owner, directory: join(stateDirectory, "memory"), policyVersion: options.policyVersion });
-    await store.read();
     const configured = options.collection;
     const collection = configured ? { ...configured, selector: { ...configured.selector,
       async sensitiveValues(signal?: AbortSignal) {
@@ -87,7 +84,23 @@ export class UserMemoryRuntime implements UserMemoryControls {
         return configured.selector.complete(input);
       },
     } } : undefined;
-    return new UserMemoryRuntime(store, client, { ...options, collection }, sessionRoot);
+    const runtime = new UserMemoryRuntime(store, client, { ...options, collection }, sessionRoot);
+    try {
+      // Runtime creation completes before this user's authenticated controls or
+      // sessions are published by UserRuntimeRegistry. Invalidate an obsolete
+      // grant before either scheduler can claim work under the new host policy.
+      const state = await store.read();
+      if (state.authorization.automaticCollection && (!collection
+        || state.authorization.collectionConsent?.policyVersion !== collection.policyVersion)) {
+        await runtime.#delivery.revokeCollection();
+      }
+      runtime.#scheduler.start();
+      runtime.#collection?.start();
+      return runtime;
+    } catch (error) {
+      await runtime.close();
+      throw error;
+    }
   }
 
   extension(worker: IsolatedToolExecutor) {

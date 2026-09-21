@@ -761,3 +761,69 @@ fixture resolves each package's declared import export and uses jiti for Dano TS
 This closes the previously missing production service-factory wiring, not the
 #475 acceptance gate. A current clean image and real browser flows, including
 concurrent chats and pause/resume, remain necessary.
+
+### Current-source regression and image build preparation
+
+For candidate `c42e08a8`, the full regression suite passed 1588 tests with one
+existing skip across 136 files (`/private/tmp/dano475-c42e08a8-full-tests.log`).
+The live parent PRD/Spec and #475 checklist were refreshed before browser work;
+#475 and #465 remain open. The existing loopback acceptance project has exactly
+`app`, `nginx`, and `ov-relay` services, with its recorded configuration/data
+volumes. Its current memory configuration has no automatic collector yet.
+No production deployment or user grant was changed during preparation.
+
+The persistent localhost certificate is valid until 2027-09-11, includes localhost
+and loopback SANs, and passed macOS system trust verification. No certificate or
+CA was regenerated. The existing authenticated in-app Browser tab remains at
+`https://localhost:18711/`.
+
+The first clean Dockerfile build completed dependency installation and application
+compilation, then failed while cloning the pinned public open-websearch Skill
+because GitHub's TLS handshake failed. Its process was observed terminal before
+retry. Log: `/private/tmp/dano475-c42e08a8-image-build.log`.
+The existing Mac proxy and VM loopback proxy tunnel were then independently
+verified against the exact public GitHub URL (HTTP 301 with TLS verification
+retained). A second build of the same candidate uses that tunnel only through
+standard build proxy arguments and the VM host network. It later exited with npm `ECONNRESET` while installing the runtime search
+package; log: `/private/tmp/dano475-c42e08a8-image-build-proxy.log`. The next
+attempt retains the GitHub proxy and explicitly bypasses it for npm, Node,
+Debian/Aliyun and PyPI dependency domains, matching the first attempt's working
+direct dependency route. Its log is
+`/private/tmp/dano475-c42e08a8-image-build-routed.log`; completion is pending.
+A running build is not image or browser acceptance evidence. The original app container remains running
+until a successful image is available.
+
+### Dano Standards/Spec review and policy-update fix
+
+Review fixed point: `8056d71eabf0bfdeb6b67e16b8899f3fd4776520` (upstream/main),
+candidate `c42e08a84`. Standards found no actionable documented violation or
+blocking heuristic. The custom provenance seam is justified by Dano's ownership
+of browser-text/file-reference boundaries; other mechanisms reuse public pi and
+published extension APIs. No ask_user_question contract changed.
+
+Spec found one P1: a changed host collection policy could run against an older
+persisted consent while the UI said reauthorization was required. A reproduction
+with configured v2/consented v1 invoked the selector and queued an automatic fact
+(`/private/tmp/dano475-policy-review.mjs`). The candidate image must therefore
+not be deployed as accepted, regardless of its build result.
+
+The fix moves both scheduler starts out of the constructor. Before publishing an
+authenticated runtime, create reads its grant and revokes automatic consent if
+its policy differs from configuration or the collection configuration is absent.
+The public extension's revoke transaction blocks unfinished collection and
+unsent automatic delivery, removes pending automatic bodies, and retains explicit
+permissions/operations and unknown in-flight reconciliation. Creation failure
+closes the unpublished runtime. A new user grant creates new source boundaries;
+old blocked operations remain terminal.
+
+Two parameterized regression cases hold the revoke operation open and prove
+neither scheduler starts early. They execute the real revoke transaction and
+verify automatic body removal, explicit queued-body preservation, unknown
+in-flight preservation and reauthorization without old-operation replay.
+All 23 runtime tests and the full type/Svelte check passed:
+`/private/tmp/dano475-policy-fence-tests.log`,
+`/private/tmp/dano475-policy-fence-check.log`.
+The Spec reviewer confirmed the P1 closed after inspecting the production
+UserRuntimeRegistry/withUserMemory/create path and these tests. Final review
+summary: Standards zero findings; Spec zero remaining source findings (one P1
+fixed). Image/browser gates remain outstanding.

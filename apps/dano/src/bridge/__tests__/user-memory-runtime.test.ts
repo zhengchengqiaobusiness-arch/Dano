@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { withUserMemory, type UserMemoryRuntime, type UserMemoryServices } from "../user-memory-runtime.js";
 import type { ProtectedSessionTools } from "../protected-session-tools.js";
-import { FileStateStore, DeliveryScheduler, CollectionSessionRegistry, CollectionLifecycle } from "@josephyoung/pi-openviking/host";
+import { FileStateStore, DeliveryScheduler, CollectionSessionRegistry, CollectionLifecycle, CollectionScheduler, MemoryDelivery } from "@josephyoung/pi-openviking/host";
 import { LazyMemoryClient } from "../lazy-memory-client.js";
 
 const roots: string[] = [];
@@ -391,4 +391,52 @@ for (const boundary of ["credential", "isolation"] as const) it(`rechecks ${boun
   expect(h.services.collection!.selector.complete).not.toHaveBeenCalled();
   expect(Object.values((await store.read()).operations)).toHaveLength(0);
   expect(h.services.provisioner.provision).not.toHaveBeenCalled();
+});
+
+for (const change of ["policy", "unconfigured"] as const) it(`invalidates obsolete collection consent before schedulers start: ${change}`, async () => {
+  const deliveryStart = vi.spyOn(DeliveryScheduler.prototype, "start").mockImplementation(() => {});
+  const collectionStart = vi.spyOn(CollectionScheduler.prototype, "start").mockImplementation(() => {});
+  const h = await harness(); configureCollection(h.services);
+  const first = await h.start();
+  await h.runtime().setEnabled(true);
+  await h.runtime().setAutomaticCollection(true, "collection-v1");
+  const owner = await h.services.owners.get(h.context);
+  const store = new FileStateStore({ owner, directory: join(first.memoryStateDirectory!, "memory"), policyVersion: "v1" });
+  const delivery = new MemoryDelivery({ store, transport: { owner } as ConstructorParameters<typeof MemoryDelivery>[0]["transport"], maxPayloadBytes: 8192 });
+  const auth = (await store.read()).authorization;
+  const source = { sessionId: "chat", branchId: "branch", entryId: "entry", contentVersion: "v1", entryTimestamp: new Date().toISOString() };
+  const automatic = await delivery.collect(source, "automatic fact", { epoch: auth.epoch, collectionRevision: auth.collectionConsent!.revision });
+  const explicit = await delivery.save({ ...source, entryId: "explicit" }, "explicit fact");
+  const inflight = await delivery.collect({ ...source, entryId: "inflight" }, "inflight fact", { epoch: auth.epoch, collectionRevision: auth.collectionConsent!.revision });
+  if (!("id" in automatic) || !("id" in explicit) || !("id" in inflight)) throw new Error("FIXTURE_NOT_QUEUED");
+  await store.transact(state => { state.operations[inflight.id]!.phase = "message_unknown"; });
+  await first.dispose!();
+  if (change === "policy") h.services.collection!.policyVersion = "collection-v2";
+  else h.services.collection = undefined;
+  deliveryStart.mockClear(); collectionStart.mockClear();
+  let entered = false, release!: () => void;
+  const fence = new Promise<void>(resolve => { release = resolve; });
+  const revoke = MemoryDelivery.prototype.revokeCollection;
+  vi.spyOn(MemoryDelivery.prototype, "revokeCollection").mockImplementationOnce(async function (this: MemoryDelivery) {
+    entered = true; await fence; await revoke.call(this);
+  });
+  const creating = h.start();
+  try {
+    await vi.waitFor(() => expect(entered).toBe(true));
+    expect(deliveryStart).not.toHaveBeenCalled();
+    expect(collectionStart).not.toHaveBeenCalled();
+  } finally { release(); }
+  await creating;
+  const state = await store.read();
+  expect(state.authorization).toMatchObject({ enabled: true, automaticCollection: false });
+  expect(state.operations[automatic.id]).toMatchObject({ phase: "blocked_by_pause" });
+  expect(state.operations[automatic.id]!.payload).toBeUndefined();
+  expect(state.operations[explicit.id]).toMatchObject({ phase: "queued", payload: "explicit fact" });
+  expect(state.operations[inflight.id]).toMatchObject({ phase: "message_unknown", payload: "inflight fact" });
+  expect(deliveryStart).toHaveBeenCalledOnce();
+  if (change === "policy") {
+    await h.runtime().setAutomaticCollection(true, "collection-v2");
+    expect((await store.read()).authorization.collectionConsent!.revision).toBeGreaterThan(auth.collectionConsent!.revision);
+    expect((await store.read()).operations[automatic.id]!.phase).toBe("blocked_by_pause");
+  }
 });
