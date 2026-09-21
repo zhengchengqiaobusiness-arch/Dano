@@ -569,3 +569,15 @@ through the actual standard RPC entry. The active run must still complete before
 any automatic-collection or full CLI success claim; its log is
 `/tmp/cli-acceptance.log` inside this container. Tokenizer revision:
 `63651580ca774f8504f676040460aed3e1244ac1`, model `mimo-v2.5`.
+
+The run subsequently exited successfully. Evidence:
+`/private/tmp/dano475-cli-auto-result.json` and
+`/private/tmp/dano475-cli-auto.log`. Through the real protected pi RPC entry,
+it verified default-off state, explicit consent/save/ready/content/source,
+new-session recall, separate automatic consent, a completed short request saved
+automatically without a `memory_save` call, automatic `ready`, another new-session
+recall, automatic-only revocation preserving the main switch, and final pause.
+The configured OpenViking key was absent from RPC events and stderr. This is one
+real MiMo/OpenViking CLI flow, not the full T-14 dataset, restart/pause-race suite,
+Dano browser acceptance, or a clean release build. The disposable container was
+removed after collecting evidence; the existing Dano stack was retained.
