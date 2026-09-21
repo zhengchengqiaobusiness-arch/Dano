@@ -75,3 +75,41 @@ outbox delivery, rather than relying on a separate in-memory lock.
    multi-owner/project and browser acceptance before release/PR closure.
 
 None of these remaining steps is waived by the successful transport probe.
+
+## Durable barrier and writer interlock
+
+The independent extension now has `MemoryGovernanceBarrier.begin`. It accepts
+only a trusted scope and an existing document reference, persists a monotonic
+governance revision in the same flock/fsync-protected owner state as delivery,
+and records affected operations plus all pre-barrier scope writers. Only one
+pending job per scope is permitted. Correction is disallowed while paused;
+forget/clear remain permitted. No completion API is provided yet.
+
+The interlock is active in explicit enqueue, selection handoff, delivery claims,
+selection scheduling and direct selector calls. Related unsent operations lose
+their payload and cannot be reactivated; other unsent scope operations remain
+held with their payload intact. Holding does not consume delivery or model
+retry budgets. Unknown accepted mutations can still reconcile. Their late
+responses cannot reopen a revoked send phase. Other trusted project scopes
+remain usable.
+
+Recall suppresses the pending scope, discards cached context and rejects a
+result if governance changed during the search. Source tombstones contain hashes
+of owner/scope/stable pi entry identity, not deleted text; copied branches and
+reopened runtimes cannot reauthorize the old source. Fresh explicit input has a
+new entry identity and is not permanently banned from saving the same content.
+
+Tests cover these boundaries, malformed persisted jobs, two competing writer
+processes and SIGKILL after durable registration. The tests that transition a
+job to complete do so with an explicitly labelled test-only state transaction;
+they do not prove remote cleanup. The production coordinator must still drain
+or selectively edit **every** pre-barrier writer before completing, including
+other old queued sources that could refer to the same fact. Simply releasing
+unrelated-looking queued work is insufficient proof of non-resurrection.
+
+Next: implement that coordinator and bounded retry/recovery, preservation of
+unrelated facts in shared documents/sources, remote and derived cleanup, scoped
+export/retirement, then shared model/UI controls and real-service/browser gates.
+
+Final barrier build and extension suite: **211/211 passed**.
+Log: `/private/tmp/dano476-barrier-complete-tests.log`.
