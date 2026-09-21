@@ -533,3 +533,19 @@ Standard CLI automatic-collection acceptance and Dano browser integration remain
 pending. Read-only Podman inventory found the existing three acceptance containers
 running, but image enumeration failed with `readlink .../storage/overlay: invalid
 argument`. No shared container storage was repaired or removed.
+
+Follow-up inspection of pi 0.85.1 confirms that normal `prompt` emits `input`
+before expansion, but public `steer`/`followUp` and their RPC commands expand
+without that event. An input-only provenance map would therefore leave queued
+template messages uncovered. The existing protected CLI already disables prompt
+templates, while the SDK resource profile does not; do not silently remove Dano
+template capability to claim this cross-host finding fixed.
+
+The standard CLI acceptance fixture now takes explicit provider/model/tokenizer
+revision arguments instead of hardcoded qwen35 metadata. With collection config,
+it exercises separate consent, one completed-request automatic save without
+`memory_save`, ready state, new-session recall and automatic-only revocation.
+The acceptance host now forwards the configured collection policy version.
+Both scripts pass Node syntax checks; their new real-container scenario has not
+run yet. Podman image enumeration reproduced the same error on recheck; storage
+exists and has 14 GB free, so absence or disk exhaustion is not established.
