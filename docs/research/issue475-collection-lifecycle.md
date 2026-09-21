@@ -269,9 +269,39 @@ recording input/output/cache token counts. Its log is
 component check, not the Spec T-14 dataset, a privacy proof, a price calculation,
 or real automatic OpenViking delivery.
 
-Remaining implementation includes durable selection results and atomic outbox
-handoff, owner-level bounded coalescing/recovery, confirmation context across
+Remaining implementation includes owner-level bounded coalescing/recovery, confirmation context across
 already-processed batches, safe allowlisted task-fact projection, host model and
 credential-snapshot wiring, bounded unavailable-store behavior, separate consent
 UI and real multi-user/pause/browser/service acceptance. Dano still installs the
 published `0.1.2`; this feature remains unpublished.
+
+### Atomic selection handoff and real OpenViking restart
+
+Extension commit `0ef2af4` adds `collectSelection`: one owner-state transaction
+records the selected batch digest, processed request receipts, source ledger and
+outbox operation. Multiple source facts share one operation; only selected fact
+text enters its payload. Evidence quotes are retained as hashes and source
+references. Empty selections record completion without creating an operation.
+Exact replays return the original receipt, including after pause; changed or
+overlapping selections cannot create replacement writes. Current authorization,
+scope and consent revision are checked at the durable handoff.
+
+All 120 extension tests pass (`/private/tmp/dano475-handoff-tests.log`), covering
+concurrent handoffs, pause/replay, malformed receipts, payload limits, duplicate
+facts and child-process SIGKILL before and after the transaction commits.
+
+[The real-service fixture](fixtures/openviking-collection-handoff.mjs) uses real
+pi session entries and OpenViking 0.4.20. Two synthetic source facts become one
+operation, the writer is killed after persistence, and a reopened owner store
+resumes delivery to `ready`. Alice recalls the fact; Bob's scope remains empty.
+Forged cross-user read, write and search each return 403. Replaying the same
+selection returns the existing operation without another enqueue. Evidence:
+`/private/tmp/dano475-real-handoff.log`. Private credentials and the result remain
+under the fixture's private audit directory, outside the repository.
+
+The real-service fixture supplies deterministic selected facts; semantic model
+selection and browser automatic collection are not exercised by this probe.
+The final small payload-deduplication and missing-receipt guards were covered by
+the 120-test suite after that service run. Runtime scheduling, browser consent
+and the remaining acceptance gates above are still pending. This does not close
+#475 or publish the extension.
