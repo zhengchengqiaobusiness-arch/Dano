@@ -4,6 +4,7 @@
 
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { isCallerParam, NEVER_CALLER_SOURCE_KINDS } from "../result-gate.mjs";
 
 function asList(value) {
   return Array.isArray(value) ? value : [];
@@ -24,7 +25,6 @@ function stripSamples(value) {
   return out;
 }
 
-const SYSTEM_KINDS = new Set(["constant", "current_user", "unresolved"]);
 const HOST_ASK_INPUT_TYPES = new Set([
   "text", "textarea", "date", "radio", "checkbox", "select", "treeSelect",
 ]);
@@ -35,12 +35,10 @@ export function capabilityId(cap) {
 
 export function executeRef(cap, steps = []) {
   const refs = asList(cap?.request_refs);
-  const exec = refs.find((ref) => String(ref?.usage || "") === "execute") || refs[0] || {};
-  const step = asList(steps).find((item) => item.step_id && item.step_id === exec.step_id)
-    || asList(steps).find((item) => asList(cap?.step_ids).includes(item.step_id)
-      && String(item.method || "")
-      && !/option|simple-list|dict-data/i.test(String(item.path || item.name || "")))
+  const exec = refs.find((ref) => String(ref?.usage || "") === "execute")
+    || refs.find((ref) => !String(ref?.usage || "").trim())
     || {};
+  const step = asList(steps).find((item) => item.step_id && item.step_id === exec.step_id) || {};
   return {
     method: String(exec.method || step.method || "GET").toUpperCase(),
     path: String(exec.path || step.path || ""),
@@ -51,7 +49,7 @@ export function executeRef(cap, steps = []) {
 
 function isSystemParam(item) {
   const kind = String(item?.source_kind || "");
-  return item?.exposed_to_user === false || SYSTEM_KINDS.has(kind);
+  return item?.exposed_to_user === false || NEVER_CALLER_SOURCE_KINDS.has(kind);
 }
 
 function capabilitySteps(cap, steps = []) {
@@ -89,11 +87,12 @@ export function callerParams(cap, steps = []) {
   const seen = new Set();
   for (const [key, spec] of Object.entries(properties)) {
     const param = found.get(key) || {};
+    if (!isCallerParam(param)) continue;
     fields.push(normalizeCallerField(key, spec, param, required.has(key) || Boolean(param.required)));
     seen.add(key);
   }
   for (const [key, param] of found) {
-    if (seen.has(key) || param?.exposed_to_user === false) continue;
+    if (seen.has(key) || !isCallerParam(param)) continue;
     fields.push(normalizeCallerField(key, {}, param, Boolean(param.required)));
     seen.add(key);
   }
@@ -152,8 +151,10 @@ function normalizeCallerField(key, spec, param, required) {
     source_kind: String(param.source_kind || spec["x-dano-source-kind"] || ""),
     reason: String(param.reason || spec.description || ""),
   };
-  const itemType = itemTypeFromReason(param.reason || spec.description);
-  if (itemType != null) field.itemType = itemType;
+  const format = String(spec.format || param.format || "").trim();
+  if (format) field.format = format;
+  const itemType = Number(param.itemType);
+  if (Number.isFinite(itemType)) field.itemType = itemType;
   const rawDefault = Object.prototype.hasOwnProperty.call(param, "default_value") && param.default_value !== undefined && param.default_value !== ""
     ? param.default_value
     : (spec.default !== undefined && spec.default !== "" ? spec.default : undefined);
@@ -161,46 +162,6 @@ function normalizeCallerField(key, spec, param, required) {
     field.default = rawDefault;
   }
   return copyContractPageDefault(field, spec, param);
-}
-
-function itemTypeFromReason(reason) {
-  const matched = String(reason || "").match(/itemType\s*=\s*(\d+)/i);
-  if (!matched) return undefined;
-  const value = Number(matched[1]);
-  return Number.isFinite(value) ? value : undefined;
-}
-
-function coerceWireValue(type, raw) {
-  let text = String(raw ?? "").trim();
-  if ((text.startsWith("\"") && text.endsWith("\"")) || (text.startsWith("'") && text.endsWith("'"))) {
-    text = text.slice(1, -1);
-  }
-  if (type === "number" || type === "integer") {
-    const n = Number(text);
-    return Number.isFinite(n) ? n : undefined;
-  }
-  if (type === "boolean") return text === "true" || text === "1";
-  if (type === "array") {
-    if (text === "[]" || /空数组/i.test(text)) return [];
-    return undefined;
-  }
-  return text || undefined;
-}
-
-function valueFromCapabilityReason(param) {
-  const reason = String(param?.reason || "");
-  const key = String(param?.key || "");
-  const type = String(param?.type || "");
-  if (!reason) return undefined;
-  if (type === "array" && /空数组|empty array|\[\s*\]/i.test(reason)) return [];
-  if (key) {
-    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const keyed = reason.match(new RegExp(`${escaped}\\s*=\\s*(-?\\d+(?:\\.\\d+)?|"[^"]+"|'[^']+'|[A-Za-z0-9._-]+)`));
-    if (keyed) return coerceWireValue(type, keyed[1]);
-  }
-  const fixedNum = reason.match(/固定为\s*(-?\d+)/);
-  if (fixedNum && (type === "number" || type === "integer" || !type)) return Number(fixedNum[1]);
-  return undefined;
 }
 
 export function resolveSystemDefault(param) {
@@ -211,10 +172,8 @@ export function resolveSystemDefault(param) {
   for (const key of ["value", "constant_value", "const"]) {
     if (param[key] !== undefined && param[key] !== "") return { has: true, value: param[key] };
   }
-  if (String(param.source_kind || "") === "constant") {
-    const fromReason = valueFromCapabilityReason(param);
-    if (fromReason !== undefined) return { has: true, value: fromReason };
-    if (param.type === "array") return { has: true, value: [] };
+  if (String(param.source_kind || "") === "constant" && param.type === "array") {
+    return { has: true, value: [] };
   }
   return { has: false };
 }
@@ -242,6 +201,17 @@ export function systemParams(cap, steps = []) {
           result_path: resultPath,
         };
       }
+    }
+    if (item.source_kind === "previous_response") {
+      const src = asRecord(item.source);
+      const fromStep = String(item.from_step_id || src.from_step_id || "").trim();
+      const fromPath = String(item.from_path || src.from_path || "").trim();
+      if (fromStep) out.from_step_id = fromStep;
+      if (fromPath) out.from_path = fromPath;
+    }
+    if (item.source_kind === "generated") {
+      const formula = String(asRecord(item.source).formula || item.formula || "").trim();
+      if (formula) out.formula = formula;
     }
     return out;
   });
@@ -295,13 +265,11 @@ export function buildRoutes(draft) {
   const outgoing = new Map();
   const indegree = new Map();
   const graphNodes = new Set();
-  for (const rel of asList(draft?.capability_relations)) {
-    const from = String(rel.from_capability || rel.from || "").trim();
-    const to = String(rel.to_capability || rel.to || "").trim();
-    if (!from || !to || from === to) continue;
-    if (!idSet.has(from) || !idSet.has(to)) continue;
+  const addEdge = (from, to) => {
+    if (!from || !to || from === to) return;
+    if (!idSet.has(from) || !idSet.has(to)) return;
     const key = `${from}\0${to}`;
-    if (edgeKeys.has(key)) continue;
+    if (edgeKeys.has(key)) return;
     edgeKeys.add(key);
     graphNodes.add(from);
     graphNodes.add(to);
@@ -309,6 +277,31 @@ export function buildRoutes(draft) {
     outgoing.get(from).push(to);
     indegree.set(from, indegree.get(from) || 0);
     indegree.set(to, (indegree.get(to) || 0) + 1);
+  };
+  for (const rel of asList(draft?.capability_relations)) {
+    addEdge(
+      String(rel.from_capability || rel.from || "").trim(),
+      String(rel.to_capability || rel.to || "").trim(),
+    );
+  }
+  const capIdByStep = new Map();
+  for (const cap of caps) {
+    const id = capabilityId(cap);
+    if (!id) continue;
+    for (const stepId of asList(cap.step_ids)) {
+      const key = String(stepId || "").trim();
+      if (key && !capIdByStep.has(key)) capIdByStep.set(key, id);
+    }
+    for (const ref of asList(cap.request_refs)) {
+      const key = String(ref?.step_id || "").trim();
+      if (key && !capIdByStep.has(key)) capIdByStep.set(key, id);
+    }
+  }
+  for (const link of asList(draft?.links)) {
+    addEdge(
+      capIdByStep.get(String(link.source_step_id || "").trim()) || "",
+      capIdByStep.get(String(link.target_step_id || "").trim()) || "",
+    );
   }
   const byOriginal = (a, b) => (indexOf.get(a) ?? 0) - (indexOf.get(b) ?? 0);
   const queue = [...graphNodes]
@@ -396,8 +389,11 @@ function fieldControl(field) {
   return "text";
 }
 
-function isWriteCap(cap) {
-  return /create|update|delete|submit|write/i.test(String(cap?.kind || ""));
+export function isWriteCap(cap) {
+  const kind = String(cap?.kind || "");
+  if (/create|update|delete|submit|write|mutation/i.test(kind)) return true;
+  if (/query|read/i.test(kind)) return false;
+  return /^(POST|PUT|PATCH|DELETE)$/i.test(String(cap?.execute?.method || ""));
 }
 
 function enumOption(item) {
@@ -491,7 +487,6 @@ function askInputType(field) {
   const control = fieldControl(field);
   if (control === "number") return "text";
   if (control === "table") return "textarea";
-  if (/文本域|textarea/i.test(String(field.reason || ""))) return "textarea";
   return HOST_ASK_INPUT_TYPES.has(control) ? control : "text";
 }
 
@@ -565,7 +560,13 @@ function systemFillText(param) {
     return `合同值 ${JSON.stringify(param.default_value)}；不要向用户要`;
   }
   if (param.source_kind === "constant") return "合同常量；必须带 default_value，由 runtime 自动填";
-  if (param.source_kind === "generated") return "能力未给出生成规则，runtime 不填";
+  if (param.source_kind === "generated") {
+    if (param.formula) return `按合同公式 ${param.formula} 生成；不要向用户要`;
+    if (Object.prototype.hasOwnProperty.call(param, "default_value")) {
+      return `合同值 ${JSON.stringify(param.default_value)}；不要向用户要`;
+    }
+    return "能力未给出生成规则，runtime 不填";
+  }
   return `${param.source_kind || "system"}；不要向用户要`;
 }
 
@@ -608,8 +609,7 @@ export function renderInputForms(contract) {
         lines.push("```", "");
       }
     }
-    const write = /create|update|delete|submit|write/i.test(cap.kind || "");
-    if (write) {
+    if (isWriteCap(cap)) {
       lines.push("写操作收集完毕后必须单独确认：`{ \"confirm\": true, \"formIds\": [\"<answered.formId>\"] }`。", "");
     }
   }

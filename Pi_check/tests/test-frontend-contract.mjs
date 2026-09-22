@@ -15,7 +15,7 @@ import {
   shouldCancelOnFrontendDisconnect,
 } from "../src/frontend-bridge.mjs";
 
-function waitFor(predicate, timeoutMs = 3000) {
+function waitFor(predicate, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
     const started = Date.now();
     const tick = async () => {

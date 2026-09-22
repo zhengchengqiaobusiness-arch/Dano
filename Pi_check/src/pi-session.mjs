@@ -184,7 +184,7 @@ export function buildLiveDrivePrompt({ targetUrl = "", goal = "" } = {}) {
     `你是 Business Skill Investigator。按 Skill 1–3 交能力。\n` +
     `目标：${String(goal || "").trim() || "把该页独立业务动作做成可调用能力"}\n` +
     `入口：${String(targetUrl || "").trim()}\n` +
-    `人也可以点预览。某一行已有真实 execute：立刻 Skill 3 交该项完整合同，禁止先换页、禁止点附件预览。立刻交不是交残缺。列表查询与点结果后的详情请求若 path 或粒度不同，是两项能力。目标点名多种数量列则每列都要点。台账齐且每项合同完整才立刻 submit_recording_result({final:true, use_draft:true}) 并停止。不要等人说结束，不要再 snapshot 空转。\n` +
+    `人也可以点预览。某一行已有真实 execute：立刻 Skill 3 交该项完整合同，禁止先换页、禁止点附件预览。立刻交不是交残缺。列表查询与点结果后的详情请求若 path 或粒度不同，是两项能力。目标点名多种数量列则每列都要点；多次详情 path+query 相同则只交一项详情。current_user 必须带本场 source。读能力 kind=query，写能力 kind=create/update/delete/submit。闸门拒收就用原 id 补信封再交。台账齐且每项合同完整才立刻 submit_recording_result({final:true, use_draft:true}) 并停止。不要等人说结束，不要再 snapshot 空转。\n` +
     `不要写消费者包，不要调 Skill 4。不要把完整 JSON 写在对话里。`
   );
 }

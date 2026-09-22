@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -58,17 +57,43 @@ def _probe_path(raw):
     return text.split("?", 1)[0]
 
 
-def _identity_payload():
-    probes = list(getattr(client, "CONFIG", {}).get("identity_probes") or [])
+def _identity_spec(param):
+    ident = param.get("identity") if isinstance(param.get("identity"), dict) else {}
+    src = param.get("source") if isinstance(param.get("source"), dict) else {}
+    return {
+        "method": str(ident.get("method") or src.get("source_method") or "GET").upper() or "GET",
+        "path": ident.get("path") or src.get("source_url") or src.get("path") or "",
+        "result_path": ident.get("result_path") or src.get("result_path") or "",
+    }
+
+
+def _identity_payload(param=None, cache=None):
+    spec = _identity_spec(param or {})
+    probes = []
+    path = _probe_path(spec.get("path"))
+    if path:
+        probes.append((spec.get("method") or "GET", path))
+    else:
+        for probe in list(getattr(client, "CONFIG", {}).get("identity_probes") or []):
+            probe_path = _probe_path((probe or {}).get("path"))
+            method = str((probe or {}).get("method") or "GET").upper() or "GET"
+            if probe_path:
+                probes.append((method, probe_path))
     last_error = None
-    for probe in probes:
-        path = _probe_path((probe or {}).get("path"))
-        method = str((probe or {}).get("method") or "GET").upper() or "GET"
-        if not path:
+    seen = set()
+    for method, path in probes:
+        key = f"{method} {path}"
+        if key in seen:
             continue
+        seen.add(key)
+        if cache is not None and key in cache:
+            return cache[key]
         try:
             result = client.http_json(method, path)
-            return result.get("data") if isinstance(result, dict) else result
+            payload = result.get("data") if isinstance(result, dict) else result
+            if cache is not None:
+                cache[key] = payload
+            return payload
         except Exception as exc:
             last_error = exc
     raise client.AuthExpired(str(last_error) if last_error else "没有身份探针，无法读取当前登录用户")
@@ -78,18 +103,97 @@ def current_user():
     return {"_payload": _identity_payload()}
 
 
-def _system_value(param, user):
+def _is_http_wrapper(result):
+    return isinstance(result, dict) and "data" in result and (
+        "ok" in result or "status" in result or "method" in result or "url" in result
+    )
+
+
+def _http_body(result):
+    if _is_http_wrapper(result):
+        return result.get("data")
+    return result
+
+
+def _link_value(result, source_path):
+    body = _http_body(result)
+    path = str(source_path or "").removeprefix("response.").removeprefix("$.")
+    if "[]" in path:
+        list_path, _, field = path.partition("[]")
+        list_path = list_path.rstrip(".")
+        field = field.lstrip(".")
+        rows = client.get_path(body, list_path) if list_path else body
+        if not isinstance(rows, list):
+            return None
+        values = []
+        for row in rows:
+            if field:
+                if isinstance(row, dict) and row.get(field) not in (None, ""):
+                    values.append(row.get(field))
+            elif row not in (None, ""):
+                values.append(row)
+        if len(values) == 1:
+            return values[0]
+        return None
+    return client.get_path(body, path)
+
+
+def _target_key(target_path):
+    text = str(target_path or "")
+    if text.startswith("query.") or text.startswith("body."):
+        return text.split(".", 1)[1].split(".", 1)[0]
+    return text.split(".")[-1]
+
+
+def apply_links(contract, source_step_id, result, context):
+    filled = dict(context or {})
+    source = str(source_step_id or "")
+    for link in contract.get("links") or []:
+        if str((link or {}).get("source_step_id") or "") != source:
+            continue
+        value = _link_value(result, (link or {}).get("source_path"))
+        key = _target_key((link or {}).get("target_path"))
+        if key and value not in (None, "") and filled.get(key) in (None, ""):
+            filled[key] = value
+    return filled
+
+
+def _generated_value(param):
+    src = param.get("source") if isinstance(param.get("source"), dict) else {}
+    formula = str(param.get("formula") or src.get("formula") or "").strip().lower()
+    if formula in {"today", "date", "yyyy-mm-dd"}:
+        return _page_today()
+    if formula in {"now", "datetime", "iso"}:
+        return datetime.now().isoformat(timespec="seconds")
+    if "default_value" in param:
+        return param.get("default_value")
+    return None
+
+
+def _system_value(param, user, inputs=None, step_results=None, identity_cache=None):
     kind = str(param.get("source_kind") or "")
     key = str(param.get("key") or "")
+    inputs = inputs or {}
+    if kind not in ("current_user", "constant", "generated") and inputs.get(key) not in (None, ""):
+        return inputs.get(key)
     if kind == "current_user":
-        ident = param.get("identity") or {}
-        pointer = str(ident.get("result_path") or "")
-        root = user.get("_payload") if isinstance(user, dict) else None
+        spec = _identity_spec(param)
+        pointer = str(spec.get("result_path") or "")
+        root = _identity_payload(param, identity_cache)
         if pointer and root is not None:
             value = client.get_path(root, pointer)
             if value not in (None, ""):
                 return value
         raise client.AuthExpired(f"当前登录用户缺少 {key}")
+    if kind == "previous_response":
+        prior = (step_results or {}).get(str(param.get("from_step_id") or ""))
+        if prior is not None:
+            value = _link_value(prior, param.get("from_path"))
+            if value not in (None, ""):
+                return value
+        return None
+    if kind == "generated":
+        return _generated_value(param)
     if "default_value" in param:
         return param.get("default_value")
     if kind == "constant" and param.get("type") == "array":
@@ -177,8 +281,7 @@ def _item_type(field):
             return int(raw)
         except (TypeError, ValueError):
             pass
-    matched = re.search(r"itemType\s*=\s*(\d+)", str((field or {}).get("reason") or ""), re.I)
-    return int(matched.group(1)) if matched else None
+    return None
 
 
 def _stamp_item_type(field, value):
@@ -238,19 +341,72 @@ def fill_caller_defaults(cap, inputs):
     return filled
 
 
-def build_request(cap, inputs, user):
+def _is_file_field(field):
+    if str((field or {}).get("format") or "").lower() == "binary":
+        return True
+    return str((field or {}).get("type") or "").lower() in {"file", "binary"}
+
+
+def _step_by_id(contract, step_id):
+    wanted = str(step_id or "")
+    for item in contract.get("steps") or []:
+        if str(item.get("step_id") or "") == wanted:
+            return item
+    return {}
+
+
+def _refs_to_run(cap):
+    refs = [item for item in (cap.get("request_refs") or []) if isinstance(item, dict)]
+    order = {"preflight": 0, "execute": 1}
+    refs.sort(key=lambda item: (
+        int(item.get("sequence") or 0) or 0,
+        order.get(str(item.get("usage") or ""), 9),
+    ))
+    return [
+        item for item in refs
+        if str(item.get("usage") or "execute") in {"preflight", "execute"}
+    ]
+
+
+def _fields_for_step(cap, step):
+    keys = {
+        str(item.get("key") or "")
+        for item in (step.get("params") or [])
+        if item.get("key")
+    }
+    if not keys:
+        return list(cap.get("caller_fields") or [])
+    return [field for field in (cap.get("caller_fields") or []) if str(field.get("id") or "") in keys]
+
+
+def _step_wants_files(cap, step):
+    fields = _fields_for_step(cap, step) if step else []
+    if any(_is_file_field(field) for field in fields):
+        return True
+    for param in (step or {}).get("params") or []:
+        if _is_file_field(param):
+            return True
+    return False
+
+
+def build_request(cap, inputs, user, step=None, step_results=None, identity_cache=None):
     query = {}
     body = {}
-    method = str((cap.get("execute") or {}).get("method") or "GET").upper()
+    files = {}
+    method = str((step or cap.get("execute") or {}).get("method") or (cap.get("execute") or {}).get("method") or "GET").upper()
     required = []
     inputs = fill_caller_defaults(cap, inputs)
-    for field in cap.get("caller_fields") or []:
+    fields = _fields_for_step(cap, step) if step is not None else list(cap.get("caller_fields") or [])
+    for field in fields:
         key = field.get("id")
         value = inputs.get(key)
         if field.get("required") and value in (None, ""):
             required.append(key)
             continue
         if value in (None, ""):
+            continue
+        if _is_file_field(field):
+            files[key] = value
             continue
         if field.get("type") == "array":
             value = _parse_caller_array(field, value)
@@ -263,9 +419,17 @@ def build_request(cap, inputs, user):
         _assign_payload(target, name or key, value)
     if required:
         raise RuntimeError(f"缺少必填字段: {', '.join(required)}")
-    for param in cap.get("system_params") or []:
+    system = list(cap.get("system_params") or [])
+    if step is not None and str((step.get("step_id") or "")) != str((cap.get("execute") or {}).get("step_id") or ""):
+        system = [
+            item for item in (step.get("params") or [])
+            if item.get("exposed_to_user") is False or str(item.get("source_kind") or "") in {
+                "current_user", "constant", "generated", "previous_response", "selected_record_identity",
+            }
+        ]
+    for param in system:
         key = str(param.get("key") or "")
-        value = _system_value(param, user)
+        value = _system_value(param, user, inputs=inputs, step_results=step_results, identity_cache=identity_cache)
         if value is None:
             if param.get("required"):
                 raise RuntimeError(f"系统字段 {key} 无法按合同填充（常量缺少 default_value，且不是可推断的运行时字段）")
@@ -273,7 +437,7 @@ def build_request(cap, inputs, user):
         slot, name = _payload_slot(param.get("path"), method)
         target = query if slot == "query" else body
         _assign_payload(target, name or key, value)
-    return query, body
+    return query, body, files
 
 
 def list_field_options(capability_id, field_id):
@@ -289,38 +453,85 @@ def list_field_options(capability_id, field_id):
 
 
 def _is_write(cap):
-    return any(token in str(cap.get("kind") or "") for token in ("create", "update", "delete", "submit", "write"))
+    kind = str(cap.get("kind") or "")
+    if any(token in kind.lower() for token in ("create", "update", "delete", "submit", "write", "mutation")):
+        return True
+    if any(token in kind.lower() for token in ("query", "read")):
+        return False
+    method = str((cap.get("execute") or {}).get("method") or "").upper()
+    return method in {"POST", "PUT", "PATCH", "DELETE"}
 
 
-def execute_capability(capability_id, inputs=None, confirm=False):
-    cap = capability(load_contract(), capability_id)
+def execute_capability(capability_id, inputs=None, confirm=False, contract=None):
+    contract = contract or load_contract()
+    cap = capability(contract, capability_id)
     if _is_write(cap) and not confirm:
         raise RuntimeError("写操作需要 --confirm")
-    needs_user = any(str(item.get("source_kind") or "") == "current_user" for item in cap.get("system_params") or [])
-    user = current_user() if needs_user else {}
-    query, body = build_request(cap, dict(inputs or {}), user)
-    exec_ref = cap.get("execute") or {}
-    method = str(exec_ref.get("method") or "GET").upper()
-    path = str(exec_ref.get("path") or "")
-    if not path:
+    user = {}
+    identity_cache = {}
+    context = dict(inputs or {})
+    step_results = {}
+    last = None
+    refs = _refs_to_run(cap)
+    if not refs:
+        refs = [{
+            "usage": "execute",
+            "method": (cap.get("execute") or {}).get("method"),
+            "path": (cap.get("execute") or {}).get("path"),
+            "step_id": (cap.get("execute") or {}).get("step_id"),
+        }]
+    for ref in refs:
+        step = _step_by_id(contract, ref.get("step_id"))
+        method = str(ref.get("method") or step.get("method") or (cap.get("execute") or {}).get("method") or "GET").upper()
+        path = str(ref.get("path") or step.get("path") or (cap.get("execute") or {}).get("path") or "")
+        if not path:
+            raise RuntimeError(f"{capability_id} 没有执行路径")
+        query, body, files = build_request(
+            cap,
+            context,
+            user,
+            step=step if step else None,
+            step_results=step_results,
+            identity_cache=identity_cache,
+        )
+        if str(ref.get("usage") or "") == "preflight" and _step_wants_files(cap, step) and not files:
+            continue
+        last = client.http_json(
+            method,
+            path,
+            query=query or None,
+            body=None if method == "GET" and not files else (body or None),
+            files=files or None,
+            content_type="multipart/form-data" if files else "application/json",
+        )
+        step_id = str(ref.get("step_id") or "")
+        if step_id:
+            step_results[step_id] = last
+            context = apply_links(contract, step_id, last, context)
+        if not last.get("ok"):
+            return last
+    if last is None:
         raise RuntimeError(f"{capability_id} 没有执行路径")
-    return client.http_json(
-        method,
-        path,
-        query=query or None,
-        body=body if method != "GET" else None,
-    )
+    return last
 
 
-def run_route(route_id, inputs=None, confirm=False):
-    contract = load_contract()
+def run_route(route_id, inputs=None, confirm=False, contract=None):
+    contract = contract or load_contract()
     chosen = route(contract, route_id)
     context = dict(inputs or {})
     results = []
     for step in chosen.get("steps") or []:
         cap = capability(contract, step)
-        result = execute_capability(step, context, confirm=confirm if _is_write(cap) else False)
+        result = execute_capability(
+            step,
+            context,
+            confirm=confirm if _is_write(cap) else False,
+            contract=contract,
+        )
         results.append({"capability_id": step, "result": result})
+        exec_id = str((cap.get("execute") or {}).get("step_id") or "")
+        if exec_id:
+            context = apply_links(contract, exec_id, result, context)
         if not result.get("ok"):
             return {"ok": False, "error": f"{step} 失败", "results": results}
     return {"ok": True, "route": chosen.get("route_id"), "results": results}

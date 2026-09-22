@@ -13,6 +13,6 @@
 
 ## 代码只做
 
-执行动作、存证据、跑指定检查。出包运输开 Skill 4 会话、按能力注入冻结的 `client.py` / `wire_format.py` / `auth.local.json`、写入 `data/skill-catalog.json`。禁止引用 `back`。能力对不对只在录制合同里解决。
+执行动作、存证据、跑指定检查。出包运输开 Skill 4 会话、按能力注入冻结的 `client.py` / `wire_format.py` / `auth.local.json`、写入 `data/skill-catalog.json`。禁止引用 `back`。能力对不对只在录制合同里解决。交能力时信封不完整（schema 含系统键、`current_user` 无 source）当场拒收。冻结 runtime 按合同执行 preflight 与 links。
 
 详见 `RESPONSIBILITIES.md`。

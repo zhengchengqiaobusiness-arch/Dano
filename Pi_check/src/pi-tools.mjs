@@ -4,7 +4,7 @@
  * 这些工具只提供事实读取和结果保存，不分析、不归类、不改写。
  */
 
-import { SUBMIT_RECORDING_RESULT, assertCapabilityIdentityContract, assertPageDisplayContract } from "./result-gate.mjs";
+import { SUBMIT_RECORDING_RESULT, SubmitRejectedError, assertCapabilityIdentityContract, assertPageDisplayContract } from "./result-gate.mjs";
 import { logPiOnly } from "./policy.mjs";
 import { summarizeToolArgs, summarizeToolResult } from "./pi-trace.mjs";
 import { buildActionTimeline, requestShapeFromEvents } from "./evidence-facts.mjs";
@@ -384,29 +384,43 @@ export function createPiToolHost({
       capability_relations = [],
       title = "",
     } = {}) {
-      const current = await files.readDraft(recordingId);
-      const merged = mergeCapabilityIntoDraft(current?.draft || {}, {
-        capability,
-        steps,
-        links,
-        unresolved,
-        capability_relations,
-        title,
-      });
-      assertPageDisplayContract(merged);
-      assertCapabilityIdentityContract(merged);
-      await files.writeDraft(recordingId, {
-        recording_id: recordingId,
-        saved_at: new Date().toISOString(),
-        draft: merged,
-      });
-      return {
-        saved: true,
-        final: false,
-        capability_count: merged.capabilities.length,
-        capability_ids: merged.capabilities.map((item) => item.capability_id),
-        next_action: "该项已保存。继续按 Skill 调查或交下一项完整合同（「一项能力什么时候才算完整」都满足）；省略 unresolved 会保留上次。台账齐且每项完整后 submit_recording_result({final:true, use_draft:true})。不要写消费者包。",
-      };
+      try {
+        const current = await files.readDraft(recordingId);
+        const merged = mergeCapabilityIntoDraft(current?.draft || {}, {
+          capability,
+          steps,
+          links,
+          unresolved,
+          capability_relations,
+          title,
+        });
+        assertPageDisplayContract(merged);
+        assertCapabilityIdentityContract(merged);
+        await files.writeDraft(recordingId, {
+          recording_id: recordingId,
+          saved_at: new Date().toISOString(),
+          draft: merged,
+        });
+        return {
+          saved: true,
+          final: false,
+          capability_count: merged.capabilities.length,
+          capability_ids: merged.capabilities.map((item) => item.capability_id),
+          next_action: "该项已保存。继续按 Skill 调查或交下一项完整合同（「一项能力什么时候才算完整」都满足）；省略 unresolved 会保留上次。台账齐且每项完整后 submit_recording_result({final:true, use_draft:true})。不要写消费者包。",
+        };
+      } catch (error) {
+        if (error instanceof SubmitRejectedError) {
+          return {
+            saved: false,
+            accepted: false,
+            final: false,
+            code: error.code,
+            error: error.message,
+            next_action: "用原 capability_id 按 error 补信封再交。禁止换 id。禁止指望出包去猜。不要写消费者包。",
+          };
+        }
+        throw error;
+      }
     },
     async control_in_app_browser({
       action = "",
@@ -1181,6 +1195,15 @@ export function wrapPiToolsForSdk(host, defineTool, Type, trace = null, specs = 
             accepted: false,
             error: message,
             next_action: "按 error 精确修正 result，保留其它已完成能力，不要重读证据，然后重新调用 submit_recording_result。",
+          });
+        }
+        if (spec.name === "submit_recording_capability") {
+          return toolText({
+            saved: false,
+            accepted: false,
+            error: message,
+            code: error?.code || "ENVELOPE",
+            next_action: "用原 capability_id 按 error 补信封再交。禁止换 id。禁止指望出包去猜。不要写消费者包。",
           });
         }
         throw error;

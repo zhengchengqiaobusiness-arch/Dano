@@ -135,21 +135,53 @@ def _business_ok(data, rule):
     return True
 
 
-def _request_json(method, target, *, headers, query, body, content_type, timeout=30):
+def _as_multipart_files(files):
+    opened = []
+    payload = {}
+    for name, value in (files or {}).items():
+        if value in (None, ""):
+            continue
+        if hasattr(value, "read"):
+            payload[str(name)] = value
+            continue
+        path = Path(str(value))
+        handle = path.open("rb")
+        opened.append(handle)
+        payload[str(name)] = (path.name, handle)
+    return payload, opened
+
+
+def _request_json(method, target, *, headers, query, body, content_type, files=None, timeout=30):
     method = str(method or "GET").upper()
     if httpx is not None:
         kwargs = {"params": query or None, "headers": headers, "timeout": timeout}
-        if body is not None:
-            if "form-urlencoded" in str(content_type).casefold():
-                kwargs["data"] = body
-            else:
-                kwargs["json"] = body
-        response = httpx.request(method, target, **kwargs)
+        opened = []
+        try:
+            if files:
+                payload, opened = _as_multipart_files(files)
+                kwargs["files"] = payload
+                if body is not None:
+                    kwargs["data"] = body
+            elif body is not None:
+                if "form-urlencoded" in str(content_type).casefold():
+                    kwargs["data"] = body
+                else:
+                    kwargs["json"] = body
+            response = httpx.request(method, target, **kwargs)
+        finally:
+            for handle in opened:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
         try:
             data = response.json()
         except ValueError:
             data = response.text
         return int(response.status_code), data, str(response.url), response.is_success
+
+    if files:
+        raise RuntimeError("multipart 上传需要 httpx")
 
     from urllib.error import HTTPError
     from urllib.parse import urlencode
@@ -186,7 +218,7 @@ def _request_json(method, target, *, headers, query, body, content_type, timeout
     return status, data, final, 200 <= status < 300
 
 
-def http_json(method, path="", *, url="", query=None, body=None, extra_headers=None, content_type="application/json", success_rule=None):
+def http_json(method, path="", *, url="", query=None, body=None, extra_headers=None, content_type="application/json", success_rule=None, files=None):
     target = url or path
     if not str(target).startswith(("http://", "https://")):
         if not BASE_URL:
@@ -210,6 +242,7 @@ def http_json(method, path="", *, url="", query=None, body=None, extra_headers=N
         query=query,
         body=body,
         content_type=content_type,
+        files=files,
     )
     if _login_expired(status, data):
         raise AuthExpired("token 已过期，请提供 token")

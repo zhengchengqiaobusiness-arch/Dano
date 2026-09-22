@@ -125,6 +125,8 @@ Investigator 确认该项已按目标做完、并在 `list_action_timeline` 或 
 - 「撤回」「撤销」→ 独立能力。
 - 「删除」且随后有删除类写请求 → 独立能力。禁止并进撤回或提交，禁止只写在 `business_understanding`。
 - 「查看」「详情」「进度」「审批」且随后有读该记录的请求 → 独立读能力。列表查询 execute 与点结果后发出的详情 GET（path 不同，或从计数/汇总变成逐条名单）必须是两项。禁止把详情写进查询 intent 然后丢掉，也禁止只挂查询→新增。
+- 目标点名多种列但各次详情请求 path+query 完全相同：只交**一项**详情能力，intent 写清响应里有哪些列表。禁止为每种列各交一项却共用同一个 execute。
+- `kind` 只允许：读用 `query`；写用 `create` / `update` / `delete` / `submit`。不要只用 `mutation`。runtime 按 kind 与 execute 方法认写操作并要求 `--confirm`。
 - 选择器弹层（标题像「选择××」、表格单选+确认）、日期面板、展开收起 → 不是新能力，挂到打开它的那个字段所在能力。
 - 同一动作做两遍只保留一项能力。有确认按钮+写请求却没有能力、又没有 `unresolved`，就是失败。没有对应写请求就不要编造能力。
 - 证据引用必须是本场真实 seq。不要把后一轮的序号写到前一轮。
@@ -192,7 +194,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 - 只读回填的 `previous_response`：`source` 必须写 `from_step_id` + `from_path`，提交时原样带回，调用方不能改。同一条值流还要写进 `links`。导出从这些 `links` 投影绑定。目标要求先 A 后 B、但没有值要传时，另写 `capability_relations`（见编排）。不要把本场主键/单号/正文当 `default_value`。
 - `selected_record_identity`：从列表哪一次点击/当前行哪个字段带出，提交到哪个 path。`reason` 若是「点结果表某行/某数字/某链接带出」，这就是 identity 或 `previous_response` + `links`，**禁止**再做成独立 `api_option` 树/下拉，也禁止把上一查询的 execute 路径挂成本字段 `option_source`。该键 `exposed_to_user=false`，**禁止**再出现在 `input_schema`。用户说「我 / 当前登录人」时，人维度的读请求用 `current_user` 的用户主键，不要再做一个全员选择器。
 - `computed`：计算规则写进 `reason` 和 `source.formula`。用页面标签和字段 key 写关系，例如「明细金额 = 数量 × 产品单价」。证据里看不出公式：写入 `unresolved`，不要编公式，不要用录制原值冒充已解决。
-- `generated`：谁生成、何时生成（例如保存后服务端生成单号、打开表单时前端写入的时间戳）。看不出生成规则时写入 `unresolved`。禁止把这类键标成 `current_user`：登录身份接口里没有 `createTime` 这类时间戳。未认清也必须留在 `unresolved`，禁止从合同里删掉。
+- `generated`：谁生成、何时生成（例如保存后服务端生成单号、打开表单时前端写入的时间戳）。runtime 只执行合同公式 `today` / `now`，或使用 `default_value`。其它公式、看不清规则 → `unresolved`。禁止把这类键标成 `current_user`：登录身份接口里没有 `createTime` 这类时间戳。未认清也必须留在 `unresolved`，禁止从合同里删掉。
 - `constant`：已经认清、每次提交都相同且有业务含义的固定值。依据写清。必须带 `default_value`。没有认清不要用 `constant`。宿主整项锁死且 URL 已带入的类型码，用 `constant` 或锁死 `page_default`，都必须有 `default_value`，并且**只留在系统 params**。
 - `selected_option_field`：随哪一个选项接口的哪一个字段带出。
 - **来源未识别**：请求里有、但页面上没有对应可填控件，也看不出公式或上游映射。写入 `unresolved`，`sample_value` 可记本场原值。禁止 `source_kind=constant` + 录制原值 + 已解决。禁止因为「合同会显得乱」就把该键删掉。
@@ -209,7 +211,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 - `constant`：必须带 `default_value`。
 - `previous_response`：必须带 `from_step_id` + `from_path`，并有对应 `links`。
 - 锁死控件的 `page_default`：必须带 `default_value`（或已认清的分页数字缺省）。
-- 已认清的生成时间：`generated`，或键本身就是打开时写入的创建时间；不要标 `current_user`。
+- 已认清的生成时间：`generated` 且带 `source.formula=today|now` 或 `default_value`；看不清就 `unresolved`。不要标 `current_user`。
 
 下面这种形状 **禁止交成已解决写能力**：
 
@@ -405,6 +407,7 @@ execute 里的附件容器字段来自 preflight 响应，标为系统自动处�
 | 系统自动处理 | `attachments`（附件元数据） | 前置上传步骤响应 |
 
 > 这正确区分了「调用方提供文件」和「系统自动搬运上传结果」。调用方只关心"传什么文件"，不需要关心 URL 格式或元数据结构。
+> runtime 会按 `request_refs` 先跑 multipart `preflight`，再用 `links` / `previous_response` 填进 execute。不要指望只打 execute 就能带上附件。
 
 #### 禁止
 
@@ -640,6 +643,7 @@ execute 里的附件容器字段来自 preflight 响应，标为系统自动处�
 53. 用来摊控件的 `visible_control` 的 URL 是这一张表；没有用提交后跳到的其它模块 snapshot。
 54. 加行后本表可见表头列（序号、操作除外）都在 `items.properties` 或 `unresolved`。
 55. `previous_response` 写在 `source.from_step_id` + `source.from_path`，并有 `links`。
+56. 读能力 `kind=query`，写能力 `kind` 为 `create` / `update` / `delete` / `submit` 之一，没有只用 `mutation`。
 
 ## 最小补证
 

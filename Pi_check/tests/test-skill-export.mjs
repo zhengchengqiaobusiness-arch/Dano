@@ -127,7 +127,7 @@ test("相对规范目录按 DANO_SKILL_REFERENCE_ROOT 解析", () => {
   assert.equal(path.normalize(dir), path.normalize(path.join(root, "doc")));
 });
 
-test("工作项和计划项投影为两个 caller 字段，并带上 itemType / 树 children", () => {
+test("工作项投影为调用方数组；itemType 只来自合同字段，不从 reason 抽取", () => {
   const contract = consumerContract({
     capabilities: [
       {
@@ -147,24 +147,19 @@ test("工作项和计划项投影为两个 caller 字段，并带上 itemType / 
       {
         capability_id: "cap_daily_report_create_submit",
         name: "新增日报并提交",
-        kind: "write",
+        kind: "submit",
         step_ids: ["step_create_submit"],
         request_refs: [{ step_id: "step_create_submit", usage: "execute" }],
         input_schema: {
           type: "object",
           properties: {
-            workItems: {
+            items: {
               type: "array",
-              title: "已完成工作项",
+              title: "已完成工作/工作计划",
+              "x-dano-section-titles": { "已完成工作": "工作内容", "工作计划": "计划内容" },
               items: { type: "object", properties: { content: { type: "string" }, progress: { type: "number" } } },
             },
-            planItems: {
-              type: "array",
-              title: "工作计划项",
-              items: { type: "object", properties: { content: { type: "string" } } },
-            },
           },
-          required: ["workItems"],
         },
       },
     ],
@@ -176,6 +171,7 @@ test("工作项和计划项投影为两个 caller 字段，并带上 itemType / 
         params: [{
           key: "deptId",
           path: "query.deptId",
+          exposed_to_user: true,
           source_kind: "api_option",
           source: { source_method: "GET", source_url: "/admin-api/system/dept/simple-list", label_key: "name", value_key: "id", children_key: "children" },
         }],
@@ -185,8 +181,20 @@ test("工作项和计划项投影为两个 caller 字段，并带上 itemType / 
         method: "POST",
         path: "/admin-api/oa/work-report/submit",
         params: [
-          { key: "workItems", path: "body.items", type: "array", reason: "系统组装成 body.items 数组，itemType=1 表示工作项。" },
-          { key: "planItems", path: "body.items", type: "array", reason: "系统组装成 body.items 数组，itemType=2 表示计划项。" },
+          {
+            key: "items",
+            path: "body.items",
+            type: "array",
+            exposed_to_user: true,
+            reason: "系统组装成 body.items 数组，itemType=1 表示工作项。",
+          },
+          {
+            key: "creator",
+            path: "body.creator",
+            source_kind: "current_user",
+            exposed_to_user: false,
+            source: { source_method: "GET", source_url: "/api/me", result_path: "user.id" },
+          },
         ],
       },
     ],
@@ -199,11 +207,11 @@ test("工作项和计划项投影为两个 caller 字段，并带上 itemType / 
   const query = contract.capabilities[0];
   assert.equal(query.caller_fields[0].dataSource.childrenField, "children");
   const create = contract.capabilities[1];
-  assert.equal(create.caller_fields.find((item) => item.id === "workItems").itemType, 1);
-  assert.equal(create.caller_fields.find((item) => item.id === "planItems").itemType, 2);
+  assert.equal(create.caller_fields.find((item) => item.id === "items")?.itemType, undefined);
+  assert.ok(!create.caller_fields.some((item) => item.id === "creator"));
   assert.deepEqual(contract.routes[0].steps, ["cap_report_statistics_query", "cap_daily_report_create_submit"]);
   const ask = frozenAskForm(create);
-  assert.equal(ask.questions.find((item) => item.id === "workItems").inputType, "textarea");
+  assert.equal(ask.questions.find((item) => item.id === "items").inputType, "textarea");
   assert.doesNotMatch(JSON.stringify(ask), /"inputType": "table"/);
 });
 
@@ -991,7 +999,7 @@ cap = {
   ],
   "system_params": [{"key": "reportType", "path": "body.reportType", "source_kind": "constant", "default_value": 1, "required": True}],
 }
-print(json.dumps(runtime.build_request(cap, {"workItems": "完成模块开发|||100", "planItems": "继续联调"}, {}), ensure_ascii=False))`;
+print(json.dumps(runtime.build_request(cap, {"workItems": "完成模块开发|||100", "planItems": "继续联调"}, {})[:2], ensure_ascii=False))`;
     const child = spawn("python", ["-c", code], { windowsHide: true });
     let stdout = "";
     let stderr = "";
@@ -1418,3 +1426,210 @@ test("启动回写不得用录制旧头盖掉页面 token", async () => {
   const auth = JSON.parse(await readFile(path.join(dest, "config", "auth.local.json"), "utf8"));
   assert.equal(auth.headers.Authorization, "Bearer page-new-token");
 });
+
+test("runtime 先跑 preflight 再 execute，mutation 要 confirm，单行 links 才带值", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dano-runtime-envelope-"));
+  const files = new RecordingFiles(root);
+  const packed = await packSkill4Artifacts({
+    files,
+    recordingId: "rec_runtime_envelope",
+    outDir: path.join(root, "out"),
+    skillId: "oa.rec_runtime_envelope",
+    tenant: "acme",
+    subsystem: "oa",
+    draft: {
+      title: "两步上传",
+      capabilities: [{
+        capability_id: "cap_w",
+        name: "提交",
+        kind: "mutation",
+        step_ids: ["step_upload", "step_submit"],
+        request_refs: [
+          { step_id: "step_upload", usage: "preflight", method: "POST", path: "/upload", sequence: 1 },
+          { step_id: "step_submit", usage: "execute", method: "POST", path: "/submit", sequence: 2 },
+        ],
+        input_schema: {
+          type: "object",
+          properties: {
+            file: { type: "string", format: "binary", title: "附件" },
+            title: { type: "string", title: "标题" },
+          },
+        },
+      }],
+      steps: [
+        {
+          step_id: "step_upload",
+          method: "POST",
+          path: "/upload",
+          params: [{
+            key: "file", path: "body.file", exposed_to_user: true, format: "binary", source_kind: "user_input",
+          }],
+        },
+        {
+          step_id: "step_submit",
+          method: "POST",
+          path: "/submit",
+          params: [
+            { key: "title", path: "body.title", exposed_to_user: true, source_kind: "user_input", required: true },
+            {
+              key: "attachments",
+              path: "body.attachments",
+              exposed_to_user: false,
+              source_kind: "previous_response",
+              from_step_id: "step_upload",
+              from_path: "response.data",
+              source: { from_step_id: "step_upload", from_path: "response.data" },
+            },
+          ],
+        },
+      ],
+      links: [{
+        source_step_id: "step_upload",
+        target_step_id: "step_submit",
+        source_path: "response.data",
+        target_path: "body.attachments",
+      }],
+    },
+    authHeaders: { Authorization: "Bearer t", "tenant-id": "1" },
+    baseUrl: "https://example.test",
+  });
+  const scriptsDir = path.join(packed.export_path, "scripts");
+  const contract = JSON.parse(await readFile(path.join(packed.export_path, "references", "CONTRACT.json"), "utf8"));
+  const ran = await new Promise((resolve) => {
+    const code = `import json, sys
+sys.path.insert(0, ${JSON.stringify(scriptsDir)})
+import runtime, client
+assert runtime._is_write({"kind": "mutation", "execute": {"method": "POST"}})
+assert not runtime._is_write({"kind": "query", "execute": {"method": "GET"}})
+one = {"ok": True, "data": {"code": 0, "data": [{"userId": 9}]}}
+many = {"ok": True, "data": {"code": 0, "data": [{"userId": 1}, {"userId": 2}]}}
+ctx1 = runtime.apply_links({"links": [{"source_step_id": "q", "source_path": "response.data[].userId", "target_path": "query.userId"}]}, "q", one, {})
+ctx2 = runtime.apply_links({"links": [{"source_step_id": "q", "source_path": "response.data[].userId", "target_path": "query.userId"}]}, "q", many, {})
+calls = []
+def fake(method, path, **kw):
+    calls.append({"method": method, "path": path, "files": bool(kw.get("files")), "body": kw.get("body")})
+    if "upload" in path:
+        return {"ok": True, "status": 200, "data": {"code": 0, "data": {"fileName": "a.png"}}}
+    return {"ok": True, "status": 200, "data": {"code": 0, "data": 9}}
+client.http_json = fake
+contract = json.loads(${JSON.stringify(JSON.stringify(contract))})
+need = ""
+try:
+    runtime.execute_capability("cap_w", {"title": "t", "file": "x.png"}, confirm=False, contract=contract)
+except Exception as exc:
+    need = str(exc)
+runtime.execute_capability("cap_w", {"title": "t", "file": "x.png"}, confirm=True, contract=contract)
+print(json.dumps({"need": need, "calls": calls, "one": ctx1, "many": ctx2}, ensure_ascii=False))
+`;
+    const child = spawn("python", ["-c", code], { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+  assert.equal(ran.code, 0, ran.stderr + ran.stdout);
+  const payload = JSON.parse(ran.stdout);
+  assert.match(payload.need, /写操作需要 --confirm/);
+  assert.deepEqual(payload.one, { userId: 9 });
+  assert.deepEqual(payload.many, {});
+  assert.equal(payload.calls.length, 2);
+  assert.equal(payload.calls[0].path.includes("upload"), true);
+  assert.equal(payload.calls[0].files, true);
+  assert.equal(payload.calls[1].path.includes("submit"), true);
+  assert.equal(payload.calls[1].body?.title, "t");
+  assert.equal(payload.calls[1].body?.attachments?.fileName, "a.png");
+});
+
+test("runtime 按 param.identity 取身份，result_path 相对 HTTP 原文", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dano-runtime-identity-"));
+  const files = new RecordingFiles(root);
+  const packed = await packSkill4Artifacts({
+    files,
+    recordingId: "rec_runtime_identity",
+    outDir: path.join(root, "out"),
+    skillId: "oa.rec_runtime_identity",
+    tenant: "acme",
+    subsystem: "oa",
+    draft: {
+      title: "身份写入",
+      capabilities: [{
+        capability_id: "cap_w",
+        name: "提交",
+        kind: "create",
+        step_ids: ["step_open", "step_submit"],
+        request_refs: [
+          { step_id: "step_open", usage: "preflight", method: "GET", path: "/form/open", sequence: 1 },
+          { step_id: "step_submit", usage: "execute", method: "POST", path: "/submit", sequence: 2 },
+        ],
+        input_schema: {
+          type: "object",
+          properties: { title: { type: "string", title: "标题" } },
+        },
+      }],
+      steps: [
+        { step_id: "step_open", method: "GET", path: "/form/open", params: [] },
+        {
+          step_id: "step_submit",
+          method: "POST",
+          path: "/submit",
+          params: [
+            { key: "title", path: "body.title", exposed_to_user: true, source_kind: "user_input", required: true },
+            {
+              key: "creator",
+              path: "body.creator",
+              exposed_to_user: false,
+              source_kind: "current_user",
+              required: true,
+              source: { source_method: "GET", source_url: "/api/me", result_path: "data.user.id" },
+            },
+            {
+              key: "createTime",
+              path: "body.createTime",
+              exposed_to_user: false,
+              source_kind: "generated",
+              required: true,
+              source: { formula: "today" },
+            },
+          ],
+        },
+      ],
+    },
+    authHeaders: { Authorization: "Bearer t", "tenant-id": "1" },
+    baseUrl: "https://example.test",
+  });
+  const scriptsDir = path.join(packed.export_path, "scripts");
+  const contract = JSON.parse(await readFile(path.join(packed.export_path, "references", "CONTRACT.json"), "utf8"));
+  const ran = await new Promise((resolve) => {
+    const code = `import json, sys
+sys.path.insert(0, ${JSON.stringify(scriptsDir)})
+import runtime, client
+calls = []
+def fake(method, path, **kw):
+    calls.append({"method": method, "path": path, "body": kw.get("body")})
+    if path.endswith("/api/me"):
+        return {"ok": True, "status": 200, "data": {"code": 0, "data": {"user": {"id": 7}}}}
+    return {"ok": True, "status": 200, "data": {"code": 0, "data": {}}}
+client.http_json = fake
+contract = json.loads(${JSON.stringify(JSON.stringify(contract))})
+result = runtime.execute_capability("cap_w", {"title": "t"}, confirm=True, contract=contract)
+print(json.dumps({"ok": result.get("ok"), "calls": calls}, ensure_ascii=False))
+`;
+    const child = spawn("python", ["-c", code], { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+  assert.equal(ran.code, 0, ran.stderr + ran.stdout);
+  const payload = JSON.parse(ran.stdout);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.calls.length, 3);
+  assert.equal(payload.calls[0].path.includes("/form/open"), true);
+  assert.equal(payload.calls[1].path.includes("/api/me"), true);
+  assert.equal(payload.calls[2].path.includes("/submit"), true);
+  assert.equal(payload.calls[2].body?.creator, 7);
+  assert.match(String(payload.calls[2].body?.createTime || ""), /^\d{4}-\d{2}-\d{2}$/);
+});
+

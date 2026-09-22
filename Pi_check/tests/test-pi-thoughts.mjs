@@ -50,7 +50,7 @@ test("trace 把工具调用实时交给 onThought", () => {
   assert.equal(received[0].phase, "start");
   assert.equal(received[1].phase, "end");
   assert.equal(received[1].ok, true);
-  assert.match(received[2].text, /已看到列表/);
+  assert.equal(received.length, 2);
 });
 
 test("最终分析生命周期会推到助手", async () => {

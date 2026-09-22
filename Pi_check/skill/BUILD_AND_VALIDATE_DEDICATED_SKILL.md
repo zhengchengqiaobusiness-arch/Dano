@@ -59,7 +59,7 @@ frontmatter 仅非空 `name` + `description`。不要写 `version`、`compatibil
 
 - `立刻办理`：只读这一节就能办。读完禁止再读本文件，禁止 ls / cat / 探路。本 `SKILL.md` 就在本包目录，用**本文件路径**，不要用 `available_skills` 里过期 location。
   动态字段（执行协议写了 `--list-options`）：**第一次工具**必须是 `cd <本 SKILL.md 所在目录> && python3 scripts/flow.py --list-options <capability_id> <field>`，把返回的 `options`（已展平 id/label）写进该字段后再复制冻结 JSON 去 `ask_user_question`。没有动态字段时，第一次工具才是冻结提问。禁止把无 `options` 的 `treeSelect` / `select` 直接问出去。禁止把 `dataSource` 放进 `ask_user_question`。
-  按合同 `routes` 走。用户意图只对上某一条能力 `name` / `intent` → 只跑该原子 `--route <capability_id>`。对不上 → 按 `default.steps` **数组顺序逐步**办理：每一步问该能力自己的冻结表，交回后立刻 `--route <这一步的 capability_id>`，禁止一上来把整条 `--route default` 一次跑完。读能力不要确认卡；每步读成功必须先发一条用户可见的原始结果表（优先脚本 `table`，禁止改写成短条），再进入下一步。写能力字段收齐后必须 `{ "confirm": true, "formIds": ["<answered.formId>"] }`，确认后再 `--confirm`。
+  按合同 `routes` 走。用户意图只对上某一条能力 `name` / `intent` → 只跑该原子 `--route <capability_id>`。对不上 → 按 `default.steps` **数组顺序逐步**办理：每一步问该能力自己的冻结表，交回后立刻 `--route <这一步的 capability_id>`，禁止一上来把整条 `--route default` 一次跑完。读能力不要确认卡；每步读成功必须先发一条用户可见的原始结果表（优先脚本 `table`，禁止改写成短条），再进入下一步。写能力不要套「读成功发结果表」；字段收齐后必须 `{ "confirm": true, "formIds": ["<answered.formId>"] }`，确认后再 `--confirm`。点行身份、附件元数据、登录身份都在系统栏：冻结提问不要问它们。原子路线若需要选中记录 id，只用本对话已确认的查询结果，经 `--input-json` 传入，不要编造，也不要把该键写进 ask 表单。
   禁止写「不要走 default，因为可能不含填写」——`default.steps` 必须含本场已交的查询/详情/写入。禁止跳过 `default.steps` 里的中间读能力。禁止自造合同外问卷。禁止增删冻结字段、禁止改 `inputType`、禁止自己补非日期 `default`。只有写操作且合同 `page_default=today` 的日期，冻结 JSON 才带 `default: today`，调用 ask 前必须先跑 `date +%F` 换成当天。查询/筛选周期没有当日默认，必须向用户收集真实区间。禁止用录制样本日期冒充当天。
   无合同 default 的字段不要编 default。禁止「暂无 / 请填写 / 请审批」。可选空 = 省略或空字符串。用户交回占位句视为未填，按同一张冻结表再问。
   系统字段不要向用户要。手册只抄能力里已有的默认值与身份说明。能力缺值不要在出包补，也不要因此判出包失败。

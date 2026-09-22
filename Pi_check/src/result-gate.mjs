@@ -19,6 +19,21 @@ export class SubmitRejectedError extends Error {
   }
 }
 
+/** 这些来源只能由 runtime 填，禁止进 input_schema / 冻结提问。page_default 可改时仍是调用方。 */
+export const NEVER_CALLER_SOURCE_KINDS = new Set([
+  "constant",
+  "current_user",
+  "unresolved",
+  "previous_response",
+  "generated",
+  "selected_record_identity",
+]);
+
+export function isCallerParam(param) {
+  if (!param || param.exposed_to_user !== true) return false;
+  return !NEVER_CALLER_SOURCE_KINDS.has(String(param.source_kind || "").trim());
+}
+
 function isNonEmptyPlainObject(value) {
   return Boolean(
     value
@@ -160,7 +175,7 @@ export function assertPageDisplayContract(result) {
     for (const stepId of stepIds) {
       const step = stepsById.get(stepId);
       for (const param of Array.isArray(step?.params) ? step.params : []) {
-        if (param?.exposed_to_user === true && String(param.key || "").trim()) {
+        if (isCallerParam(param) && String(param.key || "").trim()) {
           callerKeys.add(String(param.key).trim());
         }
       }
@@ -174,8 +189,8 @@ export function assertPageDisplayContract(result) {
     }
     if (isPlainObject(properties)) {
       for (const key of Object.keys(properties)) {
-        if (callerKeys.size && !callerKeys.has(key)) {
-          const validKeys = [...callerKeys].join(", ");
+        if (!callerKeys.has(key)) {
+          const validKeys = [...callerKeys].join(", ") || "（无 exposed_to_user=true 的 param）";
           throw new SubmitRejectedError(
             "DISPLAY_CONTRACT",
             `input_schema.properties.${key} 不存在于任何 exposed_to_user=true 的 param.key 中，不能编造。` +
@@ -216,6 +231,75 @@ export function assertPageDisplayContract(result) {
         "DISPLAY_CONTRACT",
         "links 的 source_step_id 与 target_step_id 不能相同",
       );
+    }
+  }
+  assertFillableSystemEnvelope(result);
+}
+
+function paramSource(param) {
+  return isPlainObject(param?.source) ? param.source : {};
+}
+
+function hasOwn(object, key) {
+  return Boolean(object) && Object.prototype.hasOwnProperty.call(object, key);
+}
+
+/**
+ * 信封自洽：系统栏标了来源种类，就必须带上 runtime 能填的槽。
+ * 不猜业务 URL，不补字段。
+ */
+export function assertFillableSystemEnvelope(result) {
+  const steps = Array.isArray(result?.steps) ? result.steps : [];
+  for (const step of steps) {
+    if (!isPlainObject(step)) continue;
+    for (const param of Array.isArray(step.params) ? step.params : []) {
+      if (!isPlainObject(param)) continue;
+      const key = String(param.key || "").trim() || "(missing key)";
+      const kind = String(param.source_kind || "").trim();
+      const src = paramSource(param);
+      if (kind === "current_user") {
+        const url = String(src.source_url || "").trim();
+        const pointer = String(src.result_path || "").trim();
+        if (!url || !pointer) {
+          throw new SubmitRejectedError(
+            "ENVELOPE",
+            `source_kind=current_user 的 ${key} 必须带 source.source_url 和 source.result_path（本场身份接口，禁止出包去猜）`,
+          );
+        }
+      }
+      if (param.exposed_to_user === true) continue;
+      if (param.required !== true) continue;
+      if (kind === "constant" && !hasOwn(param, "default_value")) {
+        throw new SubmitRejectedError(
+          "ENVELOPE",
+          `必填 constant ${key} 必须带 default_value，否则写入 unresolved，禁止当已解决`,
+        );
+      }
+      if (kind === "previous_response") {
+        const fromStep = String(param.from_step_id || src.from_step_id || "").trim();
+        const fromPath = String(param.from_path || src.from_path || "").trim();
+        if (!fromStep || !fromPath) {
+          throw new SubmitRejectedError(
+            "ENVELOPE",
+            `必填 previous_response ${key} 必须带 source.from_step_id 和 source.from_path`,
+          );
+        }
+      }
+      if (kind === "generated") {
+        const formula = String(src.formula || param.formula || "").trim();
+        if (!formula && !hasOwn(param, "default_value")) {
+          throw new SubmitRejectedError(
+            "ENVELOPE",
+            `必填 generated ${key} 必须有 source.formula 或 default_value；看不清生成规则就写入 unresolved`,
+          );
+        }
+      }
+      if (kind === "page_default" && !hasOwn(param, "default_value")) {
+        throw new SubmitRejectedError(
+          "ENVELOPE",
+          `系统 page_default 必填 ${key} 必须带 default_value；可改日期应 exposed_to_user=true`,
+        );
+      }
     }
   }
 }

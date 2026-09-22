@@ -4,6 +4,7 @@
  */
 
 import { resolveSystemDefault } from "./skill-export/contract-materialize.mjs";
+import { isCallerParam } from "./result-gate.mjs";
 
 
 function isPlainObject(value) {
@@ -59,7 +60,7 @@ export function projectContractToRequest(draft, capabilityId, inputs = {}) {
     const key = String(param?.key || "").trim();
     const wirePath = String(param?.path || "").trim();
     if (!key || !wirePath) continue;
-    if (param.exposed_to_user === true) {
+    if (isCallerParam(param)) {
       if (!(key in given)) {
         if (param.required === true) missing.push(key);
         continue;

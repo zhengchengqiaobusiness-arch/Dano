@@ -5,7 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mergeCapabilityIntoDraft } from "../src/result-merge.mjs";
-import { buildRoutes } from "../src/skill-export/contract-materialize.mjs";
+import { buildRoutes, executeRef } from "../src/skill-export/contract-materialize.mjs";
 import { assertPageDisplayContract, SubmitRejectedError } from "../src/result-gate.mjs";
 import {
   pageIdentityUrl,
@@ -13,7 +13,7 @@ import {
   wrapContextSkillContent,
   CONTEXT_SKILL_META_START,
 } from "../src/monitor-page.mjs";
-import { createExportToolHost, createMonitorPiToolHost } from "../src/pi-tools.mjs";
+import { createExportToolHost, createMonitorPiToolHost, createPiToolHost } from "../src/pi-tools.mjs";
 import { createHarness, sampleResult } from "./helpers/harness.mjs";
 import { buildMonitorDrivePrompt, buildMonitorContinuePrompt } from "../src/pi-session.mjs";
 
@@ -141,6 +141,24 @@ test("菱形关系全部进入 default，孤立写入不丢", () => {
     capability_relations: [{ from_capability: "only", to_capability: "only" }],
   });
   assert.deepEqual(self.find((item) => item.route_id === "default").steps, ["only"]);
+
+  const fromLinks = buildRoutes({
+    capabilities: [
+      { capability_id: "query", step_ids: ["step_q"], request_refs: [{ step_id: "step_q", usage: "execute" }] },
+      { capability_id: "detail", step_ids: ["step_d"], request_refs: [{ step_id: "step_d", usage: "execute" }] },
+      { capability_id: "create", step_ids: ["step_c"], request_refs: [{ step_id: "step_c", usage: "execute" }] },
+    ],
+    capability_relations: [
+      { from_capability: "query", to_capability: "create" },
+    ],
+    links: [{
+      source_step_id: "step_q",
+      target_step_id: "step_d",
+      source_path: "response.data[].userId",
+      target_path: "query.userId",
+    }],
+  });
+  assert.deepEqual(fromLinks.find((item) => item.route_id === "default").steps, ["query", "detail", "create"]);
 });
 
 test("闸门反方向：调用方键必须进 schema，对象数组要有 items.properties，禁自指 links", () => {
@@ -213,6 +231,174 @@ test("闸门反方向：调用方键必须进 schema，对象数组要有 items.
     (error) => error instanceof SubmitRejectedError && /不能相同/.test(error.message),
   );
   assert.doesNotThrow(() => assertPageDisplayContract(sampleResult()));
+});
+
+test("闸门拒收 schema 里的系统键、无 source 的 current_user、无公式的必填 generated", () => {
+  assert.throws(
+    () => assertPageDisplayContract({
+      capabilities: [{
+        capability_id: "cap_detail",
+        request_refs: [{ step_id: "step_detail", usage: "execute" }],
+        input_schema: {
+          type: "object",
+          properties: { userId: { type: "number", title: "用户" } },
+        },
+      }],
+      steps: [{
+        step_id: "step_detail",
+        params: [{
+          key: "userId",
+          path: "query.userId",
+          exposed_to_user: false,
+          source_kind: "selected_record_identity",
+          required: true,
+        }],
+      }],
+    }),
+    (error) => error instanceof SubmitRejectedError && /userId/.test(error.message),
+  );
+  assert.throws(
+    () => assertPageDisplayContract({
+      capabilities: [{
+        capability_id: "cap_write",
+        request_refs: [{ step_id: "step_write", usage: "execute" }],
+        input_schema: { type: "object", properties: {} },
+      }],
+      steps: [{
+        step_id: "step_write",
+        params: [{
+          key: "creator",
+          path: "body.creator",
+          exposed_to_user: false,
+          source_kind: "current_user",
+          required: true,
+        }],
+      }],
+    }),
+    (error) => error instanceof SubmitRejectedError && /source_url/.test(error.message),
+  );
+  assert.doesNotThrow(() => assertPageDisplayContract({
+    capabilities: [{
+      capability_id: "cap_write",
+      request_refs: [{ step_id: "step_write", usage: "execute" }],
+      input_schema: { type: "object", properties: { title: { type: "string" } } },
+    }],
+    steps: [{
+      step_id: "step_write",
+      params: [
+        { key: "title", path: "body.title", exposed_to_user: true, source_kind: "user_input" },
+        {
+          key: "creator",
+          path: "body.creator",
+          exposed_to_user: false,
+          source_kind: "current_user",
+          required: true,
+          source: { source_method: "GET", source_url: "/api/me", result_path: "user.id" },
+        },
+      ],
+    }],
+  }));
+  assert.throws(
+    () => assertPageDisplayContract({
+      capabilities: [{
+        capability_id: "cap_write",
+        request_refs: [{ step_id: "step_write", usage: "execute" }],
+        input_schema: { type: "object", properties: {} },
+      }],
+      steps: [{
+        step_id: "step_write",
+        params: [{
+          key: "createTime",
+          path: "body.createTime",
+          exposed_to_user: false,
+          source_kind: "generated",
+          required: true,
+        }],
+      }],
+    }),
+    (error) => error instanceof SubmitRejectedError && /generated/.test(error.message),
+  );
+  assert.throws(
+    () => assertPageDisplayContract({
+      capabilities: [{
+        capability_id: "cap_write",
+        request_refs: [{ step_id: "step_write", usage: "execute" }],
+        input_schema: { type: "object", properties: { creator: { type: "number" } } },
+      }],
+      steps: [{
+        step_id: "step_write",
+        params: [{
+          key: "creator",
+          path: "body.creator",
+          exposed_to_user: true,
+          source_kind: "current_user",
+          required: true,
+          source: { source_method: "GET", source_url: "/api/me", result_path: "data.user.id" },
+        }],
+      }],
+    }),
+    (error) => error instanceof SubmitRejectedError && /creator/.test(error.message),
+  );
+});
+
+test("execute 只认 usage=execute，不按 URL 猜", () => {
+  const steps = [
+    { step_id: "step_opt", method: "GET", path: "/dept/simple-list", params: [] },
+    { step_id: "step_q", method: "GET", path: "/q", params: [] },
+  ];
+  const exec = executeRef({
+    capability_id: "cap_q",
+    step_ids: ["step_opt", "step_q"],
+    request_refs: [
+      { step_id: "step_opt", usage: "option_source", method: "GET", path: "/dept/simple-list" },
+      { step_id: "step_q", usage: "execute", method: "GET", path: "/q" },
+    ],
+  }, steps);
+  assert.equal(exec.path, "/q");
+  const onlyOpt = executeRef({
+    capability_id: "cap_q",
+    step_ids: ["step_opt"],
+    request_refs: [{ step_id: "step_opt", usage: "option_source", path: "/dept/simple-list" }],
+  }, steps);
+  assert.equal(onlyOpt.path, "");
+});
+
+test("交能力信封错误返回 saved=false 且不落盘", async () => {
+  const harness = await createHarness();
+  try {
+    const session = await harness.evidence.create({ targetUrl: "http://x", goal: "g" });
+    const tools = createPiToolHost({
+      recordingId: session.id,
+      evidence: harness.evidence,
+      files: harness.files,
+      gate: harness.gate,
+      getPiSessionId: () => "pi-1",
+    });
+    const rejected = await tools.submit_recording_capability({
+      capability: {
+        capability_id: "cap_write",
+        request_refs: [{ step_id: "step_write", usage: "execute" }],
+        input_schema: { type: "object", properties: {} },
+      },
+      steps: [{
+        step_id: "step_write",
+        params: [{
+          key: "creator",
+          path: "body.creator",
+          exposed_to_user: false,
+          source_kind: "current_user",
+          required: true,
+        }],
+      }],
+    });
+    assert.equal(rejected.saved, false);
+    assert.equal(rejected.code, "ENVELOPE");
+    assert.match(rejected.error, /source_url/);
+    const draft = await harness.files.readDraft(session.id);
+    assert.equal(draft?.draft?.capabilities?.length || 0, 0);
+  } finally {
+    await harness.cleanup();
+  }
 });
 
 test("监控换页只认主文档 URL（含 hash），弹层不算新页", () => {

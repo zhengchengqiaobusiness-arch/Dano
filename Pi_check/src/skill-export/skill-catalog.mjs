@@ -58,7 +58,7 @@ export function skillManifestFromExport({
     title: title || skillId,
     description: description || title || "",
     integration: "page",
-    risk_level: capabilities.some((cap) => /create|update|delete|submit|write/i.test(String(cap.kind || ""))) ? "L3" : "L1",
+    risk_level: capabilities.some((cap) => /create|update|delete|submit|write|mutation/i.test(String(cap.kind || ""))) ? "L3" : "L1",
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     version,

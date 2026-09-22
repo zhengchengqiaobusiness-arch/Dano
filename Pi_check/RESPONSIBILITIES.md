@@ -42,7 +42,9 @@ Skills 页「导出为 pi 文件式 skill」另走快速原样导出：不开 Sk
 - 动作执行错（点 A 打到 B；`choose` / `fill` 没按所请）
 - 图像/证据存丢或读丢；图送不进模型
 - 代码改写了 PI 信封（omit `unresolved` 清空、同 id 追加 links/relations、`buildRoutes` 后写覆盖丢掉能力）
-- 展示契约只检查页面能读到的信封是否自洽（每个 `exposed_to_user` 都在 `input_schema`、对象数组有 `items.properties`、禁自指 links），不认业务、不补字段
+- 展示契约只检查页面能读到的信封是否自洽（每个 `exposed_to_user` 都在 `input_schema`、schema 不得含系统键、对象数组有 `items.properties`、禁自指 links），不认业务、不补字段
+- 系统栏信封自洽：`current_user` 必须带本场 `source_url`+`result_path`；必填 `constant`/`previous_response`/`generated`/`page_default` 必须带 runtime 能填的槽。不猜业务 URL
+- 冻结 runtime 按合同 `request_refs` 执行 preflight→execute，并应用 `links`；不认业务、不发明身份接口
 - 工具返回与现场不符（监控 snapshot / `network_since` 必须读真实 inspect 与证据）
 - 监控运输：换页触发、累积写入 `context-skill.md`、steer 主 PI、出包只读；不交能力、不认业务
 - 凭据泄漏

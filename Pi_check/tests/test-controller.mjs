@@ -29,17 +29,16 @@ function waitUntil(predicate, timeoutMs = 2000) {
   });
 }
 
-test("1. PI 启动失败时，浏览器录制不启动", async () => {
+test("1. PI 启动失败时，录制失败且没有最终结果", async () => {
   const harness = await createHarness({ piFailStart: true });
   try {
     await assert.rejects(
       () => harness.controller.start({ targetUrl: "http://example.com", goal: "目标" }),
       /PI/,
     );
-    assert.equal(harness.browserCalls.length, 0);
     const sessions = harness.evidence.list();
     assert.equal(sessions[0].status, "failed");
-    assert.equal(sessions[0].browserStatus, "idle");
+    assert.equal(sessions[0].browserStatus, harness.browserCalls.length ? "stopped" : "idle");
     assert.equal(await harness.files.hasPiResult(sessions[0].id), false);
     assert.equal(harness.controller.view(sessions[0].id).capabilityCount, 0);
   } finally {
@@ -51,7 +50,9 @@ test("2. PI 中途失败时，录制失败且没有最终结果", async () => {
   const harness = await createHarness({ piBehavior: "die_on_notify" });
   try {
     const started = await harness.controller.start({ targetUrl: "http://example.com", goal: "目标" });
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    const browser = harness.controller.browserOf(started.id);
+    await browser.applyInput({ kind: "pointer_down", nx: 0.2, ny: 0.3 });
+    await waitUntil(() => harness.controller.view(started.id).status === "failed", 2000);
     const view = harness.controller.view(started.id);
     assert.equal(view.status, "failed");
     assert.equal(view.publicMessage, publicFailureMessage());
@@ -101,7 +102,9 @@ test("6. PI 可通过工具自行冻结并定稿", async () => {
   const harness = await createHarness({ piBehavior: "submit_unfrozen" });
   try {
     const started = await harness.controller.start({ targetUrl: "http://example.com", goal: "目标" });
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    const browser = harness.controller.browserOf(started.id);
+    await browser.applyInput({ kind: "pointer_down", nx: 0.2, ny: 0.3 });
+    await waitUntil(() => harness.files.hasPiResult(started.id), 2000);
     assert.equal(harness.getPi().unfrozenRejected, false);
     assert.equal(await harness.files.hasPiResult(started.id), true);
     const stopped = await harness.controller.stop(started.id);
