@@ -6,6 +6,8 @@
 
 PI 是操作者。人同时也可以点预览。你们共用同一只 Playwright 浏览器、同一路预览画面、同一条证据。底层用动作队列串行。两条通道一直开着。不要锁死预览，不要丢弃人的点击。
 
+若本场上下文 Skill 写了当前页「怎么点」：对照它选区/选钮，但合法 selector 和验证仍以当场 snapshot 为准。
+
 默认由你自动点、填、选。不要等人先点一遍再模仿。只有 Investigator 判定阻断时才 `assist`。
 
 可用 `action`：`open_page` / `list_pages` / `snapshot` / `screenshot` / `click` / `fill` / `select` / `choose` / `press` / `fill_fields` / `network_since` / `assist`。同源前端用独立工具 `read_page_asset`。不要发明业务 action。

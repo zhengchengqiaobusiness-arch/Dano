@@ -1,7 +1,7 @@
 /**
  * PI 是唯一语义决策者；旧录制逻辑绝不启动。
  *
- * 唯一录制链路：先启动 PI，再开浏览器。PI 按 Skill 观察和操作，
+ * 唯一录制链路：先开浏览器推流，再开主 PI；监控只读 overlay，换页续写并不挡主 PI。
  * 人同时也可以点预览。两条通道共用同一页、同一路画面、同一条证据。
  * 没有第二条能力生成路径，异常处理中禁止生成替代结果。
  */
@@ -25,10 +25,13 @@ import {
   readMonitorSkill,
   buildPiInstructionsWithContext,
   buildMonitorPiInstructions,
+  buildMonitorDrivePrompt,
+  buildMonitorContinuePrompt,
   BASE_RECORDING_SKILLS,
   monitorPiAgentDir,
 } from "./pi-session.mjs";
 import { createMonitorPiToolHost, describeMonitorPiTools } from "./pi-tools.mjs";
+import { isMonitorPageEvent, pageIdentityUrl } from "./monitor-page.mjs";
 import path from "node:path";
 
 export class RecordingController {
@@ -197,37 +200,20 @@ export class RecordingController {
   }
 
   /**
-   * 监控 PI 侦察阶段（浏览器已打开后调用）。
-   * 启动一个短暂的 Monitor PI，让它观察目标页面（snapshot + network_since）并写入 context-skill.md。
-   * 返回写入的上下文 Skill 内容字符串，或 null（若超时/失败/Skill文件缺失）。
-   * @param {object} session - 录制会话对象
-   * @param {object|null} browser - 已打开的浏览器实例（用于快照）
+   * 监控会话在主 PI 期间保持存活。每打开一张新主文档页（含 hash）续识别，
+   * 把本场 overlay 写入 context-skill.md 并 steer 主 PI。失败跳过该页，不挡录制。
    */
-  async #runMonitorPhase(session, browser = null) {
-    const MONITOR_TIMEOUT_MS = Number(process.env.MONITOR_PI_TIMEOUT_MS || 30000); // 默认 30秒（缩短以减少黑屏时间）
-    const recordingId = session.id;
+  async #ensureMonitorPi(recordingId) {
+    const slot = this.#active.get(recordingId);
+    if (!slot || slot.failed || slot.completing || slot.monitorStopping) return null;
+    if (slot.monitorPi?.alive) return slot.monitorPi;
 
+    const session = this.evidence.snapshot(recordingId);
     const monitorSkillText = await readMonitorSkill();
     if (!monitorSkillText) {
-      logPiOnly(`监控 PI Skill 文件缺失，跳过侦察阶段 recording=${recordingId}`);
+      logPiOnly(`监控 PI Skill 文件缺失，跳过侦察 recording=${recordingId}`);
       return null;
     }
-
-    await this.evidence.setStatus(recordingId, {
-      publicMessage: "监控 PI 正在侦察目标系统（约 30–60 秒）...",
-    }).catch(() => {});
-
-    const monitorTools = createMonitorPiToolHost({
-      recordingId,
-      evidence: this.evidence,
-      files: this.files,
-      getBrowser: () => browser,  // 浏览器已就绪，可做只读快照
-    });
-
-    const monitorInstructions = buildMonitorPiInstructions(monitorSkillText, {
-      targetUrl: session.targetUrl,
-      goal: session.goal,
-    });
 
     const MONITOR_TOOL_NAMES = [
       "list_recording_manifest",
@@ -237,42 +223,162 @@ export class RecordingController {
       "control_in_app_browser",
       "write_context_skill",
     ];
+    const monitorTools = createMonitorPiToolHost({
+      recordingId,
+      evidence: this.evidence,
+      files: this.files,
+      getBrowser: () => this.#active.get(recordingId)?.browser || null,
+      getTargetUrl: () => this.evidence.snapshot(recordingId).targetUrl || "",
+      getPageMeta: () => {
+        const current = this.evidence.snapshot(recordingId);
+        const active = this.#active.get(recordingId);
+        return {
+          entryUrl: current.targetUrl || "",
+          pageUrl: active?.monitorRoundUrl || current.targetUrl || "",
+          reconUntilSeq: Number(current.lastSeq) || 0,
+        };
+      },
+      onContextSkillWritten: () => {
+        const active = this.#active.get(recordingId);
+        if (active) active.monitorWriteGen = (active.monitorWriteGen || 0) + 1;
+      },
+    });
 
     const monitorPi = await this.createPi({
       recording: session,
       tools: monitorTools,
-      instructions: monitorInstructions,
-      onThought: null,                        // 监控 PI 思维过程静默，不推送前台
-      toolSpecs: describeMonitorPiTools(),    // 监控 PI 专属工具描述（含 write_context_skill）
-      agentToolNames: MONITOR_TOOL_NAMES,     // 只暴露只读工具，不含 submit_recording_capability 等
-      agentDirOverride: monitorPiAgentDir(),  // 独立目录，避免 close() 时清理影响主 PI 的 agentDir
+      instructions: buildMonitorPiInstructions(monitorSkillText, {
+        targetUrl: session.targetUrl,
+        goal: session.goal,
+      }),
+      onThought: null,
+      toolSpecs: describeMonitorPiTools(),
+      agentToolNames: MONITOR_TOOL_NAMES,
+      agentDirOverride: monitorPiAgentDir(),
     });
-
-    if (!monitorPi?.alive) {
-      logPiOnly(`监控 PI 无法启动，跳过侦察阶段 recording=${recordingId}`);
+    if (slot.monitorStopping || slot.failed) {
+      try { await monitorPi?.close?.(); } catch { /* ignore */ }
       return null;
     }
+    if (!monitorPi?.alive) {
+      logPiOnly(`监控 PI 无法启动，跳过侦察 recording=${recordingId}`);
+      return null;
+    }
+    slot.monitorPi = monitorPi;
+    return monitorPi;
+  }
+
+  #queueMonitorPage(recordingId, url) {
+    const slot = this.#active.get(recordingId);
+    if (!slot || !slot.monitorEnabled || slot.failed || slot.completing || slot.monitorStopping) return;
+    const identity = pageIdentityUrl(url);
+    if (!identity) return;
+    if (identity === pageIdentityUrl(slot.monitorLastUrl) && !slot.monitorBusy) return;
+    slot.monitorQueuedUrl = url;
+    if (slot.monitorBusy) return;
+    slot.monitorBusy = true;
+    Promise.resolve(this.#drainMonitorQueue(recordingId))
+      .catch((error) => {
+        logPiOnly(`监控识别失败 recording=${recordingId} ${error?.message || error}`);
+      })
+      .finally(() => {
+        const active = this.#active.get(recordingId);
+        if (active) active.monitorBusy = false;
+        if (
+          active?.monitorQueuedUrl
+          && pageIdentityUrl(active.monitorQueuedUrl) !== pageIdentityUrl(active.monitorLastUrl)
+        ) {
+          this.#queueMonitorPage(recordingId, active.monitorQueuedUrl);
+        }
+      });
+  }
+
+  async #drainMonitorQueue(recordingId) {
+    const slot = this.#active.get(recordingId);
+    while (slot && !slot.failed && !slot.completing && !slot.monitorStopping) {
+      const url = slot.monitorQueuedUrl;
+      if (!url) break;
+      slot.monitorQueuedUrl = "";
+      if (pageIdentityUrl(url) === pageIdentityUrl(slot.monitorLastUrl)) continue;
+      await this.#identifyMonitorPage(recordingId, url);
+    }
+  }
+
+  async #identifyMonitorPage(recordingId, url) {
+    const PAGE_TIMEOUT_MS = Number(process.env.MONITOR_PI_TIMEOUT_MS || 25000);
+    const slot = this.#active.get(recordingId);
+    const session = this.evidence.snapshot(recordingId);
+    if (!slot || session.frozen || session.status === "failed" || session.status === "succeeded") return;
+
+    slot.monitorRoundUrl = url;
+    const roundStartGen = slot.monitorWriteGen || 0;
+    let monitorPi;
+    try {
+      monitorPi = await this.#ensureMonitorPi(recordingId);
+    } catch (error) {
+      logPiOnly(`监控 PI 无法启动，跳过本页 recording=${recordingId} ${error?.message || error}`);
+      slot.monitorLastUrl = url;
+      return;
+    }
+    if (!monitorPi) {
+      slot.monitorLastUrl = url;
+      return;
+    }
+
+    const previous = await this.files.readContextSkill(recordingId);
+    const reconUntilSeq = Number(this.evidence.snapshot(recordingId).lastSeq) || 0;
+    await this.evidence.setStatus(recordingId, {
+      publicMessage: "监控正在识别当前页...",
+    }).catch(() => {});
 
     try {
       await Promise.race([
         monitorPi.beginLiveDrive({
           targetUrl: session.targetUrl,
-          goal: `侦察目标系统所有页面，写入上下文 Skill。先读初始证据，再对 goal 中的每个额外 URL 调用 open_page 侦察，汇总后写入，立即终止。目标：${session.goal}`,
-          timeoutMs: MONITOR_TIMEOUT_MS,
-          hasResult: () => this.files.hasContextSkill(recordingId),
+          goal: session.goal,
+          timeoutMs: PAGE_TIMEOUT_MS,
+          idleSubmitMs: Math.min(15000, PAGE_TIMEOUT_MS),
+          maxEmptySettles: 2,
+          promptText: buildMonitorDrivePrompt({
+            targetUrl: session.targetUrl,
+            goal: session.goal,
+            pageUrl: url,
+            reconUntilSeq,
+            previousContext: previous,
+          }),
+          continueText: buildMonitorContinuePrompt(),
+          hasResult: () => (this.#active.get(recordingId)?.monitorWriteGen || 0) > roundStartGen,
         }),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("监控 PI 超时")), MONITOR_TIMEOUT_MS + 5000),
+          setTimeout(() => reject(new Error("监控本页超时")), PAGE_TIMEOUT_MS + 2000),
         ),
       ]);
     } catch (error) {
-      // 超时或失败都可降级，不阻断主录制
-      logPiOnly(`监控 PI 结束（可能超时）: ${error?.message || error} recording=${recordingId}`);
-    } finally {
-      try { await monitorPi.close?.(); } catch { /* ignore */ }
+      logPiOnly(`监控本页结束 recording=${recordingId} url=${url} ${error?.message || error}`);
     }
 
-    return this.files.readContextSkill(recordingId);
+    slot.monitorLastUrl = url;
+    const text = await this.files.readContextSkill(recordingId);
+    if (text && slot.pi?.alive && typeof slot.pi.notifyContextSkill === "function") {
+      try {
+        slot.pi.notifyContextSkill(text);
+      } catch {
+        // steer 失败不得挡住主 PI
+      }
+    }
+  }
+
+  async #closeMonitor(recordingId) {
+    const slot = this.#active.get(recordingId);
+    if (!slot) return;
+    slot.monitorStopping = true;
+    slot.monitorEnabled = false;
+    try {
+      await slot.monitorPi?.close?.();
+    } catch {
+      // ignore
+    }
+    slot.monitorPi = null;
   }
 
   #buildPiTools(recordingId) {
@@ -451,6 +557,14 @@ export class RecordingController {
       assist: { reason: "" },
       assistHold: false,
       drive: null,
+      monitorPi: null,
+      monitorEnabled: false,
+      monitorBusy: false,
+      monitorStopping: false,
+      monitorQueuedUrl: "",
+      monitorLastUrl: "",
+      monitorRoundUrl: "",
+      monitorWriteGen: 0,
       onThought: typeof onThought === "function" ? onThought : null,
       onComplete: typeof onComplete === "function" ? onComplete : null,
       onAssist: typeof onAssist === "function" ? onAssist : null,
@@ -498,21 +612,7 @@ export class RecordingController {
       // 给浏览器约 4 秒加载初始页面，让网络请求证据有机会被记录
       await new Promise((r) => setTimeout(r, 4000));
 
-      // ── Phase 0b: 监控 PI 侦察阶段（浏览器已就绪）─────────────────
-      // 轻量 Monitor PI 读取初始证据和页面快照，写入系统特征到 context-skill.md。
-      // 若监控 PI 失败，降级继续（不影响主录制流程）。
-      let piInstructions = buildPiInstructionsWithContext(BASE_RECORDING_SKILLS, null);
-      try {
-        const contextSkill = await this.#runMonitorPhase(session, browser);
-        if (contextSkill) {
-          piInstructions = buildPiInstructionsWithContext(BASE_RECORDING_SKILLS, contextSkill);
-          logPiOnly(`监控 PI 已写入上下文 Skill recording=${session.id} bytes=${Buffer.byteLength(contextSkill, "utf8")}`);
-        }
-      } catch (monitorError) {
-        logPiOnly(`监控 PI 失败，降级为通用模板 recording=${session.id} ${monitorError?.message || monitorError}`);
-      }
-
-      // ── Phase 1: 主录制 PI（含上下文 Skill 或通用模板）────────────
+      // ── Phase 1: 主录制 PI（监控 overlay 经 steer 注入，不挡启动）──
       await this.evidence.setStatus(session.id, {
         status: "starting_pi",
         piStatus: "starting",
@@ -522,7 +622,7 @@ export class RecordingController {
       const pi = await this.createPi({
         recording: session,
         tools,
-        instructions: piInstructions,  // 含上下文 Skill（或降级为通用）
+        instructions: buildPiInstructionsWithContext(BASE_RECORDING_SKILLS, null),
         onThought: slot.onThought,
       });
       if (!pi || !pi.alive) {
@@ -543,6 +643,8 @@ export class RecordingController {
         publicMessage: "PI 正在自动操作，预览你也可以点",
       });
       this.#launchDrive(session.id);
+      slot.monitorEnabled = true;
+      this.#queueMonitorPage(session.id, session.targetUrl);
       return this.view(session.id);
     } catch (error) {
       await this.#fail(session.id, error.message || String(error));
@@ -659,6 +761,11 @@ export class RecordingController {
     slot.teardownScheduled = true;
     const tearDown = async () => {
       try {
+        await this.#closeMonitor(recordingId);
+      } catch {
+        // ignore
+      }
+      try {
         await slot.browser?.close();
       } catch {
         // ignore
@@ -773,6 +880,9 @@ export class RecordingController {
           });
       }
     }
+    if (slot?.monitorEnabled && isMonitorPageEvent(kind, nextPayload)) {
+      this.#queueMonitorPage(recordingId, nextPayload.url || nextPayload.frame_id || "");
+    }
     return event;
   }
 
@@ -780,6 +890,11 @@ export class RecordingController {
     const slot = this.#active.get(recordingId);
     if (slot?.failed) return;
     if (slot) slot.failed = true;
+    try {
+      await this.#closeMonitor(recordingId);
+    } catch {
+      // ignore
+    }
     let current = null;
     try {
       current = this.evidence.snapshot(recordingId);

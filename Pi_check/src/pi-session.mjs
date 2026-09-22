@@ -90,13 +90,13 @@ export function buildPiInstructionsWithContext(baseSkills = [], contextSkillCont
  * 构建监控 PI 的指令字符串。
  */
 export function buildMonitorPiInstructions(monitorSkillText = "", { targetUrl = "", goal = "" } = {}) {
-  const notice = `你是监控 PI（侦察阶段）。你的唯一任务：快速观察目标页面，识别系统特征，调用 write_context_skill 写入上下文 Skill，然后立即停止。
-禁止：提交录制能力、操作表单、submit_recording_result、长时间空转。
-完成写入后立即 stop（不要再调其他工具）。`;
+  const notice = `你是监控 PI。你的任务：主 PI 每打开一张新页，继续只读识别，把本场 overlay 写成整份累积稿（怎么点、能力怎么切、Skill 怎么写、系统共性、待观察）。
+禁止：click / fill / open_page、submit_recording_capability、submit_recording_result、write_skill_artifact、写消费者 SKILL.md。
+不要巡游 goal 里的其它 URL；当前页由主 PI 打开。写完 write_context_skill 即本轮结束，等待下一页，不要 stop 整场。`;
 
   const body = String(monitorSkillText || "").trim();
-  const urlLine = targetUrl ? `目标页面：${targetUrl}` : "";
-  const goalLine = goal ? `录制目标（仅供参考，用于在上下文 Skill 里记录页面清单）：${goal}` : "";
+  const urlLine = targetUrl ? `入口：${targetUrl}` : "";
+  const goalLine = goal ? `录制目标（仅供参考，不要巡游其它 URL）：${goal}` : "";
 
   return [notice, body, urlLine, goalLine].filter(Boolean).join("\n\n");
 }
@@ -139,7 +139,7 @@ export function buildExportPiInstructions(skillText = "") {
   return `${PI_ONLY_NOTICE}
 
 你是 Build and Validate Dedicated Skill。不要点页面，不要交能力，不要 submit_recording_result。
-唯一输入是 read_export_contract 返回的合同五块。
+唯一输入是 read_export_contract 返回的合同五块，加上只读的 read_context_skill。
 运输层已按合同物化整包。禁止重写 client/runtime/flow/CONTRACT/INPUT_FORMS。
 写包前必须 read_generator_guides，读完返回的全部文件。
 通过验证后 submit_skill_export。
@@ -149,6 +149,7 @@ ${String(skillText || "").trim()}
 可用工具：
 - read_generator_guides
 - read_export_contract
+- read_context_skill
 - read_skill_artifact
 - write_skill_artifact
 - validate_skill_package
@@ -170,12 +171,12 @@ export function buildUserSteerPrompt(text, { finalizing = false } = {}) {
   if (finalizing) {
     return (
       `用户说：${body}\n` +
-      `先用一两句话回答用户。按 Skill 1 继续。台账齐了就 submit_recording_result({final:true, use_draft:true}) 交出能力。不要写消费者包。`
+      `先用一两句话回答用户。按 Skill 1 继续。台账齐且每项合同完整才 submit_recording_result({final:true, use_draft:true}) 交出能力。残缺先补证或 unresolved。不要写消费者包。`
     );
   }
   return (
     `用户说：${body}\n` +
-    `这是对话。先用一两句话回答这句话，然后按 Skill 1 继续。人也可以点预览。台账齐了就立刻 submit_recording_result({final:true, use_draft:true}) 并停止。不要等人说结束，不要再空转。`
+    `这是对话。先用一两句话回答这句话，然后按 Skill 1 继续。人也可以点预览。台账齐且每项合同完整才立刻 submit_recording_result({final:true, use_draft:true}) 并停止。不要等人说结束，不要再空转。`
   );
 }
 
@@ -184,17 +185,42 @@ export function buildLiveDrivePrompt({ targetUrl = "", goal = "" } = {}) {
     `你是 Business Skill Investigator。按 Skill 1–3 交能力。\n` +
     `目标：${String(goal || "").trim() || "把该页独立业务动作做成可调用能力"}\n` +
     `入口：${String(targetUrl || "").trim()}\n` +
-    `人也可以点预览。某一行已有真实 execute：立刻 Skill 3 交该项，禁止先换页、禁止点附件预览。列表查询与点结果后的详情请求若 path 或粒度不同，是两项能力。目标点名多种数量列则每列都要点。台账齐了就立刻 submit_recording_result({final:true, use_draft:true}) 并停止。不要等人说结束，不要再 snapshot 空转。\n` +
+    `人也可以点预览。某一行已有真实 execute：立刻 Skill 3 交该项完整合同，禁止先换页、禁止点附件预览。立刻交不是交残缺。列表查询与点结果后的详情请求若 path 或粒度不同，是两项能力。目标点名多种数量列则每列都要点。台账齐且每项合同完整才立刻 submit_recording_result({final:true, use_draft:true}) 并停止。不要等人说结束，不要再 snapshot 空转。\n` +
     `不要写消费者包，不要调 Skill 4。不要把完整 JSON 写在对话里。`
   );
+}
+
+export function buildMonitorDrivePrompt({
+  targetUrl = "",
+  goal = "",
+  pageUrl = "",
+  reconUntilSeq = 0,
+  previousContext = "",
+} = {}) {
+  const previous = String(previousContext || "").trim();
+  return (
+    `你是监控 PI。本轮只识别当前页，写出整份累积上下文 Skill。\n` +
+    `入口：${String(targetUrl || "").trim()}\n` +
+    `当前页：${String(pageUrl || targetUrl || "").trim()}\n` +
+    `recon_until_seq：${Number(reconUntilSeq) || 0}（≤该序号的自动加载不是已完成查询）\n` +
+    `录制目标（仅供参考）：${String(goal || "").trim()}\n` +
+    `禁止 click / fill / submit_recording_capability / submit_recording_result / write_skill_artifact。\n` +
+    `只读：list_recording_index 看本页新增请求、一次 snapshot 或 network_since，然后 write_context_skill 写整份累积稿（保留已识别页，补上本页）。\n` +
+    `不要巡游其它 URL。写完即本轮结束。\n` +
+    (previous ? `已有累积稿：\n${previous}` : "尚无累积稿，从本页写起。")
+  );
+}
+
+export function buildMonitorContinuePrompt() {
+  return "按监控 Skill：只读当前页，把整份累积稿写入 write_context_skill。禁止交能力、禁止 click。写完即本轮结束。";
 }
 
 export function buildFinalAnalysisPrompt(latestSeq) {
   return (
     `自动操作已停止。证据已冻结，最新 seq=${Number(latestSeq) || 0}。\n` +
     `不要再 click，不要再读证据，不要点预览附件。按 Skill 1 对台账，Skill 3 认产物。\n` +
-    `列表查询与点结果后的详情请求若 path 或粒度不同，必须分别交能力或写入 unresolved。禁止只交查询+新增。\n` +
-    `有真实 execute 的项立刻 submit_recording_capability；已有草稿立刻 submit_recording_result({final:true, use_draft:true})。\n` +
+    `列表查询与点结果后的详情请求若 path 或粒度不同，必须分别交完整合同或写入 unresolved。禁止只交查询+新增。\n` +
+    `有完整合同的项立刻 submit_recording_capability；已有完整草稿立刻 submit_recording_result({final:true, use_draft:true})。禁止交残缺。\n` +
     `不要写消费者包，不要调 Skill 4。不要把 JSON 写在对话里。`
   );
 }
@@ -368,7 +394,7 @@ export class LivePiSession {
     return this.#notifyChain;
   }
 
-  notifyHumanAct({ seq } = {}) {
+    notifyHumanAct({ seq } = {}) {
     this.#latestSeq = Number(seq) || this.#latestSeq;
     if (!this.alive || this.status !== "driving" || this.#driveStopped) return this.#notifyChain;
     const now = Date.now();
@@ -378,6 +404,21 @@ export class LivePiSession {
       "用户刚在预览里操作了页面。看 snapshot.recentUserActions，用 choose/click 继续。不要每点一次就截图，也不要锁预览。",
       { streamingBehavior: "steer" },
     ).catch(() => {});
+    return this.#notifyChain;
+  }
+
+  notifyContextSkill(text = "") {
+    const body = String(text || "").trim();
+    if (!body || !this.alive) return this.#notifyChain;
+    const prompt = (
+      `本场上下文 Skill 已更新。先读当前页栏目再决定点或交。证据与 overlay 冲突以证据为准。不要重复通用规则。\n\n` +
+      body
+    );
+    if (this.status === "driving" && !this.#driveStopped) {
+      this.session.prompt(prompt, { streamingBehavior: "steer" }).catch(() => {});
+      return this.#notifyChain;
+    }
+    this.#promptNow(prompt).catch(() => {});
     return this.#notifyChain;
   }
 
@@ -460,6 +501,8 @@ export class LivePiSession {
     idleSubmitMs = 90000,
     hasResult,
     maxEmptySettles = MAX_EMPTY_FINAL_SETTLES,
+    promptText = "",
+    continueText = "",
   } = {}) {
     if (!this.alive) {
       throw new PiRequiredError("PI 会话已关闭");
@@ -480,8 +523,8 @@ export class LivePiSession {
     const deadline = started + timeoutMs;
     const idleMs = Math.max(20, Number(idleSubmitMs) || 90000);
     const emptyBudget = Math.max(1, Number(maxEmptySettles) || MAX_EMPTY_FINAL_SETTLES);
-    const continueNow = (
-      "按 Skill 1：台账不齐才用 control_in_app_browser 做最小操作。台账齐了立刻 submit_recording_result({final:true, use_draft:true}) 并停止，不要再 snapshot，不要空转。人也可以同时点预览。阻断才 assist，不要锁预览。不要盲点，不要 invent selector。"
+    const continueNow = String(continueText || "").trim() || (
+      "按 Skill 1：台账不齐才用 control_in_app_browser 做最小操作。台账齐且每项合同完整才立刻 submit_recording_result({final:true, use_draft:true}) 并停止，不要再 snapshot，不要空转。残缺合同先补证或 unresolved。人也可以同时点预览。阻断才 assist，不要锁预览。不要盲点，不要 invent selector。"
     );
     const checkResult = typeof hasResult === "function" ? hasResult : null;
     let lastToolCount = this.#trace.toolCount;
@@ -662,7 +705,7 @@ export class LivePiSession {
     }
     startPrompt(resumeHint
       ? buildUserSteerPrompt(resumeHint)
-      : buildLiveDrivePrompt({ targetUrl, goal }));
+      : (String(promptText || "").trim() || buildLiveDrivePrompt({ targetUrl, goal })));
     const heartbeat = setInterval(() => {
       if (!this.alive) {
         settleErr(new Error("PI 会话已关闭"));
@@ -765,7 +808,7 @@ export class LivePiSession {
     const idleMs = Math.max(20, Number(idleSubmitMs) || 90000);
     const emptyBudget = Math.max(1, Number(maxEmptySettles) || MAX_EMPTY_FINAL_SETTLES);
     const submitNow = (
-      "证据已经够了。不要把 JSON 写在对话里，不要再读证据。有真实 execute 形状的项用 submit_recording_capability 交；已有草稿就立刻 submit_recording_result({final:true, use_draft:true})。"
+      "证据已经够了。不要把 JSON 写在对话里，不要再读证据。有完整合同的项用 submit_recording_capability 交；已有完整草稿就立刻 submit_recording_result({final:true, use_draft:true})。禁止交残缺。"
     );
     const checkResult = typeof hasResult === "function" ? hasResult : null;
     let lastToolCount = this.#trace.toolCount;
@@ -1058,10 +1101,11 @@ export class LivePiSession {
       `禁止重写 client/runtime/flow/CONTRACT/INPUT_FORMS，禁止另开子包，禁止发明 client.request。\n` +
       `1. read_generator_guides，读完返回的全部文件\n` +
       `2. read_export_contract，只认五块合同\n` +
-      `3. read_skill_artifact("SKILL.md") 看运输层骨架；骨架不是成品\n` +
-      `4. 按本 Skill 与 doc/ 覆盖 SKILL.md：完全基于能力。每个能力必须有冻结提问 JSON。调用方字段写成一次完整表单。系统常量必须写出实际合同值，由 runtime 自动填。无合同 default 的正文不编占位句。写操作日期可用 today。不准漏字段，禁止把能力字段改成系统后删掉\n` +
-      `5. project_contract_to_request + validate_skill_package\n` +
-      `6. 校验通过立刻 submit_skill_export({ok:true})，不要反复隔离跑\n` +
+      `3. read_context_skill，只读本场 overlay；禁止打开业务页\n` +
+      `4. read_skill_artifact("SKILL.md") 看运输层骨架；骨架不是成品\n` +
+      `5. 按本 Skill 与 doc/ 覆盖 SKILL.md：完全基于能力。write_skill_artifact 若 saved=false：停写 SKILL.md，validate 现包，通过就提交。每个能力必须有冻结提问 JSON。调用方字段写成一次完整表单。系统常量必须写出实际合同值，由 runtime 自动填。无合同 default 的正文不编占位句。写操作日期可用 today。不准漏字段，禁止把能力字段改成系统后删掉\n` +
+      `6. project_contract_to_request + validate_skill_package。投影失败或不可执行 → submit_skill_export({ok:false})\n` +
+      `7. 校验通过立刻 submit_skill_export({ok:true})，不要反复隔离跑\n` +
       `失败带 issues 调用 submit_skill_export({ok:false, errors:[...]})，不要假装发布。`
     );
     const nudge = "还没有 submit_skill_export。不要重写冻结执行器。校验通过立刻提交。";

@@ -222,21 +222,55 @@ export function systemParams(cap, steps = []) {
 export function buildRoutes(draft) {
   const caps = asList(draft?.capabilities);
   const ids = caps.map(capabilityId).filter(Boolean);
-  const relations = asList(draft?.capability_relations);
-  const incoming = new Set(relations.map((item) => String(item.to_capability || item.to || "")));
-  const nextOf = new Map();
-  for (const rel of relations) {
-    const from = String(rel.from_capability || rel.from || "");
-    const to = String(rel.to_capability || rel.to || "");
-    if (from && to) nextOf.set(from, to);
+  const indexOf = new Map(ids.map((id, index) => [id, index]));
+  const idSet = new Set(ids);
+  const edgeKeys = new Set();
+  const outgoing = new Map();
+  const indegree = new Map();
+  const graphNodes = new Set();
+  for (const rel of asList(draft?.capability_relations)) {
+    const from = String(rel.from_capability || rel.from || "").trim();
+    const to = String(rel.to_capability || rel.to || "").trim();
+    if (!from || !to || from === to) continue;
+    if (!idSet.has(from) || !idSet.has(to)) continue;
+    const key = `${from}\0${to}`;
+    if (edgeKeys.has(key)) continue;
+    edgeKeys.add(key);
+    graphNodes.add(from);
+    graphNodes.add(to);
+    if (!outgoing.has(from)) outgoing.set(from, []);
+    outgoing.get(from).push(to);
+    indegree.set(from, indegree.get(from) || 0);
+    indegree.set(to, (indegree.get(to) || 0) + 1);
   }
-  let start = ids.find((id) => !incoming.has(id)) || ids[0] || "";
+  const byOriginal = (a, b) => (indexOf.get(a) ?? 0) - (indexOf.get(b) ?? 0);
+  const queue = [...graphNodes]
+    .filter((id) => (indegree.get(id) || 0) === 0)
+    .sort(byOriginal);
   const chain = [];
   const seen = new Set();
-  while (start && !seen.has(start)) {
-    chain.push(start);
-    seen.add(start);
-    start = nextOf.get(start) || "";
+  while (queue.length) {
+    queue.sort(byOriginal);
+    const node = queue.shift();
+    if (seen.has(node)) continue;
+    seen.add(node);
+    chain.push(node);
+    for (const next of outgoing.get(node) || []) {
+      indegree.set(next, (indegree.get(next) || 0) - 1);
+      if ((indegree.get(next) || 0) === 0 && !seen.has(next)) queue.push(next);
+    }
+  }
+  for (const id of ids) {
+    if (graphNodes.has(id) && !seen.has(id)) {
+      chain.push(id);
+      seen.add(id);
+    }
+  }
+  for (const id of ids) {
+    if (!seen.has(id)) {
+      chain.push(id);
+      seen.add(id);
+    }
   }
   if (!chain.length) chain.push(...ids);
   const routes = [{

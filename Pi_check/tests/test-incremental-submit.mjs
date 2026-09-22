@@ -85,6 +85,36 @@ test("单项能力写入草稿后可用 use_draft 定稿", async () => {
   }
 });
 
+test("省略 unresolved 不会清空草稿里已有缺口", async () => {
+  const harness = await createHarness();
+  try {
+    const session = await harness.evidence.create({ targetUrl: "http://x", goal: "g" });
+    await harness.evidence.setStatus(session.id, { piSessionId: "pi-1" });
+    const tools = createPiToolHost({
+      recordingId: session.id,
+      evidence: harness.evidence,
+      files: harness.files,
+      gate: harness.gate,
+      getPiSessionId: () => "pi-1",
+    });
+    const result = sampleResult();
+    await tools.submit_recording_capability({
+      capability: JSON.stringify(result.capabilities[0]),
+      steps: JSON.stringify(result.steps),
+      unresolved: JSON.stringify([{ key: "createTime", reason: "未识别" }]),
+    });
+    await tools.submit_recording_capability({
+      capability: JSON.stringify(result.capabilities[0]),
+      steps: JSON.stringify(result.steps),
+    });
+    const saved = await harness.files.readDraft(session.id);
+    assert.equal(saved.draft.unresolved.length, 1);
+    assert.equal(saved.draft.unresolved[0].key, "createTime");
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test("没有 freezeEvidence 的 host 仍拒未冻结提交", async () => {
   const harness = await createHarness();
   try {

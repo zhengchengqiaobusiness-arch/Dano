@@ -4,11 +4,13 @@
 禁止：点页面、写消费者 SKILL.md、改导出实现、把未识别来源冻结成录制常量。  
 缺口只改本文件。
 
-Investigator 叫你认一项产物时立刻工作。该项已按目标做完且有真实 execute 就交，不要等用户结束，不要攒全场再交。交一项用 `submit_recording_capability`。不准宣布定稿，不准 `submit_recording_result`。
+Investigator 叫你认一项产物时立刻工作。该项已按目标做完、有真实 execute、且「一项能力什么时候才算完整」都满足才交。立刻交 = 不要攒全场，不是交残缺。不要等用户结束。交一项用 `submit_recording_capability`。不准宣布定稿，不准 `submit_recording_result`。
+
+运输层按 `capability_id` 覆盖该项。省略 `unresolved` 会保留上次；传入 `[]` 才清空。该项 step 上的 `links`、该项 from/to 的 `capability_relations` 按这次传入先删后加，所以整项再交时要把关系带上。
 
 不要单独交没有 `request_refs` 的 relations-only 信封。顺序关系写在已有能力之后的 `capability_relations`，不能当成一项没有 execute 的能力，也不能为补 relation 再交一份同名 `_v2`。
 
-修正已交项：`submit_recording_capability` 用**同一个** `capability_id` 把整项再交一遍（含 steps / refs / relations）。运输层按 id 覆盖。禁止另起 `_v2` / `_2` /「含顺序关系」新 id。闸门报「两个能力不能共用同一个 execute step_id」只约束**两项不同能力**；那不是让你给同一动作新编 step。新建和编辑才拆两个 execute step。同一「新增并提交」只交一项。
+修正已交项：`submit_recording_capability` 用**同一个** `capability_id` 把整项再交一遍（含 steps / refs / relations / links）。运输层按 id 覆盖。禁止另起 `_v2` / `_2` /「含顺序关系」新 id。闸门报「两个能力不能共用同一个 execute step_id」只约束**两项不同能力**；那不是让你给同一动作新编 step。新建和编辑才拆两个 execute step。同一「新增并提交」只交一项。
 
 目标要求先 A 后 B：有值流写 `links`；没有值流也必须写 `capability_relations`（handoff），挂在**已有**写能力上再交同一 id。页内典型链只要本场都做完，必须挂 relation：**查询→点结果看详情**、查询→新增、查询→编辑、查询→删除、新增→提交。列表查询和详情若 execute path 不同、返回粒度不同（例如计数 vs 逐条明细），两者都是独立能力，**禁止**只挂「查询→新增」而把详情留在原子路线外。Skill 4 靠这些关系编最长默认办理路线，不要自己写消费者包。
 
@@ -42,7 +44,7 @@ Investigator 叫你认一项产物时立刻工作。该项已按目标做完且�
 
 1. 有本场该次操作的真实 execute。首屏自动请求、上一页列表加载、通知未读，都不是这项的 execute。
 2. execute 的每个 query/body 业务键：已认清来源并进该 step 的 `params`，或写入 `unresolved`。禁止标系统并按录制原值结案。**禁止丢掉**：页眉身份（申请人/单位/部门这类无独立可改控件却出现在 body 里的键）、打开时写入的时间、空数组占位、行类型码、行序号、前端行键。丢掉比写错更糟——页面系统栏会比真实请求瘦。
-3. 对照**打开该表单或加行之后、且 payload.url 仍是这一张表**的最近一次 `visible_control`。提交后 SPA 跳到其它路由的 snapshot 一律不算。每个可改控件都有调用方字段（目标排除项除外）。宿主 `readonly=true` 或 `disabled=true` 的灰框不进 `input_schema`，只进系统 params。加行后新出现的表头列（进度等）必须进 `items.properties` 或 `unresolved`。
+3. 对照**打开该表单或加行之后、且 payload.url 仍是这一张表**的最近一次 `visible_control`。提交后 SPA 跳到其它路由的 snapshot 一律不算。每个可改控件都有调用方字段（目标排除项除外）。宿主 `readonly=true` 或 `disabled=true` 的灰框不进 `input_schema`，只进系统 params。加行后新出现的表头列（进度等）必须进 `items.properties` 或 `unresolved`。本场 overlay 若写了这一页怎么切能力，只作线索，execute 形状仍以当场请求为准。
 4. `input_schema` 的 type、param 的 type、线上 query/body 的实际类型必须一致。日期就是 `date` / `datetime`，数字就是 `number`，不要一边 string 一边 number。
 5. 可增行：目标要求的每一种「添加××」分区都加过并写过。数组 `title` 用各分区标题原文，用 `/` 或 `；` 连接，并写 `x-dano-section-titles`。`items.properties` 的 `title` 是表头原文，禁止自造「A/B」合并名去替代列名。只在某一个分区表头出现的列，只属于该分区的行，不要写成每一行都有。行类型码、行序号、前端行键只留在系统 params，不进 schema。
 6. `preflight` 只挂「进入该表单可写状态」的那次请求。上一页列表加载、通知未读、字典/菜单不是 preflight。没有这样的请求就不要硬挂一条。
@@ -144,7 +146,7 @@ Investigator 确认该项已按目标做完、并在 `list_action_timeline` 或 
    - 入口 URL / 上一页带入的默认值：本页对应控件**仍能改** → **调用方**，`source_kind=page_default`，必须进 `input_schema`。日期页面默认当天时，调用方字段写 `page_default=today`（或等价说明），**不要**收进系统栏。`visible_control` 上该控件整项 `readonly=true` 或 `disabled=true` → **系统**，`source_kind=page_default`，且必须带运行时可执行的 `default_value`，reason 写清从哪次跳转/URL 带入；**禁止**再写进 `input_schema`。同一标签若既有只读下拉、又有一份看起来可改的空 input，认只读那条，不要把灰掉的类型收成调用方数字框。
      **禁止**把可改日期/下拉做成系统 `page_default` 且没有 `default_value`：导出后 runtime 填不出，调用方 input-json 也改不了系统栏，写操作会直接失败。这种形状要么改回调用方，要么写入 `unresolved`，禁止当已解决。
    - 对得上灰框 / 自动编号 / 只读姓名单位 / `readonly=true` / `disabled=true` → **系统**。
-   - 请求里有、控件上没有：登录用户/组织且初始加载请求就自动带上 → **系统**，`source_kind=current_user`，reason 写「运行时取当前登录身份」，**禁止**把本场的用户 ID、公司 ID 写成永远不变的 `constant` 固定值。
+   - 请求里有、控件上没有：登录用户/组织且初始加载请求就自动带上 → **系统**，`source_kind=current_user`，`key` 必须等于这条 execute 里的真实键，且能在登录身份接口响应里读到。reason 写「运行时取当前登录身份」。**禁止**把本场的用户 ID、公司 ID 写成永远不变的 `constant` 固定值，禁止编 `current-dept-id` 这类运行时别名。
    - 请求里有、控件上没有：行类型判别、行序号、前端行键 → 仅当有加行按钮和分区证据时标 **系统**，reason 写清依据和 seq。前端时间戳或看不清的键 → `unresolved`，录制值只作 `sample_value`。禁止写成「无独立来源，按录制请求原值提交」并标已解决。
    - 空数组/空对象：有对应可改控件（上传、选人、可增行）且目标没有排除它 → **调用方**，即使本场是空；目标排除该项（例如排除上传）→ 不进 `input_schema`，空数组留在系统 params；没有对应控件 → **系统**，按请求原值。
    - 上一页跳转带进本页 query、本页仍有对应控件 → **调用方**，`source_kind=page_default`，不要因为本场没再搜就收成系统。
@@ -203,7 +205,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 
 允许进系统栏的，只限已经认清且 runtime 填得出的：
 
-- `current_user`：仅登录身份真实有的键（创建人、姓名、部门、公司这类）。reason 写「运行时取当前登录身份」。禁止把前端时间戳、单据日期、类型下拉挂在这里。
+- `current_user`：仅登录身份真实有的键（创建人、姓名、部门、公司这类）。`key` 必须是 execute 里的真实键且身份接口能读到。reason 写「运行时取当前登录身份」。禁止把前端时间戳、单据日期、类型下拉挂在这里，禁止编运行时别名。
 - `constant`：必须带 `default_value`。
 - `previous_response`：必须带 `from_step_id` + `from_path`，并有对应 `links`。
 - 锁死控件的 `page_default`：必须带 `default_value`（或已认清的分页数字缺省）。

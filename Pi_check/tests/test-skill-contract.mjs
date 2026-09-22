@@ -12,11 +12,13 @@ import {
   REQUIRED_SKILL_FILES,
   RECORDING_SKILL_FILES,
   EXPORT_SKILL_FILE,
+  MONITOR_SKILL_FILE,
   readRequiredSkills,
   buildPiInstructions,
   buildExportPiInstructions,
   buildLiveDrivePrompt,
   buildFinalAnalysisPrompt,
+  buildMonitorDrivePrompt,
   PI_INSTRUCTIONS,
 } from "../src/pi-session.mjs";
 
@@ -46,7 +48,10 @@ test("PI 必须加载且只加载四份 Skill", async () => {
   assert.match(exportInstructions, /read_skill_artifact/);
   assert.match(exportInstructions, /read_generator_guides/);
   assert.match(exportInstructions, /submit_skill_export/);
-  assert.doesNotMatch(exportInstructions, /control_in_app_browser/);
+  assert.match(exportInstructions, /read_context_skill/);
+  const exportTools = exportInstructions.split("可用工具：")[1] || "";
+  assert.doesNotMatch(exportTools, /control_in_app_browser/);
+  assert.match(exportTools, /read_context_skill/);
 });
 
 test("缺一份 Skill 文件不准开录", async () => {
@@ -71,9 +76,16 @@ test("入口和定稿提示只留协调句，不含字段细则", () => {
   const prompt = buildFinalAnalysisPrompt(3);
   assert.match(prompt, /Skill 1/);
   assert.match(prompt, /seq=3/);
+  assert.match(prompt, /完整/);
   assert.doesNotMatch(prompt, /x-dano-section-titles/);
   assert.doesNotMatch(prompt, /部门树/);
   assert.doesNotMatch(prompt, /确认弹层/);
+  const monitor = buildMonitorDrivePrompt({ targetUrl: "http://example.com", goal: "侦察" });
+  assert.match(monitor, /监控 PI/);
+  assert.match(monitor, /禁止[^\n]*submit_recording_result/);
+  assert.doesNotMatch(monitor, /立刻 submit_recording_result/);
+  assert.doesNotMatch(monitor, /立刻 submit_recording_capability/);
+  assert.match(monitor, /不要巡游其它 URL/);
 });
 
 test("仓库里没有旧 RECORDING_CAPABILITY", async () => {
@@ -82,6 +94,6 @@ test("仓库里没有旧 RECORDING_CAPABILITY", async () => {
   assert.equal(names.includes("RECORDING_CAPABILITY.md"), false);
   assert.deepEqual(
     names.filter((name) => name.endsWith(".md")).sort(),
-    REQUIRED_SKILL_FILES.slice().sort(),
+    [...REQUIRED_SKILL_FILES, MONITOR_SKILL_FILE].sort(),
   );
 });

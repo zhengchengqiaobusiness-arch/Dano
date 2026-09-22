@@ -40,6 +40,7 @@ test("调查工具不含写包，出包工具不含浏览器", () => {
   assert.ok(!live.includes("read_export_contract"));
   const exported = describeExportPiTools().map((item) => item.name);
   assert.ok(exported.includes("read_export_contract"));
+  assert.ok(exported.includes("read_context_skill"));
   assert.ok(exported.includes("read_skill_artifact"));
   assert.ok(exported.includes("submit_skill_export"));
   assert.ok(!exported.includes("control_in_app_browser"));
@@ -56,6 +57,7 @@ test("出包只吃已交能力，没有能力就不开 Skill 4", async () => {
   });
   assert.deepEqual(Object.keys(host).sort(), [
     "project_contract_to_request",
+    "read_context_skill",
     "read_export_contract",
     "read_generator_guides",
     "read_skill_artifact",

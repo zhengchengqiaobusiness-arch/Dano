@@ -24,6 +24,13 @@ export function sampleResult(overrides = {}) {
         intent: "创建请假",
         kind: "write",
         request_refs: [{ step_id: "step_1", usage: "execute" }],
+        input_schema: {
+          type: "object",
+          properties: {
+            days: { type: "number", title: "天数" },
+          },
+          required: ["days"],
+        },
       },
     ],
     steps: [
@@ -78,6 +85,7 @@ export class ScriptedPiSession {
     this.secondSubmitError = "";
     this.humanActs = 0;
     this.userMessages = [];
+    this.contextSkills = [];
     this.driveStarted = false;
     this.driveStopped = false;
     this.lastStopReason = "";
@@ -152,6 +160,12 @@ export class ScriptedPiSession {
     this.driveStopped = false;
     this.status = "driving";
     return { ok: true, resumeDrive, text: message };
+  }
+
+  async notifyContextSkill(text = "") {
+    const body = String(text || "").trim();
+    if (body) this.contextSkills.push(body);
+    return { ok: true };
   }
 
   get needsFreshSession() {
@@ -342,6 +356,10 @@ export class FakeBrowser {
     };
   }
 
+  async snapshot(opts = {}) {
+    return this.inspect(opts);
+  }
+
   async actByRef({ ref = "", action = "click", text = "", selector = "" } = {}) {
     return this.actBySelector({ selector: selector || ref, ref: ref || selector, action, text });
   }
@@ -425,9 +443,20 @@ export async function createHarness(options = {}) {
     gate,
     finalTimeoutMs: options.finalTimeoutMs || 2000,
     driveTimeoutMs: options.driveTimeoutMs || 2000,
-    createPi: options.createPi || (async ({ recording, tools, onThought }) => {
+    createPi: options.createPi || (async ({ recording, tools, onThought, agentDirOverride, agentToolNames }) => {
       if (options.piFailStart) {
         throw new Error("PI 初始化失败");
+      }
+      const isMonitor = Boolean(agentDirOverride)
+        || (Array.isArray(agentToolNames) && agentToolNames.includes("write_context_skill"));
+      if (isMonitor) {
+        return new ScriptedPiSession({
+          tools,
+          recordingId: recording.id,
+          behavior: "never_submit",
+          sessionId: "scripted-monitor",
+          onThought: null,
+        });
       }
       piCreateCount += 1;
       const behavior = typeof options.piBehaviorForCreate === "function"

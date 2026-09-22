@@ -11,6 +11,7 @@ import { buildActionTimeline, requestShapeFromEvents } from "./evidence-facts.mj
 import { projectVisibleControlSnapshot } from "./visible-controls.mjs";
 import { mergeCapabilityIntoDraft } from "./result-merge.mjs";
 import { isNoiseNetworkPath } from "./browser-actions.mjs";
+import { wrapContextSkillContent } from "./monitor-page.mjs";
 import { projectContractToRequest } from "./contract-project.mjs";
 import {
   writeSkillArtifact,
@@ -141,6 +142,66 @@ function assistHoldError() {
     human_can_click: true,
     error: "已暂停自动操作。等用户在预览做完或说继续。现在只能 snapshot / network_since / 读证据，禁止再 click / fill / choose。",
   };
+}
+
+export async function networkEventsSince(evidence, recordingId, after_seq = 0) {
+  const all = await evidence.files.readEvidence(recordingId);
+  const list = Array.isArray(all) ? all : [];
+  const cursor = Number(after_seq) > 0 ? Number(after_seq) : 0;
+  const matched = list.filter((item) => {
+    if (cursor && Number(item.seq) <= cursor) return false;
+    if (item.kind === "network_request") {
+      const type = String(item.payload?.resource_type || "");
+      if (type && type !== "xhr" && type !== "fetch") return false;
+      return !isNoiseNetworkPath(item.payload?.url || item.payload?.path || "");
+    }
+    return item.kind === "page_navigated" || item.kind === "interaction";
+  });
+  const windowed = cursor ? matched.slice(-80) : matched.slice(-40);
+  return {
+    after_seq: cursor || (windowed[0] ? Number(windowed[0].seq) - 1 : 0),
+    events: windowed.map((item) => ({
+      seq: item.seq,
+      kind: item.kind,
+      actor: item.payload?.actor || "",
+      method: item.payload?.method || "",
+      path: item.payload?.url || item.payload?.path || "",
+      label: item.payload?.label || item.payload?.text || item.payload?.selector || "",
+      status: item.payload?.status,
+    })),
+  };
+}
+
+async function inspectBrowser(browser, { includeScreenshot = false, as_image = false, action = "" } = {}) {
+  if (!browser) {
+    return { available: false, error: "浏览器未打开。用 list_action_timeline / read_request_shape / read_evidence_item 读已有证据。" };
+  }
+  const wantImage = Boolean(as_image);
+  const shot = await browser.inspect?.({ includeScreenshot: wantImage || Boolean(includeScreenshot) });
+  if (!shot || shot.error || shot.available === false) {
+    return { available: false, error: shot?.error || shot?.screenshot?.error || "无法截图" };
+  }
+  if (wantImage && shot.screenshot?.data) {
+    return {
+      ...compactInspect(shot),
+      action: "screenshot",
+      __image: true,
+      as_image: true,
+      mimeType: "image/png",
+      data: shot.screenshot.data,
+      image_in_conversation: true,
+    };
+  }
+  const payload = {
+    ...compactInspect(shot),
+    include_screenshot_ignored: Boolean(includeScreenshot) && !wantImage,
+    image_in_conversation: false,
+  };
+  if (action === "screenshot") {
+    payload.action = "screenshot";
+    payload.note = SCREENSHOT_TEXT_ONLY_NOTE;
+  }
+  return payload;
 }
 
 export function createPiToolHost({
@@ -309,7 +370,7 @@ export function createPiToolHost({
       capability,
       steps = [],
       links = [],
-      unresolved = [],
+      unresolved,
       capability_relations = [],
       title = "",
     } = {}) {
@@ -334,7 +395,7 @@ export function createPiToolHost({
         final: false,
         capability_count: merged.capabilities.length,
         capability_ids: merged.capabilities.map((item) => item.capability_id),
-        next_action: "该项已保存。继续按 Skill 调查或交下一项已有真实 execute 形状的能力；台账齐了用 submit_recording_result({final:true, use_draft:true})。不要写消费者包。",
+        next_action: "该项已保存。继续按 Skill 调查或交下一项完整合同（「一项能力什么时候才算完整」都满足）；省略 unresolved 会保留上次。台账齐且每项完整后 submit_recording_result({final:true, use_draft:true})。不要写消费者包。",
       };
     },
     async control_in_app_browser({
@@ -352,31 +413,7 @@ export function createPiToolHost({
     } = {}) {
       const kind = String(action || "").trim();
       if (kind === "network_since") {
-        const all = await evidence.files.readEvidence(recordingId);
-        const list = Array.isArray(all) ? all : [];
-        const cursor = Number(after_seq) > 0 ? Number(after_seq) : 0;
-        const matched = list.filter((item) => {
-          if (cursor && Number(item.seq) <= cursor) return false;
-          if (item.kind === "network_request") {
-            const type = String(item.payload?.resource_type || "");
-            if (type && type !== "xhr" && type !== "fetch") return false;
-            return !isNoiseNetworkPath(item.payload?.url || item.payload?.path || "");
-          }
-          return item.kind === "page_navigated" || item.kind === "interaction";
-        });
-        const windowed = cursor ? matched.slice(-80) : matched.slice(-40);
-        return {
-          after_seq: cursor || (windowed[0] ? Number(windowed[0].seq) - 1 : 0),
-          events: windowed.map((item) => ({
-            seq: item.seq,
-            kind: item.kind,
-            actor: item.payload?.actor || "",
-            method: item.payload?.method || "",
-            path: item.payload?.url || item.payload?.path || "",
-            label: item.payload?.label || item.payload?.text || item.payload?.selector || "",
-            status: item.payload?.status,
-          })),
-        };
+        return networkEventsSince(evidence, recordingId, after_seq);
       }
       if (kind === "assist") {
         const message = String(reason || "请在预览页帮忙：登录、验证码或确认写入。预览始终可以点。");
@@ -411,34 +448,14 @@ export function createPiToolHost({
       if (kind === "open_page") return browser.openPage?.(url) ?? { available: false, error: "当前浏览器不能打开页面" };
       if (kind === "list_pages") return browser.listPages?.() ?? { pages: [] };
       if (kind === "snapshot") {
-        const shot = await browser.inspect?.({ includeScreenshot: false });
+        const shot = await inspectBrowser(browser, { includeScreenshot: false });
         return {
-          ...compactInspect(shot),
+          ...shot,
           include_screenshot_ignored: Boolean(include_screenshot),
         };
       }
       if (kind === "screenshot") {
-        const shot = await browser.inspect?.({ includeScreenshot: Boolean(as_image) });
-        if (!shot || shot.error || shot.available === false) {
-          return { available: false, error: shot?.error || shot?.screenshot?.error || "无法截图" };
-        }
-        if (as_image && shot.screenshot?.data) {
-          return {
-            ...compactInspect(shot),
-            action: "screenshot",
-            __image: true,
-            as_image: true,
-            mimeType: "image/png",
-            data: shot.screenshot.data,
-            image_in_conversation: true,
-          };
-        }
-        return {
-          ...compactInspect(shot),
-          action: "screenshot",
-          image_in_conversation: false,
-          note: SCREENSHOT_TEXT_ONLY_NOTE,
-        };
+        return inspectBrowser(browser, { includeScreenshot: Boolean(as_image), as_image, action: "screenshot" });
       }
       if (kind === "click" || kind === "fill" || kind === "select" || kind === "press" || kind === "choose") {
         const target = String(selector || ref || "").trim();
@@ -725,33 +742,33 @@ export function describePiTools() {
  * 监控 PI 工具集（轻量侦察阶段）。
  *
  * 只读工具（list_recording_manifest / list_recording_index / read_request_shape /
- * read_evidence_item / control_in_app_browser[snapshot only]）
+ * read_evidence_item / control_in_app_browser[snapshot / screenshot / network_since]）
  * + 一个写出口 write_context_skill。
- * 禁止提交能力、操作表单、写入证据。
+ * 禁止提交能力、操作表单、open_page、写入证据。
  */
 export function createMonitorPiToolHost({
   recordingId,
   evidence,
   files,
   getBrowser = null,
+  getTargetUrl = null,
+  getPageMeta = null,
+  onContextSkillWritten = null,
 }) {
   const logTool = (name, detail) =>
     logPiOnly(`[监控PI] 工具 ${name} recording=${recordingId || "-"} ${detail}`);
 
   return {
-    /** 读录制会话基本信息（URL、状态、证据数量） */
     async list_recording_manifest() {
       return evidence.snapshot(recordingId);
     },
 
-    /** 读证据索引（类型、seq、摘要） */
     async list_recording_index() {
       const index = await evidence.index(recordingId);
       logTool("list_recording_index", `count=${index.count}`);
       return { recording_id: recordingId, count: index.count, items: index.items };
     },
 
-    /** 读指定 seq 请求的 query/body 键和响应摘要 */
     async read_request_shape({ seq }) {
       const events = await evidence.files.readEvidence(recordingId);
       const shape = requestShapeFromEvents(events, seq);
@@ -759,7 +776,6 @@ export function createMonitorPiToolHost({
       return shape;
     },
 
-    /** 读指定 seq 的原始证据事件 */
     async read_evidence_item({ seq }) {
       const event = await evidence.readOne(recordingId, seq);
       if (!event) return { found: false, seq };
@@ -774,65 +790,61 @@ export function createMonitorPiToolHost({
       return { found: true, event };
     },
 
-    /** 快照/导航（监控阶段不允许点击/填写，允许 open_page 以侦察多页面） */
-    async control_in_app_browser({ action, selector, ref, url: urlParam } = {}) {
-      const allowedActions = ["snapshot", "screenshot", "network_since", "open_page"];
+    async control_in_app_browser({
+      action,
+      after_seq = 0,
+      as_image = false,
+    } = {}) {
+      const allowedActions = ["snapshot", "screenshot", "network_since"];
       const kind = String(action || "snapshot").toLowerCase();
       if (!allowedActions.includes(kind)) {
         return {
           ok: false,
-          error: `监控 PI 只允许只读动作：${allowedActions.join(" / ")}。不能 ${kind}。`,
+          error: `监控 PI 只允许只读动作：${allowedActions.join(" / ")}。不能 ${kind}。当前页由主 PI 打开，禁止 open_page / click / fill。`,
         };
       }
       const browser = typeof getBrowser === "function" ? getBrowser() : null;
-      if (!browser) {
+      if (!browser && kind !== "network_since") {
         return { available: false, error: "浏览器尚未打开，稍后重试或使用 list_recording_index 读已有证据。" };
       }
-      logTool("control_in_app_browser", `action=${kind}${kind === "open_page" ? ` url=${urlParam || selector || ""}` : ""}`);
+      logTool("control_in_app_browser", `action=${kind}`);
       if (kind === "snapshot") {
-        const shot = await browser.snapshot?.({ selector, ref });
-        return compactInspect(shot);
+        return inspectBrowser(browser, { includeScreenshot: false });
       }
       if (kind === "screenshot") {
-        return await browser.screenshot?.({ asImage: false }) ?? { available: false };
+        return inspectBrowser(browser, {
+          includeScreenshot: Boolean(as_image),
+          as_image: Boolean(as_image),
+          action: "screenshot",
+        });
       }
       if (kind === "network_since") {
-        const since = await browser.networkSince?.({ seq: 0 });
-        return since ?? { requests: [] };
-      }
-      if (kind === "open_page") {
-        // 允许导航到其他页面以侦察系统特征，但不允许填写表单
-        const targetUrl = String(urlParam || selector || ref || "").trim();
-        if (!targetUrl) {
-          return { ok: false, error: "open_page 需要提供目标 URL（通过 url 或 selector 参数传入）" };
-        }
-        const result = await browser.openPage?.(targetUrl);
-        if (!result?.available && result?.available !== undefined) return result;
-        // 额外等待 3 秒让页面请求充分记录
-        await new Promise((r) => setTimeout(r, 3000));
-        return {
-          ok: true,
-          url: result?.url || targetUrl,
-          message: "页面已导航。可调用 list_recording_index 获取新增证据 seq，再用 read_request_shape 分析各请求。",
-        };
+        return networkEventsSince(evidence, recordingId, after_seq);
       }
       return { ok: false, error: "未知动作" };
     },
 
-    /**
-     * 写入本场录制的上下文 Skill。
-     * content：Markdown 格式，主 PI 将以 "## CONTEXT_SKILL_本场会话上下文" 注入指令。
-     * 写完后监控 PI 必须立刻停止。
-     */
     async write_context_skill({ content }) {
       const text = String(content || "").trim();
       if (!text) return { ok: false, error: "content 不能为空" };
-      await files.writeContextSkill(recordingId, text);
-      logTool("write_context_skill", `bytes=${Buffer.byteLength(text, "utf8")}`);
+      const session = evidence.snapshot(recordingId);
+      const meta = typeof getPageMeta === "function" ? getPageMeta() || {} : {};
+      const wrapped = wrapContextSkillContent(text, {
+        entryUrl: meta.entryUrl || (typeof getTargetUrl === "function" ? getTargetUrl() : session.targetUrl) || "",
+        pageUrl: meta.pageUrl || session.targetUrl || "",
+        reconUntilSeq: meta.reconUntilSeq ?? session.lastSeq ?? 0,
+      });
+      await files.writeContextSkill(recordingId, wrapped);
+      logTool("write_context_skill", `bytes=${Buffer.byteLength(wrapped, "utf8")}`);
+      try {
+        onContextSkillWritten?.({ content: wrapped });
+      } catch {
+        // 回写通知失败仍要把写入结果回给模型
+      }
       return {
         ok: true,
-        bytes: Buffer.byteLength(text, "utf8"),
-        message: "上下文 Skill 已写入。主 PI 将在启动时读取。监控 PI 请立刻停止。",
+        bytes: Buffer.byteLength(wrapped, "utf8"),
+        message: "上下文 Skill 已写入整份累积稿。本轮结束。等待下一页；禁止 click，禁止交能力。",
       };
     },
   };
@@ -866,6 +878,15 @@ export function createExportToolHost({
       logTool("read_export_contract", `caps=${payload.capabilities.length} steps=${payload.steps.length} links=${payload.links.length} unresolved=${payload.unresolved.length}`);
       return payload;
     },
+    async read_context_skill() {
+      if (typeof files.readContextSkill !== "function") {
+        return { found: false, content: "" };
+      }
+      const text = await files.readContextSkill(recordingId);
+      const content = String(text || "").trim();
+      logTool("read_context_skill", `found=${Boolean(content)} bytes=${Buffer.byteLength(content, "utf8")}`);
+      return { found: Boolean(content), content };
+    },
     async read_skill_artifact({ path: rel }) {
       try {
         const result = await readSkillArtifact(files, recordingId, rel);
@@ -883,6 +904,12 @@ export function createExportToolHost({
           "write_skill_artifact",
           `path=${result.path} bytes=${String(content ?? "").length} saved=${result.saved !== false} ${result.errors?.length ? result.errors.join("; ") : ""}`.trim(),
         );
+        if (result.saved === false) {
+          return {
+            ...result,
+            next_action: "SKILL.md 未保存。停止再写手册。对运输层现包跑 validate_skill_package；通过且合同可执行则 submit_skill_export({ok:true})。禁止再写更瘦表单，禁止打开页面。",
+          };
+        }
         return result;
       } catch (error) {
         logTool("write_skill_artifact", `失败 path=${rel || "-"} ${error.message || error}`);
@@ -973,15 +1000,14 @@ export function describeMonitorPiTools() {
     },
     {
       name: "control_in_app_browser",
-      label: "页面快照与导航（只读）",
-      description: "允许 action=snapshot / screenshot / network_since / open_page。open_page 可导航到新页面以侦察其初始证据（不填写任何表单）。监控阶段禁止 click/fill 等写操作。",
+      label: "当前页只读快照",
+      description: "只允许 action=snapshot / screenshot / network_since。当前页由主 PI 打开。禁止 open_page / click / fill。screenshot 设 as_image=true 才把图像送给模型。",
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", enum: ["snapshot", "screenshot", "network_since", "open_page"] },
-          url: { type: "string", description: "action=open_page 时填写目标 URL" },
-          selector: { type: "string", description: "action=snapshot/screenshot 时的选择器（可选）；也可作为 open_page 的 URL 传入" },
-          ref: { type: "string" },
+          action: { type: "string", enum: ["snapshot", "screenshot", "network_since"] },
+          as_image: { type: "boolean", description: "action=screenshot 时为 true 才把图像写入对话" },
+          after_seq: { type: "integer", description: "action=network_since 时只看该序号之后的证据" },
         },
         required: ["action"],
         additionalProperties: false,
@@ -990,13 +1016,13 @@ export function describeMonitorPiTools() {
     {
       name: "write_context_skill",
       label: "写入上下文 Skill",
-      description: "把侦察结果以 Markdown 格式写入本场录制的上下文 Skill。写完后立即停止。",
+      description: "把本场累积 overlay 写成 Markdown。每页都要写整份稿（保留已识别页，补上本页）。写完本轮结束，等待下一页。禁止交能力。",
       parameters: {
         type: "object",
         properties: {
           content: {
             type: "string",
-            description: "Markdown 格式的上下文 Skill 内容，须包含：目标系统域名、API 前缀、噪声路径、业务路径、文件上传模式（若有）、日期格式。",
+            description: "Markdown 累积稿：系统共性、每页怎么点、能力怎么切、Skill 怎么写、待观察。",
           },
         },
         required: ["content"],
@@ -1018,6 +1044,12 @@ export function describeExportPiTools() {
       name: "read_export_contract",
       label: "出包合同",
       description: "读取点击当下的最新合同五块：capabilities / steps / links / capability_relations / unresolved。禁止回头猜页面。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
+      name: "read_context_skill",
+      label: "本场上下文",
+      description: "只读本场监控写入的 overlay。用来核对日期口径、成功码、路线线索。禁止据此打开页面或改 CONTRACT。",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
     {

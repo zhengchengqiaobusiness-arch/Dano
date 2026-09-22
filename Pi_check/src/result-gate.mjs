@@ -32,6 +32,29 @@ function isPlainObject(value) {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
+function assertObjectArrayHasItemProperties(key, node) {
+  if (String(node?.type || "").toLowerCase() !== "array") return;
+  const items = node.items;
+  if (items == null) {
+    throw new SubmitRejectedError(
+      "DISPLAY_CONTRACT",
+      `input_schema.properties.${key} 是数组但缺少 items.properties`,
+    );
+  }
+  if (!isPlainObject(items)) return;
+  const itemType = String(items.type || "").toLowerCase();
+  if (itemType === "string" || itemType === "number" || itemType === "integer" || itemType === "boolean") {
+    return;
+  }
+  const props = items.properties;
+  if (!isPlainObject(props) || Object.keys(props).length === 0) {
+    throw new SubmitRejectedError(
+      "DISPLAY_CONTRACT",
+      `input_schema.properties.${key} 的对象数组必须有非空 items.properties`,
+    );
+  }
+}
+
 function schemaConflictsParamType(node, param) {
   const schemaType = String(node?.type || "").toLowerCase();
   const paramType = String(param?.type || "").toLowerCase();
@@ -120,7 +143,6 @@ export function assertPageDisplayContract(result) {
   }
   for (const capability of capabilities) {
     const properties = capability?.input_schema?.properties;
-    if (!isPlainObject(properties)) continue;
     const callerKeys = new Set();
     const stepIds = [];
     if (Array.isArray(capability.request_refs)) {
@@ -143,25 +165,57 @@ export function assertPageDisplayContract(result) {
         }
       }
     }
-    for (const key of Object.keys(properties)) {
-      if (callerKeys.size && !callerKeys.has(key)) {
-        const validKeys = [...callerKeys].join(", ");
-        throw new SubmitRejectedError(
-          "DISPLAY_CONTRACT",
-          `input_schema.properties.${key} 不存在于任何 exposed_to_user=true 的 param.key 中。` +
-          `当前能力中有效的 caller param key 为：[${validKeys}]。` +
-          `请确认 input_schema.properties 的每个键与 step.params 里某个 exposed_to_user=true 的 key 字段值完全一致（区分大小写）。`,
-        );
+    if (callerKeys.size && !isPlainObject(properties)) {
+      const missing = [...callerKeys].join(", ");
+      throw new SubmitRejectedError(
+        "DISPLAY_CONTRACT",
+        `每个 exposed_to_user=true 的 param.key 必须出现在该能力 input_schema.properties 中。缺失：[${missing}]`,
+      );
+    }
+    if (isPlainObject(properties)) {
+      for (const key of Object.keys(properties)) {
+        if (callerKeys.size && !callerKeys.has(key)) {
+          const validKeys = [...callerKeys].join(", ");
+          throw new SubmitRejectedError(
+            "DISPLAY_CONTRACT",
+            `input_schema.properties.${key} 不存在于任何 exposed_to_user=true 的 param.key 中，不能编造。` +
+            `当前能力中有效的 caller param key 为：[${validKeys}]。` +
+            `请确认 input_schema.properties 的每个键与 step.params 里某个 exposed_to_user=true 的 key 字段值完全一致（区分大小写）。`,
+          );
+        }
+        const node = properties[key];
+        if (!isPlainObject(node)) continue;
+        const param = findParamByKey(stepsById, stepIds, key);
+        if (schemaConflictsParamType(node, param)) {
+          throw new SubmitRejectedError(
+            "DISPLAY_CONTRACT",
+            `input_schema.properties.${key} 的 type 必须和对应 param.type 一致`,
+          );
+        }
+        assertObjectArrayHasItemProperties(key, node);
       }
-      const node = properties[key];
-      if (!isPlainObject(node)) continue;
-      const param = findParamByKey(stepsById, stepIds, key);
-      if (schemaConflictsParamType(node, param)) {
-        throw new SubmitRejectedError(
-          "DISPLAY_CONTRACT",
-          `input_schema.properties.${key} 的 type 必须和对应 param.type 一致`,
-        );
+    }
+    if (isPlainObject(properties) && callerKeys.size) {
+      for (const key of callerKeys) {
+        if (!Object.prototype.hasOwnProperty.call(properties, key)) {
+          throw new SubmitRejectedError(
+            "DISPLAY_CONTRACT",
+            `exposed_to_user=true 的 param.key=${key} 必须出现在该能力 input_schema.properties 中`,
+          );
+        }
       }
+    }
+  }
+  const links = Array.isArray(result?.links) ? result.links : [];
+  for (const link of links) {
+    if (!isPlainObject(link)) continue;
+    const source = String(link.source_step_id || "").trim();
+    const target = String(link.target_step_id || "").trim();
+    if (source && target && source === target) {
+      throw new SubmitRejectedError(
+        "DISPLAY_CONTRACT",
+        "links 的 source_step_id 与 target_step_id 不能相同",
+      );
     }
   }
 }
