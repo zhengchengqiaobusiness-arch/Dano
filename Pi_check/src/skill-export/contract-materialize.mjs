@@ -87,22 +87,35 @@ export function callerParams(cap, steps = []) {
   const found = paramsByKey(cap, steps);
   const fields = [];
   const seen = new Set();
-  const write = /create|update|delete|submit|write/i.test(String(cap?.kind || ""));
   for (const [key, spec] of Object.entries(properties)) {
     const param = found.get(key) || {};
-    fields.push(withPageDateDefault(normalizeCallerField(key, spec, param, required.has(key) || Boolean(param.required)), write));
+    fields.push(normalizeCallerField(key, spec, param, required.has(key) || Boolean(param.required)));
     seen.add(key);
   }
   for (const [key, param] of found) {
     if (seen.has(key) || param?.exposed_to_user === false) continue;
-    fields.push(withPageDateDefault(normalizeCallerField(key, {}, param, Boolean(param.required)), write));
+    fields.push(normalizeCallerField(key, {}, param, Boolean(param.required)));
     seen.add(key);
   }
   return fields;
 }
 
-function withPageDateDefault(field, _write) {
-  if (field.type === "date" && !Object.prototype.hasOwnProperty.call(field, "default")) {
+export function isRecordedCalendarSample(value) {
+  if (value === "today" || value === "now") return false;
+  if (typeof value !== "string") return false;
+  return /^\d{4}-\d{2}-\d{2}(?:[T\s].*)?$/.test(value.trim());
+}
+
+function copyContractPageDefault(field, spec, param) {
+  if (field.type !== "date") return field;
+  if (isRecordedCalendarSample(field.default)) delete field.default;
+  const candidates = [
+    param.page_default,
+    spec.page_default,
+    spec["x-dano-page-default"],
+    asRecord(param.source).page_default,
+  ];
+  if (candidates.some((value) => String(value || "").trim() === "today")) {
     field.page_default = "today";
   }
   return field;
@@ -113,7 +126,7 @@ function normalizeCallerField(key, spec, param, required) {
   const option = asRecord(spec["x-dano-option-source"]);
   const enums = asList(spec["x-enum-options"]).length ? asList(spec["x-enum-options"]) : asList(param.enum_options);
   const endpoint = String(option.source_url || source.source_url || "");
-  const childrenField = String(option.children_key || source.children_key || (endpoint ? "children" : ""));
+  const childrenField = String(option.children_key || source.children_key || "").trim();
   const dataSource = endpoint ? {
     type: "api",
     endpoint,
@@ -127,7 +140,9 @@ function normalizeCallerField(key, spec, param, required) {
   const field = {
     id: String(key),
     title: String(spec.title || param.label || key),
-    type: String(spec.type || param.type || "string"),
+    type: (spec.format === "date" || param.type === "date" || spec.type === "date")
+      ? "date"
+      : String(spec.type || param.type || "string"),
     required: Boolean(required),
     enums,
     dataSource,
@@ -139,12 +154,13 @@ function normalizeCallerField(key, spec, param, required) {
   };
   const itemType = itemTypeFromReason(param.reason || spec.description);
   if (itemType != null) field.itemType = itemType;
-  if (Object.prototype.hasOwnProperty.call(param, "default_value") && param.default_value !== undefined && param.default_value !== "") {
-    field.default = param.default_value;
-  } else if (spec.default !== undefined && spec.default !== "") {
-    field.default = spec.default;
+  const rawDefault = Object.prototype.hasOwnProperty.call(param, "default_value") && param.default_value !== undefined && param.default_value !== ""
+    ? param.default_value
+    : (spec.default !== undefined && spec.default !== "" ? spec.default : undefined);
+  if (rawDefault !== undefined && !isRecordedCalendarSample(rawDefault)) {
+    field.default = rawDefault;
   }
-  return field;
+  return copyContractPageDefault(field, spec, param);
 }
 
 function itemTypeFromReason(reason) {
@@ -215,8 +231,59 @@ export function systemParams(cap, steps = []) {
     };
     const resolved = resolveSystemDefault(item);
     if (resolved.has) out.default_value = resolved.value;
+    if (item.source_kind === "current_user") {
+      const src = asRecord(item.source);
+      const identPath = String(src.source_url || src.path || "").trim();
+      const resultPath = String(src.result_path || src.value_key || "").trim();
+      if (identPath || resultPath) {
+        out.identity = {
+          method: String(src.source_method || "GET").toUpperCase(),
+          path: identPath,
+          result_path: resultPath,
+        };
+      }
+    }
     return out;
   });
+}
+
+function identityPath(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return "";
+  try {
+    return new URL(text).pathname || "";
+  } catch {
+    return text.replace(/^https?:\/\/[^/]+/i, "").split("?")[0];
+  }
+}
+
+export function identityProbesFromDraft(draft) {
+  const probes = [];
+  const seen = new Set();
+  const add = (method, rawPath) => {
+    const path = identityPath(rawPath);
+    if (!path || !path.startsWith("/")) return;
+    const verb = String(method || "GET").toUpperCase() || "GET";
+    const key = `${verb} ${path}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    probes.push({ method: verb, path });
+  };
+  for (const cap of asList(draft?.capabilities)) {
+    for (const param of asList(cap.system_params)) {
+      if (String(param?.source_kind || "") !== "current_user") continue;
+      const src = asRecord(param.source || param.identity);
+      add(src.source_method || src.method, src.source_url || src.path);
+    }
+  }
+  for (const step of asList(draft?.steps)) {
+    for (const param of asList(step.params)) {
+      if (String(param?.source_kind || "") !== "current_user") continue;
+      const src = asRecord(param.source);
+      add(src.source_method, src.source_url);
+    }
+  }
+  return probes;
 }
 
 export function buildRoutes(draft) {
@@ -498,7 +565,7 @@ function systemFillText(param) {
     return `合同值 ${JSON.stringify(param.default_value)}；不要向用户要`;
   }
   if (param.source_kind === "constant") return "合同常量；必须带 default_value，由 runtime 自动填";
-  if (String(param.key) === "createTime") return "运行时生成当前时间；不要向用户要";
+  if (param.source_kind === "generated") return "能力未给出生成规则，runtime 不填";
   return `${param.source_kind || "system"}；不要向用户要`;
 }
 
@@ -600,6 +667,42 @@ export function renderOptions(contract) {
   return `${lines.join("\n")}\n`;
 }
 
+function renderImmediateHowTo(contract) {
+  const defaultRoute = contract.routes.find((item) => item.route_id === "default") || contract.routes[0];
+  const steps = asList(defaultRoute?.steps);
+  const byId = new Map((contract.capabilities || []).map((cap) => [capabilityId(cap), cap]));
+  const hasToday = (contract.capabilities || []).some((cap) => (
+    isWriteCap(cap) && (cap.caller_fields || []).some((field) => field.page_default === "today")
+  ));
+  const lines = [
+    "只读这一节就能办。读完禁止再读本文件，禁止读 `references/`，禁止 ls / cat / 探路。",
+    "查询不要确认卡：表单提交后立刻执行。写操作才弹确认卡，确认后再 `--confirm`。",
+  ];
+  if (steps.length > 1) {
+    lines.push(`按 \`default.steps\` 顺序逐步办理（共 ${steps.length} 步）。禁止 \`--route default\` 一次跑完整条链（会把后续写表单提前问完）：`);
+  } else if (steps.length === 1) {
+    lines.push("本合同默认路线只有一步，按该能力冻结表办理。");
+  }
+  steps.forEach((id, index) => {
+    const cap = byId.get(id) || { capability_id: id };
+    const name = cap.name || id;
+    const n = index + 1;
+    if (isWriteCap(cap)) {
+      lines.push(`${n}. \`${id}\`（${name}）：问该能力冻结表；收齐后确认，再 \`python3 scripts/flow.py --route ${id} --input-json '{...}' --confirm\`。`);
+    } else if ((cap.caller_fields || []).length) {
+      lines.push(`${n}. \`${id}\`（${name}）：问该能力冻结表；提交后立刻 \`python3 scripts/flow.py --route ${id} --input-json '{...}'\`。读成功必须先发原始结果表，再进入下一步。`);
+    } else {
+      lines.push(`${n}. \`${id}\`（${name}）无调用方字段：直接 \`python3 scripts/flow.py --route ${id}\`。读成功先发原始结果表。`);
+    }
+  });
+  lines.push("缺写字段就一次跑完 default 会报缺少必填字段。中间不要重读，不要第二次 `--list-options`。");
+  if (hasToday) {
+    lines.push("写操作日期：冻结 JSON 的 `default` 是 `today`。调用 ask 前必须先跑 `date +%F`，用这条输出换成当天 yyyy-MM-dd，`required` 保持 false。禁止用合同、INPUT_FORMS、录制样本里的日期冒充当天，禁止自己猜年份。不要改回必填。runtime 也会把未选的写操作日期填成当天。");
+  }
+  lines.push("查询/筛选周期没有页面当日默认，必须向用户收集真实区间，禁止把统计周期改成今天。");
+  return lines;
+}
+
 export function renderSkillMd(contract) {
   const title = contract.title || "本页办理";
   const names = contract.capabilities.map((item) => item.name).filter(Boolean);
@@ -613,15 +716,7 @@ export function renderSkillMd(contract) {
     "",
     "## 立刻办理",
     "",
-    "只读这一节就能办。读完禁止再读本文件，禁止读 `references/`，禁止 ls / cat / 探路。",
-    "查询不要确认卡：表单提交后立刻执行。写操作才弹确认卡，确认后再 `--confirm`。",
-    "default 链固定四步，不许跳步、不许一上来就 `--route default`：",
-    "1. 只问读能力冻结表。用户提交后立刻 `python3 scripts/flow.py --route <读能力id> --input-json '{...}'`。此时禁止 `--route default`。",
-    "2. 读成功后先发一条用户可见的原始结果表，禁止此时就问写表单，禁止等整条链写完再补表。",
-    "3. 再问写能力冻结表。",
-    "4. 写确认后才跑写能力，或此时才允许 `--route default`。",
-    "缺写字段就跑 default 会报缺少必填字段，用户会看到命令执行失败。中间不要重读，不要第二次 `--list-options`。",
-    "日期：冻结 JSON 的 `default` 是 `today`。调用 ask 前必须先跑 `date +%F`，用这条输出换成当天 yyyy-MM-dd，`required` 保持 false。禁止用合同、INPUT_FORMS、录制样本里的日期冒充当天，禁止自己猜年份。不要改回必填。runtime 也会把未选日期填成当天。",
+    ...renderImmediateHowTo(contract),
     "冻结提问 JSON 必须原样复制，不要改 question 文案，不要给无合同 default 的字段编默认值。",
     "问句只保留短标题和行格式，不要把内部 path 或探路说明写进宿主标签。",
     "查询成功必须回原始结果表：优先原样复制脚本返回的 `table`。没有 `table` 时按返回列表字段画 Markdown 表。列名和单元格必须与原始返回相同，禁止改写成短条，禁止漏行漏列，禁止为某一页发明口径。",
@@ -848,12 +943,15 @@ export function handbookUnfaithfulReasons(text, contract) {
   }
   if (!/禁止再读本文件|不要再读本文件/.test(text)) reasons.push("缺少不要再读本文件");
   if (!/确认卡/.test(text)) reasons.push("缺少确认卡规则");
-  if (!/换成当天/.test(text)) reasons.push("缺少日期 today 换成当天");
   if ((contract.routes || []).some((item) => item.route_id === "default") && (contract.capabilities || []).length > 1) {
     if (!/禁止 `--route default`|禁止 --route default/.test(text)) reasons.push("缺少禁止提前 default");
     if (!/原始结果表/.test(text)) reasons.push("缺少原始结果表");
   }
-  if ((contract.capabilities || []).some((cap) => (cap.caller_fields || []).some((field) => field.page_default === "today"))) {
+  const hasToday = (contract.capabilities || []).some((cap) => (
+    (cap.caller_fields || []).some((field) => field.page_default === "today")
+  ));
+  if (hasToday) {
+    if (!/换成当天/.test(text)) reasons.push("缺少日期 today 换成当天");
     if (!/"default": "today"/.test(text) && !/"default":"today"/.test(text)) {
       reasons.push("冻结提问缺少日期 default today");
     }

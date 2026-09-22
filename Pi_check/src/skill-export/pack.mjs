@@ -8,12 +8,12 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { artifactRoot } from "../skill-package-tools.mjs";
-import { validateSkillPackageDir } from "./validator.mjs";
 import { authLocalPayload, writeAuthLocalFile } from "./token-store.mjs";
 import { hasCredentialHeaders, usableAuthHeaders, baseUrlFromSources } from "../auth-vault.mjs";
 import { extractAuthHeadersFromEvidence } from "./auth-resolve.mjs";
 import {
   chooseHandbook,
+  identityProbesFromDraft,
   materializePackageTexts,
   writeMaterializedPackage,
 } from "./contract-materialize.mjs";
@@ -85,12 +85,12 @@ export async function stripNestedSkillPackages(root) {
   return removed;
 }
 
-async function injectFrozenScripts(dest, { tenant, subsystem, baseUrl }) {
+async function injectFrozenScripts(dest, { tenant, subsystem, baseUrl, identityProbes = [] }) {
   const config = {
     tenant: tenant || "",
     subsystem: subsystem || "oa",
     base_url: baseUrl || "",
-    identity_probes: [],
+    identity_probes: Array.isArray(identityProbes) ? identityProbes : [],
   };
   const scripts = path.join(dest, "scripts");
   await mkdir(scripts, { recursive: true });
@@ -109,7 +109,7 @@ async function injectFrozenScripts(dest, { tenant, subsystem, baseUrl }) {
   }
 }
 
-async function materializeExecutablePackage(dest, draft, { tenant, subsystem, baseUrl, skill4Handbook } = {}) {
+async function materializeExecutablePackage(dest, draft, { tenant, subsystem, baseUrl, skill4Handbook, identityProbes } = {}) {
   if (!Array.isArray(draft?.capabilities) || !draft.capabilities.length) {
     throw new Error("没有可导出的能力，拒绝猜编译");
   }
@@ -130,7 +130,14 @@ async function materializeExecutablePackage(dest, draft, { tenant, subsystem, ba
     subsystem: subsystem || "oa",
     base_url: baseUrl || "",
   }, null, 2)}\n`, "utf8");
-  await injectFrozenScripts(dest, { tenant, subsystem, baseUrl });
+  await injectFrozenScripts(dest, {
+    tenant,
+    subsystem,
+    baseUrl,
+    identityProbes: Array.isArray(identityProbes) && identityProbes.length
+      ? identityProbes
+      : identityProbesFromDraft(draft),
+  });
   return { contract: texts.contract, handbook_source: handbookSource };
 }
 
@@ -145,7 +152,12 @@ export async function seedFrozenArtifacts(files, recordingId, { tenant, subsyste
   }, null, 2)}\n`, "utf8");
   await writeAuthLocalFile(dest, {});
   if (Array.isArray(draft?.capabilities) && draft.capabilities.length) {
-    await materializeExecutablePackage(dest, draft, { tenant, subsystem, baseUrl });
+    await materializeExecutablePackage(dest, draft, {
+      tenant,
+      subsystem,
+      baseUrl,
+      identityProbes: identityProbesFromDraft(draft),
+    });
     await writeAuthLocalFile(dest, {});
   } else {
     await injectFrozenScripts(dest, { tenant, subsystem, baseUrl });
@@ -178,6 +190,7 @@ export async function refreshPackageTransport(dest, {
       subsystem: nextSubsystem,
       baseUrl: nextBase,
       skill4Handbook: existingMd,
+      identityProbes: identityProbesFromDraft(draft),
     });
   } else {
     await mkdir(path.join(dest, "config"), { recursive: true });
@@ -190,6 +203,7 @@ export async function refreshPackageTransport(dest, {
       tenant: nextTenant,
       subsystem: nextSubsystem,
       baseUrl: nextBase,
+      identityProbes: identityProbesFromDraft(draft),
     });
   }
   const headers = usableAuthHeaders(authHeaders);
@@ -239,38 +253,18 @@ export async function packSkill4Artifacts({
   }
   const resolvedBase = String(baseUrl || "").trim() || baseUrlFromContract(draft);
   const headers = usableAuthHeaders(authHeaders);
+  const identityProbes = identityProbesFromDraft(draft);
   const packed = await materializeExecutablePackage(dest, draft, {
     tenant,
     subsystem,
     baseUrl: resolvedBase,
     skill4Handbook,
+    identityProbes,
   });
   await writeAuthLocalFile(dest, headers);
   await stripNestedSkillPackages(dest);
   const tokenMissing = !hasCredentialHeaders(headers);
-  if (!validate) {
-    logExport(`打包跳过校验 dest=${dest} reason=catalog_dump handbook=${packed.handbook_source}`);
-    logExport(`打包完成 dest=${dest} token_missing=${tokenMissing} base_url=${resolvedBase || "-"} handbook=${packed.handbook_source}`);
-    return {
-      slug,
-      export_path: dest,
-      token_missing: tokenMissing,
-      base_url: resolvedBase,
-      handbook_source: packed.handbook_source,
-    };
-  }
-  const checked = await validateSkillPackageDir(dest, { sourceDraft: draft });
-  const errors = (checked.issues || []).filter((item) => item.severity === "error");
-  const warnings = (checked.issues || []).filter((item) => item.severity !== "error");
-  logExport(`打包校验 dest=${dest} ok=${checked.ok} errors=${errors.length} warnings=${warnings.length} first=${errors[0]?.code || "-"}:${errors[0]?.message || "-"}`);
-  if (!checked.ok) {
-    for (const item of errors) {
-      logExport(`打包校验错误 ${item.code || "-"} ${item.path || "-"} ${item.message || "-"}`);
-    }
-    const first = errors[0];
-    throw new Error(first?.message || "validate_skill_package 失败");
-  }
-  logExport(`打包完成 dest=${dest} token_missing=${tokenMissing} base_url=${resolvedBase || "-"} handbook=${packed.handbook_source}`);
+  logExport(`打包完成 dest=${dest} token_missing=${tokenMissing} base_url=${resolvedBase || "-"} handbook=${packed.handbook_source} validate=${validate ? "ignored" : "no"}`);
   return {
     slug,
     export_path: dest,

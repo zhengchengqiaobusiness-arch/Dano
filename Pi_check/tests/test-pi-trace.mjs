@@ -13,6 +13,15 @@ test("工具参数和结果摘要能看出 PI 走了哪一步", () => {
     result: { capabilities: [{}, {}], unresolved: [] },
   }), /capabilities=2/);
   assert.match(summarizeToolResult("list_recording_index", { count: 18, items: [] }), /items=18/);
+  assert.match(
+    summarizeToolResult("control_in_app_browser", {
+      count: 3,
+      request_count: 2,
+      requests: [{ method: "GET", path: "/admin-api/oa/work-report/statistics" }],
+      events: [],
+    }),
+    /requests=2/,
+  );
 });
 
 test("模型事件格式化成可读分析步骤", () => {

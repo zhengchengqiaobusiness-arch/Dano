@@ -60,9 +60,18 @@ export function summarizeToolResult(name, result) {
   }
   if (name === "control_in_app_browser") {
     if (result?.error || result?.ok === false) return `失败 ${compactText(result.error || result.message || "error", 160)}`;
+    if (Array.isArray(result?.events) || result?.request_count != null || result?.count != null) {
+      const reqs = (result.requests || result.events || [])
+        .filter((item) => !item.kind || item.kind === "network_request")
+        .slice(0, 4)
+        .map((item) => `${item.method || ""} ${compactText(item.path, 36)}`.trim())
+        .filter(Boolean);
+      return `events=${result.count ?? result.events?.length ?? 0} requests=${result.request_count ?? reqs.length} ${reqs.join("; ")}`.trim();
+    }
     if (Array.isArray(result?.controls) || Array.isArray(result?.actions)) {
       return `controls=${result.controls?.length ?? 0} actions=${result.actions?.length ?? 0}`;
     }
+    if (result?.filled != null) return `filled=${result.filled} ok=${result.ok}`;
     return compactText(`${result.action || ""} ${result.selector || result.ref || ""} ${result.text || result.url || ""}`, 120);
   }
   return compactText(JSON.stringify(result), 160);

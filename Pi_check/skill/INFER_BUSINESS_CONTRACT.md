@@ -146,7 +146,7 @@ Investigator 确认该项已按目标做完、并在 `list_action_timeline` 或 
    - 入口 URL / 上一页带入的默认值：本页对应控件**仍能改** → **调用方**，`source_kind=page_default`，必须进 `input_schema`。日期页面默认当天时，调用方字段写 `page_default=today`（或等价说明），**不要**收进系统栏。`visible_control` 上该控件整项 `readonly=true` 或 `disabled=true` → **系统**，`source_kind=page_default`，且必须带运行时可执行的 `default_value`，reason 写清从哪次跳转/URL 带入；**禁止**再写进 `input_schema`。同一标签若既有只读下拉、又有一份看起来可改的空 input，认只读那条，不要把灰掉的类型收成调用方数字框。
      **禁止**把可改日期/下拉做成系统 `page_default` 且没有 `default_value`：导出后 runtime 填不出，调用方 input-json 也改不了系统栏，写操作会直接失败。这种形状要么改回调用方，要么写入 `unresolved`，禁止当已解决。
    - 对得上灰框 / 自动编号 / 只读姓名单位 / `readonly=true` / `disabled=true` → **系统**。
-   - 请求里有、控件上没有：登录用户/组织且初始加载请求就自动带上 → **系统**，`source_kind=current_user`，`key` 必须等于这条 execute 里的真实键，且能在登录身份接口响应里读到。reason 写「运行时取当前登录身份」。**禁止**把本场的用户 ID、公司 ID 写成永远不变的 `constant` 固定值，禁止编 `current-dept-id` 这类运行时别名。
+   - 请求里有、控件上没有：登录用户/组织且初始加载请求就自动带上 → **系统**，`source_kind=current_user`，`key` 必须等于这条 execute 里的真实键。`source` 必须写出本场真实身份接口：`source_url`（本场证据里的 GET path）、`source_method`、`result_path`（身份 JSON 里指向该值的路径）。reason 写「运行时取当前登录身份」。这是能力合同的一部分，Skill 只照抄，不会猜探测。**禁止**把本场的用户 ID、公司 ID 写成永远不变的 `constant` 固定值，禁止编 `current-dept-id` 这类运行时别名，禁止假设所有系统都是 `/admin-api/system/auth/get-permission-info`。身份接口没看见或 result_path 对不上 → `unresolved`，不要标 `current_user`。
    - 请求里有、控件上没有：行类型判别、行序号、前端行键 → 仅当有加行按钮和分区证据时标 **系统**，reason 写清依据和 seq。前端时间戳或看不清的键 → `unresolved`，录制值只作 `sample_value`。禁止写成「无独立来源，按录制请求原值提交」并标已解决。
    - 空数组/空对象：有对应可改控件（上传、选人、可增行）且目标没有排除它 → **调用方**，即使本场是空；目标排除该项（例如排除上传）→ 不进 `input_schema`，空数组留在系统 params；没有对应控件 → **系统**，按请求原值。
    - 上一页跳转带进本页 query、本页仍有对应控件 → **调用方**，`source_kind=page_default`，不要因为本场没再搜就收成系统。
@@ -262,7 +262,8 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 - **行内字段**：行里对应可填/可选控件的是调用方，写进该数组的 `items.properties`；行里没有独立来源的判别码、序号、前端行键是系统，只留在 params，不要进 schema。行类型码来自点了哪个加行按钮或落在哪张表，不是调用方下拉，禁止编成「类型/项目类型」让调用方选。
 - **键名**：execute 的 `path` / `key` 必须能在实际 **query/body** 里找到，或能对上当前页可见控件。请求和控件都没有的键不要编进去；请求有的键不要改名。`input_schema.properties` 的顶层 key 必须等于某个 `exposed_to_user=true` 的 param.key。不要把请求头写成 `query.*` / `body.*`。
 - **页面原名**：`label` / `title` 用当前页原文，去掉星号（星号只表示 `required_mark`，不要把星号写进名字）。有 `section` 时，附件等分区字段优先用分区标题。
-- **样例值**：`default_value` 只固定无来源字段怎么提交，不是下次执行必须填的业务值。
+- **样例值**：`default_value` 只固定无来源字段怎么提交，不是下次执行必须填的业务值。调用方日期禁止把本场看到的 `yyyy-MM-dd` 写成 `default_value`；写入表单日期控件默认当天写 `page_default=today`；查询/筛选周期没有合同默认。
+- **身份**：`current_user` 的处理合同就是 `source.source_url` + `result_path`。`result_path` 相对身份接口响应 JSON 原文（HTTP 体，含外层字段），不要按某一系统先剥 `data`。Skill 成品完全按能力投影，能力里没有身份接口，包里就没有。禁止交没有 `source` 的 `current_user`。
 - **编排**：`request_refs` / `steps` 只能引用本场真实发出的请求。不要把没发过的 create/update/save 编进执行顺序。
 
 完整性：

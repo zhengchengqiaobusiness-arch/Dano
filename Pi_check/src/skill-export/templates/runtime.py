@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import client
@@ -45,41 +45,55 @@ def _payload_slot(path, method="GET"):
     return "body", text
 
 
+def _probe_path(raw):
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if "://" in text:
+        try:
+            from urllib.parse import urlparse
+            return urlparse(text).path or ""
+        except Exception:
+            return text.split("?", 1)[0]
+    return text.split("?", 1)[0]
+
+
+def _identity_payload():
+    probes = list(getattr(client, "CONFIG", {}).get("identity_probes") or [])
+    last_error = None
+    for probe in probes:
+        path = _probe_path((probe or {}).get("path"))
+        method = str((probe or {}).get("method") or "GET").upper() or "GET"
+        if not path:
+            continue
+        try:
+            result = client.http_json(method, path)
+            return result.get("data") if isinstance(result, dict) else result
+        except Exception as exc:
+            last_error = exc
+    raise client.AuthExpired(str(last_error) if last_error else "没有身份探针，无法读取当前登录用户")
+
+
 def current_user():
-    result = client.http_json("GET", "/admin-api/system/auth/get-permission-info")
-    payload = result.get("data")
-    if not isinstance(payload, dict):
-        raise client.AuthExpired("无法读取当前登录用户")
-    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-    user = data.get("user") if isinstance(data.get("user"), dict) else {}
-    dept = user.get("dept") if isinstance(user.get("dept"), dict) else {}
-    info = {
-        "creator": user.get("id") if user.get("id") is not None else user.get("userId"),
-        "creatorName": user.get("nickname") or user.get("username") or "",
-        "deptId": user.get("deptId") if user.get("deptId") is not None else dept.get("id"),
-        "deptName": dept.get("name") or user.get("deptName") or "",
-        "companyId": user.get("companyId") if user.get("companyId") is not None else data.get("companyId"),
-        "companyName": user.get("companyName") or data.get("companyName") or "",
-    }
-    if info["creator"] in (None, ""):
-        raise client.AuthExpired("当前登录用户缺少 id，请提供 token")
-    return info
+    return {"_payload": _identity_payload()}
 
 
 def _system_value(param, user):
     kind = str(param.get("source_kind") or "")
     key = str(param.get("key") or "")
     if kind == "current_user":
-        if key in user and user[key] not in (None, ""):
-            return user[key]
+        ident = param.get("identity") or {}
+        pointer = str(ident.get("result_path") or "")
+        root = user.get("_payload") if isinstance(user, dict) else None
+        if pointer and root is not None:
+            value = client.get_path(root, pointer)
+            if value not in (None, ""):
+                return value
         raise client.AuthExpired(f"当前登录用户缺少 {key}")
     if "default_value" in param:
         return param.get("default_value")
     if kind == "constant" and param.get("type") == "array":
         return []
-    if key == "createTime":
-        now = datetime.now(timezone.utc)
-        return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
     return None
 
 
@@ -290,15 +304,11 @@ def execute_capability(capability_id, inputs=None, confirm=False):
     path = str(exec_ref.get("path") or "")
     if not path:
         raise RuntimeError(f"{capability_id} 没有执行路径")
-    extra = None
-    if user.get("deptId") not in (None, ""):
-        extra = {"current-dept-id": str(user["deptId"])}
     return client.http_json(
         method,
         path,
         query=query or None,
         body=body if method != "GET" else None,
-        extra_headers=extra,
     )
 
 

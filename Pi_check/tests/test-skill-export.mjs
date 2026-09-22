@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, mkdir, access } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -9,7 +9,7 @@ import { RecordingFiles } from "../src/fs-store.mjs";
 import { writeSkillArtifact, runIsolatedScript, asStringArgs } from "../src/skill-package-tools.mjs";
 import { exportRecordingSkill, dumpRecordingSkill, reexportCatalogSkills, stableSkillId } from "../src/skill-export/start-export-session.mjs";
 import { upsertExportedSkill, listExportedSkills, skillManifestFromExport } from "../src/skill-export/skill-catalog.mjs";
-import { readGeneratorGuides, REQUIRED_GUIDE_FILES, generatorGuideDir } from "../src/skill-export/read-guides.mjs";
+import { readGeneratorGuides, generatorGuideDir } from "../src/skill-export/read-guides.mjs";
 import { validateSkillPackageDir } from "../src/skill-export/validator.mjs";
 import { createExportToolHost, describeExportPiTools, describePiTools } from "../src/pi-tools.mjs";
 import { packSkill4Artifacts } from "../src/skill-export/pack.mjs";
@@ -94,13 +94,28 @@ test("出包只吃已交能力，没有能力就不开 Skill 4", async () => {
   assert.match(String(outcome.errors?.[0] || ""), /没有可导出的能力/);
 });
 
-test("doc/ 四份生成规范齐全", async () => {
+test("doc/ 规范按目录现有文件读取，不写死文件名", async () => {
   const guides = await readGeneratorGuides();
   assert.equal(guides.ok, true, guides.error);
-  const names = new Set(guides.files.map((item) => path.posix.basename(item.path)));
-  for (const name of REQUIRED_GUIDE_FILES) {
-    assert.ok(names.has(name), name);
+  assert.ok(guides.files.length > 0);
+  const names = new Set(guides.files.map((item) => item.path.replace(/\\/g, "/")));
+  const listed = await (await import("node:fs/promises")).readdir(guides.dir, { withFileTypes: true });
+  for (const entry of listed) {
+    if (!entry.isFile() || entry.name.startsWith(".")) continue;
+    assert.ok(names.has(entry.name), entry.name);
   }
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "dano-guides-"));
+  await writeFile(path.join(root, "alpha.md"), "# a\n", "utf8");
+  await mkdir(path.join(root, "extra"), { recursive: true });
+  await writeFile(path.join(root, "extra", "beta.txt"), "b\n", "utf8");
+  const custom = await readGeneratorGuides({
+    env: { DANO_SKILL_REFERENCE_DIR: root },
+    includeContent: true,
+  });
+  assert.equal(custom.ok, true, custom.error);
+  assert.deepEqual(custom.files.map((item) => item.path), ["alpha.md", "extra/beta.txt"]);
+  assert.equal(custom.files[0].content, "# a\n");
 });
 
 test("相对规范目录按 DANO_SKILL_REFERENCE_ROOT 解析", () => {
@@ -162,7 +177,7 @@ test("工作项和计划项投影为两个 caller 字段，并带上 itemType / 
           key: "deptId",
           path: "query.deptId",
           source_kind: "api_option",
-          source: { source_method: "GET", source_url: "/admin-api/system/dept/simple-list", label_key: "name", value_key: "id" },
+          source: { source_method: "GET", source_url: "/admin-api/system/dept/simple-list", label_key: "name", value_key: "id", children_key: "children" },
         }],
       },
       {
@@ -801,15 +816,24 @@ test("合同已物化后拒绝改瘦 SKILL.md", async () => {
   assert.ok(reasons.some((item) => item.includes("立刻办理")));
 });
 
-test("物化字段与录制调用方字段一致，flow --help 可读", async () => {
+test("物化字段与录制调用方字段一致，flow --help 可读", async (t) => {
   const resultPath = path.join(ROOT, "data", "rec_0fcf87ab2f2e42c8b5b4500d3c01ac6b", "pi-result.json");
+  try {
+    await access(resultPath);
+  } catch {
+    t.skip("缺少本地录制夹具");
+    return;
+  }
   const draft = JSON.parse(await readFile(resultPath, "utf8"));
   const contract = consumerContract(draft);
   const query = contract.capabilities.find((item) => item.capability_id === "cap_report_statistics_query");
   const create = contract.capabilities.find((item) => item.capability_id === "cap_daily_report_create_submit");
   assert.deepEqual(query.caller_fields.map((item) => item.id), ["reportType", "deptId", "startDate", "endDate"]);
   assert.equal(query.execute.path, "/admin-api/oa/work-report/statistics");
-  assert.equal(query.caller_fields.find((item) => item.id === "deptId").dataSource.childrenField, "children");
+  const dept = query.caller_fields.find((item) => item.id === "deptId");
+  assert.ok(dept.dataSource?.endpoint);
+  const deptParam = (draft.steps || []).flatMap((step) => step.params || []).find((item) => item.key === "deptId");
+  assert.equal(dept.dataSource.childrenField || "", deptParam?.source?.children_key || "");
   assert.deepEqual(create.caller_fields.map((item) => item.id), [
     "startDate", "endDate", "title", "todayContent", "planContent", "issueContent", "remark", "approvalOpinion", "items",
   ]);
@@ -840,7 +864,7 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
   );
   const forms = await readFile(path.join(packed.export_path, "references", "INPUT_FORMS.md"), "utf8");
   assert.match(forms, /dataSource/);
-  assert.match(forms, /childrenField/);
+  if (dept.dataSource.childrenField) assert.match(forms, /childrenField/);
   const handbook = await readFile(path.join(packed.export_path, "SKILL.md"), "utf8");
   assert.match(handbook, /立刻办理/);
   assert.match(handbook, /冻结提问/);
@@ -869,9 +893,9 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
   assert.match(handbook, /禁止再读本文件/);
   assert.match(handbook, /查询不要确认卡/);
   assert.match(handbook, /原始结果表/);
-  assert.equal(query.caller_fields.find((item) => item.id === "startDate").page_default, "today");
+  assert.equal(query.caller_fields.find((item) => item.id === "startDate").page_default, undefined);
   const queryAsk = frozenAskForm(query);
-  assert.equal(queryAsk.questions.find((item) => item.id === "startDate").required, false);
+  assert.equal(queryAsk.questions.find((item) => item.id === "startDate").default, undefined);
   assert.equal(queryAsk.questions.find((item) => item.id === "deptId").inputType, "treeSelect");
   assert.equal(queryAsk.questions.find((item) => item.id === "deptId").dataSource, undefined);
   const askForm = renderSkillMd(contract);
@@ -891,6 +915,7 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async ()
   assert.match(askForm, /"default": "today"/);
   assert.match(askForm, /禁止 `--route default`/);
   assert.match(askForm, /原始结果表/);
+  assert.doesNotMatch(askForm, /固定四步/);
   assert.ok(handbookIsFaithful(askForm, contract));
   assert.ok(!handbookIsFaithful(`${askForm}\n{"inputType": "table"}\n`, contract));
   assert.ok(!handbookIsFaithful(`${askForm}\n{"dataSource": {"type":"api"}}\n`, contract));
@@ -987,8 +1012,15 @@ print(json.dumps(runtime.build_request(cap, {"workItems": "完成模块开发|||
   ]);
 });
 
-test("能力 schema 字段不得被系统标记丢掉，调用方 extras 必须留下", async () => {
-  const quit = JSON.parse(await readFile(path.join(ROOT, "data", "rec_3790796afb344b6a9c66848cd1fc1773", "pi-result.json"), "utf8"));
+test("能力 schema 字段不得被系统标记丢掉，调用方 extras 必须留下", async (t) => {
+  const quitPath = path.join(ROOT, "data", "rec_3790796afb344b6a9c66848cd1fc1773", "pi-result.json");
+  try {
+    await access(quitPath);
+  } catch {
+    t.skip("缺少本地录制夹具");
+    return;
+  }
+  const quit = JSON.parse(await readFile(quitPath, "utf8"));
   const quitContract = consumerContract(quit);
   const submit = quitContract.capabilities.find((item) => item.capability_id === "cap_quit_submit");
   assert.deepEqual(submit.caller_fields.map((item) => item.id), ["billType", "businessId"]);
@@ -1095,6 +1127,108 @@ test("dumpRecordingSkill 默认不开 Skill 4，但沿用已有手册", async ()
   assert.equal(outcome.skill_id, "oa.rec_dump_one");
   assert.equal(packedValidate, false);
   assert.equal(packedUseHandbook, true);
+});
+
+test("查询日期不打 today，写操作日期才 page_default today，立刻办理按 default.steps", () => {
+  const contract = consumerContract({
+    title: "汇报",
+    capabilities: [
+      {
+        capability_id: "cap_q",
+        name: "查询统计",
+        kind: "query",
+        step_ids: ["s1"],
+        request_refs: [{ step_id: "s1", usage: "execute" }],
+        input_schema: {
+          properties: {
+            startDate: { type: "string", format: "date", title: "开始日期" },
+            deptId: { type: "number", title: "组织机构" },
+          },
+          required: ["startDate", "deptId"],
+        },
+      },
+      {
+        capability_id: "cap_d",
+        name: "查询明细",
+        kind: "query",
+        step_ids: ["s2"],
+        request_refs: [{ step_id: "s2", usage: "execute" }],
+        input_schema: { properties: { userId: { type: "number", title: "用户" } } },
+      },
+      {
+        capability_id: "cap_w",
+        name: "提交日报",
+        kind: "create",
+        step_ids: ["s3"],
+        request_refs: [{ step_id: "s3", usage: "execute" }],
+        input_schema: {
+          properties: {
+            startDate: { type: "string", format: "date", title: "开始日期" },
+            title: { type: "string", title: "标题" },
+          },
+        },
+      },
+    ],
+    steps: [
+      {
+        step_id: "s1",
+        method: "GET",
+        path: "/q",
+        params: [
+          { key: "startDate", path: "query.startDate", type: "date", exposed_to_user: true, required: true },
+          { key: "deptId", path: "query.deptId", exposed_to_user: true, required: true },
+        ],
+      },
+      {
+        step_id: "s2",
+        method: "GET",
+        path: "/d",
+        params: [{ key: "userId", path: "query.userId", exposed_to_user: true }],
+      },
+      {
+        step_id: "s3",
+        method: "POST",
+        path: "/w",
+        params: [
+          { key: "startDate", path: "body.startDate", type: "date", exposed_to_user: true, page_default: "today" },
+          { key: "title", path: "body.title", exposed_to_user: true },
+          {
+            key: "creator",
+            path: "body.creator",
+            source_kind: "current_user",
+            exposed_to_user: false,
+            source: { source_method: "GET", source_url: "/admin-api/system/auth/get-permission-info", result_path: "user.id" },
+          },
+        ],
+      },
+    ],
+    capability_relations: [
+      { from_capability: "cap_q", to_capability: "cap_d" },
+      { from_capability: "cap_d", to_capability: "cap_w" },
+    ],
+  });
+  const query = contract.capabilities[0];
+  const write = contract.capabilities[2];
+  assert.equal(query.caller_fields.find((item) => item.id === "startDate").page_default, undefined);
+  assert.equal(query.caller_fields.find((item) => item.id === "startDate").type, "date");
+  assert.equal(write.caller_fields.find((item) => item.id === "startDate").page_default, "today");
+  const creator = write.system_params.find((item) => item.key === "creator");
+  assert.equal(creator?.identity?.path, "/admin-api/system/auth/get-permission-info");
+  assert.equal(creator?.identity?.result_path, "user.id");
+  const md = renderSkillMd(contract);
+  assert.doesNotMatch(md, /固定四步/);
+  assert.match(md, /cap_q/);
+  assert.match(md, /cap_d/);
+  assert.match(md, /cap_w/);
+  assert.match(md, /default\.steps/);
+  assert.match(md, /禁止 `--route default`/);
+  assert.match(md, /换成当天/);
+  assert.ok(handbookIsFaithful(md, contract));
+  const queryAsk = frozenAskForm(query);
+  assert.equal(queryAsk.questions.find((item) => item.id === "startDate").default, undefined);
+  assert.equal(queryAsk.questions.find((item) => item.id === "startDate").required, true);
+  const writeAsk = frozenAskForm(write);
+  assert.equal(writeAsk.questions.find((item) => item.id === "startDate").default, "today");
 });
 
 test("查询日期未选按当天，旧手册缺确认卡即不保真", () => {

@@ -19,7 +19,7 @@
 ## 每页一轮
 
 1. `list_recording_index` 看本页新增请求。文首 `recon_until_seq` 表示：不大于该序号的自动加载不是已完成查询。
-2. 一次 `snapshot` 或 `network_since`（需要时 `read_request_shape`）。不要反复 snapshot。
+2. 一次 `snapshot` 或 `network_since`（需要时 `read_request_shape`）。不要反复 snapshot。**禁止 screenshot**。
 3. `write_context_skill` 写出**整份累积稿**：保留已经识别过的页，补上本页。没看见的栏目写「待观察」。
 
 不确定就写待观察。降级是正常情况。主 PI 不依赖本文件才能工作。

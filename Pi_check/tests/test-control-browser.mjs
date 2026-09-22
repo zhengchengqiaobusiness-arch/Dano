@@ -163,6 +163,9 @@ test("choose 用语义选择器一次选中，不必再 snapshot", async () => {
       selector: 'role=button[name="搜索"]',
     });
     assert.equal(clicked.ok, true);
+    const emptyFill = await tools.control_in_app_browser({ action: "fill_fields", fields: [] });
+    assert.equal(emptyFill.ok, false);
+    assert.match(emptyFill.error, /非空 fields/);
     const shot = await tools.control_in_app_browser({ action: "snapshot", include_screenshot: true });
     assert.equal(shot.screenshot?.data, undefined);
     assert.equal(shot.__image, undefined);

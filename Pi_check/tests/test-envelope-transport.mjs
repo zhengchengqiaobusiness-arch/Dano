@@ -299,9 +299,10 @@ test("监控驱动词禁止交能力；出包 host 能只读 context", async () 
       }),
     });
     const shot = await withBrowser.control_in_app_browser({ action: "screenshot", as_image: true });
-    assert.equal(shot.__image, true);
-    assert.equal(shot.as_image, true);
-    assert.equal(shot.data, "QQQQ");
+    assert.equal(shot.ok, false);
+    assert.match(shot.error, /screenshot/);
+    const snap = await withBrowser.control_in_app_browser({ action: "snapshot" });
+    assert.equal(snap.url, "http://x/#/p");
   } finally {
     await harness.cleanup();
   }

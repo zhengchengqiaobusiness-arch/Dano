@@ -49,6 +49,8 @@ test("PI 必须加载且只加载四份 Skill", async () => {
   assert.match(exportInstructions, /read_generator_guides/);
   assert.match(exportInstructions, /submit_skill_export/);
   assert.match(exportInstructions, /read_context_skill/);
+  assert.doesNotMatch(exportInstructions, /骨架不是成品/);
+  assert.doesNotMatch(exportInstructions, /覆盖 SKILL\.md/);
   const exportTools = exportInstructions.split("可用工具：")[1] || "";
   assert.doesNotMatch(exportTools, /control_in_app_browser/);
   assert.match(exportTools, /read_context_skill/);

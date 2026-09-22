@@ -1,7 +1,8 @@
 /**
- * 两条导出路径：
  * 录制页「产出 Skill」每次新建 Skill 4 会话。禁止因磁盘已有 SKILL.md 而跳过 Skill 4。
- * 目录页快速导出不开 Skill 4、不校验；沿用已发布或产物里的 Skill 4 手册，运输层只重写合同/脚本/token。
+ * Skill 4 按已交能力写出调用手册，成品必须遵守仓库 doc/ 目录当前全部规范文件。
+ * 不校验能力对不对，禁止另编字段、接口或身份，禁止把规范文件打进消费者包。
+ * 目录页快速导出不开 Skill 4、不校验；沿用已发布或产物里的手册，运输层只重写合同/脚本/token。
  */
 
 import { readdir, rm } from "node:fs/promises";
@@ -68,7 +69,7 @@ export async function exportRecordingSkill({
   const started = Date.now();
   const capIds = (overlayDraft?.capabilities || []).map((item) => item.capability_id || item.id).filter(Boolean);
   logExport(`1/9 开始 recording_id=${recordingId || "-"} title=${title || "-"} tenant=${tenant || "-"} subsystem=${subsystem || "-"} overlay=${overlayDraft ? "yes" : "no"} overlay_caps=${capIds.length || 0} out_dir=${outDir || "-"} timeout_ms=${timeoutMs}`, started);
-  const guides = await readGeneratorGuides();
+  const guides = await readGeneratorGuides({ includeContent: false });
   if (!guides.ok) {
     logExport(`失败 规范缺失 ${guides.error}`, started);
     return { status: "export_failed", errors: [guides.error], clarification_questions: [] };

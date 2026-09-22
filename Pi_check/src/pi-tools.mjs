@@ -158,17 +158,27 @@ export async function networkEventsSince(evidence, recordingId, after_seq = 0) {
     return item.kind === "page_navigated" || item.kind === "interaction";
   });
   const windowed = cursor ? matched.slice(-80) : matched.slice(-40);
+  const events = windowed.map((item) => ({
+    seq: item.seq,
+    kind: item.kind,
+    actor: item.payload?.actor || "",
+    method: item.payload?.method || "",
+    path: item.payload?.url || item.payload?.path || "",
+    label: item.payload?.label || item.payload?.text || item.payload?.selector || "",
+    status: item.payload?.status,
+  }));
+  const requests = events.filter((item) => item.kind === "network_request");
   return {
     after_seq: cursor || (windowed[0] ? Number(windowed[0].seq) - 1 : 0),
-    events: windowed.map((item) => ({
+    count: events.length,
+    request_count: requests.length,
+    requests: requests.slice(0, 12).map((item) => ({
       seq: item.seq,
-      kind: item.kind,
-      actor: item.payload?.actor || "",
-      method: item.payload?.method || "",
-      path: item.payload?.url || item.payload?.path || "",
-      label: item.payload?.label || item.payload?.text || item.payload?.selector || "",
-      status: item.payload?.status,
+      method: item.method,
+      path: item.path,
+      status: item.status,
     })),
+    events,
   };
 }
 
@@ -463,6 +473,12 @@ export function createPiToolHost({
           ?? browser.actByRef?.({ ref: target, selector: target, action: kind, text });
       }
       if (kind === "fill_fields") {
+        if (!Array.isArray(fields) || !fields.length) {
+          return {
+            ok: false,
+            error: "fill_fields 需要非空 fields[]，每项含 ref/selector 与 text。不要空调用。先 snapshot 当前表单再填。",
+          };
+        }
         return browser.fillFields?.(fields);
       }
       if (kind === "upload") {
@@ -742,7 +758,7 @@ export function describePiTools() {
  * 监控 PI 工具集（轻量侦察阶段）。
  *
  * 只读工具（list_recording_manifest / list_recording_index / read_request_shape /
- * read_evidence_item / control_in_app_browser[snapshot / screenshot / network_since]）
+ * read_evidence_item / control_in_app_browser[snapshot / network_since]）
  * + 一个写出口 write_context_skill。
  * 禁止提交能力、操作表单、open_page、写入证据。
  */
@@ -793,14 +809,13 @@ export function createMonitorPiToolHost({
     async control_in_app_browser({
       action,
       after_seq = 0,
-      as_image = false,
     } = {}) {
-      const allowedActions = ["snapshot", "screenshot", "network_since"];
+      const allowedActions = ["snapshot", "network_since"];
       const kind = String(action || "snapshot").toLowerCase();
       if (!allowedActions.includes(kind)) {
         return {
           ok: false,
-          error: `监控 PI 只允许只读动作：${allowedActions.join(" / ")}。不能 ${kind}。当前页由主 PI 打开，禁止 open_page / click / fill。`,
+          error: `监控 PI 只允许 snapshot / network_since。不能 ${kind}。禁止 screenshot。当前页由主 PI 打开，禁止 open_page / click / fill。`,
         };
       }
       const browser = typeof getBrowser === "function" ? getBrowser() : null;
@@ -810,13 +825,6 @@ export function createMonitorPiToolHost({
       logTool("control_in_app_browser", `action=${kind}`);
       if (kind === "snapshot") {
         return inspectBrowser(browser, { includeScreenshot: false });
-      }
-      if (kind === "screenshot") {
-        return inspectBrowser(browser, {
-          includeScreenshot: Boolean(as_image),
-          as_image: Boolean(as_image),
-          action: "screenshot",
-        });
       }
       if (kind === "network_since") {
         return networkEventsSince(evidence, recordingId, after_seq);
@@ -861,7 +869,7 @@ export function createExportToolHost({
   };
   return {
     async read_generator_guides() {
-      const result = await readGeneratorGuides();
+      const result = await readGeneratorGuides({ includeContent: true });
       logTool("read_generator_guides", `ok=${result.ok} files=${result.files?.length || 0} error=${result.error || "-"}`);
       return result;
     },
@@ -907,7 +915,7 @@ export function createExportToolHost({
         if (result.saved === false) {
           return {
             ...result,
-            next_action: "SKILL.md 未保存。停止再写手册。对运输层现包跑 validate_skill_package；通过且合同可执行则 submit_skill_export({ok:true})。禁止再写更瘦表单，禁止打开页面。",
+            next_action: "SKILL.md 未保存。停止再写手册。按 doc/ 目录当前全部规范核对手册后立刻 submit_skill_export({ok:true})。禁止再写更瘦表单，禁止打开页面，禁止用校验去判能力。",
           };
         }
         return result;
@@ -1001,12 +1009,11 @@ export function describeMonitorPiTools() {
     {
       name: "control_in_app_browser",
       label: "当前页只读快照",
-      description: "只允许 action=snapshot / screenshot / network_since。当前页由主 PI 打开。禁止 open_page / click / fill。screenshot 设 as_image=true 才把图像送给模型。",
+      description: "只允许 action=snapshot / network_since。当前页由主 PI 打开。禁止 screenshot / open_page / click / fill。",
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", enum: ["snapshot", "screenshot", "network_since"] },
-          as_image: { type: "boolean", description: "action=screenshot 时为 true 才把图像写入对话" },
+          action: { type: "string", enum: ["snapshot", "network_since"] },
           after_seq: { type: "integer", description: "action=network_since 时只看该序号之后的证据" },
         },
         required: ["action"],
@@ -1037,7 +1044,7 @@ export function describeExportPiTools() {
     {
       name: "read_generator_guides",
       label: "生成规范",
-      description: "读取 doc/ 下全部生成规范。写包前必须调用。缺目录或缺必需要文件则失败。",
+      description: "读取仓库 doc/ 目录里当前全部规范文件。增删以目录为准。成品必须遵守返回的全部文件。禁止拷进消费者包。不要用来判断能力对不对。",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
     {
@@ -1068,7 +1075,7 @@ export function describeExportPiTools() {
     {
       name: "write_skill_artifact",
       label: "写 Skill 产物",
-      description: "只允许覆盖 SKILL.md 的触发用语。禁止重写 client/runtime/flow/CONTRACT/INPUT_FORMS/鉴权配置，禁止另开子包。",
+      description: "只允许改 SKILL.md 的触发用语或立刻办理缺句。禁止整篇重写。禁止重写 client/runtime/flow/CONTRACT/INPUT_FORMS/鉴权配置，禁止另开子包。",
       parameters: {
         type: "object",
         properties: {
@@ -1082,7 +1089,7 @@ export function describeExportPiTools() {
     {
       name: "validate_skill_package",
       label: "校验 Skill 包",
-      description: "跑结构/披露检查。细节看 Skill 4。",
+      description: "可选。看包文件是否齐。不要用来判断能力对不对。",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
     {

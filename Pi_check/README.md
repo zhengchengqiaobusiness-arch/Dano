@@ -7,12 +7,12 @@
 - `skill/BUSINESS_SKILL_INVESTIGATOR.md`：唯一入口
 - `skill/CONTROL_IN_APP_BROWSER.md`：操作与取证
 - `skill/INFER_BUSINESS_CONTRACT.md`：解释证据、写合同
-- `skill/BUILD_AND_VALIDATE_DEDICATED_SKILL.md`：只在用户点击「产出 Skill」后写专用包并验证
+- `skill/BUILD_AND_VALIDATE_DEDICATED_SKILL.md`：只在用户点击「产出 Skill」后按已交能力写调用手册，成品遵守 `doc/` 生成规范，不校验能力
 
-缺一份不准开录。识别、切能力、来源、handbook、能不能发布：只改对应 Skill。录制会话不加载 Skill 4。
+缺一份不准开录。识别、切能力、来源只改 Skill 1–3。调用手册只改 Skill 4。录制会话不加载 Skill 4。
 
 ## 代码只做
 
-执行动作、存证据、跑指定检查。出包运输开 Skill 4 会话、注入冻结的 `client.py` / `wire_format.py` / `auth.local.json`、校验本目录形状、写入 `data/skill-catalog.json`。禁止引用 `back`。写入仍 unresolved 时拒绝发布可执行写能力。
+执行动作、存证据、跑指定检查。出包运输开 Skill 4 会话、按能力注入冻结的 `client.py` / `wire_format.py` / `auth.local.json`、写入 `data/skill-catalog.json`。禁止引用 `back`。能力对不对只在录制合同里解决。
 
 详见 `RESPONSIBILITIES.md`。

@@ -1,4 +1,4 @@
-export { readGeneratorGuides, REQUIRED_GUIDE_FILES, generatorGuideDir } from "./read-guides.mjs";
+export { readGeneratorGuides, generatorGuideDir } from "./read-guides.mjs";
 export { validateSkillPackageDir } from "./validator.mjs";
 export {
   readTokenRecord,

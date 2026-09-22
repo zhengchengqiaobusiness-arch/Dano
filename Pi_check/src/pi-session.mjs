@@ -139,10 +139,9 @@ export function buildExportPiInstructions(skillText = "") {
   return `${PI_ONLY_NOTICE}
 
 你是 Build and Validate Dedicated Skill。不要点页面，不要交能力，不要 submit_recording_result。
-唯一输入是 read_export_contract 返回的合同五块，加上只读的 read_context_skill。
-运输层已按合同物化整包。禁止重写 client/runtime/flow/CONTRACT/INPUT_FORMS。
-写包前必须 read_generator_guides，读完返回的全部文件。
-通过验证后 submit_skill_export。
+唯一输入是已交能力五块。成品 Skill 只给调用方用：怎么问、怎么跑。字段/接口/必填与能力一致，禁止另编。
+成品必须遵守仓库 doc/ 目录里当前全部规范文件。运输层已按能力和规范物化 CONTRACT/runtime/SKILL.md。
+不要校验能力对不对。能力问题留在录制。禁止读 scripts/*，禁止把规范正文抄进成品。
 
 ${String(skillText || "").trim()}
 
@@ -205,7 +204,7 @@ export function buildMonitorDrivePrompt({
     `recon_until_seq：${Number(reconUntilSeq) || 0}（≤该序号的自动加载不是已完成查询）\n` +
     `录制目标（仅供参考）：${String(goal || "").trim()}\n` +
     `禁止 click / fill / submit_recording_capability / submit_recording_result / write_skill_artifact。\n` +
-    `只读：list_recording_index 看本页新增请求、一次 snapshot 或 network_since，然后 write_context_skill 写整份累积稿（保留已识别页，补上本页）。\n` +
+    `只读：list_recording_index 看本页新增请求、一次 snapshot 或 network_since，然后 write_context_skill 写整份累积稿（保留已识别页，补上本页）。禁止 screenshot。\n` +
     `不要巡游其它 URL。写完即本轮结束。\n` +
     (previous ? `已有累积稿：\n${previous}` : "尚无累积稿，从本页写起。")
   );
@@ -1097,18 +1096,15 @@ export class LivePiSession {
     const kick = (
       `你是 Build and Validate Dedicated Skill。不要点页面，不要交能力。\n` +
       `标题：${String(title || "本页办理").trim()}\n` +
-      `运输层已按录制合同物化整包：CONTRACT、表单、路线、runtime.py、flow.py、client.py。\n` +
-      `禁止重写 client/runtime/flow/CONTRACT/INPUT_FORMS，禁止另开子包，禁止发明 client.request。\n` +
-      `1. read_generator_guides，读完返回的全部文件\n` +
-      `2. read_export_contract，只认五块合同\n` +
-      `3. read_context_skill，只读本场 overlay；禁止打开业务页\n` +
-      `4. read_skill_artifact("SKILL.md") 看运输层骨架；骨架不是成品\n` +
-      `5. 按本 Skill 与 doc/ 覆盖 SKILL.md：完全基于能力。write_skill_artifact 若 saved=false：停写 SKILL.md，validate 现包，通过就提交。每个能力必须有冻结提问 JSON。调用方字段写成一次完整表单。系统常量必须写出实际合同值，由 runtime 自动填。无合同 default 的正文不编占位句。写操作日期可用 today。不准漏字段，禁止把能力字段改成系统后删掉\n` +
-      `6. project_contract_to_request + validate_skill_package。投影失败或不可执行 → submit_skill_export({ok:false})\n` +
-      `7. 校验通过立刻 submit_skill_export({ok:true})，不要反复隔离跑\n` +
-      `失败带 issues 调用 submit_skill_export({ok:false, errors:[...]})，不要假装发布。`
+      `运输层已按已交能力和 doc/ 目录当前全部规范物化 CONTRACT、runtime、SKILL.md。\n` +
+      `成品必须遵守 read_generator_guides 返回的全部文件。目录里有什么就遵守什么，不要假设固定几份。\n` +
+      `不要校验能力对不对。不要读 scripts/*。不要把规范正文抄进 SKILL.md。\n` +
+      `1. read_export_contract\n` +
+      `2. read_generator_guides，读完目录里当前全部文件并按它们核对手册调用形状\n` +
+      `3. 手册已满足规范 → 立刻 submit_skill_export({ok:true})\n` +
+      `4. 只有规范要求的调用说明缺句才改 SKILL.md。禁止整篇重写。\n`
     );
-    const nudge = "还没有 submit_skill_export。不要重写冻结执行器。校验通过立刻提交。";
+    const nudge = "还没有 submit_skill_export。成品必须遵守 doc/ 目录当前全部规范。核对手册后立刻提交。不要校验能力。";
     const ready = async () => {
       try {
         return Boolean(await hasExport?.());
