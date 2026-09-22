@@ -14,7 +14,7 @@
 2. 只有 relation、没有值流：仍是主路线。交接点停问，不准猜传值，不准拆成两个 Skill。
 3. 都没有：按 `capabilities[]` 顺序做人手交接主路线，**仍然要有能跑的 default**。
 4. 每个能力另留原子路线。选路：matched = 本包能力里 name / title / intent 被当前说法覆盖到的集合。1 个 → 只跑该原子路线。≥2 个 → 取 `default.steps` 里覆盖全部 matched 的最短连续切片。0 个且已选本 skill → 按 `default.steps` 全程逐步办理。禁止为某个业务口令写死 capability_id。
-5. 每步先填槽。读能力禁止提问、禁止确认卡：说法、合同身份、上一步表能填的立刻执行；填不满必填槽就停，不要问部门树或姓名。写能力把该能力冻结提问 JSON 整份带上（禁止删 id，只改 default），提交后再 `confirm:true + formIds[]`。禁止一上来 `--route default`，也禁止跳过切片外的步骤。
+5. 每步先填槽。读能力禁止确认卡：说法、合同身份、上一步表能填的立刻执行。合同调用方必填尚未确定 → 必须问缺槽，不要停。不要改口问合同已标 current_user / selected_record 的筛选。写能力把该能力冻结提问 JSON 整份带上（禁止删 id，禁止改问句，只改 default），提交后再 `confirm:true + formIds[]`。禁止一上来 `--route default`，也禁止跳过切片外的步骤。
 
 `CONTRACT.json` 必须有 `routes[]`。合同里有 ≥2 个能力时，必须有一条多步默认路线。这些由运输层写出；你只核对，不要另编一份。
 
@@ -33,7 +33,7 @@ python3 scripts/flow.py --list-options <capability_id> <field>
 - 写步骤必须整份带上冻结提问 JSON（禁止删 id），再 `confirm:true + formIds[]`，执行时加 `--confirm`。读步骤禁止确认卡。
 - 任一步失败即停，不得跳过写操作或用查询结果假装办理完成。读步骤成功必须先发原始结果表，再进入下一步。
 - 只认 `client.http_json(query=, body=)`。禁止发明 `client.request`。
-- 有合法来源必须写入 `default`。读能力：无合法值则必填填不满就停，不要问。写能力：无合法值也留在全量确认表里。禁止编「暂无 / 请填写 / 请审批」。
+- 有合法来源必须写入 `default`。读能力：已确定的不问；调用方必填未定必须问，不要停。写能力：无合法值也留在全量确认表里。禁止编「暂无 / 请填写 / 请审批」。
 - 系统栏写着 `page_default` 却没有 `default_value`：合同不可执行，停止，不要让用户补键，不要改 `CONTRACT.json`。
 
 ## `SKILL.md`「选择工作流」

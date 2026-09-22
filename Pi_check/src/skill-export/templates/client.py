@@ -119,8 +119,14 @@ def get_path(node, path):
 def _login_expired(status, data):
     if int(status or 0) == 401:
         return True
+    if isinstance(data, dict):
+        for key in ("code", "status", "errcode", "errCode", "resultCode"):
+            if key in data and not isinstance(data[key], (dict, list)):
+                if str(data[key]) == "401":
+                    return True
     text = json.dumps(data, ensure_ascii=False) if not isinstance(data, str) else data
-    return "账号未登录" in text or "not login" in text.casefold()
+    lowered = text.casefold()
+    return "not login" in lowered or "unauthorized" in lowered
 
 
 def _business_ok(data, rule):
@@ -255,14 +261,12 @@ def http_json(method, path="", *, url="", query=None, body=None, extra_headers=N
     }
 
 
-def flatten_options(rows, id_field="id", label_field="label", children_field=""):
+def flatten_options(rows, id_field="", label_field="", children_field=""):
     options = []
     for item in rows or []:
         if not isinstance(item, dict):
             continue
-        ident = item.get(id_field)
-        if ident in (None, ""):
-            ident = item.get("id")
+        ident = item.get(id_field) if id_field else None
         if ident in (None, ""):
             kids = item.get(children_field) if children_field else None
             if isinstance(kids, list):
@@ -270,7 +274,7 @@ def flatten_options(rows, id_field="id", label_field="label", children_field="")
             continue
         options.append({
             "id": ident,
-            "label": item.get(label_field) or item.get("name") or ident,
+            "label": (item.get(label_field) if label_field else ident) or ident,
         })
         kids = item.get(children_field) if children_field else None
         if isinstance(kids, list):
@@ -289,13 +293,13 @@ def list_options(binding, values=None):
     if search_param and values.get(search_param) not in (None, ""):
         query[search_param] = values[search_param]
     result = http_json(method, endpoint, query=query if method == "GET" else None, body=query if method != "GET" else None)
-    rows = get_path(result.get("data"), (binding or {}).get("resultPath") or "data")
+    rows = get_path(result.get("data"), (binding or {}).get("resultPath") or "")
     if not isinstance(rows, list):
         rows = []
     options = flatten_options(
         rows,
-        str((binding or {}).get("idField") or "id"),
-        str((binding or {}).get("labelField") or "label"),
+        str((binding or {}).get("idField") or ""),
+        str((binding or {}).get("labelField") or ""),
         str((binding or {}).get("childrenField") or ""),
     )
     if not options:

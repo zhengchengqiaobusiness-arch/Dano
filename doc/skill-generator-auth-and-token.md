@@ -44,14 +44,14 @@
 
 `--show-config` 只打印 tenant / subsystem / base_url / 是否已有鉴权头，**不打印头的值**。
 
-HTTP 401，或响应声明账号未登录，同样抛 `AuthExpired`。调用方必须停问要 token，不得重试猜值，不得把录制时的 Authorization 写进手册或脚本常量。
+HTTP 401，或响应业务码 401，同样抛 `AuthExpired`。调用方必须停问要 token，不得重试猜值，不得把录制时的 Authorization 写进手册或脚本常量。
 
 ## 手册和对话
 
 `SKILL.md` 必须有「鉴权」节，只写：
 
 - 没有 `auth.local.json` 且没有环境凭证则停止
-- 401 / 账号未登录同样停问
+- 401 / 响应业务码 401 同样停问
 - 页面改 token 后会回写已导出包，不必重录
 
 禁止把真实 token、cookie、password 写进：

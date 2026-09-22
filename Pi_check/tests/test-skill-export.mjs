@@ -472,7 +472,8 @@ test("出包注入 auth 并按最新合同重导同一条", async () => {
   assert.doesNotMatch(clientSrc, /JSON\.stringify\(JSON\.stringify/);
   const handbook = await readFile(path.join(first.export_path, "SKILL.md"), "utf8");
   assert.match(handbook, /立刻办理/);
-  assert.match(handbook, /不问直接执行|先按合同填槽|读能力禁止提问/);
+  assert.match(handbook, /必须问缺|未定必须问|缺槽/);
+  assert.doesNotMatch(handbook, /读能力禁止提问|填不满必填槽就停/);
   assert.doesNotMatch(handbook, /Skill4已核对手册/);
   assert.doesNotMatch(handbook, /不要先查/);
   assert.doesNotMatch(handbook, /test-token-value-12345/);
@@ -953,7 +954,7 @@ test("物化字段与录制调用方字段一致，flow --help 可读", async (t
 
   const assembled = await new Promise((resolve) => {
     const scriptsDir = path.join(packed.export_path, "scripts");
-    const code = `import sys, json; sys.path.insert(0, ${JSON.stringify(scriptsDir)}); import runtime; field = {"sections": {"已完成工作": "x", "工作计划": "y"}, "itemProperties": {"content": {"type": "string"}, "progress": {"type": "number"}}}; print(json.dumps(runtime._parse_caller_array(field, "已完成工作|||写日报|||80\\n工作计划|||明天评审"), ensure_ascii=False))`;
+    const code = `import sys, json; sys.path.insert(0, ${JSON.stringify(scriptsDir)}); import runtime; field = {"sections": {"已完成工作": "x", "工作计划": "y"}, "sectionItemTypes": {"已完成工作": {"itemType": 1}, "工作计划": {"itemType": 2}}, "itemProperties": {"content": {"type": "string"}, "progress": {"type": "number"}}}; print(json.dumps(runtime._parse_caller_array(field, "已完成工作|||写日报|||80\\n工作计划|||明天评审"), ensure_ascii=False))`;
     const child = spawn("python", ["-c", code], { windowsHide: true });
     let stdout = "";
     let stderr = "";
@@ -1227,8 +1228,10 @@ test("查询日期不打 today，写操作日期才 page_default today，立刻�
   assert.match(md, /换成当天/);
   assert.match(md, /matched/);
   assert.match(md, /切片/);
-  assert.match(md, /读能力禁止提问/);
+  assert.match(md, /必须问缺|未定必须问|缺槽/);
+  assert.doesNotMatch(md, /读能力禁止提问|填不满必填槽就停/);
   assert.match(md, /禁止删 id|整份带上|全量/);
+  assert.match(md, /禁止改问句/);
   assert.match(md, /写入该题 `default`/);
   assert.ok(handbookIsFaithful(md, contract));
   const queryAsk = frozenAskForm(query);
@@ -1335,7 +1338,8 @@ test("目录导出丢弃旧手册，按合同重写 SKILL.md", async () => {
   assert.equal(outcome.status, "exported", (outcome.errors || []).join("; "));
   const packed = await readFile(path.join(outcome.export_path, "SKILL.md"), "utf8");
   assert.notEqual(packed, skill4Text);
-  assert.match(packed, /不问直接执行|先按合同填槽|读能力禁止提问/);
+  assert.match(packed, /必须问缺|未定必须问|缺槽/);
+  assert.doesNotMatch(packed, /读能力禁止提问|填不满必填槽就停/);
   assert.doesNotMatch(packed, /不要先查/);
   assert.doesNotMatch(packed, /第一次工具调用必须是 ask_user_question/);
 });
@@ -1396,6 +1400,7 @@ test("数组自动列不进提问行格式，手册标明 runtime 补", () => {
             type: "array",
             title: "工作项",
             "x-dano-section-titles": { "已完成工作": "工作内容", "工作计划": "计划内容" },
+            "x-dano-section-item-types": { "已完成工作": { itemType: 1 }, "工作计划": { itemType: 2 } },
             items: {
               type: "object",
               properties: {
@@ -1423,13 +1428,15 @@ test("数组自动列不进提问行格式，手册标明 runtime 补", () => {
   });
   const field = contract.capabilities[0].caller_fields[0];
   assert.deepEqual(field.autoItemKeys, ["itemType"]);
+  assert.deepEqual(field.sectionItemTypes, { "已完成工作": { itemType: 1 }, "工作计划": { itemType: 2 } });
   const md = renderSkillMd(contract);
-  assert.match(md, /每行一条：分区标题\|\|\|content/);
+  assert.match(md, /每行一条：分区标题\|\|\|内容/);
   assert.doesNotMatch(md, /每行一条：分区标题\|\|\|content\|\|\|itemType/);
   assert.match(md, /自动补齐|不要向用户要/);
   const ask = frozenAskForm(contract.capabilities[0], contract);
-  assert.match(ask.questions[0].question, /content/);
+  assert.match(ask.questions[0].question, /内容/);
   assert.doesNotMatch(ask.questions[0].question, /itemType/);
+  assert.doesNotMatch(ask.questions[0].question, /每行一条：content/);
 });
 
 test("只有 tenant-id 不算有证，出包回落到同租户可用 token", async () => {

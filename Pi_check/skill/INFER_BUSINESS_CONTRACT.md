@@ -143,7 +143,7 @@ Investigator 确认该项已按目标做完、并在 `list_action_timeline` 或 
 4. **按目标写上再证明绑定**：Investigator 已按目标把该动作的可见字段写上并点出 execute 之后，再对还没对上的键建议改一个值看哪个请求键变了。值碰巧相等、字段名相似、同一个请求里仅剩两个字段，都不能单独定案。本场没改过、但控件可改：仍是调用方，不要写成 `constant` / 「无独立来源」。无法做这个实验（合法 selector 写不进、未授权写入）：该键写入 `unresolved`。禁止编 path，禁止 invent selector。来源没看清不能说成已经理解业务。录制值只可作 `sample_value`。
 5. **逐键对上控件，决定调用方还是系统**：
    - 对得上**可改**控件（input/select/date/textarea/upload，以及树、页签、分段器、单选组，且 `readonly`/`disabled` 都不是 true）→ **调用方**。即使本场没改、这次 query/body 没带这个键，也留下可选调用方字段。页面上已有默认选中（单选默认启用、下拉已有值）只要还能改，仍是调用方，禁止写成 `constant` / 「无独立来源」。`path` 用控件 `name` 或同页已发出请求里的同义键。对不上 path 就写入 `unresolved`，不要假装控件不存在。
-     **例外（读筛选 = 当前登录人）**：查询/筛选 execute 里的部门、人员键，本场请求值与身份 JSON 走通值相同 → **系统** `current_user`，不要收成调用方必填树/姓名框。`source` 写与写能力同一套身份接口和已走通的 `result_path`（人员主键常常是 `data.user.id`，不是 `data.`+execute 键名）。本场改成了与身份不同的部门/人员 → 仍按可改控件收成调用方。这条优先于「本场没改过、控件可改 → 调用方」。
+     **例外（读筛选 = 当前登录人）**：查询/筛选 execute 里的键，若本场请求值与身份 JSON 走通值相同（常见于人、组织、部门这类筛选）→ **系统** `current_user`，不要收成调用方必填树/姓名框。`source` 写与写能力同一套身份接口和已走通的 `result_path`（必须对着本场身份响应 JSON 原文走通，禁止用 execute 键名去拼路径）。本场改成了与身份不同的人/组织 → 仍按可改控件收成调用方。这条优先于「本场没改过、控件可改 → 调用方」。
    - 一个可见**日期区间**（`range=true` 或一个控件里两个起止输入）对上两个请求键时，两个键都是调用方，不要把起止收成系统。
    - 页面因切换类型/页签自动改了日期，只要日期控件仍能点，仍是调用方，不要当成计算公式。
    - 入口 URL / 上一页带入的默认值：本页对应控件**仍能改** → **调用方**，`source_kind=page_default`，必须进 `input_schema`。日期页面默认当天时，调用方字段写 `page_default=today`（或等价说明），**不要**收进系统栏。`visible_control` 上该控件整项 `readonly=true` 或 `disabled=true` → **系统**，`source_kind=page_default`，且必须带运行时可执行的 `default_value`，reason 写清从哪次跳转/URL 带入；**禁止**再写进 `input_schema`。同一标签若既有只读下拉、又有一份看起来可改的空 input，认只读那条，不要把灰掉的类型收成调用方数字框。
@@ -221,7 +221,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 - `option_source` 的 path 等于另一能力的 `execute` path，并且空参时拉不到候选
 - `input_schema` 出现了 `exposed_to_user=false` 的 key（点行身份做成了调用方树，或系统键又写进 schema）
 - execute 的某个 query/body 业务键既不在该 step `params`、也不在 `unresolved`（身份、时间、空数组、行类型被丢掉）
-- 数组 `items.properties` 里出现行类型码、行序号；或整表写死一个 `itemType`
+- 数组 `items.properties` 里出现行类型码、行序号；或整表写死一种行类型码
 - 加行后本表 URL 的 `visible_control` 已有某列表头，却既不在 `items.properties` 也不在 `unresolved`
 - 用来认字段的 `visible_control` 的 URL 不是这一张表（提交后跳到其它模块的 snapshot）
 
@@ -260,13 +260,13 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 
 - **重复键**：同一个 query/body 键在请求里出现多次，就建同样多个 param，共用这个 `path`，归属相同，执行时仍发这个重复键。不要丢掉第 2 次及以后，也不要改成线上没有的新键名。
 - **数组**：请求体里是一个数组，就只建这一个数组 path，`input_schema` 也只出现这一个数组 key。行与行的差别写在行内字段上，不要把每行的内容/进度拆成并列调用方字段，也不要把一种行拆成另一个调用方数组去抢同一 path。
-- **可增行明细**：调用方输入的是点「添加×× / 新增行」后单独出现的那些输入框，行数可变。`input_schema` 只出现 execute 里那一个数组 key，类型必须是对象数组，不能写成 `string`。页面上两张分区表、请求里却是同一个数组：合同仍是**一个**数组字段，调用方 UI 按分区分栏，不要拆成两项能力，也不要拆成两个调用方数组。`items.properties` 的 `title` 用**表头原文**（不要自造「工作内容/计划内容」这种合并名去替代列名），必须覆盖各分区可见表头（序号、操作除外）。数组自己的 `title` 用各分区标题原文，多个分区必须用 `/` 或 `；` 连接，禁止写成「A和B」或「工作项和计划项」这种拆不开的合并名。数组 title 能拆出多个分区时，必须写 `x-dano-section-titles`。同一线格式键在不同分区表头不同时，在该 property 上写 `x-dano-section-titles`：`{分区标题: 表头原文}`。也可以把同一份 `{分区标题: 表头原文}` 写在数组自己身上，导出按键认分区、按值认该字符串列的表头。合并成一个数组提交时，按分区标题分组或每行带分区标题，系统按分区补行类型等无独立控件的行字段。只在某一个分区表头出现的列（例如只有一种行有进度），只属于该分区，必须进该分区的 `items.properties` 或 `unresolved`，不要写进所有行，也不要省略。`reason` 必须写清：调用方按行填写这些实际输入，可增减；**最后**由系统把各行组装成 execute 里的那一个对象数组，并按分区补上无独立控件的行字段。行类型码、行序号、前端行键必须作为该 step 的系统 param 出现，禁止只写在数组 `reason` 里。禁止把整份数组当成调用方一次性粘贴的 JSON。禁止把一个数组拆成多个调用方数组或并列字段去抢同一 path。禁止把行序号写成调用方。
+- **可增行明细**：调用方输入的是点「添加×× / 新增行」后单独出现的那些输入框，行数可变。`input_schema` 只出现 execute 里那一个数组 key，类型必须是对象数组，不能写成 `string`。页面上两张分区表、请求里却是同一个数组：合同仍是**一个**数组字段，调用方 UI 按分区分栏，不要拆成两项能力，也不要拆成两个调用方数组。`items.properties` 的 `title` 用**表头原文**（不要自造合并名去替代列名），必须覆盖各分区可见表头（序号、操作除外）。数组自己的 `title` 用各分区标题原文，多个分区必须用 `/` 或 `；` 连接，禁止写成拆不开的合并名。数组 title 能拆出多个分区时，必须写 `x-dano-section-titles`。同一线格式键在不同分区表头不同时，在该 property 上写 `x-dano-section-titles`：`{分区标题: 表头原文}`。也可以把同一份 `{分区标题: 表头原文}` 写在数组自己身上，导出按键认分区、按值认该字符串列的表头。合并成一个数组提交时，按分区标题分组或每行带分区标题，系统按分区补行类型等无独立控件的行字段。多分区行类型必须写 `x-dano-section-item-types`：键是分区标题原文，值是该分区行要补的键值对象（从本场该分区行读出，禁止用 1、2 或下标去猜）。只在某一个分区表头出现的列（例如只有一种行有进度），只属于该分区，必须进该分区的 `items.properties` 或 `unresolved`，不要写进所有行，也不要省略。`reason` 必须写清：调用方按行填写这些实际输入，可增减；**最后**由系统把各行组装成 execute 里的那一个对象数组，并按分区补上无独立控件的行字段。行类型码、行序号、前端行键必须作为该 step 的系统 param 出现，禁止只写在数组 `reason` 里。禁止把整份数组当成调用方一次性粘贴的 JSON。禁止把一个数组拆成多个调用方数组或并列字段去抢同一 path。禁止把行序号写成调用方。
 - **同名文本域不是行**：`region=form` 的大段 textarea 与 `region=table` 的行内输入即使标题相近，也是两套控件。有独立 body 键的补充说明单独建模，用它自己的控件标签，不要用表格分区标题去命名这段文本。不要用它代替可增行，也不要把可增行收成一段字符串。
 - **行内字段**：行里对应可填/可选控件的是调用方，写进该数组的 `items.properties`；行里没有独立来源的判别码、序号、前端行键是系统，只留在 params，不要进 schema。行类型码来自点了哪个加行按钮或落在哪张表，不是调用方下拉，禁止编成「类型/项目类型」让调用方选。
 - **键名**：execute 的 `path` / `key` 必须能在实际 **query/body** 里找到，或能对上当前页可见控件。请求和控件都没有的键不要编进去；请求有的键不要改名。`input_schema.properties` 的顶层 key 必须等于某个 `exposed_to_user=true` 的 param.key。不要把请求头写成 `query.*` / `body.*`。
 - **页面原名**：`label` / `title` 用当前页原文，去掉星号（星号只表示 `required_mark`，不要把星号写进名字）。有 `section` 时，附件等分区字段优先用分区标题。
 - **样例值**：`default_value` 只固定无来源字段怎么提交，不是下次执行必须填的业务值。调用方日期禁止把本场看到的 `yyyy-MM-dd` 写成 `default_value`；**写入**表单里能打开面板的日期控件默认当天 → 调用方且写 `page_default=today`（即使本场改过日期，也不要收成没有 today 的纯 `user_input`，否则调用方会当成查询日期再确认一遍）；查询/筛选周期没有合同默认，禁止标 today。
-- **身份**：`current_user` 的处理合同就是 `source.source_url` + `result_path`。`result_path` 相对身份接口响应 JSON **原文**（HTTP 体，含外层 `code`/`data` 这类字段），不要按某一系统先剥 `data`。交之前必须用本场该次身份 GET 的响应把路径走通：从根开始每一段都是真实键，`get_path(响应原文, result_path)` 能读到这个 execute 键的值。禁止用 execute 的 body 键名去拼路径（例如看见 body 有 `userId`/`userNickname`/`deptId` 就写成 `data.userId`）。身份 JSON 若是 `data.user.id` / `data.user.nickname` / `data.user.deptId`，就必须写成这些真实路径。走不通 → 改路径或改 `unresolved`，禁止标 `current_user` 交差。Skill 成品完全按能力投影，能力里没有身份接口，包里就没有。禁止交没有 `source` 的 `current_user`。
+- **身份**：`current_user` 的处理合同就是 `source.source_url` + `result_path`。`result_path` 相对身份接口响应 JSON **原文**（HTTP 体，含外层 `code`/`data` 这类字段），不要按某一系统先剥 `data`。交之前必须用本场该次身份 GET 的响应把路径走通：从根开始每一段都是真实键，`get_path(响应原文, result_path)` 能读到这个 execute 键的值。禁止用 execute 的 body 键名去拼路径（例如看见 body 有 `userId` 就写成 `data.userId`）。某场身份 JSON 若实际是 `data.user.id`，就写成这条真实路径——这是形状例子，不是所有系统的必须形状。走不通 → 改路径或改 `unresolved`，禁止标 `current_user` 交差。Skill 成品完全按能力投影，能力里没有身份接口，包里就没有。禁止交没有 `source` 的 `current_user`。
 - **编排**：`request_refs` / `steps` 只能引用本场真实发出的请求。不要把没发过的 create/update/save 编进执行顺序。
 
 完整性：
@@ -638,14 +638,14 @@ execute 里的附件容器字段来自 preflight 响应，标为系统自动处�
 47. 系统栏每个 `required=true` 的键，runtime 都填得出：`current_user` 键在登录身份里真实存在，且 `result_path` 已用本场身份响应原文走通；`constant` 有 `default_value`；`previous_response` 有 `from_step_id`+`from_path`；锁死的 `page_default` 有 `default_value`。可改日期/下拉没有被收进系统栏。写入能力的可改日期带 `page_default=today`。缺一项就改回调用方或 `unresolved`，禁止交不可执行写能力。
 48. 每个 `option_source` 都是本表单选择器自己的候选接口，path 不等于另一能力的 execute。空参应能返回候选。点行带出的 id 没有被做成独立用户树。
 49. 本场已做完的列表查询和「点结果看详情」已有 query→detail 的 `links` 或 `capability_relations`。默认关系没有跳过粒度更细的那次读。
-50. 行类型码、行序号不在 `input_schema` / `items.properties`；没有把整份数组合并成固定一种 `itemType` 让调用方填。行类型码、行序号已作为系统 param 出现，不是只写在 reason。
+50. 行类型码、行序号不在 `input_schema` / `items.properties`；没有把整份数组合并成固定一种类型码让调用方填。多分区时写了 `x-dano-section-item-types`（分区标题 → 本场该分区行要补的键值），行类型码、行序号已作为系统 param 出现，不是只写在 reason，也不是按下标猜。
 51. execute 的每个 query/body 业务键都在该 step `params` 或 `unresolved`。没有因为「系统栏会变长」丢掉身份、时间、空数组占位。
 52. `input_schema.properties` 没有任何 `exposed_to_user=false` 的 key。点行身份没有一边 params 标 identity、一边 schema 挂另一能力 execute 的 option_source。
 53. 用来摊控件的 `visible_control` 的 URL 是这一张表；没有用提交后跳到的其它模块 snapshot。
 54. 加行后本表可见表头列（序号、操作除外）都在 `items.properties` 或 `unresolved`。
 55. `previous_response` 写在 `source.from_step_id` + `source.from_path`，并有 `links`。
 56. 读能力 `kind=query`，写能力 `kind` 为 `create` / `update` / `delete` / `submit` 之一，没有只用 `mutation`。
-57. 查询/筛选里与本场身份走通值相同的部门/人员键已标 `current_user` 并带走通的 `result_path`，没有收成调用方必填树，也没有把「点自己那一行」收成要用户填姓名的 `selected_record`。
+57. 查询/筛选里与本场身份走通值相同的人/组织键已标 `current_user` 并带走通的 `result_path`，没有收成调用方必填树，也没有把「点自己那一行」收成要用户填姓名的 `selected_record`。
 
 ## 最小补证
 
@@ -677,7 +677,7 @@ execute 里的附件容器字段来自 preflight 响应，标为系统自动处�
 - 点结果表带出的 id → identity / `links`，不要把上一查询 execute 当 option_source，也不要再写进 schema。
 - 列表查询与详情粒度不同 → 两项能力，默认链保留「查询→详情」，不要压成查询→新增。
 - 只在一个分区出现的列 → 只属于该分区行。加行后看见的表头列不得从合同消失。
-- 行类型码、行序号 → 系统 params，不进 schema，不要整表写死一种类型，也不要只写在 reason。
+- 行类型码、行序号 → 系统 params，不进 schema；多分区写 `x-dano-section-item-types`（从本场该分区行读键值），不要整表写死一种类型，不要按下标猜，也不要只写在 reason。
 - 页眉身份键（申请人/单位/部门）在请求里 → 系统 `current_user`，禁止省略。
 - 前端时间戳、看不清的打开时写入键 → `unresolved`，不要标 `current_user`，也不要从合同删除。
 - 认字段只用这一张表的 `visible_control`，提交后跳走的页面不算。

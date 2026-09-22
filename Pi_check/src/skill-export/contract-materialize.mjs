@@ -126,14 +126,17 @@ function normalizeCallerField(key, spec, param, required) {
   const enums = asList(spec["x-enum-options"]).length ? asList(spec["x-enum-options"]) : asList(param.enum_options);
   const endpoint = String(option.source_url || source.source_url || "");
   const childrenField = String(option.children_key || source.children_key || "").trim();
+  const resultPath = String(option.result_path || source.result_path || "").trim();
+  const idField = String(option.value_key || source.value_key || "").trim();
+  const labelField = String(option.label_key || source.label_key || "").trim();
   const dataSource = endpoint ? {
     type: "api",
     endpoint,
     method: String(option.source_method || source.source_method || "GET").toUpperCase(),
     params: asRecord(option.params || source.params),
-    resultPath: String(option.result_path || source.result_path || "data"),
-    idField: String(option.value_key || source.value_key || "id"),
-    labelField: String(option.label_key || source.label_key || "name"),
+    ...(resultPath ? { resultPath } : {}),
+    ...(idField ? { idField } : {}),
+    ...(labelField ? { labelField } : {}),
     ...(childrenField ? { childrenField } : {}),
   } : null;
   const field = {
@@ -151,6 +154,8 @@ function normalizeCallerField(key, spec, param, required) {
     source_kind: String(param.source_kind || spec["x-dano-source-kind"] || ""),
     reason: String(param.reason || spec.description || ""),
   };
+  const sectionItemTypes = asRecord(spec["x-dano-section-item-types"] || param.section_item_types || source.section_item_types);
+  if (Object.keys(sectionItemTypes).length) field.sectionItemTypes = sectionItemTypes;
   const format = String(spec.format || param.format || "").trim();
   if (format) field.format = format;
   const itemType = Number(param.itemType);
@@ -212,7 +217,7 @@ export function systemParams(cap, steps = [], links = []) {
     if (item.source_kind === "current_user") {
       const src = asRecord(item.source);
       const identPath = String(src.source_url || src.path || "").trim();
-      const resultPath = String(src.result_path || src.value_key || "").trim();
+      const resultPath = String(src.result_path || "").trim();
       if (identPath || resultPath) {
         out.identity = {
           method: String(src.source_method || "GET").toUpperCase(),
@@ -424,11 +429,12 @@ export function consumerContract(draft) {
 }
 
 function fieldControl(field) {
-  if (field.dataSource) return "treeSelect";
+  if (field.dataSource) return field.dataSource.childrenField ? "treeSelect" : "select";
   if (field.enums.length) return "radio";
   if (field.type === "date") return "date";
   if (field.type === "array") return "table";
   if (field.type === "number" || field.type === "integer") return "number";
+  if (/文本域|多行/.test(String(field.reason || ""))) return "textarea";
   return "text";
 }
 
@@ -466,12 +472,12 @@ function howToFill(field, contract) {
   if (field.enums.length) return `按合同枚举选 id：${enumText(field)}。说法能唯一对上 label 或 id 则直接用，不必再问`;
   if (field.source_kind === "selected_record_identity") return "从上一张原始表里能唯一对上说法的一行取合同身份键；用户指向自己时用本包 current_user 主键去对，不要问「你是谁」，不要编造，不要把系统 id 写进 ask";
   if (field.source_kind === "previous_response") return "用本对话上一步已确认结果里的同名字段；runtime 也可按 links 带入";
-  if (isInheritedField(field)) return "默认用本对话上一步已确认的同名字段，调用方可改。已确定则不进 questions[]";
+  if (isInheritedField(field)) return "默认用本对话上一步已确认的同名字段，调用方可改。已确定则写入 default；读能力不进 questions[]，写能力题仍在";
   if (field.autoStamped) return "合同标明自动补齐，不要向用户要";
   if (field.type === "date") {
     return field.page_default === "today"
-      ? "按 yyyy-MM-dd 填写；页面日期控件默认当日，可改。说法已唯一解析或上一步同名 id 已确定 → 写入 input-json，不要放进本次 questions[]"
-      : "按 yyyy-MM-dd 填写；说法已唯一解析出日期 → 写入 input-json，不要放进本次 questions[]。查询/筛选日期禁止改成今天。不能解析才问";
+      ? "按 yyyy-MM-dd 填写；页面日期控件默认当日，可改。说法已唯一解析或上一步同名 id 已确定 → 写入 input-json；写操作仍留在全量确认表 default"
+      : "按 yyyy-MM-dd 填写；说法已唯一解析出日期 → 写入 input-json。查询/筛选日期禁止改成今天。读能力不能解析且该日期是调用方必填 → 问该题，不要停；写操作不能解析则省略 default 仍留在全量表";
   }
   if (field.type === "array") {
     const cols = visibleItemKeys(field, contract).map((key) => `\`${key}\` ${(field.itemProperties[key] || {}).title || key}`);
@@ -550,13 +556,17 @@ function askInputType(field) {
   return HOST_ASK_INPUT_TYPES.has(control) ? control : "text";
 }
 
+function visibleItemTitles(field, contract) {
+  return visibleItemKeys(field, contract).map((key) => String((field.itemProperties[key] || {}).title || key));
+}
+
 function arrayLineRecipe(field, contract) {
-  const cols = visibleItemKeys(field, contract);
+  const titles = visibleItemTitles(field, contract);
   const sections = Object.keys(field.sections || {});
-  if (sections.length && cols.length) {
-    return `每行一条：分区标题|||${cols.join("|||")}；分区只能是 ${sections.join(" / ")}`;
+  if (sections.length && titles.length) {
+    return `每行一条：分区标题|||${titles.join("|||")}；分区只能是 ${sections.join(" / ")}`;
   }
-  if (cols.length) return `每行一条：${cols.join("|||")}`;
+  if (titles.length) return `每行一条：${titles.join("|||")}`;
   return "每行一条，或提交 JSON 数组";
 }
 
@@ -742,18 +752,18 @@ function renderImmediateHowTo(contract) {
   const multi = (contract.capabilities || []).length > 1 || steps.length > 1;
   const lines = [
     "只读这一节就能办。读完禁止再读本文件，禁止读 `references/`，禁止 ls / cat / 探路。",
-    "查询不要确认卡：读能力禁止提问，禁止确认卡。说法、合同身份、上一步原始表能填的立刻执行；填不满必填槽就停，不要问部门树或姓名。",
-    "写操作必须把该能力「冻结提问」代码块整份拿去调用 `ask_user_question`。questions[] 的 id 集合和顺序必须与冻结 JSON 完全相同，禁止删 id。只允许改各题 default。附件、计划、问题、备注这类空可选也必须出现（省略 default，不要编占位）。少一个 id = 违规。用户提交后再弹确认卡，确认后再 `--confirm`。禁止按口头提到的字段瘦表。",
+    "查询不要确认卡：读能力禁止确认卡。说法、合同身份、上一步原始表能填的立刻执行。合同调用方必填尚未确定 → 必须问缺的那些题（动态字段先 `--list-options` 再 ask），不要停。不要问合同已标 current_user / selected_record 的筛选，也不要把系统栏改口问出来。",
+    "写操作必须把该能力「冻结提问」代码块整份拿去调用 `ask_user_question`。questions[] 的 id、question、inputType、options、dateFormat、顺序必须与冻结 JSON 完全相同，禁止删 id，禁止改问句。只允许改各题 default。冻结目录里每一题都要出现（含已有 default 的日期、空的可选、附件），空可选省略 default，禁止编「无 / 暂无 / 请填写」。少一个 id = 违规。用户提交后再弹确认卡，确认后再 `--confirm`。禁止按口头提到的字段瘦表，禁止把标题改成能力里没有的叫法。",
   ];
   if (multi) {
     lines.push("禁止 `--route default` 一次跑完整条链。逐步 `--route <capability_id>`。");
   }
   lines.push(
     "选路：matched = 本包能力里 name / title / intent 被当前说法覆盖到的集合。1 个 → 只跑该原子路线。≥2 个 → 取 `default.steps` 里覆盖全部 matched 的最短连续切片（夹在中间且有已确认 relation/link 的步骤一起跑，切片外不跑）。0 个且已选本 skill → 按 `default.steps` 全程逐步办理。不要为某个业务口令写死 capability_id。",
-    "每步先填槽。读能力禁止提问、禁止确认卡。写能力先按合同把已确定的值写入冻结表对应题的 default，再把整份冻结 questions[] 弹出去（禁止删 id），提交后再确认。读成功必须先发原始结果表（列以本次返回为准），再进入切片下一步。",
-    "读能力已唯一确定的字段不要放进本次 questions[]（整步都不问），即使冻结目录标了必填。写操作冻结 JSON 里每一题都进 questions[]，已确定的写入该题 `default`，不要从确认卡拿掉。有 default 还把读能力再问一遍 = 违反已确定则不问。",
-    "有合法值必须写入该题 `default`（非空）。禁止空字符串，禁止编「暂无 / 请填写 / 请审批」。读能力无合法值：必填填不满就停，不要问。写能力无合法值：必填省略 default 仍留在表里；可选未提也留在表里（可空）。禁止因为没值就删掉该题。",
-    "用户说法里带先查再决定是否写：仍按 matched≥2 的切片跑。写步骤是否执行，用当次查询返回的真实列判定用户条件；判定不了再问条件。先查某日再决定是否写：写入日期继承该查询日；「今天的内容」填正文槽，不把已确定的业务日期改成当天。",
+    "每步先填槽。读能力禁止确认卡。已确定的立刻执行。调用方必填未定必须问缺槽。写能力先按合同把已确定的值写入冻结表对应题的 default，再把整份冻结 questions[] 弹出去（禁止删 id，禁止改问句），提交后再确认。读成功必须先发原始结果表（列以本次返回为准），再进入切片下一步。",
+    "读能力已唯一确定的字段不要放进本次 questions[]。还有未定的调用方必填 → 只问缺的那些 id，不要整步都不问、也不要停。写操作冻结 JSON 里每一题都进 questions[]，已确定的写入该题 `default`，不要从确认卡拿掉。有 default 还把已确定的读槽再问一遍 = 违反已确定则不问。",
+    "有合法值必须写入该题 `default`（非空）。禁止空字符串，禁止编「无 / 暂无 / 请填写 / 请审批」。读能力无合法值：调用方必填必须问。写能力无合法值：必填省略 default 仍留在表里；可选未提也留在表里（可空）。禁止因为没值就删掉写表的题。",
+    "用户说法里带先查再决定是否写：仍按 matched≥2 的切片跑。写步骤是否执行，用当次查询返回的真实列判定用户条件；判定不了再问条件。先查某个业务日期再决定是否写：写入日期继承该查询日；说法里不是业务日期的那部分填对应正文/明细调用方槽，不把已确定的业务日期改成当天。",
   );
   if (hasDynamic) {
     lines.push("动态字段仅当尚未确定时才跑 `cd <本 SKILL.md 所在目录> && python3 scripts/flow.py --list-options <capability_id> <field>`，把返回的 `options` 写进该字段。说法能唯一对上则直接用 id。空列表或失败则停，不准猜第一条。不要把 dataSource 放进 ask_user_question。");
@@ -763,9 +773,9 @@ function renderImmediateHowTo(contract) {
   if (hasToday) {
     lines.push("写操作日期：冻结 JSON 的 `default` 是 `today`。调用 ask 前必须先跑 `date +%F`，用这条输出换成当天 yyyy-MM-dd，`required` 保持 false。用户说法已给出日期或上一步同名 id 已确定 → 用那个日期作 default，仍留在全量确认表里，不要改成今天。禁止用合同、INPUT_FORMS、录制样本里的日期冒充当天，禁止自己猜年份。不要改回必填。runtime 也会把未选的写操作日期填成当天。");
   }
-  lines.push("查询/筛选周期没有页面当日默认，禁止把查询日期改成今天；说法已唯一解析出日期 → 写入 input-json，不要放进本次 questions[]，不能解析就停，不要问。单一日期说法同时填 startDate 与 endDate（同一天区间）。");
-  lines.push("系统字段由 `scripts/runtime.py` 按合同自动填，不要向用户要。用户指向自己（我/替我/本人/当前登录人）时不要问「你是谁」、不要问所在部门；读/写身份键 runtime 按 current_user 填。selected_record 指向自己时用合同身份主键去上一张原始表匹配，唯一命中直接用，不要用表里其它人名反问。");
-  lines.push("问句只保留短标题和行格式，禁止改 `inputType`，禁止把内部 path 写进宿主标签。数组只问可见列；合同 unresolved 标明自动补的列由 runtime 补，不要问。");
+  lines.push("查询/筛选周期没有页面当日默认，禁止把查询日期改成今天；说法已唯一解析出日期 → 写入 input-json，读能力不要放进本次 questions[]。不能解析且该日期是调用方必填 → 问该题，不要停。写操作日期即使已从查询继承或说法解析，也留在冻结表里作 default，不要从 questions[] 拿掉。同一能力里成对的起止日期调用方字段：单一日期说法同时填两端（同一天区间）。");
+  lines.push("系统字段由 `scripts/runtime.py` 按合同自动填，不要向用户要。用户指向自己（我/替我/本人/当前登录人）时：本包 current_user 能填的同名槽先填，不要问「你是谁」。仍缺的调用方必填再问。selected_record 指向自己时用合同身份主键去上一张原始表匹配，唯一命中直接用，不要用表里其它人名反问。");
+  lines.push("问句用冻结 JSON 的 `question` 原文（能力字段 title + 行格式），禁止改问句、禁止改 `inputType`，禁止把内部 path 或属性键写进宿主标签。数组只问可见列表头；合同 unresolved 标明自动补的列由 runtime 补，不要问。");
   return lines;
 }
 
@@ -784,11 +794,11 @@ export function renderSkillMd(contract) {
     "",
     ...renderImmediateHowTo(contract),
     "查询成功必须回原始结果表：优先原样复制脚本返回的 `table`。没有 `table` 时按返回列表字段画 Markdown 表。列名和单元格必须与原始返回相同，禁止改写成短条，禁止漏行漏列，禁止为某一页发明口径。",
-    "这份 JSON 已经按宿主控件投影。能力层的 table 在提问里是同一字段 id 的 textarea；答案由 runtime 组装回数组。读能力不要弹出冻结提问。写操作调用 `ask_user_question` 时必须整份带上该能力冻结 JSON 的 questions[]，禁止删 id，已确定的值写入 default，没值的题仍出现。",
+    "这份 JSON 已经按宿主控件投影。能力层的 table 在提问里是同一字段 id 的 textarea；答案由 runtime 组装回数组。读能力已确定则不要弹出冻结提问；缺调用方必填则只问缺的那些题。写操作调用 `ask_user_question` 时必须整份带上该能力冻结 JSON 的 questions[]，禁止删 id，禁止改问句，已确定的值写入 default，没值的题仍出现。",
     "",
     "## 冻结提问",
     "",
-    "下面是写能力调用时必须整份带上的表。`id` / `inputType` / `options` / `dateFormat` 原样用，只改 default，禁止删 id、禁止改顺序。读能力不要弹出。动态字段的 options 必须是本次 `--list-options` 返回值，不要自编表单，不要带 dataSource。",
+    "下面是冻结提问目录。写能力调用时必须整份带上。`id` / `question` / `inputType` / `options` / `dateFormat` 原样用，只改 default，禁止删 id、禁止改问句、禁止改顺序。读能力缺调用方必填时只带尚未确定的题；已确定的不要问。动态字段的 options 必须是本次 `--list-options` 返回值，不要自编表单，不要带 dataSource。",
     "",
   ];
   for (const cap of contract.capabilities) {
@@ -812,7 +822,7 @@ export function renderSkillMd(contract) {
     "6. 合同标明继承上一步，或上一步已确认的同名 id",
     "7. selected_record：上一张原始表里唯一对上的行的合同身份键",
     "",
-    "有合法来源必须写入 `default`，禁止空字符串。读能力：没有合法来源则必填填不满就停，不要问；已确定的不进本次 questions[]。写能力：冻结 JSON 每一题都进 questions[]，禁止删 id；没有合法来源就省略 default，题仍在。已唯一确定的值写入 input-json 和写确认表的 default。禁止编造「无」「示例」「请审批」。",
+    "有合法来源必须写入 `default`，禁止空字符串。读能力：已确定的不进本次 questions[]；调用方必填未定必须问，不要停。写能力：冻结 JSON 每一题都进 questions[]，禁止删 id，禁止改问句；没有合法来源就省略 default，题仍在。已唯一确定的值写入 input-json 和写确认表的 default。禁止编造「无」「示例」「请审批」。",
     "系统常量必须带合同值，由 runtime 自动填。",
     "",
     "## 适用场景",
@@ -866,7 +876,7 @@ export function renderSkillMd(contract) {
     "```",
     "",
     "工作目录不是本包。选定路线后立刻 `cd` 到本 SKILL.md 所在目录再跑脚本。禁止 ls / cat / 探路。",
-    "没有 `python3` 再用 `python`。读能力不要确认卡，也不要提问。写操作必须整份带上冻结提问 JSON（禁止删 id），确认后再执行。",
+    "没有 `python3` 再用 `python`。读能力不要确认卡；调用方必填未定必须问缺槽。写操作必须整份带上冻结提问 JSON（禁止删 id，禁止改问句），确认后再执行。",
     "",
   );
   for (const cap of contract.capabilities) {
@@ -875,7 +885,7 @@ export function renderSkillMd(contract) {
     lines.push(`capability_id: \`${cap.capability_id}\``, "");
     if (cap.intent) lines.push(`intent: ${cap.intent}`, "");
     lines.push(`Done when: \`${cap.execute.method} ${cap.execute.path}\` 已返回业务成功。`, "");
-    lines.push("调用方字段（目录必须完整；读能力已确定的不进本次 questions[]，写操作冻结 JSON 每一题都进 questions[]，禁止删 id）:", "");
+    lines.push("调用方字段（目录必须完整；读能力已确定的不进本次 questions[]，未定的调用方必填必须问；写操作冻结 JSON 每一题都进 questions[]，禁止删 id）:", "");
     if (cap.caller_fields.length) {
       lines.push("| 字段 | 标题 | 必填 | 控件 | 怎么填 | 可用默认值 |", "|---|---|---|---|---|---|");
       for (const field of cap.caller_fields) {
@@ -1003,17 +1013,22 @@ export function handbookUnfaithfulReasons(text, contract) {
   }
   if (!/禁止再读本文件|不要再读本文件/.test(text)) reasons.push("缺少不要再读本文件");
   if (!/确认卡/.test(text)) reasons.push("缺少确认卡规则");
-  if (!/已确定|不问直接执行|先按合同填槽|读能力禁止提问|读能力不要/.test(text)) reasons.push("缺少已确定则不问");
+  if (!/已确定|不问直接执行|先按合同填槽/.test(text)) reasons.push("缺少已确定则不问");
   if (!/不进本次 questions|不要放进本次 questions/.test(text)) reasons.push("缺少已确定不进 questions");
   if (!/写入该题 `default`|有合法值必须写入|写入 `default`/.test(text)) reasons.push("缺少写入 default");
   if ((contract.capabilities || []).some((cap) => isWriteCap(cap))) {
     if (!/全量|禁止删 id|整份带上/.test(text)) reasons.push("缺少写确认全量表单");
+    if (!/禁止改问句/.test(text)) reasons.push("缺少写操作禁止改问句");
     if (/不是每次原样弹出|不要把整张空表当每次必问清单/.test(text)) {
       reasons.push("写手册仍允许瘦表");
     }
   }
   if ((contract.capabilities || []).some((cap) => !isWriteCap(cap))) {
-    if (!/读能力禁止提问|读能力不要|查询不要提问/.test(text)) reasons.push("缺少读能力不要问");
+    if (!/不要确认卡|禁止确认卡/.test(text)) reasons.push("缺少读能力不要确认卡");
+    if (!/必须问|缺槽|未定必须问/.test(text)) reasons.push("缺少读能力缺槽要问");
+    if (/读能力禁止提问|填不满必填槽就停|填不满就停，不要问/.test(text)) {
+      reasons.push("读能力缺槽被写成绝对禁止提问");
+    }
   }
   if (/不要先查/.test(text)) reasons.push("禁止写不要先查");
   if (/第一次工具调用必须是 ask_user_question/.test(text)) reasons.push("禁止无条件第一次工具必须提问");

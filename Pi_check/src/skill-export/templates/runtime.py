@@ -94,9 +94,13 @@ def _identity_payload(param=None, cache=None):
             if cache is not None:
                 cache[key] = payload
             return payload
+        except client.AuthExpired:
+            raise
         except Exception as exc:
             last_error = exc
-    raise client.AuthExpired(str(last_error) if last_error else "没有身份探针，无法读取当前登录用户")
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("合同 current_user 没有身份接口，无法读取当前登录用户")
 
 
 def current_user():
@@ -198,7 +202,7 @@ def _system_value(param, user, inputs=None, step_results=None, identity_cache=No
             value = client.get_path(root, pointer)
             if value not in (None, ""):
                 return value
-        raise client.AuthExpired(f"当前登录用户缺少 {key}")
+        raise RuntimeError(f"系统字段 {key} 无法按合同身份 result_path 填充")
     if kind == "previous_response":
         src = param.get("source") if isinstance(param.get("source"), dict) else {}
         linked_step, linked_path = _previous_from_links(param, links)
@@ -242,7 +246,7 @@ def _cell_value(spec, raw):
 
 def _visible_item_keys(field):
     props = field.get("itemProperties") or {}
-    cols = list(props.keys()) or ["content"]
+    cols = list(props.keys())
     auto = {str(key) for key in (field.get("autoItemKeys") or [])}
     visible = [key for key in cols if key not in auto]
     return visible or cols
@@ -294,7 +298,8 @@ def _parse_caller_array(field, value):
     for row in value:
         if not isinstance(row, dict):
             continue
-        if _is_placeholder(row.get("content")):
+        cells = [value for name, value in row.items() if name not in {"section", "sectionTitle"}]
+        if cells and all(_is_placeholder(value) for value in cells):
             continue
         cleaned.append(row)
     return _stamp_item_type(field, _assemble_items(field, cleaned))
@@ -333,6 +338,19 @@ def _assign_payload(target, name, value):
     target[key] = value
 
 
+def _section_stamps(field, section):
+    mapping = field.get("sectionItemTypes") if isinstance(field, dict) else None
+    if not isinstance(mapping, dict) or section not in mapping:
+        return {}
+    raw = mapping.get(section)
+    if isinstance(raw, dict):
+        return {key: value for key, value in raw.items() if value not in (None, "")}
+    auto = [str(key) for key in (field.get("autoItemKeys") or []) if key]
+    if not auto:
+        return {}
+    return {auto[0]: raw}
+
+
 def _assemble_items(field, value):
     sections = list((field.get("sections") or {}).keys())
     if not sections or not isinstance(value, list):
@@ -342,12 +360,10 @@ def _assemble_items(field, value):
         if not isinstance(row, dict):
             continue
         item = dict(row)
-        if item.get("itemType") not in (None, ""):
-            assembled.append(item)
-            continue
         section = item.pop("section", None) or item.pop("sectionTitle", None)
-        if section in sections:
-            item["itemType"] = sections.index(section) + 1
+        for key, stamp in _section_stamps(field, section).items():
+            if item.get(key) in (None, ""):
+                item[key] = stamp
         assembled.append(item)
     return assembled
 

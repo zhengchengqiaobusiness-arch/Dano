@@ -62,7 +62,7 @@
 - 目标写「全字段」：当前表单上每个可改控件都要写上，灰框/排除项除外。不要只填标题就保存。
 - Skill 3 把带星号、仍能打开面板的日期或下拉收成系统 `page_default`、或系统必填没有 `default_value`：标「未解决」，用原 `capability_id` 让 Skill 3 改回调用方再交。禁止带着不可执行写合同定稿。
 - Skill 3 把登录身份标成 `current_user` 却没有 `source.source_url` + `result_path`，或 `result_path` 在本场身份响应 JSON 上走不通（用 execute 键名拼 `data.userId` 而响应实际是 `data.user.id`）：用原 id 让 Skill 3 对着身份响应改路径再交。闸门会拒收缺 source 的信封（`saved=false`），不要指望出包去猜路径。
-- Skill 3 把查询/筛选里与身份走通值相同的部门/人员收成调用方必填树，或把「点自己那一行」收成要用户填姓名的 `selected_record`：用原 id 让 Skill 3 改 `current_user` 再交。
+- Skill 3 把查询/筛选里与身份走通值相同的人/组织键收成调用方必填树，或把「点自己那一行」收成要用户填姓名的 `selected_record`：用原 id 让 Skill 3 改 `current_user` 再交。
 - Skill 3 把写入表单可改日期收成没有 `page_default=today` 的纯 `user_input`：用原 id 让 Skill 3 补上 today（查询/筛选周期除外）。
 - Skill 3 把 `kind` 写成含糊的 `mutation`：改成 `create` / `update` / `delete` / `submit` 之一再交。读能力用 `query`。
 - 目标要提交就点提交并走完确认，不要用保存换请求形状。目标只要求新增/保存：不要额外点提交去换另一条请求。
