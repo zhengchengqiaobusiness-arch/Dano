@@ -14,8 +14,8 @@ export function generatorGuideDir(env = process.env) {
   const configured = String(env.DANO_SKILL_REFERENCE_DIR || "").trim();
   if (!configured) return path.join(REPO_ROOT, "doc");
   if (path.isAbsolute(configured)) return path.resolve(configured);
-  const root = String(env.DANO_SKILL_REFERENCE_ROOT || "").trim();
-  return root ? path.resolve(root, configured) : path.resolve(configured);
+  const root = String(env.DANO_SKILL_REFERENCE_ROOT || "").trim() || REPO_ROOT;
+  return path.resolve(root, configured);
 }
 
 async function listGuideFiles(dir, rel = "") {

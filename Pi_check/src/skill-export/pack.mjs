@@ -1,6 +1,6 @@
 /**
  * 出包运输：按录制合同物化整包，再注入冻结运行时和完整鉴权。
- * Skill 4 只可保留忠实的 SKILL.md；执行器、合同、表单一律覆盖。
+ * 出包按最新合同物化手册/合同/脚本。旧 SKILL.md 默认丢弃，Skill 4 手册仅在显式开启且保真时才保留。
  */
 
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -17,6 +17,7 @@ import {
   materializePackageTexts,
   writeMaterializedPackage,
 } from "./contract-materialize.mjs";
+import { validateSkillPackageDir } from "./validator.mjs";
 import { logExport } from "../policy.mjs";
 
 const TEMPLATES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "templates");
@@ -184,12 +185,10 @@ export async function refreshPackageTransport(dest, {
   const nextTenant = tenant || runtime.tenant || "";
   const nextSubsystem = subsystem || runtime.subsystem || "oa";
   if (Array.isArray(draft?.capabilities) && draft.capabilities.length) {
-    const existingMd = await readText(path.join(dest, "SKILL.md"));
     await materializeExecutablePackage(dest, draft, {
       tenant: nextTenant,
       subsystem: nextSubsystem,
       baseUrl: nextBase,
-      skill4Handbook: existingMd,
       identityProbes: identityProbesFromDraft(draft),
     });
   } else {
@@ -225,7 +224,7 @@ export async function packSkill4Artifacts({
   authHeaders,
   baseUrl = "",
   validate = true,
-  useSkill4Handbook = true,
+  useSkill4Handbook = false,
   existingHandbook = "",
   existingHandbookPath = "",
 }) {
@@ -264,7 +263,18 @@ export async function packSkill4Artifacts({
   await writeAuthLocalFile(dest, headers);
   await stripNestedSkillPackages(dest);
   const tokenMissing = !hasCredentialHeaders(headers);
-  logExport(`打包完成 dest=${dest} token_missing=${tokenMissing} base_url=${resolvedBase || "-"} handbook=${packed.handbook_source} validate=${validate ? "ignored" : "no"}`);
+  if (validate) {
+    const checked = await validateSkillPackageDir(dest, { sourceDraft: draft });
+    if (!checked.ok) {
+      const messages = (checked.issues || [])
+        .filter((item) => item.severity !== "warning")
+        .map((item) => item.message || item.code)
+        .filter(Boolean);
+      logExport(`打包校验失败 dest=${dest} issues=${messages.join("；")}`);
+      throw new Error(messages.join("；") || "出包校验失败");
+    }
+  }
+  logExport(`打包完成 dest=${dest} token_missing=${tokenMissing} base_url=${resolvedBase || "-"} handbook=${packed.handbook_source} validate=${validate ? "yes" : "no"}`);
   return {
     slug,
     export_path: dest,

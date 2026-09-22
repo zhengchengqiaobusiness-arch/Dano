@@ -1,5 +1,5 @@
 /**
- * Skill 4 运输：写产物、隔离运行。校验在 skill-export/validator.mjs。不认业务，不引用 back。
+ * 出包运输：写产物、隔离运行。校验在 skill-export/validator.mjs。不认业务，不引用 back。
  */
 
 import { mkdir, writeFile, cp, rm, readFile } from "node:fs/promises";

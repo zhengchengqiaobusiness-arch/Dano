@@ -145,6 +145,20 @@ def _target_key(target_path):
     return text.split(".")[-1]
 
 
+def _previous_from_links(param, links=None):
+    key = str((param or {}).get("key") or "")
+    path = str((param or {}).get("path") or "")
+    for link in links or []:
+        target = str((link or {}).get("target_path") or "")
+        if target != path and _target_key(target) != key:
+            continue
+        from_step = str((link or {}).get("source_step_id") or "").strip()
+        from_path = str((link or {}).get("source_path") or "").strip()
+        if from_step or from_path:
+            return from_step, from_path
+    return "", ""
+
+
 def apply_links(contract, source_step_id, result, context):
     filled = dict(context or {})
     source = str(source_step_id or "")
@@ -170,7 +184,7 @@ def _generated_value(param):
     return None
 
 
-def _system_value(param, user, inputs=None, step_results=None, identity_cache=None):
+def _system_value(param, user, inputs=None, step_results=None, identity_cache=None, links=None):
     kind = str(param.get("source_kind") or "")
     key = str(param.get("key") or "")
     inputs = inputs or {}
@@ -186,9 +200,13 @@ def _system_value(param, user, inputs=None, step_results=None, identity_cache=No
                 return value
         raise client.AuthExpired(f"当前登录用户缺少 {key}")
     if kind == "previous_response":
-        prior = (step_results or {}).get(str(param.get("from_step_id") or ""))
+        src = param.get("source") if isinstance(param.get("source"), dict) else {}
+        linked_step, linked_path = _previous_from_links(param, links)
+        from_step = str(param.get("from_step_id") or src.get("from_step_id") or linked_step or "")
+        from_path = param.get("from_path") or src.get("from_path") or linked_path
+        prior = (step_results or {}).get(from_step)
         if prior is not None:
-            value = _link_value(prior, param.get("from_path"))
+            value = _link_value(prior, from_path)
             if value not in (None, ""):
                 return value
         return None
@@ -222,8 +240,16 @@ def _cell_value(spec, raw):
     return text
 
 
+def _visible_item_keys(field):
+    props = field.get("itemProperties") or {}
+    cols = list(props.keys()) or ["content"]
+    auto = {str(key) for key in (field.get("autoItemKeys") or [])}
+    visible = [key for key in cols if key not in auto]
+    return visible or cols
+
+
 def _rows_from_lines(field, text):
-    cols = list((field.get("itemProperties") or {}).keys()) or ["content"]
+    cols = _visible_item_keys(field)
     sections = list((field.get("sections") or {}).keys())
     props = field.get("itemProperties") or {}
     rows = []
@@ -389,7 +415,7 @@ def _step_wants_files(cap, step):
     return False
 
 
-def build_request(cap, inputs, user, step=None, step_results=None, identity_cache=None):
+def build_request(cap, inputs, user, step=None, step_results=None, identity_cache=None, links=None):
     query = {}
     body = {}
     files = {}
@@ -429,7 +455,7 @@ def build_request(cap, inputs, user, step=None, step_results=None, identity_cach
         ]
     for param in system:
         key = str(param.get("key") or "")
-        value = _system_value(param, user, inputs=inputs, step_results=step_results, identity_cache=identity_cache)
+        value = _system_value(param, user, inputs=inputs, step_results=step_results, identity_cache=identity_cache, links=links)
         if value is None:
             if param.get("required"):
                 raise RuntimeError(f"系统字段 {key} 无法按合同填充（常量缺少 default_value，且不是可推断的运行时字段）")
@@ -493,6 +519,7 @@ def execute_capability(capability_id, inputs=None, confirm=False, contract=None)
             step=step if step else None,
             step_results=step_results,
             identity_cache=identity_cache,
+            links=contract.get("links"),
         )
         if str(ref.get("usage") or "") == "preflight" and _step_wants_files(cap, step) and not files:
             continue

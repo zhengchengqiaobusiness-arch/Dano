@@ -1109,7 +1109,7 @@ export function describeExportPiTools() {
     {
       name: "project_contract_to_request",
       label: "合同投影",
-      description: "只按合同投影请求，缺键失败，不补键。细节看 Skill 4。",
+      description: "只按合同投影请求，缺键失败，不补键。细节看运输层物化合同。",
       parameters: {
         type: "object",
         properties: {
@@ -1123,7 +1123,7 @@ export function describeExportPiTools() {
     {
       name: "run_isolated_script",
       label: "隔离运行",
-      description: "在隔离目录运行生成的脚本。细节看 Skill 4。",
+      description: "在隔离目录运行生成的脚本。细节看运输层物化合同。",
       parameters: {
         type: "object",
         properties: {
@@ -1137,7 +1137,7 @@ export function describeExportPiTools() {
     {
       name: "submit_skill_export",
       label: "提交出包",
-      description: "Skill 4 验证通过后提交。ok=false 表示失败，带上 errors。不要 submit_recording_result。",
+      description: "运输层物化完成后提交。ok=false 表示失败，带上 errors。不要 submit_recording_result。",
       parameters: {
         type: "object",
         properties: {

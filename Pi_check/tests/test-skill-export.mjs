@@ -251,7 +251,7 @@ test("目录按 recording_id 重导覆盖同一条并升 version", async () => {
   assert.equal(second.version, Number(first.version || 1) + 1);
 });
 
-test("每次导出都重开 Skill 4，不因旧 SKILL.md 跳过", async () => {
+test("每次导出都物化最新合同，不开 Skill 4", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "dano-export-"));
   const files = new RecordingFiles(root);
   const recordingId = "rec_always";
@@ -266,21 +266,16 @@ test("每次导出都重开 Skill 4，不因旧 SKILL.md 跳过", async () => {
     subsystem: "oa",
     existingSkillId: "oa.rec_always",
     outDir: path.join(root, "out"),
-    createExportSession: async ({ tools }) => {
+    createExportSession: async () => {
       started += 1;
-      return {
-        beginSkillExport: async () => {
-          await tools.submit_skill_export({ ok: true, skill_id: "oa.rec_always", routes: [] });
-        },
-        close: async () => {},
-      };
+      throw new Error("出包不应开 Skill 4");
     },
     packArtifacts: async () => ({
       export_path: path.join(root, "out", "skill"),
       token_missing: true,
     }),
   });
-  assert.equal(started, 1);
+  assert.equal(started, 0);
   assert.equal(outcome.status, "exported");
   assert.equal(outcome.skill_id, "oa.rec_always");
   assert.equal(outcome.catalog_item.recording_id, "rec_always");
@@ -362,7 +357,7 @@ function coveringSkill4Handbook(draft, extra = "") {
   const contract = consumerContract(draft);
   const lines = [
     "## 立刻办理",
-    "读完立刻提问。禁止再读本文件。查询不要确认卡，写操作才弹确认卡。日期 today 调用前换成当天。读成功后先发一条用户可见的原始结果表。此时禁止 `--route default`。",
+    "读完立刻提问。禁止再读本文件。查询不要确认卡，读能力禁止提问。写操作才弹确认卡，禁止删 id。日期 today 调用前换成当天。读成功后先发一条用户可见的原始结果表。此时禁止 `--route default`。已确定的不进本次 questions[]。有合法值必须写入该题 `default`。",
     extra,
     "## 冻结提问",
     "第一次工具调用必须是 ask_user_question。",
@@ -422,7 +417,6 @@ test("overlay draft 优先于磁盘旧合同", async () => {
     title: "新合同",
     capabilities: [...DRAFT.capabilities, { capability_id: "submit", name: "提交", kind: "submit" }],
   };
-  let contract = null;
   let packedDraft = null;
   const outcome = await exportRecordingSkill({
     files,
@@ -432,27 +426,22 @@ test("overlay draft 优先于磁盘旧合同", async () => {
     subsystem: "oa",
     draft: overlay,
     outDir: path.join(root, "out"),
-    createExportSession: async ({ tools }) => ({
-      beginSkillExport: async () => {
-        contract = await tools.read_export_contract();
-        await tools.submit_skill_export({ ok: true, skill_id: "oa.should_not_win", routes: [] });
-      },
-      close: async () => {},
-    }),
+    createExportSession: async () => {
+      throw new Error("出包不应开 Skill 4");
+    },
     packArtifacts: async ({ draft }) => {
       packedDraft = draft;
       return { export_path: path.join(root, "out", "skill"), token_missing: true };
     },
   });
   assert.equal(outcome.status, "exported");
-  assert.equal(contract?.title, "新合同");
-  assert.equal(contract?.capabilities?.length, 3);
+  assert.equal(packedDraft?.title, "新合同");
   assert.equal(packedDraft?.capabilities?.length, 3);
   const saved = await files.readDraft(recordingId);
   assert.equal(saved.draft.capabilities.length, 3);
 });
 
-test("Skill 4 产物打包注入 auth 并重导同一条", async () => {
+test("出包注入 auth 并按最新合同重导同一条", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "dano-pack-reexport-"));
   const files = new RecordingFiles(root);
   const recordingId = "rec_pack_same";
@@ -468,13 +457,9 @@ test("Skill 4 产物打包注入 auth 并重导同一条", async () => {
     outDir,
     authHeaders,
     existingSkillId: "oa.rec_pack_same",
-    createExportSession: async ({ tools }) => ({
-      beginSkillExport: async () => {
-        await writeValidSkill4Package(files, recordingId);
-        await tools.submit_skill_export({ ok: true, skill_id: "oa.should_not_win", routes: CONTRACT.routes });
-      },
-      close: async () => {},
-    }),
+    createExportSession: async () => {
+      throw new Error("出包不应开 Skill 4");
+    },
   });
   assert.equal(first.status, "exported", (first.errors || []).join("; "));
   assert.equal(first.skill_id, "oa.rec_pack_same");
@@ -486,8 +471,10 @@ test("Skill 4 产物打包注入 auth 并重导同一条", async () => {
   assert.doesNotMatch(clientSrc, /test-token-value-12345/);
   assert.doesNotMatch(clientSrc, /JSON\.stringify\(JSON\.stringify/);
   const handbook = await readFile(path.join(first.export_path, "SKILL.md"), "utf8");
-  assert.match(handbook, /默认完整办理/);
-  assert.match(handbook, /Skill4已核对手册/);
+  assert.match(handbook, /立刻办理/);
+  assert.match(handbook, /不问直接执行|先按合同填槽|读能力禁止提问/);
+  assert.doesNotMatch(handbook, /Skill4已核对手册/);
+  assert.doesNotMatch(handbook, /不要先查/);
   assert.doesNotMatch(handbook, /test-token-value-12345/);
 
   const overlay = {
@@ -495,7 +482,23 @@ test("Skill 4 产物打包注入 auth 并重导同一条", async () => {
     title: "日报填报（已改）",
     capabilities: [
       ...DRAFT.capabilities,
-      { capability_id: "submit", name: "提交", kind: "submit", input_schema: { properties: { formId: { type: "string" } } } },
+      {
+        capability_id: "submit",
+        name: "提交",
+        kind: "submit",
+        step_ids: ["s_submit"],
+        request_refs: [{ step_id: "s_submit", usage: "execute", method: "POST", path: "/submit" }],
+        input_schema: { properties: { formId: { type: "string", title: "表单" } } },
+      },
+    ],
+    steps: [
+      ...(DRAFT.steps || []),
+      {
+        step_id: "s_submit",
+        method: "POST",
+        path: "/submit",
+        params: [{ key: "formId", path: "body.formId", exposed_to_user: true, source_kind: "user_input" }],
+      },
     ],
   };
   const second = await exportRecordingSkill({
@@ -507,13 +510,9 @@ test("Skill 4 产物打包注入 auth 并重导同一条", async () => {
     draft: overlay,
     outDir,
     authHeaders,
-    createExportSession: async ({ tools }) => ({
-      beginSkillExport: async () => {
-        await writeValidSkill4Package(files, recordingId);
-        await tools.submit_skill_export({ ok: true, skill_id: "oa.renamed_by_skill4", routes: CONTRACT.routes });
-      },
-      close: async () => {},
-    }),
+    createExportSession: async () => {
+      throw new Error("出包不应开 Skill 4");
+    },
   });
   assert.equal(second.status, "exported", (second.errors || []).join("; "));
   assert.equal(second.skill_id, "oa.rec_pack_same");
@@ -607,7 +606,7 @@ test("隔离运行拷到产物目录外，并展开对象参数", async () => {
   }
 });
 
-test("Skill 4 已提交后超时仍打包同一条", async () => {
+test("出包不依赖 Skill 4 会话也能打包", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "dano-timeout-pack-"));
   const files = new RecordingFiles(root);
   const recordingId = "rec_timeout_pack";
@@ -621,14 +620,9 @@ test("Skill 4 已提交后超时仍打包同一条", async () => {
     subsystem: "oa",
     outDir,
     existingSkillId: "oa.rec_timeout_pack",
-    createExportSession: async ({ tools }) => ({
-      beginSkillExport: async () => {
-        await writeValidSkill4Package(files, recordingId);
-        await tools.submit_skill_export({ ok: true, skill_id: "oa.should_keep", routes: CONTRACT.routes });
-        throw new Error("Skill 4 出包超时");
-      },
-      close: async () => {},
-    }),
+    createExportSession: async () => {
+      throw new Error("Skill 4 出包超时");
+    },
   });
   assert.equal(outcome.status, "exported", (outcome.errors || []).join("; "));
   assert.equal(outcome.skill_id, "oa.rec_timeout_pack");
@@ -1051,7 +1045,7 @@ test("能力 schema 字段不得被系统标记丢掉，调用方 extras 必须�
   assert.match(planMd, /`billType`/);
 });
 
-test("目录快速导出不开 Skill 4、不校验，只写文件和 token", async () => {
+test("目录快速导出不开 Skill 4，物化并校验", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "dano-dump-"));
   const files = new RecordingFiles(root);
   const recordingId = "rec_dump_fast";
@@ -1080,15 +1074,15 @@ test("目录快速导出不开 Skill 4、不校验，只写文件和 token", asy
         },
         packArtifacts: async (opts) => {
           seenValidate = opts.validate;
-          assert.equal(opts.useSkill4Handbook, true);
-          assert.equal(opts.validate, false);
+          assert.equal(opts.useSkill4Handbook, false);
+          assert.equal(opts.validate, true);
           return packSkill4Artifacts(opts);
         },
       });
     },
   });
   assert.equal(started, 1);
-  assert.equal(seenValidate, false);
+  assert.equal(seenValidate, true);
   assert.equal(outcome.mode, "dump");
   assert.equal(outcome.count, 1, (outcome.errors || []).join("; "));
   const dest = outcome.written[0];
@@ -1103,7 +1097,7 @@ test("目录快速导出不开 Skill 4、不校验，只写文件和 token", asy
   assert.equal(rows[0].export_path, dest);
 });
 
-test("dumpRecordingSkill 默认不开 Skill 4，但沿用已有手册", async () => {
+test("dumpRecordingSkill 不开 Skill 4，强制物化新手册", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "dano-dump-one-"));
   const files = new RecordingFiles(root);
   const recordingId = "rec_dump_one";
@@ -1122,19 +1116,19 @@ test("dumpRecordingSkill 默认不开 Skill 4，但沿用已有手册", async ()
     packArtifacts: async (opts) => {
       packedValidate = opts.validate;
       packedUseHandbook = opts.useSkill4Handbook;
-      assert.equal(opts.useSkill4Handbook, true);
-      assert.equal(opts.validate, false);
+      assert.equal(opts.useSkill4Handbook, false);
+      assert.equal(opts.validate, true);
       return {
         export_path: path.join(root, "out", "skill"),
         token_missing: false,
-        handbook_source: "skill4",
+        handbook_source: "materialized",
       };
     },
   });
   assert.equal(outcome.status, "exported");
   assert.equal(outcome.skill_id, "oa.rec_dump_one");
-  assert.equal(packedValidate, false);
-  assert.equal(packedUseHandbook, true);
+  assert.equal(packedValidate, true);
+  assert.equal(packedUseHandbook, false);
 });
 
 test("查询日期不打 today，写操作日期才 page_default today，立刻办理按 default.steps", () => {
@@ -1231,6 +1225,11 @@ test("查询日期不打 today，写操作日期才 page_default today，立刻�
   assert.match(md, /default\.steps/);
   assert.match(md, /禁止 `--route default`/);
   assert.match(md, /换成当天/);
+  assert.match(md, /matched/);
+  assert.match(md, /切片/);
+  assert.match(md, /读能力禁止提问/);
+  assert.match(md, /禁止删 id|整份带上|全量/);
+  assert.match(md, /写入该题 `default`/);
   assert.ok(handbookIsFaithful(md, contract));
   const queryAsk = frozenAskForm(query);
   assert.equal(queryAsk.questions.find((item) => item.id === "startDate").default, undefined);
@@ -1295,15 +1294,18 @@ print(json.dumps(format_list.attach_tables(payload), ensure_ascii=False))`;
   assert.equal(payload.results[0].result.table, table);
 });
 
-test("手册保真只认合同覆盖，不按文案丢掉 Skill 4", () => {
+test("手册保真拒绝不要先查和空问一律提问", () => {
   const contract = consumerContract(DRAFT);
+  const materialized = renderSkillMd(contract);
+  assert.equal(handbookIsFaithful(materialized, contract), true);
   const skill4 = coveringSkill4Handbook(DRAFT, "用户只要填写/新增/提交其中一项，不要先查。");
-  assert.equal(handbookIsFaithful(skill4, contract), true);
-  assert.equal(chooseHandbook(skill4, renderSkillMd(contract), contract), skill4);
+  assert.equal(handbookIsFaithful(skill4, contract), false);
+  assert.ok(handbookUnfaithfulReasons(skill4, contract).some((item) => /不要先查|第一次工具/.test(item)));
+  assert.equal(chooseHandbook(skill4, materialized, contract), materialized);
   assert.equal(handbookIsFaithful("# 残缺\n", contract), false);
 });
 
-test("目录导出沿用已发布的 Skill 4 手册", async () => {
+test("目录导出丢弃旧手册，按合同重写 SKILL.md", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "dano-dump-keep-"));
   const files = new RecordingFiles(root);
   const recordingId = "rec_dump_keep";
@@ -1332,7 +1334,102 @@ test("目录导出沿用已发布的 Skill 4 手册", async () => {
   });
   assert.equal(outcome.status, "exported", (outcome.errors || []).join("; "));
   const packed = await readFile(path.join(outcome.export_path, "SKILL.md"), "utf8");
-  assert.equal(packed, skill4Text);
+  assert.notEqual(packed, skill4Text);
+  assert.match(packed, /不问直接执行|先按合同填槽|读能力禁止提问/);
+  assert.doesNotMatch(packed, /不要先查/);
+  assert.doesNotMatch(packed, /第一次工具调用必须是 ask_user_question/);
+});
+
+test("system previous_response 从 links 补 from_step", () => {
+  const contract = consumerContract({
+    title: "上传提交",
+    capabilities: [{
+      capability_id: "cap_w",
+      name: "提交",
+      kind: "create",
+      step_ids: ["step_upload", "step_submit"],
+      request_refs: [
+        { step_id: "step_upload", usage: "preflight", method: "POST", path: "/upload" },
+        { step_id: "step_submit", usage: "execute", method: "POST", path: "/submit" },
+      ],
+      input_schema: {
+        type: "object",
+        properties: { title: { type: "string", title: "标题" } },
+      },
+    }],
+    steps: [
+      { step_id: "step_upload", method: "POST", path: "/upload", params: [{ key: "file", path: "body.file", exposed_to_user: true }] },
+      {
+        step_id: "step_submit",
+        method: "POST",
+        path: "/submit",
+        params: [
+          { key: "title", path: "body.title", exposed_to_user: true, source_kind: "user_input", required: true },
+          { key: "attachments", path: "body.attachments", exposed_to_user: false, source_kind: "previous_response", required: true },
+        ],
+      },
+    ],
+    links: [{
+      source_step_id: "step_upload",
+      target_step_id: "step_submit",
+      source_path: "response.data",
+      target_path: "body.attachments",
+    }],
+  });
+  const param = contract.capabilities[0].system_params.find((item) => item.key === "attachments");
+  assert.equal(param.from_step_id, "step_upload");
+  assert.equal(param.from_path, "response.data");
+});
+
+test("数组自动列不进提问行格式，手册标明 runtime 补", () => {
+  const contract = consumerContract({
+    title: "工作项",
+    capabilities: [{
+      capability_id: "cap_w",
+      name: "提交",
+      kind: "create",
+      step_ids: ["s1"],
+      request_refs: [{ step_id: "s1", usage: "execute" }],
+      input_schema: {
+        properties: {
+          items: {
+            type: "array",
+            title: "工作项",
+            "x-dano-section-titles": { "已完成工作": "工作内容", "工作计划": "计划内容" },
+            items: {
+              type: "object",
+              properties: {
+                content: { type: "string", title: "内容" },
+                itemType: { type: "number", title: "行类型" },
+              },
+            },
+          },
+        },
+      },
+    }],
+    steps: [{
+      step_id: "s1",
+      method: "POST",
+      path: "/w",
+      params: [{
+        key: "items",
+        path: "body.items",
+        type: "array",
+        exposed_to_user: true,
+        reason: "按分区补 itemType，无独立控件",
+      }],
+    }],
+    unresolved: [{ field: "items.itemType", reason: "自动补" }],
+  });
+  const field = contract.capabilities[0].caller_fields[0];
+  assert.deepEqual(field.autoItemKeys, ["itemType"]);
+  const md = renderSkillMd(contract);
+  assert.match(md, /每行一条：分区标题\|\|\|content/);
+  assert.doesNotMatch(md, /每行一条：分区标题\|\|\|content\|\|\|itemType/);
+  assert.match(md, /自动补齐|不要向用户要/);
+  const ask = frozenAskForm(contract.capabilities[0], contract);
+  assert.match(ask.questions[0].question, /content/);
+  assert.doesNotMatch(ask.questions[0].question, /itemType/);
 });
 
 test("只有 tenant-id 不算有证，出包回落到同租户可用 token", async () => {
@@ -1505,6 +1602,12 @@ one = {"ok": True, "data": {"code": 0, "data": [{"userId": 9}]}}
 many = {"ok": True, "data": {"code": 0, "data": [{"userId": 1}, {"userId": 2}]}}
 ctx1 = runtime.apply_links({"links": [{"source_step_id": "q", "source_path": "response.data[].userId", "target_path": "query.userId"}]}, "q", one, {})
 ctx2 = runtime.apply_links({"links": [{"source_step_id": "q", "source_path": "response.data[].userId", "target_path": "query.userId"}]}, "q", many, {})
+linked = runtime._system_value(
+    {"key": "attachments", "path": "body.attachments", "source_kind": "previous_response"},
+    {},
+    step_results={"step_upload": {"ok": True, "data": {"code": 0, "data": {"fileName": "from-link.png"}}}},
+    links=[{"source_step_id": "step_upload", "source_path": "response.data", "target_path": "body.attachments"}],
+)
 calls = []
 def fake(method, path, **kw):
     calls.append({"method": method, "path": path, "files": bool(kw.get("files")), "body": kw.get("body")})
@@ -1519,7 +1622,7 @@ try:
 except Exception as exc:
     need = str(exc)
 runtime.execute_capability("cap_w", {"title": "t", "file": "x.png"}, confirm=True, contract=contract)
-print(json.dumps({"need": need, "calls": calls, "one": ctx1, "many": ctx2}, ensure_ascii=False))
+print(json.dumps({"need": need, "calls": calls, "one": ctx1, "many": ctx2, "linked": linked}, ensure_ascii=False))
 `;
     const child = spawn("python", ["-c", code], { windowsHide: true });
     let stdout = "";
@@ -1533,6 +1636,7 @@ print(json.dumps({"need": need, "calls": calls, "one": ctx1, "many": ctx2}, ensu
   assert.match(payload.need, /写操作需要 --confirm/);
   assert.deepEqual(payload.one, { userId: 9 });
   assert.deepEqual(payload.many, {});
+  assert.equal(payload.linked?.fileName, "from-link.png");
   assert.equal(payload.calls.length, 2);
   assert.equal(payload.calls[0].path.includes("upload"), true);
   assert.equal(payload.calls[0].files, true);

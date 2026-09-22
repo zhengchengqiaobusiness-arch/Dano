@@ -26,7 +26,7 @@
 
 ## 预取与刷新
 
-助手必须先用本包鉴权拉候选，再提问。不要让问句自己裸打 dataSource。
+助手仅当该动态字段尚未确定时，才用本包鉴权拉候选再提问。说法能唯一对上 label 则直接用 id。不要让问句自己裸打 dataSource，不要把 dataSource 放进 `ask_user_question`。
 
 ```text
 python3 scripts/flow.py --list-options <capability_id> <field>

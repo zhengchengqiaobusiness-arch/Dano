@@ -13,8 +13,8 @@
 1. 用 `capability_relations` 和已确认 `links` 连成最长默认办理链，`route_id=default`。合同里同时有列表查询和点结果看详情时，默认链必须包含详情，禁止压成查询→写入。
 2. 只有 relation、没有值流：仍是主路线。交接点停问，不准猜传值，不准拆成两个 Skill。
 3. 都没有：按 `capabilities[]` 顺序做人手交接主路线，**仍然要有能跑的 default**。
-4. 每个能力另留原子路线，只服务「用户意图对上该能力 name / intent」。禁止为某个业务口令写死 capability_id。
-5. 用户意图对不上某一条原子能力时，按 `default.steps` **数组顺序逐步**办理：每一步问该能力自己的冻结表，交回后立刻 `--route <这一步的 capability_id>`。禁止一上来 `--route default`，也禁止跳过中间读能力。
+4. 每个能力另留原子路线。选路：matched = 本包能力里 name / title / intent 被当前说法覆盖到的集合。1 个 → 只跑该原子路线。≥2 个 → 取 `default.steps` 里覆盖全部 matched 的最短连续切片。0 个且已选本 skill → 按 `default.steps` 全程逐步办理。禁止为某个业务口令写死 capability_id。
+5. 每步先填槽。读能力禁止提问、禁止确认卡：说法、合同身份、上一步表能填的立刻执行；填不满必填槽就停，不要问部门树或姓名。写能力把该能力冻结提问 JSON 整份带上（禁止删 id，只改 default），提交后再 `confirm:true + formIds[]`。禁止一上来 `--route default`，也禁止跳过切片外的步骤。
 
 `CONTRACT.json` 必须有 `routes[]`。合同里有 ≥2 个能力时，必须有一条多步默认路线。这些由运输层写出；你只核对，不要另编一份。
 
@@ -27,18 +27,18 @@ python3 scripts/flow.py --route default --input-json '{...}' --confirm
 python3 scripts/flow.py --list-options <capability_id> <field>
 ```
 
-- `--route` 选择路线；缺省即 default。调用方不要一上来 `--route default`：按 `default.steps` 逐步 `--route <capability_id>`。
-- 动态字段第一次工具必须是 `--list-options <capability_id> <field>`，把返回的 `options` 写进冻结提问后再 `ask_user_question`。禁止把无 `options` 的 `treeSelect` / `select` 直接问出去。
+- `--route` 选择路线；缺省即 default。调用方不要一上来 `--route default`：按 matched / 切片逐步 `--route <capability_id>`。
+- 动态字段仅当尚未确定时才跑 `--list-options <capability_id> <field>`，把返回的 `options` 写进该字段后再 `ask_user_question`。说法能唯一对上则直接用 id。禁止把无 `options` 的 `treeSelect` / `select` 直接问出去。不要把 `dataSource` 放进 ask。
 - 已确认 links 自动带值；无绑定停问。
-- 写步骤必须 `confirm:true + formIds[]`，执行时加 `--confirm`。
+- 写步骤必须整份带上冻结提问 JSON（禁止删 id），再 `confirm:true + formIds[]`，执行时加 `--confirm`。读步骤禁止确认卡。
 - 任一步失败即停，不得跳过写操作或用查询结果假装办理完成。读步骤成功必须先发原始结果表，再进入下一步。
 - 只认 `client.http_json(query=, body=)`。禁止发明 `client.request`。
-- 无合同 default 的可选字段：省略或空字符串。禁止编「暂无 / 请填写 / 请审批」。
+- 有合法来源必须写入 `default`。读能力：无合法值则必填填不满就停，不要问。写能力：无合法值也留在全量确认表里。禁止编「暂无 / 请填写 / 请审批」。
 - 系统栏写着 `page_default` 却没有 `default_value`：合同不可执行，停止，不要让用户补键，不要改 `CONTRACT.json`。
 
 ## `SKILL.md`「选择工作流」
 
-第一行必须是默认完整办理。后面才是原子行。
+第一行必须是默认完整办理。后面才是原子行。立刻办理里写 matched / 切片算法。
 
 禁止成品出现：
 

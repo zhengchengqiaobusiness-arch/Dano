@@ -4,6 +4,8 @@
 对照：`Pi_check/RESPONSIBILITIES.md`、`Pi_check/FOUR_SKILL_EXECUTION_PLAN.md`、`doc/skill-generator-ask-user-question-guide.md`  
 对照样例：https://skills.aliyun.com/skills?orderBy=install （阿里云 skill 是完整业务生命周期，不是孤立功能点）
 
+**当前实现（已落地，覆盖下文历史方案）：** 用户点击「产出 Skill」后，运输层按最新录制合同直接物化可调用包（手册 / CONTRACT / runtime / auth），默认不开 Skill 4，禁止沿用旧 SKILL.md。Skill 4 只可核对手册调用形状。下文第 0–4 节是原工单，其中「由 Skill 4 写包」已作废。
+
 本文是一次性工单。未读完第 0–4 节之前，不要改代码，也不要改 `renderer.py` / `planner.py` 去「补业务」。
 
 ---

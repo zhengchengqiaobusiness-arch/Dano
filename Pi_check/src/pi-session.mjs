@@ -113,7 +113,7 @@ export function buildPiInstructions(skills = []) {
 你是 Business Skill Investigator。动手按 Control In App Browser，认产物按 Infer Business Contract。
 人同时也可以点预览。不要锁死预览。
 没有非空 capabilities，就等于没有产物。代码不会替你编造能力。
-台账齐了就 submit_recording_result 交出能力并停止。禁止写消费者 Skill 包。出包由用户在页面点击「产出 Skill」后另开 Skill 4 会话完成。
+台账齐了就 submit_recording_result 交出能力并停止。禁止写消费者 Skill 包。出包由运输层按已交能力物化成可调用 Skill。
 
 ${bodies.join("\n\n")}
 

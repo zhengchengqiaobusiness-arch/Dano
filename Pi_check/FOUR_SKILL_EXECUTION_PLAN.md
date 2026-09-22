@@ -1,7 +1,7 @@
 # 四 Skill 运行约定
 
 对照仓库：`E:\python\try\Dano`（核心 `Pi_check/`，出包运输在 `Pi_check/src/skill-export/`，禁止引用 `back/dano/export/`）  
-录制会话只加载 Skill 1–3。出包会话只加载 Skill 4。Investigator 是录制唯一入口。代码只运输，不认业务。
+录制会话只加载 Skill 1–3。出包由运输层按最新能力物化。Investigator 是录制唯一入口。代码只运输，不认业务。
 
 以后换页、认错字段、handbook 不好、不该发布：默认只改四个 Skill 文件。不要改闸门、导出猜测、采集业务词。
 
@@ -20,7 +20,7 @@ PI = Business Skill Investigator（唯一入口）
         ↓
 submit_recording_result({final:true, use_draft:true}) 交出能力并停
         ↓
-用户点击「产出 Skill」→ Skill 4 另开会话写专用包
+用户点击「产出 Skill」→ 运输层按最新能力物化专用包
 ```
 
 | 情况 | 谁做 |
@@ -28,7 +28,7 @@ submit_recording_result({final:true, use_draft:true}) 交出能力并停
 | 打开入口、设查询条件、填表、点查询/保存/提交 | PI 自动做 |
 | 某一行已有真实 execute | 立刻交一项能力 |
 | 目标页与台账都齐了 | 交出能力并停，不要写消费者包 |
-| 用户点击「产出 Skill」或 Skills 目录重导 | 新建 Skill 4 会话，按最新能力出包 |
+| 用户点击「产出 Skill」或 Skills 目录重导 | 运输层按最新能力物化出包，不开 Skill 4 |
 | 登录、验证码、授权写入 | 阻断，assist 这一处 |
 | 写不进、选项看不见、点了不发网、加行后仍无控件 | 阻断，assist 这一格 |
 | 「登录了 / 继续 / 好了」 | 阻断解除，自动接着做完并产出 |
@@ -47,7 +47,7 @@ submit_recording_result({final:true, use_draft:true}) 交出能力并停
 | `skill/BUSINESS_SKILL_INVESTIGATOR.md` | 目标、台账、下一步、分诊、目标做完即交能力并停 | selector、source_kind、handbook、写消费者包 |
 | `skill/CONTROL_IN_APP_BROWSER.md` | 点、填、选、快照、图像、同源前端 | 交能力、认来源 |
 | `skill/INFER_BUSINESS_CONTRACT.md` | 切能力、来源、绑定、信封 | 点页面、写消费者包、冻录制值 |
-| `skill/BUILD_AND_VALIDATE_DEDICATED_SKILL.md` | 写包、投影、隔离运行、能不能发布 | 回头猜页面、等用户结束 |
+| `skill/BUILD_AND_VALIDATE_DEDICATED_SKILL.md` | 可选核对手册调用形状 | 回头猜页面、重写执行器、整篇重写 SKILL.md |
 
 每份开头三行：本文件只负责 X；禁止 Y；缺口只改本文件。
 
@@ -58,7 +58,7 @@ submit_recording_result({final:true, use_draft:true}) 交出能力并停
 3. 写入行没有「未识别却当可执行」，也没有系统必填却填不出
 4. 每个 execute 业务键都在 params 或 unresolved；schema 没有系统键或假 option_source
 
-出包另开会话。Skill 4 必须读完 `doc/` 四份规范，写出流程、鉴权槽位和活选项；运输层只注入冻结 client/auth 并写入 Skills 目录。禁止已有 SKILL.md 就复用。
+出包由运输层按已交能力物化。禁止已有 SKILL.md 就复用旧手册。Skill 4 只可核对手册调用形状，默认不开会话。
 
 查询类可以带说明缺口的 `unresolved`。不完整写能力不得发布。
 
@@ -93,7 +93,7 @@ Skill 2：双通道一直开着，不锁预览。合法 selector 只用 snapshot
 
 Skill 3：一项能力恰好一个不共用的 `execute`。`request_refs` 是对象数组。`steps[].params` 是字段对象数组。不要写 `capabilities[].fields`。没认清来源就 `unresolved`，不要冻录制值。目标先 A 后 B 且没有值流时，`capability_relations` 挂在已有 execute 的能力上，不要单独交一项只有关系的信封。
 
-Skill 4：只读已提交合同。写入仍 unresolved 或投影失败则不发布。消费者正文不要出现录制过程词和阿里专章。
+Skill 4：可选核对已提交合同的调用形状。写入仍 unresolved 或投影失败则不发布。消费者正文不要出现录制过程词和阿里专章。
 
 ---
 
@@ -104,7 +104,7 @@ Skill 4：只读已提交合同。写入仍 unresolved 或投影失败则不发�
 | 该产出却空转、不该发布却定稿、目标理解错、分诊错 | Skill 1 |
 | 点不到、选不上、`host_value` 误判、该看图没看 | Skill 2 |
 | 切错能力、来源错、绑错、冻录制值、单独交 relations | Skill 3 |
-| 触发差、执行器与合同不一致、不该发布 | Skill 4 |
+| 触发差、手册与合同不一致、不该发布 | 运输层物化 / `doc/` |
 | 点了没反应、图送不进、证据丢失、投影工具补了键 | 才改代码 |
 
 非常必要才改代码：动作打到错控件、图像/证据读丢、代码改写了信封、工具返回与现场不符、凭据泄漏、Skill 已写但运输物理上做不到。

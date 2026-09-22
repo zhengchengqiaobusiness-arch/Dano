@@ -1,16 +1,15 @@
 /**
- * 录制页「产出 Skill」每次新建 Skill 4 会话。禁止因磁盘已有 SKILL.md 而跳过 Skill 4。
- * Skill 4 按已交能力写出调用手册，成品必须遵守仓库 doc/ 目录当前全部规范文件。
+ * 录制页「产出 Skill」与目录重导：按最新能力合同直接物化整包，默认不开 Skill 4。
+ * 手册、合同、脚本都以当次草稿为准，禁止沿用旧 SKILL.md 挡住新字段。
  * 不校验能力对不对，禁止另编字段、接口或身份，禁止把规范文件打进消费者包。
- * 目录页快速导出不开 Skill 4、不校验；沿用已发布或产物里的手册，运输层只重写合同/脚本/token。
  */
 
-import { readdir, rm } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { artifactRoot } from "../skill-package-tools.mjs";
 import { readGeneratorGuides } from "./read-guides.mjs";
-import { packSkill4Artifacts, seedFrozenArtifacts } from "./pack.mjs";
+import { packSkill4Artifacts } from "./pack.mjs";
+import { consumerContract } from "./contract-materialize.mjs";
 import { resolveExportAuth, resolveExportBaseUrl, extractAuthHeadersFromEvidence } from "./auth-resolve.mjs";
 import { writeTokenRecord, writebackExportedPackages, readTokenRecord, tokenStoreDir, listTenantTokenRecords, pickTenantCredential } from "./token-store.mjs";
 import { skillManifestFromExport, upsertExportedSkill, listExportedSkills, getExportedSkill, getExportedSkillByRecording } from "./skill-catalog.mjs";
@@ -50,6 +49,133 @@ async function resolveAuthHeaders(opts) {
   return resolveExportAuth(opts);
 }
 
+async function packLatestDraft({
+  files,
+  evidence,
+  recordingId,
+  resultId = "",
+  tenant = "",
+  subsystem = "oa",
+  title = "",
+  outDir = "",
+  overlayDraft = null,
+  authHeaders = null,
+  existingSkillId = "",
+  packArtifacts = packSkill4Artifacts,
+  persistDraft = false,
+  writebackCatalog = false,
+  started = Date.now(),
+  label = "导出",
+} = {}) {
+  const capIds = (overlayDraft?.capabilities || []).map((item) => item.capability_id || item.id).filter(Boolean);
+  const guides = await readGeneratorGuides({ includeContent: false });
+  if (!guides.ok) {
+    logExport(`失败 规范缺失 ${guides.error}`, started);
+    return { status: "export_failed", errors: [guides.error], clarification_questions: [] };
+  }
+  logExport(`${label} 规范就绪 files=${guides.files?.length || 0} dir=${guides.dir || "-"}`, started);
+  const saved = await files.readDraft(recordingId);
+  const latest = contractEnvelope(overlayDraft || saved?.draft || saved || {});
+  const latestIds = latest.capabilities.map((item) => item.capability_id || item.id).filter(Boolean);
+  if (!latest.capabilities.length) {
+    logExport(`失败 没有可导出的能力 recording_id=${recordingId || "-"} disk_draft=${saved ? "yes" : "no"}`, started);
+    return { status: "export_failed", errors: ["没有可导出的能力"], clarification_questions: [] };
+  }
+  logExport(`${label} 合同 caps=${latest.capabilities.length} ids=${latestIds.join(",") || "-"} overlay_caps=${capIds.length} source=${overlayDraft ? "overlay" : "disk"}`, started);
+  if (persistDraft) {
+    await files.writeDraft(recordingId, {
+      recording_id: recordingId,
+      saved_at: new Date().toISOString(),
+      draft: latest,
+      title: title || latest.title || "",
+    });
+    logExport(`${label} 合同已落盘`, started);
+  }
+  const auth = await resolveAuthHeaders({
+    tenant,
+    subsystem,
+    requestHeaders: authHeaders,
+    evidence,
+    recordingId,
+  });
+  const baseUrl = await resolveExportBaseUrl({ files, recordingId, draft: latest });
+  logExport(`${label} 鉴权 source=${auth.source || "missing"} header_names=${Object.keys(auth.headers).join(",") || "-"} token=${hasCredentialHeaders(auth.headers) ? "full" : "empty"} base_url=${baseUrl || "-"}`, started);
+  if (hasCredentialHeaders(auth.headers)) {
+    if (tenant) {
+      await writeTokenRecord(tenant, subsystem, auth.headers, { source: auth.source || "recording" });
+    }
+    if (writebackCatalog) {
+      const catalog = await listExportedSkills(files).catch(() => []);
+      const written = await writebackExportedPackages({
+        subsystem,
+        headers: auth.headers,
+        exportRoot: outDir,
+        catalogRows: catalog,
+      });
+      logExport(`${label} 回写已导出包 catalog=${catalog.length} updated=${written.updated?.length || 0}`, started);
+    }
+  }
+  const previousRow = existingSkillId
+    ? await getExportedSkill(files, existingSkillId)
+    : await getExportedSkillByRecording(files, recordingId);
+  const previous = existingSkillId || previousRow?.name || "";
+  const skillId = stableSkillId({
+    subsystem,
+    recordingId,
+    title,
+    existing: previous,
+  });
+  const projected = consumerContract(latest);
+  let packed;
+  try {
+    packed = await packArtifacts({
+      files,
+      recordingId,
+      outDir: outDir || path.join(files.directory(recordingId), "exported"),
+      skillId,
+      tenant,
+      subsystem,
+      draft: latest,
+      authHeaders: auth.headers,
+      baseUrl,
+      validate: true,
+      useSkill4Handbook: false,
+    });
+  } catch (error) {
+    logExport(`失败 打包 skill_id=${skillId} ${error.message || error}`, started);
+    return { status: "export_failed", errors: [error.message || String(error)], skill_id: skillId };
+  }
+  logExport(`${label} 已打包 path=${packed.export_path} token_missing=${packed.token_missing} handbook=${packed.handbook_source || "materialized"}`, started);
+  const description = projected.capabilities
+    .map((item) => item.intent || item.name)
+    .filter(Boolean)
+    .join("；") || previousRow?.description || "";
+  const manifest = await upsertExportedSkill(files, skillManifestFromExport({
+    skillId,
+    title: title || latest.title || previousRow?.title || skillId,
+    description,
+    tenant: tenant || previousRow?.tenant || "",
+    subsystem,
+    action: skillId.split(".").slice(1).join("."),
+    recordingId,
+    resultId: resultId || previousRow?.result_id || recordingId,
+    exportPath: packed.export_path,
+    draft: latest,
+  }));
+  logExport(`${label}完成 skill_id=${skillId} version=${manifest.version || "-"} path=${packed.export_path}`, started);
+  return {
+    status: "exported",
+    skill_id: skillId,
+    skill_name: manifest.title,
+    version: manifest.version,
+    export_path: packed.export_path,
+    token_missing: packed.token_missing,
+    routes: projected.routes || [],
+    errors: [],
+    catalog_item: manifest,
+  };
+}
+
 export async function exportRecordingSkill({
   files,
   evidence,
@@ -66,184 +192,28 @@ export async function exportRecordingSkill({
   packArtifacts = packSkill4Artifacts,
   timeoutMs = Number(process.env.PI_EXPORT_TIMEOUT_MS || 900000),
 } = {}) {
+  void createExportSession;
+  void timeoutMs;
   const started = Date.now();
-  const capIds = (overlayDraft?.capabilities || []).map((item) => item.capability_id || item.id).filter(Boolean);
-  logExport(`1/9 开始 recording_id=${recordingId || "-"} title=${title || "-"} tenant=${tenant || "-"} subsystem=${subsystem || "-"} overlay=${overlayDraft ? "yes" : "no"} overlay_caps=${capIds.length || 0} out_dir=${outDir || "-"} timeout_ms=${timeoutMs}`, started);
-  const guides = await readGeneratorGuides({ includeContent: false });
-  if (!guides.ok) {
-    logExport(`失败 规范缺失 ${guides.error}`, started);
-    return { status: "export_failed", errors: [guides.error], clarification_questions: [] };
-  }
-  logExport(`2/9 规范就绪 files=${guides.files?.length || 0} dir=${guides.dir || "-"}`, started);
-  const saved = await files.readDraft(recordingId);
-  const latest = contractEnvelope(overlayDraft || saved?.draft || saved || {});
-  const latestIds = latest.capabilities.map((item) => item.capability_id || item.id).filter(Boolean);
-  if (!latest.capabilities.length) {
-    logExport(`失败 没有可导出的能力 recording_id=${recordingId || "-"} disk_draft=${saved ? "yes" : "no"}`, started);
-    return { status: "export_failed", errors: ["没有可导出的能力"], clarification_questions: [] };
-  }
-  logExport(`3/9 合同就绪 caps=${latest.capabilities.length} ids=${latestIds.join(",") || "-"} steps=${latest.steps.length} links=${latest.links.length} relations=${latest.capability_relations.length} unresolved=${latest.unresolved.length} source=${overlayDraft ? "overlay" : "disk"}`, started);
-  await files.writeDraft(recordingId, {
-    recording_id: recordingId,
-    saved_at: new Date().toISOString(),
-    draft: latest,
-    title: title || latest.title || "",
-  });
-  logExport("3/9 合同已落盘", started);
-  const auth = await resolveAuthHeaders({
-    tenant,
-    subsystem,
-    requestHeaders: authHeaders,
+  logExport(`开始 recording_id=${recordingId || "-"} title=${title || "-"} tenant=${tenant || "-"} skill4=no`, started);
+  return packLatestDraft({
+    files,
     evidence,
     recordingId,
-  });
-  const baseUrl = await resolveExportBaseUrl({ files, recordingId, draft: latest });
-  logExport(`4/9 鉴权 source=${auth.source || "missing"} header_names=${Object.keys(auth.headers).join(",") || "-"} token=${hasCredentialHeaders(auth.headers) ? "full" : "empty"} base_url=${baseUrl || "-"}`, started);
-  if (hasCredentialHeaders(auth.headers)) {
-    if (tenant) {
-      await writeTokenRecord(tenant, subsystem, auth.headers, { source: auth.source || "recording" });
-      logExport(`4/9 已写 token 仓库 tenant=${tenant} subsystem=${subsystem}`, started);
-    }
-    const catalog = await listExportedSkills(files).catch(() => []);
-    const written = await writebackExportedPackages({
-      subsystem,
-      headers: auth.headers,
-      exportRoot: outDir,
-      catalogRows: catalog,
-    });
-    logExport(`4/9 回写已导出包 catalog=${catalog.length} updated=${written.updated?.length || 0}`, started);
-  }
-  const artifacts = artifactRoot(files, recordingId);
-  logExport(`5/9 清空预置产物 dest=${artifacts}`, started);
-  await rm(artifacts, { recursive: true, force: true });
-  await seedFrozenArtifacts(files, recordingId, { tenant, subsystem, baseUrl, draft: latest });
-  logExport("5/9 预置产物完成", started);
-
-  let submitted = null;
-  const toolMod = await import("../pi-tools.mjs");
-  if (typeof toolMod.createExportToolHost !== "function") {
-    logExport("失败 当前 sidecar 没有 createExportToolHost", started);
-    return { status: "export_failed", errors: ["当前 sidecar 没有 createExportToolHost"], clarification_questions: [] };
-  }
-  const tools = toolMod.createExportToolHost({
-    files,
-    recordingId,
-    draft: latest,
-    onSubmit: (payload) => {
-      submitted = payload;
-      logExport(`7/9 Skill4提交回调 ok=${payload.ok} skill_id=${payload.skill_id || "-"} routes=${payload.routes?.length || 0} errors=${JSON.stringify(payload.errors || [])}`, started);
-    },
-  });
-  logExport(`6/9 开 Skill4 会话 timeout_ms=${timeoutMs}`, started);
-  let session;
-  try {
-    if (!createExportSession) {
-      const mod = await import("../pi-session.mjs");
-      createExportSession = mod.createExportPiSession;
-    }
-    if (typeof createExportSession !== "function") {
-      throw new Error("当前 sidecar 没有 createExportPiSession，无法开 Skill 4");
-    }
-    session = await createExportSession({
-      recording: { id: `${recordingId}-export-${Date.now()}` },
-      tools,
-    });
-  } catch (error) {
-    logExport(`失败 Skill4 无法启动 ${error.message || error}`, started);
-    return {
-      status: "export_failed",
-      errors: [error.message || String(error)],
-      clarification_questions: [],
-    };
-  }
-  logExport(`6/9 Skill4 会话已创建 session=${session.sessionId || "-"}`, started);
-  try {
-    await session.beginSkillExport({
-      title: title || latest.title || "",
-      timeoutMs,
-      hasExport: () => Boolean(submitted?.ok),
-    });
-  } catch (error) {
-    if (!submitted?.ok) {
-      logExport(`失败 Skill4 ${error.message || error}`, started);
-      await session.close?.({ reason: "export_failed" }).catch(() => {});
-      return {
-        status: "export_failed",
-        errors: [error.message || String(error)],
-        clarification_questions: [],
-      };
-    }
-    logExport("7/9 Skill4 超时但已提交，继续打包", started);
-  }
-  await session.close?.({ reason: "exported" }).catch(() => {});
-  if (!submitted?.ok) {
-    logExport(`失败 Skill4 未提交 errors=${JSON.stringify(submitted?.errors || [])}`, started);
-    return {
-      status: "export_failed",
-      errors: submitted?.errors?.length ? submitted.errors : ["Skill 4 没有 submit_skill_export"],
-      clarification_questions: [],
-    };
-  }
-  logExport(`7/9 Skill4 已提交 skill_id=${submitted.skill_id || "-"} routes=${submitted.routes?.length || 0}`, started);
-
-  const previous = existingSkillId
-    || (await getExportedSkillByRecording(files, recordingId))?.name
-    || "";
-  const skillId = stableSkillId({
-    subsystem,
-    recordingId,
-    title,
-    existing: previous || submitted.skill_id,
-  });
-  logExport(`8/9 准备打包 skill_id=${skillId} previous=${previous || "-"} submitted_id=${submitted.skill_id || "-"}`, started);
-  if (tenant && hasCredentialHeaders(auth.headers)) {
-    await writeTokenRecord(tenant, subsystem, auth.headers, { source: auth.source || "recording" });
-  }
-  let packed;
-  try {
-    packed = await packArtifacts({
-      files,
-      recordingId,
-      outDir: outDir || path.join(files.directory(recordingId), "exported"),
-      skillId,
-      tenant,
-      subsystem,
-      draft: latest,
-      authHeaders: auth.headers,
-      baseUrl,
-    });
-  } catch (error) {
-    logExport(`失败 打包 skill_id=${skillId} ${error.message || error}`, started);
-    return { status: "export_failed", errors: [error.message || String(error)], skill_id: skillId };
-  }
-  logExport(`8/9 已打包 path=${packed.export_path} token_missing=${packed.token_missing} base_url=${packed.base_url || baseUrl || "-"}`, started);
-
-  logExport(`9/9 写入目录 skill_id=${skillId}`, started);
-  const manifest = await upsertExportedSkill(files, skillManifestFromExport({
-    skillId,
-    title: title || latest.title || skillId,
-    description: submitted.description || "",
+    resultId,
     tenant,
     subsystem,
-    action: skillId.split(".").slice(1).join("."),
-    recordingId,
-    resultId: resultId || recordingId,
-    exportPath: packed.export_path,
-    draft: latest,
-  }));
-  logExport(`完成 skill_id=${skillId} version=${manifest.version || "-"} path=${packed.export_path}`, started);
-
-  return {
-    status: "exported",
-    skill_id: skillId,
-    skill_name: manifest.title,
-    version: manifest.version,
-    export_path: packed.export_path,
-    token_missing: packed.token_missing,
-    routes: submitted.routes || [],
-    errors: [],
-    catalog_item: manifest,
-  };
+    title,
+    outDir,
+    overlayDraft,
+    authHeaders,
+    existingSkillId,
+    packArtifacts,
+    persistDraft: true,
+    writebackCatalog: true,
+    started,
+    label: "出包",
+  });
 }
 
 export async function dumpRecordingSkill({
@@ -261,82 +231,25 @@ export async function dumpRecordingSkill({
   packArtifacts = packSkill4Artifacts,
 } = {}) {
   const started = Date.now();
-  logExport(`快速导出 开始 recording_id=${recordingId || "-"} title=${title || "-"} tenant=${tenant || "-"} subsystem=${subsystem || "-"} out_dir=${outDir || "-"}`, started);
-  const saved = await files.readDraft(recordingId);
-  const latest = contractEnvelope(overlayDraft || saved?.draft || saved || {});
-  const latestIds = latest.capabilities.map((item) => item.capability_id || item.id).filter(Boolean);
-  if (!latest.capabilities.length) {
-    logExport(`快速导出失败 没有可导出的能力 recording_id=${recordingId || "-"} disk_draft=${saved ? "yes" : "no"}`, started);
-    return { status: "export_failed", errors: ["没有可导出的能力"], clarification_questions: [] };
-  }
-  logExport(`快速导出 合同 caps=${latest.capabilities.length} ids=${latestIds.join(",") || "-"} source=${overlayDraft ? "overlay" : "disk"}`, started);
-  const auth = await resolveAuthHeaders({
-    tenant,
-    subsystem,
-    requestHeaders: authHeaders,
+  logExport(`快速导出 开始 recording_id=${recordingId || "-"} title=${title || "-"} skill4=no`, started);
+  return packLatestDraft({
+    files,
     evidence,
     recordingId,
-  });
-  const baseUrl = await resolveExportBaseUrl({ files, recordingId, draft: latest });
-  logExport(`快速导出 鉴权 source=${auth.source || "missing"} header_names=${Object.keys(auth.headers).join(",") || "-"} token=${hasCredentialHeaders(auth.headers) ? "full" : "empty"} base_url=${baseUrl || "-"}`, started);
-  if (tenant && hasCredentialHeaders(auth.headers)) {
-    await writeTokenRecord(tenant, subsystem, auth.headers, { source: auth.source || "recording" });
-  }
-  const previousRow = existingSkillId
-    ? await getExportedSkill(files, existingSkillId)
-    : await getExportedSkillByRecording(files, recordingId);
-  const previous = existingSkillId || previousRow?.name || "";
-  const skillId = stableSkillId({
+    resultId,
+    tenant,
     subsystem,
-    recordingId,
     title,
-    existing: previous,
+    outDir,
+    overlayDraft,
+    authHeaders,
+    existingSkillId,
+    packArtifacts,
+    persistDraft: Boolean(overlayDraft),
+    writebackCatalog: false,
+    started,
+    label: "快速导出",
   });
-  let packed;
-  try {
-    packed = await packArtifacts({
-      files,
-      recordingId,
-      outDir: outDir || path.join(files.directory(recordingId), "exported"),
-      skillId,
-      tenant,
-      subsystem,
-      draft: latest,
-      authHeaders: auth.headers,
-      baseUrl,
-      validate: false,
-      useSkill4Handbook: true,
-      existingHandbookPath: previousRow?.export_path || previousRow?.package_dir || "",
-    });
-  } catch (error) {
-    logExport(`快速导出失败 打包 skill_id=${skillId} ${error.message || error}`, started);
-    return { status: "export_failed", errors: [error.message || String(error)], skill_id: skillId };
-  }
-  logExport(`快速导出 已写包 path=${packed.export_path} token_missing=${packed.token_missing} validate=no skill4_session=no handbook=${packed.handbook_source || "-"}`, started);
-  const manifest = await upsertExportedSkill(files, skillManifestFromExport({
-    skillId,
-    title: title || latest.title || previousRow?.title || skillId,
-    description: previousRow?.description || "",
-    tenant: tenant || previousRow?.tenant || "",
-    subsystem,
-    action: skillId.split(".").slice(1).join("."),
-    recordingId,
-    resultId: resultId || previousRow?.result_id || recordingId,
-    exportPath: packed.export_path,
-    draft: latest,
-  }));
-  logExport(`快速导出完成 skill_id=${skillId} version=${manifest.version || "-"} path=${packed.export_path}`, started);
-  return {
-    status: "exported",
-    skill_id: skillId,
-    skill_name: manifest.title,
-    version: manifest.version,
-    export_path: packed.export_path,
-    token_missing: packed.token_missing,
-    routes: [],
-    errors: [],
-    catalog_item: manifest,
-  };
 }
 
 export async function reexportCatalogSkills({
@@ -358,7 +271,6 @@ export async function reexportCatalogSkills({
     const recordingId = String(row.recording_id || "").trim();
     logExport(`目录快速导出 ${index + 1}/${rows.length} name=${row.name || "-"} recording_id=${recordingId || "-"} source=${row.source || "-"}`, started);
     if (!recordingId) {
-      // 导入包：已在磁盘，不需要重导；直接计入 written
       if (row.source === "imported") {
         const existingPath = String(row.export_path || row.package_dir || "").trim();
         if (existingPath) written.push(existingPath);

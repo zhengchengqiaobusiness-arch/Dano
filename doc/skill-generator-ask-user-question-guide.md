@@ -28,20 +28,21 @@
 
 以下情况不要调用：
 
-- 答案已能从当前对话或已读取的业务数据中确定；
+- 读能力（查询/详情）：不要 `ask_user_question`，不要确认卡。答案已能从当前对话、合同身份或已读取的业务数据中确定，直接执行。
+- 写能力里已能确定的值：仍留在全量确认表的 `default` 里，不要为了「确认」再拆一张更瘦的表。
 - 对应 OA Skill 尚未确认支持该业务动作；
 - 想让用户判断接口是否存在、字段是否必填或字段如何映射——这些应在生成
   Skill 时由已确认的 OA 能力定义；
 - 只需向用户说明结果，不需要新的输入；
 - 想用普通文本、Markdown、XML 或 JSON 代码块模拟提问。
+- 系统栏身份（`current_user`）和 selected_record：不要问「你是谁」、不要问所在部门。用户指向自己时用合同身份主键。
+- token：只有脚本 `code=AuthExpired` 才问；查询已成功后的写入缺身份字段不是过期。
 
 每次模型响应最多原生调用一次 `ask_user_question`。需要多个相关答案时，必须
 使用一个 `title + questions[]` 分组表单。`default` 只允许来自合同已给出的
-`default` / `default_value`、当前对话里用户已经确认的值，或写操作日期控件的页面默认 `today`（调用前换成当天 yyyy-MM-dd）。合同
-`caller_fields` 没有默认值时，不要编造「无」「示例」「请填写」「请审批」，必须向
-用户收集正确内容后再执行。成品 `SKILL.md` 必须完全基于能力：列出该能力 `input_schema` 全部字段和
+`default` / `default_value`、当前对话里用户已经确认的值、说法唯一匹配的枚举/选项 id，或写操作日期控件的页面默认 `today`（调用前换成当天 yyyy-MM-dd）。读能力不要提问。写能力必须把该能力冻结提问的全量 `questions[]` 弹出来（与 `caller_fields` 逐字一致），已确定的写入 `default`，未提可选也出现（可空）；禁止编造「无」「示例」「请填写」「请审批」。成品 `SKILL.md` 必须完全基于能力：列出该能力 `input_schema` 全部字段和
 调用方 params，写清「怎么填」和「可用默认值」。系统常量必须带实际合同值，由 runtime 自动填。禁止漏字段。
-`required` 只决定用户能否清空或省略答案。
+`required` 只决定用户能否清空或省略答案。读能力已确定则不问。写能力已确定的值写入 `default` 后仍留在全量确认表里。
 
 ## 三种调用形状
 
@@ -1825,13 +1826,13 @@ E09 和 E10 均在同一 Assistant Turn 中已提交。
 
 需要用户补充字段时必须原生调用 `ask_user_question`，禁止在普通文本、Markdown 或 `<question>` 标签中模拟工具调用。
 
-- 同一能力的相关字段必须合并为一次 `{title, questions[]}`，对上页面的一张完整表单，不要拆成多轮问卷。
-- 每个 question 必须包含唯一 `id`、业务化 `question`/label、正确 `inputType`、`required`。只有合同 default、用户已确认值或写操作日期的页面默认 `today` 时才写 `default`。
+- 同一能力的相关字段必须合并为一次 `{title, questions[]}`，对上页面的一张完整表单，不要拆成多轮问卷。读能力不要弹出这张表：已确定的不进本次 questions[]（整步都不问）。写能力必须整份带上该能力冻结提问 JSON 的 questions[]：id 集合和顺序完全相同，禁止删 id。只改 default。没值的可选（附件、计划、问题、备注）也必须出现。禁止只拿口头提到的字段做瘦表再拿去确认。
+- 每个 question 必须包含唯一 `id`、业务化 `question`/label、正确 `inputType`、`required`。有合法来源必须写入 `default`（合同 default、用户已确认值、唯一匹配的枚举/选项 id、写操作日期的页面默认 `today`（调用前换成当天 yyyy-MM-dd））。没有合法来源时省略 `default`，禁止空字符串。
 - `id` 必须与 capability 的调用方字段名逐字一致。
 - 长文本使用 `textarea`；日期使用 `date` 和正确 `dateFormat`；枚举使用 `select`/`radio`；多选使用 `multiple: true`。
-- 明细在能力层仍是 table。冻结提问必须是当前宿主可执行的控件。Dano 宿主支持 `text` / `textarea` / `date` / `radio` / `checkbox` / `select` / `treeSelect`，没有 `table`。因此对象数组冻结为同一字段 id 的 `textarea`（每行 `分区标题|||列值` 或 JSON 数组），由 runtime 组装回数组。禁止在冻结提问写 `inputType: table`，禁止改字段 id，禁止拆成多轮问卷。
-- 动态候选必须使用 `dataSource`，并完整声明 endpoint、method、params、resultPath、idField 和 labelField；用户看到 label，接口接收稳定 id 或合同声明的值。助手先运行 `python scripts/flow.py --list-options <capability_id> <field>`，把返回的 `options` 写进该字段后再复制冻结 JSON 去 `ask_user_question`。不要让问句自己裸打选项接口。禁止把无 `options` 的 `treeSelect` / `select` 直接问出去。禁止把 `dataSource` 放进 `ask_user_question`。
-- 冻结提问的字段 id 必须覆盖该能力全部 `caller_fields`，一个不能少。确认卡比原页瘦 = 合同或冻结 JSON 丢了调用方字段，停止出包，不要另写更瘦表单。
+- 明细在能力层仍是 table。冻结提问必须是当前宿主可执行的控件。Dano 宿主支持 `text` / `textarea` / `date` / `radio` / `checkbox` / `select` / `treeSelect`，没有 `table`。因此对象数组冻结为同一字段 id 的 `textarea`（每行 `分区标题|||列值` 或 JSON 数组），由 runtime 组装回数组。禁止在冻结提问写 `inputType: table`，禁止改字段 id，禁止拆成多轮问卷。只问可见列；合同 unresolved 标明自动补的列由 runtime 补。
+- 动态候选必须使用 `dataSource`，并完整声明 endpoint、method、params、resultPath、idField 和 labelField；用户看到 label，接口接收稳定 id 或合同声明的值。助手仅当该字段尚未确定时运行 `python scripts/flow.py --list-options <capability_id> <field>`，把返回的 `options` 写进该字段后再 `ask_user_question`。不要让问句自己裸打选项接口。禁止把无 `options` 的 `treeSelect` / `select` 直接问出去。禁止把 `dataSource` 放进 `ask_user_question`。
+- 冻结提问的字段 id 必须覆盖该能力全部 `caller_fields`，一个不能少（目录完整）。写操作 ask 的 questions[] 必须与冻结 JSON 逐 id、逐顺序相同，禁止删 id。确认卡比原页瘦 = 上一张分组表删了 id，停止。读能力调用时不要提问。写操作已确定字段仍留在对应题的 `default` 里。
 - 固定值、会话值、运行时生成值、计算值和上游响应不得向用户提问。系统常量必须带实际合同值，由 runtime 自动填。系统栏写着 `page_default` 却没有 `default_value`：合同不可执行，停止，不要向用户要这些键，不要改 `CONTRACT.json`。
 
 ## 4. 默认值
@@ -1839,10 +1840,11 @@ E09 和 E10 均在同一 Assistant Turn 中已提交。
 生成到文档中的 default 只能来自能力合同，不能复制录制样本，也不能编业务占位句。
 
 - 合同已写出 `default` / `default_value`：原样使用。
-- 写操作日期控件：页面默认 `today`，调用前换成当天 `yyyy-MM-dd`，用户可改。查询类日期没有页面默认，必须向用户收集真实周期。
-- 枚举和动态选项：只用合同 id 或本次 `--list-options` 用户选中的 id。
-- 正文、备注、意见、可选空字段：没有合同 default 就不写 default，不要编「请填写」「暂无」「请审批」。可选空 = 省略或空字符串。
+- 写操作日期控件：页面默认 `today`，调用前换成当天 `yyyy-MM-dd`，用户可改。查询类日期没有页面默认；说法里能解析出日期则用作 default，不能解析才问。禁止把查询日期改成今天。
+- 枚举和动态选项：合同 id 或本次 `--list-options` 返回并唯一对上/被用户选中的 id。说法唯一匹配 label 即可作为 default。
+- 正文、备注、意见、可选空字段：没有合法来源就不写 default，不要编「请填写」「暂无」「请审批」。读能力：可选未提不进本次 questions[]。写能力：未提可选也留在全量确认表里（可空）。
 - 系统常量：写入合同值，由 runtime 自动填，不要向用户要。缺 `default_value` 的必填系统 `page_default` 不是让用户修合同，而是合同不可执行。
+- 选中记录 / 上一步结果：上一张原始表唯一对上的行，或合同 `links`。
 
 规则占位符 `today` 必须在工具调用前替换成真实日期。用户交回占位句视为未填，按同一张冻结表再问。
 
@@ -1856,13 +1858,13 @@ E09 和 E10 均在同一 Assistant Turn 中已提交。
 
 ## 6. 写操作确认
 
-写操作整理并校验全部参数后，必须单独原生调用：
+写操作必须先弹出该能力冻结提问的全量分组表单（目录与 `caller_fields` 逐字一致），用户提交后再单独原生调用：
 
 ```json
 {"confirm": true, "formIds": ["<answered.formId>"]}
 ```
 
-确认调用只允许 `confirm` 与 `formIds`，不得同时携带 title、questions、options、multiple 或其他表单字段。只有返回 `confirmed` 才继续；返回 `cancelled` 立即停止。
+确认调用只允许 `confirm` 与 `formIds`，不得同时携带 title、questions、options、multiple 或其他表单字段。因此上一张分组表必须已经是全量目录：瘦收集会导致确认卡瘦、漏日期/总结/计划。只有返回 `confirmed` 才继续；返回 `cancelled` 立即停止。读能力禁止 `confirm:true`。先查某日再决定是否写：写入日期继承该查询日；「今天的内容」填正文槽，不把已确定的业务日期改成当天。
 
 ## 7. 执行和结果输出
 

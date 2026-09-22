@@ -6,7 +6,6 @@ import os from "os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { RecordingFiles } from "../src/fs-store.mjs";
-import { writeSkillArtifact } from "../src/skill-package-tools.mjs";
 import { exportRecordingSkill } from "../src/skill-export/start-export-session.mjs";
 import { listExportedSkills, upsertExportedSkill, skillManifestFromExport } from "../src/skill-export/skill-catalog.mjs";
 
@@ -34,35 +33,6 @@ async function waitHealth(port, timeoutMs = 8000) {
   throw new Error("Pi_check HTTP 未就绪");
 }
 
-const HANDBOOK = `# 转正办理
-
-## 立刻办理
-读完立刻提问。禁止 ls。
-
-## 默认值规则
-可用默认值只允许合同 default、用户已确认值、枚举 id、本次 --list-options 选中 id。
-
-## 选择工作流
-默认完整办理：先查询再提交。
-
-## 执行协议
-Done when: 提交成功。
-- \`query\`
-- \`submit\`
-
-## 按需读取资源
-需要字段时读 INPUT_FORMS.md。
-
-## 鉴权
-没有 auth.local.json 则停止，要求提供 token。
-
-路线：\`default\` \`query\` \`submit\`
-`;
-
-async function writeValidSkill4Package(files, recordingId) {
-  await writeSkillArtifact(files, recordingId, "SKILL.md", HANDBOOK);
-}
-
 test("HTTP 目录在导出写入后立刻能读到同一条，重导不另开一条", async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "dano-skill-http-"));
   const files = new RecordingFiles(dataDir);
@@ -85,6 +55,7 @@ test("HTTP 目录在导出写入后立刻能读到同一条，重导不另开一
       ...process.env,
       PI_CHECK_PORT: String(port),
       PI_CHECK_DATA_DIR: dataDir,
+      DANO_SKILL_REFERENCE_DIR: path.resolve(ROOT, "..", "doc"),
     },
     stdio: "ignore",
   });
@@ -103,13 +74,6 @@ test("HTTP 目录在导出写入后立刻能读到同一条，重导不另开一
       outDir: path.join(dataDir, "out"),
       authHeaders: { Authorization: "Bearer test-token-value-12345" },
       existingSkillId: "oa.rec_http_list",
-      createExportSession: async ({ tools }) => ({
-        beginSkillExport: async () => {
-          await writeValidSkill4Package(files, recordingId);
-          await tools.submit_skill_export({ ok: true, skill_id: "oa.should_not_win", routes: [] });
-        },
-        close: async () => {},
-      }),
     });
     assert.equal(first.status, "exported", (first.errors || []).join("; "));
     const listed = await jsonRequest(port, "GET", "/v1/skills");
@@ -132,13 +96,6 @@ test("HTTP 目录在导出写入后立刻能读到同一条，重导不另开一
       draft: overlay,
       outDir: path.join(dataDir, "out"),
       authHeaders: { Authorization: "Bearer test-token-value-12345" },
-      createExportSession: async ({ tools }) => ({
-        beginSkillExport: async () => {
-          await writeValidSkill4Package(files, recordingId);
-          await tools.submit_skill_export({ ok: true, skill_id: "oa.renamed", routes: [] });
-        },
-        close: async () => {},
-      }),
     });
     assert.equal(second.status, "exported", (second.errors || []).join("; "));
     assert.equal(second.skill_id, "oa.rec_http_list");
@@ -187,6 +144,7 @@ test("HTTP 目录快速导出不开 Skill 4，只写文件", async () => {
       ...process.env,
       PI_CHECK_PORT: String(port),
       PI_CHECK_DATA_DIR: dataDir,
+      DANO_SKILL_REFERENCE_DIR: path.resolve(ROOT, "..", "doc"),
     },
     stdio: "ignore",
   });

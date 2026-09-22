@@ -12,7 +12,7 @@ Investigator 叫你认一项产物时立刻工作。该项已按目标做完、�
 
 修正已交项：`submit_recording_capability` 用**同一个** `capability_id` 把整项再交一遍（含 steps / refs / relations / links）。运输层按 id 覆盖。禁止另起 `_v2` / `_2` /「含顺序关系」新 id。闸门报「两个能力不能共用同一个 execute step_id」只约束**两项不同能力**；那不是让你给同一动作新编 step。新建和编辑才拆两个 execute step。同一「新增并提交」只交一项。
 
-目标要求先 A 后 B：有值流写 `links`；没有值流也必须写 `capability_relations`（handoff），挂在**已有**写能力上再交同一 id。页内典型链只要本场都做完，必须挂 relation：**查询→点结果看详情**、查询→新增、查询→编辑、查询→删除、新增→提交。列表查询和详情若 execute path 不同、返回粒度不同（例如计数 vs 逐条明细），两者都是独立能力，**禁止**只挂「查询→新增」而把详情留在原子路线外。Skill 4 靠这些关系编最长默认办理路线，不要自己写消费者包。
+目标要求先 A 后 B：有值流写 `links`；没有值流也必须写 `capability_relations`（handoff），挂在**已有**写能力上再交同一 id。页内典型链只要本场都做完，必须挂 relation：**查询→点结果看详情**、查询→新增、查询→编辑、查询→删除、新增→提交。列表查询和详情若 execute path 不同、返回粒度不同（例如计数 vs 逐条明细），两者都是独立能力，**禁止**只挂「查询→新增」而把详情留在原子路线外。运输层靠这些关系编最长默认办理路线，不要自己写消费者包。
 
 ## 禁止把未识别来源冻成录制常量
 
@@ -143,12 +143,13 @@ Investigator 确认该项已按目标做完、并在 `list_action_timeline` 或 
 4. **按目标写上再证明绑定**：Investigator 已按目标把该动作的可见字段写上并点出 execute 之后，再对还没对上的键建议改一个值看哪个请求键变了。值碰巧相等、字段名相似、同一个请求里仅剩两个字段，都不能单独定案。本场没改过、但控件可改：仍是调用方，不要写成 `constant` / 「无独立来源」。无法做这个实验（合法 selector 写不进、未授权写入）：该键写入 `unresolved`。禁止编 path，禁止 invent selector。来源没看清不能说成已经理解业务。录制值只可作 `sample_value`。
 5. **逐键对上控件，决定调用方还是系统**：
    - 对得上**可改**控件（input/select/date/textarea/upload，以及树、页签、分段器、单选组，且 `readonly`/`disabled` 都不是 true）→ **调用方**。即使本场没改、这次 query/body 没带这个键，也留下可选调用方字段。页面上已有默认选中（单选默认启用、下拉已有值）只要还能改，仍是调用方，禁止写成 `constant` / 「无独立来源」。`path` 用控件 `name` 或同页已发出请求里的同义键。对不上 path 就写入 `unresolved`，不要假装控件不存在。
+     **例外（读筛选 = 当前登录人）**：查询/筛选 execute 里的部门、人员键，本场请求值与身份 JSON 走通值相同 → **系统** `current_user`，不要收成调用方必填树/姓名框。`source` 写与写能力同一套身份接口和已走通的 `result_path`（人员主键常常是 `data.user.id`，不是 `data.`+execute 键名）。本场改成了与身份不同的部门/人员 → 仍按可改控件收成调用方。这条优先于「本场没改过、控件可改 → 调用方」。
    - 一个可见**日期区间**（`range=true` 或一个控件里两个起止输入）对上两个请求键时，两个键都是调用方，不要把起止收成系统。
    - 页面因切换类型/页签自动改了日期，只要日期控件仍能点，仍是调用方，不要当成计算公式。
    - 入口 URL / 上一页带入的默认值：本页对应控件**仍能改** → **调用方**，`source_kind=page_default`，必须进 `input_schema`。日期页面默认当天时，调用方字段写 `page_default=today`（或等价说明），**不要**收进系统栏。`visible_control` 上该控件整项 `readonly=true` 或 `disabled=true` → **系统**，`source_kind=page_default`，且必须带运行时可执行的 `default_value`，reason 写清从哪次跳转/URL 带入；**禁止**再写进 `input_schema`。同一标签若既有只读下拉、又有一份看起来可改的空 input，认只读那条，不要把灰掉的类型收成调用方数字框。
      **禁止**把可改日期/下拉做成系统 `page_default` 且没有 `default_value`：导出后 runtime 填不出，调用方 input-json 也改不了系统栏，写操作会直接失败。这种形状要么改回调用方，要么写入 `unresolved`，禁止当已解决。
    - 对得上灰框 / 自动编号 / 只读姓名单位 / `readonly=true` / `disabled=true` → **系统**。
-   - 请求里有、控件上没有：登录用户/组织且初始加载请求就自动带上 → **系统**，`source_kind=current_user`，`key` 必须等于这条 execute 里的真实键。`source` 必须写出本场真实身份接口：`source_url`（本场证据里的 GET path）、`source_method`、`result_path`（身份 JSON 里指向该值的路径）。reason 写「运行时取当前登录身份」。这是能力合同的一部分，Skill 只照抄，不会猜探测。**禁止**把本场的用户 ID、公司 ID 写成永远不变的 `constant` 固定值，禁止编 `current-dept-id` 这类运行时别名，禁止假设所有系统都是 `/admin-api/system/auth/get-permission-info`。身份接口没看见或 result_path 对不上 → `unresolved`，不要标 `current_user`。
+   - 请求里有、控件上没有：登录用户/组织且初始加载请求就自动带上 → **系统**，`source_kind=current_user`，`key` 必须等于这条 execute 里的真实键。`source` 必须写出本场真实身份接口：`source_url`（本场证据里的 GET path）、`source_method`、`result_path`（**对着本场身份响应 JSON 原文走通的路径**，不是 `data.`+execute 键名）。reason 写「运行时取当前登录身份」。这是能力合同的一部分，Skill 只照抄，不会猜探测。**禁止**把本场的用户 ID、公司 ID 写成永远不变的 `constant` 固定值，禁止编 `current-dept-id` 这类运行时别名，禁止假设所有系统都是 `/admin-api/system/auth/get-permission-info`。身份接口没看见，或 `result_path` 在本场响应上走不通 → `unresolved`，不要标 `current_user`。
    - 请求里有、控件上没有：行类型判别、行序号、前端行键 → 仅当有加行按钮和分区证据时标 **系统**，reason 写清依据和 seq。前端时间戳或看不清的键 → `unresolved`，录制值只作 `sample_value`。禁止写成「无独立来源，按录制请求原值提交」并标已解决。
    - 空数组/空对象：有对应可改控件（上传、选人、可增行）且目标没有排除它 → **调用方**，即使本场是空；目标排除该项（例如排除上传）→ 不进 `input_schema`，空数组留在系统 params；没有对应控件 → **系统**，按请求原值。
    - 上一页跳转带进本页 query、本页仍有对应控件 → **调用方**，`source_kind=page_default`，不要因为本场没再搜就收成系统。
@@ -192,7 +193,7 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 - `api_option`：`source` 写 `source_method`、`source_url`、`label_key`、`value_key`；`enum_options` 写本场实际返回的选项。写清 `options_complete=true/false`（只截到一页就标 false）。调用方选显示值，提交接口值。
 - `page_default` / 可改的 `previous_response`：默认从哪一步哪条路径来（`from_step_id` + `from_path`），**调用方可以改**。编辑弹层里的日期、下拉、数字都属于这类，即使本场没改。可改的 `page_default` 必须 `exposed_to_user=true` 并进 schema。只有整控件锁死的 `page_default` 才进系统栏，且必须带 `default_value`（分页页码这类已认清的数字缺省可以）。
 - 只读回填的 `previous_response`：`source` 必须写 `from_step_id` + `from_path`，提交时原样带回，调用方不能改。同一条值流还要写进 `links`。导出从这些 `links` 投影绑定。目标要求先 A 后 B、但没有值要传时，另写 `capability_relations`（见编排）。不要把本场主键/单号/正文当 `default_value`。
-- `selected_record_identity`：从列表哪一次点击/当前行哪个字段带出，提交到哪个 path。`reason` 若是「点结果表某行/某数字/某链接带出」，这就是 identity 或 `previous_response` + `links`，**禁止**再做成独立 `api_option` 树/下拉，也禁止把上一查询的 execute 路径挂成本字段 `option_source`。该键 `exposed_to_user=false`，**禁止**再出现在 `input_schema`。用户说「我 / 当前登录人」时，人维度的读请求用 `current_user` 的用户主键，不要再做一个全员选择器。
+- `selected_record_identity`：从列表哪一次点击/当前行哪个字段带出，提交到哪个 path。`reason` 若是「点结果表某行/某数字/某链接带出」，这就是 identity 或 `previous_response` + `links`，**禁止**再做成独立 `api_option` 树/下拉，也禁止把上一查询的 execute 路径挂成本字段 `option_source`。该键 `exposed_to_user=false`，**禁止**再出现在 `input_schema`。用户说「我 / 当前登录人」时，人维度的读请求用 `current_user` 的用户主键（`result_path` 走通身份 JSON），不要标 `selected_record` 再让消费者问姓名，也不要再做一个全员选择器。点行主键若等于身份走通的人员 id，直接 `current_user`。
 - `computed`：计算规则写进 `reason` 和 `source.formula`。用页面标签和字段 key 写关系，例如「明细金额 = 数量 × 产品单价」。证据里看不出公式：写入 `unresolved`，不要编公式，不要用录制原值冒充已解决。
 - `generated`：谁生成、何时生成（例如保存后服务端生成单号、打开表单时前端写入的时间戳）。runtime 只执行合同公式 `today` / `now`，或使用 `default_value`。其它公式、看不清规则 → `unresolved`。禁止把这类键标成 `current_user`：登录身份接口里没有 `createTime` 这类时间戳。未认清也必须留在 `unresolved`，禁止从合同里删掉。
 - `constant`：已经认清、每次提交都相同且有业务含义的固定值。依据写清。必须带 `default_value`。没有认清不要用 `constant`。宿主整项锁死且 URL 已带入的类型码，用 `constant` 或锁死 `page_default`，都必须有 `default_value`，并且**只留在系统 params**。
@@ -264,8 +265,8 @@ execute 的 query/body 没有、当前页也没有对应可改控件的键，禁
 - **行内字段**：行里对应可填/可选控件的是调用方，写进该数组的 `items.properties`；行里没有独立来源的判别码、序号、前端行键是系统，只留在 params，不要进 schema。行类型码来自点了哪个加行按钮或落在哪张表，不是调用方下拉，禁止编成「类型/项目类型」让调用方选。
 - **键名**：execute 的 `path` / `key` 必须能在实际 **query/body** 里找到，或能对上当前页可见控件。请求和控件都没有的键不要编进去；请求有的键不要改名。`input_schema.properties` 的顶层 key 必须等于某个 `exposed_to_user=true` 的 param.key。不要把请求头写成 `query.*` / `body.*`。
 - **页面原名**：`label` / `title` 用当前页原文，去掉星号（星号只表示 `required_mark`，不要把星号写进名字）。有 `section` 时，附件等分区字段优先用分区标题。
-- **样例值**：`default_value` 只固定无来源字段怎么提交，不是下次执行必须填的业务值。调用方日期禁止把本场看到的 `yyyy-MM-dd` 写成 `default_value`；写入表单日期控件默认当天写 `page_default=today`；查询/筛选周期没有合同默认。
-- **身份**：`current_user` 的处理合同就是 `source.source_url` + `result_path`。`result_path` 相对身份接口响应 JSON 原文（HTTP 体，含外层字段），不要按某一系统先剥 `data`。Skill 成品完全按能力投影，能力里没有身份接口，包里就没有。禁止交没有 `source` 的 `current_user`。
+- **样例值**：`default_value` 只固定无来源字段怎么提交，不是下次执行必须填的业务值。调用方日期禁止把本场看到的 `yyyy-MM-dd` 写成 `default_value`；**写入**表单里能打开面板的日期控件默认当天 → 调用方且写 `page_default=today`（即使本场改过日期，也不要收成没有 today 的纯 `user_input`，否则调用方会当成查询日期再确认一遍）；查询/筛选周期没有合同默认，禁止标 today。
+- **身份**：`current_user` 的处理合同就是 `source.source_url` + `result_path`。`result_path` 相对身份接口响应 JSON **原文**（HTTP 体，含外层 `code`/`data` 这类字段），不要按某一系统先剥 `data`。交之前必须用本场该次身份 GET 的响应把路径走通：从根开始每一段都是真实键，`get_path(响应原文, result_path)` 能读到这个 execute 键的值。禁止用 execute 的 body 键名去拼路径（例如看见 body 有 `userId`/`userNickname`/`deptId` 就写成 `data.userId`）。身份 JSON 若是 `data.user.id` / `data.user.nickname` / `data.user.deptId`，就必须写成这些真实路径。走不通 → 改路径或改 `unresolved`，禁止标 `current_user` 交差。Skill 成品完全按能力投影，能力里没有身份接口，包里就没有。禁止交没有 `source` 的 `current_user`。
 - **编排**：`request_refs` / `steps` 只能引用本场真实发出的请求。不要把没发过的 create/update/save 编进执行顺序。
 
 完整性：
@@ -634,7 +635,7 @@ execute 里的附件容器字段来自 preflight 响应，标为系统自动处�
 44. 多分区可增行：分区标题原文、表头原文、`x-dano-section-titles` 已写；只在一个分区出现的列没有写到所有行；行序号不在 schema。
 45. 前端时间戳、看不清的打开时写入键已进 `unresolved`，没有标系统结案，也没有标 `current_user`。
 46. schema type 与 param type、线上实际类型一致。该项 title/intent 没有压成半场短句。
-47. 系统栏每个 `required=true` 的键，runtime 都填得出：`current_user` 键在登录身份里真实存在；`constant` 有 `default_value`；`previous_response` 有 `from_step_id`+`from_path`；锁死的 `page_default` 有 `default_value`。可改日期/下拉没有被收进系统栏。缺一项就改回调用方或 `unresolved`，禁止交不可执行写能力。
+47. 系统栏每个 `required=true` 的键，runtime 都填得出：`current_user` 键在登录身份里真实存在，且 `result_path` 已用本场身份响应原文走通；`constant` 有 `default_value`；`previous_response` 有 `from_step_id`+`from_path`；锁死的 `page_default` 有 `default_value`。可改日期/下拉没有被收进系统栏。写入能力的可改日期带 `page_default=today`。缺一项就改回调用方或 `unresolved`，禁止交不可执行写能力。
 48. 每个 `option_source` 都是本表单选择器自己的候选接口，path 不等于另一能力的 execute。空参应能返回候选。点行带出的 id 没有被做成独立用户树。
 49. 本场已做完的列表查询和「点结果看详情」已有 query→detail 的 `links` 或 `capability_relations`。默认关系没有跳过粒度更细的那次读。
 50. 行类型码、行序号不在 `input_schema` / `items.properties`；没有把整份数组合并成固定一种 `itemType` 让调用方填。行类型码、行序号已作为系统 param 出现，不是只写在 reason。
@@ -644,6 +645,7 @@ execute 里的附件容器字段来自 preflight 响应，标为系统自动处�
 54. 加行后本表可见表头列（序号、操作除外）都在 `items.properties` 或 `unresolved`。
 55. `previous_response` 写在 `source.from_step_id` + `source.from_path`，并有 `links`。
 56. 读能力 `kind=query`，写能力 `kind` 为 `create` / `update` / `delete` / `submit` 之一，没有只用 `mutation`。
+57. 查询/筛选里与本场身份走通值相同的部门/人员键已标 `current_user` 并带走通的 `result_path`，没有收成调用方必填树，也没有把「点自己那一行」收成要用户填姓名的 `selected_record`。
 
 ## 最小补证
 
