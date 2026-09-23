@@ -197,3 +197,26 @@ isolated, and no API keys were emitted. Result:
 `/private/tmp/dano476-clear-coordinator-6oNYzX/export-result.json`; log:
 `/private/tmp/dano476-real-export.log`. This is a host-side export probe, not
 the browser export acceptance or the full account-retirement path.
+
+## Selective correction and forget groundwork
+
+`MemorySelectiveService` resolves one exact text selection in one bound memory
+document before registering the durable barrier. A duplicate selection is
+reported as ambiguous before mutation. The persisted plan contains the
+selected and replacement text only while pending; verified completion erases
+that plaintext. Once old scope writers settle, the coordinator removes the
+target's old source sessions, edits every document containing the exact old
+selection, verifies it is absent, then releases the scope. A shared document
+keeps its unrelated lines. Old pre-barrier entries are revoked and a fresh
+explicit entry may save the same fact afterward. Failed remote responses leave
+the plan pending for recovery. Corrected documents keep the governance revision
+and prior operation linkage as metadata; export includes completed correction
+or forget revisions without exposing cleanup credentials.
+
+The isolated real-service fixture added two synthetic facts to one document,
+corrected one, then forgot that new version. The unrelated line remained and
+neither old nor corrected fact appeared in the subsequent real recall. Result:
+`/private/tmp/dano476-clear-coordinator-6oNYzX/selective-result.json`; log:
+`/private/tmp/dano476-real-selective.log`. This validates exact-text remote
+behavior, not semantic paraphrase matching, a new browser chat, or the full
+model-tool/management flow. Those remain required by #476.
