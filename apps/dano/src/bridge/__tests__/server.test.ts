@@ -1041,7 +1041,7 @@ describe("BridgeServer HTTP/SSE transport", () => {
     });
   });
 
-  it("rejects owner transfer while an accepted User command is still active", async () => {
+  it.each(["complete", "target_active", "timeout", "binding_changed", "shutdown"])("drains accepted operations before ownership transfer: %s", async scenario => {
     const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dano-transfer-gate-"));
     userRoots.push(runtimeRoot);
     const source = {
@@ -1064,16 +1064,16 @@ describe("BridgeServer HTTP/SSE transport", () => {
     let guestBindingActive = true;
     const resolver: UserContextResolver = {
       async resolve() {
-        return guestBindingActive ? source : null;
+        return guestBindingActive ? (scenario === "target_active" ? target : source) : null;
       },
       async resolveForClient() {
         return guestBindingActive
-          ? { userContext: source, authentication: { status: "anonymous" } }
+          ? { userContext: scenario === "target_active" ? target : source, authentication: { status: "anonymous" } }
           : null;
       },
       async resolveExisting() {
         return guestBindingActive
-          ? { userContext: source, authentication: { status: "anonymous" } }
+          ? { userContext: scenario === "target_active" ? target : source, authentication: { status: "anonymous" } }
           : null;
       },
       async resolveAnonymous() {
@@ -1085,12 +1085,16 @@ describe("BridgeServer HTTP/SSE transport", () => {
         return true;
       },
     };
+    let reportTransferStarted!: () => void;
+    const transferStarted = new Promise<void>(resolve => { reportTransferStarted = resolve; });
     const authHandler: AuthHttpHandler = {
       async handle(req, res, url, lifecycle) {
         if (req.method !== "POST" || url.pathname !== "/api/test-transfer") {
           return false;
         }
-        await lifecycle.transferAnonymousUser(req.headers, source.user.id, target);
+        const transfer = lifecycle.transferAnonymousUser(req.headers, source.user.id, target);
+        reportTransferStarted();
+        await transfer;
         res.writeHead(204);
         res.end();
         return true;
@@ -1109,6 +1113,7 @@ describe("BridgeServer HTTP/SSE transport", () => {
     const server = new BridgeServer(
       {
         ...DEFAULT_BRIDGE_CONFIG,
+        userTransferTimeoutMs: scenario === "timeout" ? 50 : 10_000,
         host: "127.0.0.1",
         port: 0,
         upload: { ...DEFAULT_BRIDGE_CONFIG.upload, uploadDir },
@@ -1146,10 +1151,11 @@ describe("BridgeServer HTTP/SSE transport", () => {
       }),
     });
     expect(accepted.status).toBe(202);
-    const blocked = await fetch(`${origin}/api/test-transfer`, {
+    const pendingTransfer = fetch(`${origin}/api/test-transfer`, {
       method: "POST",
     });
-    expect(blocked.status).toBe(409);
+    await transferStarted;
+    await new Promise(resolve => setImmediate(resolve));
     expect(guestBindingActive).toBe(true);
     expect(
       fs.existsSync(
@@ -1157,13 +1163,38 @@ describe("BridgeServer HTTP/SSE transport", () => {
       ),
     ).toBe(false);
 
-    finishCommand();
-    await vi.waitFor(async () => {
-      const completed = await fetch(`${origin}/api/test-transfer`, {
-        method: "POST",
+    if (scenario === "shutdown") {
+      const stopped = server.stop();
+      expect((await pendingTransfer).status).toBe(503);
+      finishCommand();
+      await stopped;
+      sse.close();
+      expect(fs.readFileSync(path.join(source.folderPath, "workspaces", "default", "kept.txt"), "utf8")).toBe("guest data");
+      return;
+    }
+    if (scenario === "timeout") {
+      expect((await pendingTransfer).status).toBe(503);
+      expect(guestBindingActive).toBe(true);
+      expect(fs.readFileSync(path.join(source.folderPath, "workspaces", "default", "kept.txt"), "utf8")).toBe("guest data");
+      // Timeout must release the gate so a later login can retry safely.
+      finishCommand();
+      expect((await fetch(`${origin}/api/test-transfer`, { method: "POST" })).status).toBe(204);
+    } else {
+      const rejected = await fetch(`${origin}${client.messagesUrl}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "command", payload: { id: "during-transfer", type: "get_state" } }),
       });
-      expect(completed.status).toBe(204);
-    });
+      expect(rejected.status).toBe(409);
+      if (scenario === "binding_changed") guestBindingActive = false;
+      finishCommand();
+      expect((await pendingTransfer).status).toBe(scenario === "binding_changed" ? 401 : 204);
+      if (scenario === "binding_changed") {
+        sse.close();
+        expect(fs.readFileSync(path.join(source.folderPath, "workspaces", "default", "kept.txt"), "utf8")).toBe("guest data");
+        expect(fs.existsSync(path.join(target.folderPath, "workspaces", "default", "kept.txt"))).toBe(false);
+        return;
+      }
+    }
     sse.close();
     expect(guestBindingActive).toBe(false);
     expect(

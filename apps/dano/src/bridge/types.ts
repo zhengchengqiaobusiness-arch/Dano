@@ -61,6 +61,8 @@ export interface BridgeConfig {
   readonly transcriptProcessSummaryEnabled: boolean;
   /** Timeout in ms for extension UI dialog requests routed to browser clients. Default: 60_000 */
   readonly uiRequestTimeout: number;
+  /** Maximum wait for in-flight user operations before login data transfer. Default: 10_000 ms. */
+  readonly userTransferTimeoutMs?: number;
   /** Maximum number of SSE messages to buffer per client before dropping oldest. Default: 256 */
   readonly clientBufferSize: number;
   /** Heartbeat interval for SSE streams. Default: 15_000 */
@@ -84,6 +86,7 @@ export const DEFAULT_BRIDGE_CONFIG: BridgeConfig = {
   slashCommandsAndMentionsEnabled: false,
   transcriptProcessSummaryEnabled: false,
   uiRequestTimeout: 60_000,
+  userTransferTimeoutMs: 10_000,
   clientBufferSize: 256,
   heartbeatInterval: 15_000,
   upload: {

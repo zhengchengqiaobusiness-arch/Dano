@@ -14,7 +14,7 @@ import type {
   BridgeAuthenticationState,
   BridgeLoginErrorCode,
 } from "../../types/protocol.js";
-import { BRIDGE_LOGIN_ERROR_CODES } from "../../types/protocol.js";
+import { BRIDGE_LOGIN_ERROR_CODES, LOGIN_NEW_CHAT_QUERY_PARAM } from "../../types/protocol.js";
 import { ensureSafeDirectory } from "./safe-directory.js";
 import {
   OAuthProviderContractError,
@@ -1258,6 +1258,19 @@ function sameOrigin(value: string | undefined, appOrigin: string): boolean {
   }
 }
 
+function loginReturnPath(returnTo: string): string {
+  // returnTo has already been restricted to a local path. Preserve its query
+  // and fragment without introducing an origin or exposing login credentials.
+  const hashIndex = returnTo.indexOf("#");
+  const fragment = hashIndex < 0 ? "" : returnTo.slice(hashIndex);
+  const pathAndQuery = hashIndex < 0 ? returnTo : returnTo.slice(0, hashIndex);
+  const queryIndex = pathAndQuery.indexOf("?");
+  const pathname = queryIndex < 0 ? pathAndQuery : pathAndQuery.slice(0, queryIndex);
+  const query = new URLSearchParams(queryIndex < 0 ? "" : pathAndQuery.slice(queryIndex + 1));
+  query.set(LOGIN_NEW_CHAT_QUERY_PARAM, "1");
+  return `${pathname}?${query}${fragment}`;
+}
+
 function redirectAfterCallback(
   res: http.ServerResponse,
   returnTo: string,
@@ -1266,7 +1279,7 @@ function redirectAfterCallback(
   authErrorId?: string,
 ): void {
   res.writeHead(303, {
-    Location: returnTo,
+    Location: sessionId ? loginReturnPath(returnTo) : returnTo,
     ...(sessionId
       ? { "Set-Cookie": [
           serializeLoginCookie(sessionId, sessionAbsoluteTtlMs),

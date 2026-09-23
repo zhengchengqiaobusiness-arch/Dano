@@ -101,6 +101,8 @@ interface InitialSessionFixture {
 
 async function connectWithDefaultWorkspaceSessions(
   sessions: InitialSessionFixture[],
+  cachedSessionPath?: string,
+  newSessionCancelled = false,
 ) {
   const workspacePath = "/users/current/workspaces/default";
   const newSessionPath = "/users/current/sessions/new.jsonl";
@@ -171,7 +173,7 @@ async function connectWithDefaultWorkspaceSessions(
           sessionName: "New session",
           sessionPath: newSessionPath,
           workspacePath,
-          cancelled: false,
+          cancelled: newSessionCancelled,
         },
         list_sessions: {
           sessions: sessions.slice(
@@ -236,6 +238,10 @@ async function connectWithDefaultWorkspaceSessions(
     return new Response(null, { status: 404 });
   });
   window.sessionStorage.clear();
+  if (cachedSessionPath) {
+    const { writeActiveSessionCache } = await import("../utils/newSession");
+    writeActiveSessionCache(window.sessionStorage, cachedSessionPath);
+  }
   const bridge = await startBridge(fetchImpl);
   return { bridge, commands, newSessionPath };
 }
@@ -598,6 +604,34 @@ describe("Bridge prompt acceptance", () => {
       expect.objectContaining({ type: "new_session" }),
     );
     bridge.disconnect();
+  });
+
+  it("opens a new chat after successful login even when history exists", async () => {
+    window.history.replaceState({}, "", "/chat?dano_new_chat=1&keep=yes#anchor");
+    const { bridge, commands, newSessionPath } = await connectWithDefaultWorkspaceSessions([{
+      id: "old", name: "History", path: "/users/current/sessions/old.jsonl",
+      updatedAt: "2026-09-23T01:00:00.000Z", content: "Preserved history",
+    }], "/users/current/sessions/old.jsonl");
+    await vi.waitFor(() => expect(bridge.activeSessionPath).toBe(newSessionPath));
+    expect(commands.filter(command => command.type === "new_session")).toHaveLength(1);
+    expect(commands.some(command => command.type === "switch_session")).toBe(false);
+    expect(bridge.transcript).toEqual([]);
+    expect(window.location.pathname + window.location.search + window.location.hash).toBe("/chat?keep=yes#anchor");
+    eventSources[0]!.open();
+    await vi.waitFor(() => expect(commands).toContainEqual(
+      expect.objectContaining({ type: "switch_session", sessionPath: newSessionPath }),
+    ));
+    expect(commands.filter(command => command.type === "new_session")).toHaveLength(1);
+    bridge.disconnect();
+  });
+
+  it("retains the login new-chat marker if creating the chat is cancelled", async () => {
+    window.history.replaceState({}, "", "/chat?dano_new_chat=1");
+    const { bridge } = await connectWithDefaultWorkspaceSessions([], undefined, true);
+    await vi.waitFor(() => expect(bridge.notifications.some(n => n.notifyType === "error")).toBe(true));
+    expect(window.location.search).toBe("?dano_new_chat=1");
+    bridge.disconnect();
+    window.history.replaceState({}, "", "/chat");
   });
 
   it("creates the default workspace session only when no session exists", async () => {

@@ -434,7 +434,7 @@ describe("Anonymous User cleanup store", () => {
     }
   });
 
-  it("rejects owner transfer while cleanup holds the same exclusive gate", async () => {
+  it("revalidates ownership after waiting for the cleanup gate", async () => {
     let now = 300_000;
     const runtimeRootPath = fs.mkdtempSync(
       path.join(os.tmpdir(), "dano-anonymous-cleanup-race-"),
@@ -464,9 +464,11 @@ describe("Anonymous User cleanup store", () => {
         await finishCleanup.promise;
       },
     } as unknown as UserRuntimeRegistry;
+    const transferStarted = deferred<void>();
     const authHandler: AuthHttpHandler = {
       async handle(req, res, url, lifecycle) {
         if (url.pathname !== "/api/test-transfer") return false;
+        transferStarted.resolve();
         await lifecycle.transferAnonymousUser(
           req.headers,
           guestContext.user.id,
@@ -487,13 +489,14 @@ describe("Anonymous User cleanup store", () => {
       const origin = `http://127.0.0.1:${address.port}`;
       now = 301_001;
       await cleanupStarted.promise;
-      const blocked = await fetch(`${origin}/api/test-transfer`, {
+      const pending = fetch(`${origin}/api/test-transfer`, {
         method: "POST",
         headers: { Cookie: cookie },
       });
-      expect(blocked.status).toBe(409);
+      await transferStarted.promise;
 
       finishCleanup.resolve();
+      expect((await pending).status).toBe(401);
       await vi.waitFor(async () => {
         expect(await anonymousUsers.resolveAnonymous!({ cookie })).toBeNull();
       });
@@ -503,6 +506,7 @@ describe("Anonymous User cleanup store", () => {
       });
       expect(stale.status).toBe(401);
     } finally {
+      finishCleanup.resolve();
       await server.stop();
     }
   });

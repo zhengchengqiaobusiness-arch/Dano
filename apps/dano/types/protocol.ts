@@ -1,3 +1,6 @@
+// Successful OAuth callbacks request one new chat; removed after creation.
+export const LOGIN_NEW_CHAT_QUERY_PARAM = "dano_new_chat";
+
 /**
  * Browser-safe HTTP/SSE protocol derived from Pi's public runtime types and
  * composed with Dano-owned workspace, form, transcript, safety, and client

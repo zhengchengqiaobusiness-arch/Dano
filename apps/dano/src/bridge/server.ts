@@ -125,6 +125,7 @@ export class BridgeServer {
   private clientLoginSessions = new Map<string, string>();
   private activeUserOperations = new Map<string, number>();
   private transferringUserIds = new Set<string>();
+  private userActivityWaiters = new Set<() => void>();
   private sseStreams = new Map<string, Set<() => void>>();
   private uploadRegistry: UploadRegistry;
   private cleanupInterval: ReturnType<typeof setInterval> | undefined;
@@ -133,6 +134,7 @@ export class BridgeServer {
   private readonly serverStartTime = new Date().toISOString();
 
   private isRunning = false;
+  private stopping = false;
   private host: string = "localhost";
   private port: number = 0;
 
@@ -147,6 +149,10 @@ export class BridgeServer {
     private readonly anonymousUsers?: AnonymousUserContextResolver,
     anonymousUserCleanup?: { idleTtlMs: number; intervalMs: number },
   ) {
+    const transferTimeout = config.userTransferTimeoutMs;
+    if (transferTimeout !== undefined && (!Number.isSafeInteger(transferTimeout) || transferTimeout <= 0)) {
+      throw new Error("userTransferTimeoutMs must be a positive integer");
+    }
     this.config = config;
     this.handlerFactory = handlerFactory;
     this.eventBus = eventBus;
@@ -210,6 +216,7 @@ export class BridgeServer {
     await this.anonymousUserCleanup?.start();
     this.host = this.config.host;
     this.port = boundPort;
+    this.stopping = false;
     this.isRunning = true;
 
     this.emitEvent({
@@ -267,6 +274,8 @@ export class BridgeServer {
       return;
     }
 
+    this.stopping = true;
+    this.notifyUserActivity();
     for (const [clientId, handler] of this.handlers) {
       handler.dispose();
       this.eventBus.unregisterClient(clientId);
@@ -1300,14 +1309,24 @@ export class BridgeServer {
     if (!source || source.user.id !== expectedUserId) {
       throw new UserContextError(401, "Anonymous User binding is no longer valid");
     }
-    const finishTransfer = this.beginExclusiveUserMutation([
-      source.user.id,
-      target.user.id,
-    ]);
-    if (!finishTransfer) {
-      throw new HttpError(409, "User runtime ownership is changing");
+    const userIds = [source.user.id, target.user.id];
+    const deadline = performance.now() + (this.config.userTransferTimeoutMs ?? 10_000);
+    let finishTransfer: (() => void) | null;
+    while (!(finishTransfer = this.beginExclusiveUserMutation(userIds))) {
+      await this.waitForUserActivity(deadline);
     }
     try {
+      // Prevent new operations from entering while accepted operations drain.
+      // Do not move files still referenced by an in-flight command or upload.
+      while (userIds.some(id => (this.activeUserOperations.get(id) ?? 0) > 0)) {
+        await this.waitForUserActivity(deadline);
+      }
+      if (this.stopping) throw new HttpError(503, "Server is stopping");
+      // A competing login or cleanup may have retired this binding while queued.
+      const currentSource = await this.userContextResolver.resolveAnonymous(headers);
+      if (!currentSource || currentSource.user.id !== expectedUserId) {
+        throw new UserContextError(401, "Anonymous User binding is no longer valid");
+      }
       await this.userRuntimeRegistry.transferOwnership(source, target, {
         assertIdle: () => {
           for (const [clientId, user] of this.clientUsers) {
@@ -1407,7 +1426,33 @@ export class BridgeServer {
       const remaining = (this.activeUserOperations.get(userId) ?? 1) - 1;
       if (remaining > 0) this.activeUserOperations.set(userId, remaining);
       else this.activeUserOperations.delete(userId);
+      this.notifyUserActivity();
     };
+  }
+
+  private notifyUserActivity(): void {
+    for (const notify of [...this.userActivityWaiters]) notify();
+  }
+
+  private waitForUserActivity(deadline: number): Promise<void> {
+    if (this.stopping) return Promise.reject(new HttpError(503, "Server is stopping"));
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) {
+      return Promise.reject(new HttpError(503, "User data transfer timed out"));
+    }
+    return new Promise((resolve, reject) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.userActivityWaiters.delete(done);
+        if (this.stopping) reject(new HttpError(503, "Server is stopping"));
+        else resolve();
+      };
+      const timer = setTimeout(() => {
+        this.userActivityWaiters.delete(done);
+        reject(new HttpError(503, "User data transfer timed out"));
+      }, remaining);
+      this.userActivityWaiters.add(done);
+    });
   }
 
   private beginExclusiveUserMutation(
@@ -1420,6 +1465,7 @@ export class BridgeServer {
     for (const userId of uniqueUserIds) this.transferringUserIds.add(userId);
     return () => {
       for (const userId of uniqueUserIds) this.transferringUserIds.delete(userId);
+      this.notifyUserActivity();
     };
   }
 

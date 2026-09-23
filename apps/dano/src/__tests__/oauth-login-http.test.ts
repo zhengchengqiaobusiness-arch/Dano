@@ -341,7 +341,7 @@ describe("OAuth authentication over HTTP", () => {
       },
     };
     const firstServer = await startOAuthServer(provider);
-    const started = await fetch(`${firstServer.origin}/api/auth/login?returnTo=/chat`, {
+    const started = await fetch(`${firstServer.origin}/api/auth/login?returnTo=${encodeURIComponent("/chat?keep=yes#anchor")}`, {
       redirect: "manual",
     });
     const flowCookie = cookieFrom(started, "dano_oauth_flow");
@@ -355,7 +355,7 @@ describe("OAuth authentication over HTTP", () => {
     );
 
     expect(callback.status).toBe(303);
-    expect(callback.headers.get("location")).toBe("/chat");
+    expect(callback.headers.get("location")).toBe("/chat?keep=yes&dano_new_chat=1#anchor");
     expect(callback.headers.get("cache-control")).toBe("no-store");
     expect(callback.headers.get("referrer-policy")).toBe("no-referrer");
     expect(callback.headers.getSetCookie().find(cookie => cookie.startsWith("dano_login="))).toMatch(
