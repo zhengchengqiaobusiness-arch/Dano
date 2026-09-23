@@ -220,3 +220,53 @@ neither old nor corrected fact appeared in the subsequent real recall. Result:
 `/private/tmp/dano476-real-selective.log`. This validates exact-text remote
 behavior, not semantic paraphrase matching, a new browser chat, or the full
 model-tool/management flow. Those remain required by #476.
+
+## Shared governance entry point and recovery
+
+The extension now exposes one `MemoryGovernanceService` for authenticated
+host controls and model tools. It binds the state store and OpenViking client
+to the same owner/scope, returns a durable job ID with `pending` or verified
+`complete`, and offers an owner-level scheduler that resumes pending jobs
+without an open browser. Model tools for correction, forget, clear, export
+and status call that service; model-driven clear also requires an actual
+`ctx.ui.confirm` response before registration. Export content is labelled
+untrusted memory data. The extension suite passed **228/228** serially after
+these changes (`/private/tmp/dano476-governance-tools-suite.log`).
+
+Dano still uses published extension 0.1.5 and has not wired this service to
+its authenticated management controls or tested the browser flows. The
+extension changes remain on an unpublished work branch. Account retirement,
+project host integration and the remaining acceptance gates are outstanding.
+
+## Two-axis review fixes before publication
+
+The review found that the first selective barrier revoked all pre-barrier
+scope sources, which dropped unrelated queued facts. It now revokes only
+sources linked to the selected document or exact selected text. An unrelated
+queued writer remains held while governance is pending, then the coordinator
+advances it under the same durable barrier before editing remote documents.
+The normal scheduler cannot use this privileged drain, and an unrelated
+writer cannot be released after completion without first being reconciled.
+Already-pending automatic selection requests are discarded because their
+unselected contents cannot be proven unrelated; this is not claimed as
+preservation of an unsaved fact.
+
+The review also found that clearing `memoryUris` on correction erased the
+source relationship for a surviving shared document. The URI lineage is now
+retained while the old payload is erased and its source marked revoked.
+Scoped export distinguishes current from revoked sources and includes
+completed governance revisions. URI validation now shares one owner/scope
+parser across transport, state, export and selection. Export preflights each
+document's remote size, bounds both document and page bytes, and makes an
+oversized document an explicit error instead of silently truncating it.
+
+These fixes have targeted tests. The new isolated real-service fixture
+`fixtures/openviking-selective-drain.mjs` verifies an unrelated queued fact
+is actually delivered before the selected correction completes, and that
+export retains its source relationship. The run passed against real MiMo and
+OpenViking: `/private/tmp/dano476-selective-drain-H17AW6/result.json`, log
+`/private/tmp/dano476-real-selective-drain.log`. This is host/service proof;
+the browser acceptance is still pending.
+
+Post-review extension type check/build and serial suite passed **230/230**.
+Log: `/private/tmp/dano476-review-fixes-suite.log`.
