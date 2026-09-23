@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { reportOAuthLoginFailure } from "../oauth-login-diagnostics.js";
+import { classifyOAuthLoginFailure, type OAuthLoginStage, reportOAuthLoginFailure } from "../oauth-login-diagnostics.js";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -53,5 +53,30 @@ describe("OAuth login diagnostics", () => {
     expect(warn).toHaveBeenCalledExactlyOnceWith("OAuth login failed", {
       stage: "anonymous_transfer", elapsedMs: 0, errorCode: "unclassified",
     });
+  });
+});
+
+
+describe("OAuth login failure classification", () => {
+  it.each([
+    ["provider_exchange", { error: "invalid_grant" }, "authorization_invalid"],
+    ["provider_exchange", { error: "invalid_client" }, "login_configuration_error"],
+    ["provider_exchange", { error: "unauthorized_client" }, "login_configuration_error"],
+    ["provider_exchange", { error: "invalid_scope" }, "login_configuration_error"],
+    ["provider_exchange", { cause: { code: "ECONNRESET" } }, "provider_unavailable"],
+    ["provider_exchange", { name: "TimeoutError" }, "provider_unavailable"],
+    ["provider_exchange", { cause: new Response(null, { status: 503 }) }, "provider_unavailable"],
+    ["credential_validation", { code: "provider_identity_invalid", cause: { status: 503 } }, "provider_unavailable"],
+    ["credential_validation", { status: 429 }, "provider_unavailable"],
+    ["credential_validation", { status: 401 }, "provider_identity_invalid"],
+    ["provider_exchange", { code: "provider_identity_invalid" }, "provider_identity_invalid"],
+    ["credential_encryption", { error: "invalid_grant" }, "login_session_failed"],
+    ["session_persistence", { code: "ENOSPC" }, "login_session_failed"],
+    ["session_rotation", { cause: { code: "ECONNRESET" } }, "login_session_failed"],
+    ["anonymous_transfer", { status: 409 }, "user_data_transfer_failed"],
+    ["anonymous_transfer", { code: "EIO" }, "user_data_transfer_failed"],
+    ["provider_exchange", new Error("private provider response"), "login_failed"],
+  ] as const)("classifies %s without exposing raw exception details", (stage, error, expected) => {
+    expect(classifyOAuthLoginFailure(stage as OAuthLoginStage, error)).toBe(expected);
   });
 });

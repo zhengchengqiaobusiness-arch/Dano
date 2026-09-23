@@ -358,7 +358,7 @@ describe("OAuth authentication over HTTP", () => {
     expect(callback.headers.get("location")).toBe("/chat");
     expect(callback.headers.get("cache-control")).toBe("no-store");
     expect(callback.headers.get("referrer-policy")).toBe("no-referrer");
-    expect(callback.headers.get("set-cookie")).toMatch(
+    expect(callback.headers.getSetCookie().find(cookie => cookie.startsWith("dano_login="))).toMatch(
       /^dano_login=[A-Za-z0-9_-]{43}; Path=\/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800$/,
     );
     expect(exchanges).toEqual([
@@ -1446,6 +1446,10 @@ describe("OAuth authentication over HTTP", () => {
       { headers: { Cookie: guestCookie }, redirect: "manual" },
     );
 
+    const failure = await fetch(`${origin}/api/auth/current`, {
+      headers: { Cookie: cookieFrom(callback, "dano_auth_error") },
+    });
+    expect(await failure.json()).toMatchObject({ loginError: { code: "user_data_transfer_failed" } });
     expect(callback.headers.get("set-cookie")).toMatch(
       /^dano_auth_error=[A-Za-z0-9_-]{43};/,
     );
@@ -1942,7 +1946,7 @@ describe("OAuth authentication over HTTP", () => {
     });
     expect(await current.json()).toEqual({
       status: "anonymous",
-      loginError: { code: "provider_login_failed" },
+      loginError: { code: "authorization_invalid" },
     });
     expect(diagnostic).toHaveBeenCalledWith("OAuth login failed", {
       stage: "provider_exchange",
@@ -1958,6 +1962,46 @@ describe("OAuth authentication over HTTP", () => {
     expect(
       fs.readdirSync(path.join(runtimeRootPath, "auth", "login-sessions")),
     ).toEqual([]);
+  });
+
+  it("clears an unconsumed login error after a later successful login", async () => {
+    const base = successfulProvider("retry-user", "retry-token");
+    const provider: OAuthProviderAdapter = {
+      ...base,
+      async exchangeAuthorizationCode(input) {
+        if (input.code === "failed") throw new Error("private failure detail");
+        return base.exchangeAuthorizationCode(input);
+      },
+    };
+    const { origin, runtimeRootPath } = await startOAuthServer(provider);
+    const started = await fetch(`${origin}/api/auth/login`, { redirect: "manual" });
+    const flowCookie = cookieFrom(started, "dano_oauth_flow");
+    const state = new URL(started.headers.get("location")!).searchParams.get("state")!;
+    const failed = await fetch(`${origin}/api/auth/callback?code=failed&state=${state}`, {
+      headers: { Cookie: flowCookie }, redirect: "manual",
+    });
+    const errorCookie = cookieFrom(failed, "dano_auth_error");
+    // Do not read /current: reproduce a failure followed by success before the
+    // first error was consumed (e.g. an interrupted navigation or another tab).
+    const retry = await fetch(`${origin}/api/auth/login`, {
+      headers: { Cookie: `${flowCookie}; ${errorCookie}` }, redirect: "manual",
+    });
+    const retryState = new URL(retry.headers.get("location")!).searchParams.get("state")!;
+    const succeeded = await fetch(`${origin}/api/auth/callback?code=success&state=${retryState}`, {
+      headers: { Cookie: `${flowCookie}; ${errorCookie}` }, redirect: "manual",
+    });
+    const loginCookie = cookieFrom(succeeded, "dano_login");
+    expect(succeeded.headers.getSetCookie()).toEqual([
+      expect.stringMatching(/^dano_login=/),
+      expect.stringMatching(/^dano_auth_error=;.*Max-Age=0$/),
+    ]);
+    expect(fs.readdirSync(path.join(runtimeRootPath, "auth", "login-errors"))).toEqual([]);
+    const current = await fetch(`${origin}/api/auth/current`, {
+      headers: { Cookie: `${loginCookie}; ${errorCookie}` },
+    });
+    const body = await current.json();
+    expect(body).toMatchObject({ status: "authenticated" });
+    expect(body).not.toHaveProperty("loginError");
   });
 
   it("rejects an invalid provider identity with a sanitized contract error", async () => {
@@ -2075,6 +2119,10 @@ describe("OAuth authentication over HTTP", () => {
       },
     );
 
+    const failure = await fetch(`${origin}/api/auth/current`, {
+      headers: { Cookie: cookieFrom(callback, "dano_auth_error") },
+    });
+    expect(await failure.json()).toMatchObject({ loginError: { code: "login_session_failed" } });
     expect(callback.headers.get("set-cookie")).toMatch(
       /^dano_auth_error=[A-Za-z0-9_-]{43};/,
     );
@@ -2115,6 +2163,10 @@ describe("OAuth authentication over HTTP", () => {
       },
     );
 
+    const failure = await fetch(`${origin}/api/auth/current`, {
+      headers: { Cookie: cookieFrom(callback, "dano_auth_error") },
+    });
+    expect(await failure.json()).toMatchObject({ loginError: { code: "provider_unavailable" } });
     expect(callback.headers.get("set-cookie")).toMatch(
       /^dano_auth_error=[A-Za-z0-9_-]{43};/,
     );
@@ -2160,6 +2212,10 @@ describe("OAuth authentication over HTTP", () => {
       },
     );
 
+    const failure = await fetch(`${origin}/api/auth/current`, {
+      headers: { Cookie: cookieFrom(callback, "dano_auth_error") },
+    });
+    expect(await failure.json()).toMatchObject({ loginError: { code: "login_session_failed" } });
     expect(callback.headers.get("set-cookie")).toMatch(
       /^dano_auth_error=[A-Za-z0-9_-]{43};/,
     );
@@ -2899,6 +2955,12 @@ describe("OAuth authentication over HTTP", () => {
         redirect: "manual",
       },
     );
+    const currentAfterFailure = await fetch(`${origin}/api/auth/current`, {
+      headers: { Cookie: `${loginCookie}; ${cookieFrom(callback, "dano_auth_error")}` },
+    });
+    expect(await currentAfterFailure.json()).toMatchObject({
+      status: "authenticated", loginError: { code: "login_failed" },
+    });
     const posted = await fetch(`${origin}${client.messagesUrl}`, {
       method: "POST",
       headers: { Cookie: loginCookie, "Content-Type": "application/json" },

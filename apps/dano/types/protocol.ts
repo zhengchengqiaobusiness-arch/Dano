@@ -1158,9 +1158,17 @@ export interface BridgeUserSummary {
   readonly avatarUrl?: string;
 }
 
-export type BridgeLoginErrorCode =
-  | "provider_identity_invalid"
-  | "provider_login_failed";
+export const BRIDGE_LOGIN_ERROR_CODES = [
+  "authorization_invalid",
+  "provider_unavailable",
+  "provider_identity_invalid",
+  "login_configuration_error",
+  "login_session_failed",
+  "user_data_transfer_failed",
+  "login_failed",
+] as const;
+
+export type BridgeLoginErrorCode = (typeof BRIDGE_LOGIN_ERROR_CODES)[number];
 
 /** Recoverable, browser-safe failure from the latest login attempt. */
 export interface BridgeLoginError {

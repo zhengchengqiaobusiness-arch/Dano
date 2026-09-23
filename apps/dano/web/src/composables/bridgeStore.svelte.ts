@@ -43,6 +43,7 @@ import type {
 } from "@dano/types/protocol";
 import {
   ACCENT_COLOR_PRESET_KEYS,
+  BRIDGE_LOGIN_ERROR_CODES,
   DEFAULT_ACCENT_COLOR_PRESET,
 } from "@dano/types/protocol";
 import { createBrowserClient } from "./browserClientBootstrap";
@@ -3044,9 +3045,8 @@ export function parseBridgeAuthenticationState(
       ? (candidate.loginError as { code?: unknown }).code
       : undefined;
   const loginError: BridgeLoginError | undefined =
-    loginErrorCode === "provider_identity_invalid" ||
-    loginErrorCode === "provider_login_failed"
-      ? { code: loginErrorCode }
+    typeof loginErrorCode === "string" && loginErrorCode.length > 0
+      ? { code: BRIDGE_LOGIN_ERROR_CODES.find(code => code === loginErrorCode) ?? "login_failed" }
       : undefined;
   const withLoginError = loginError ? { loginError } : {};
 
@@ -3161,7 +3161,7 @@ async function connectOnce(): Promise<boolean> {
     if (currentAuthentication) {
       applyAuthentication(currentAuthentication);
       if (currentAuthentication.loginError) {
-        pushNotification(t("authentication.loginFailed"), "error");
+        pushNotification(t(`authentication.loginError.${currentAuthentication.loginError.code}`), "error");
       }
     }
     if (currentAuthentication?.status === "reauth_required") {

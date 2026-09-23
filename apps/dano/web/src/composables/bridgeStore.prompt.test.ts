@@ -379,7 +379,15 @@ describe("Bridge prompt acceptance", () => {
     bridge.disconnect();
   });
 
-  it("shows a recoverable login failure from one-time auth current state", async () => {
+  it.each([
+    ["authorization_invalid", "本次授权无效或已失效，请重新登录"],
+    ["provider_unavailable", "登录服务暂时无法响应，请稍后重试"],
+    ["provider_identity_invalid", "无法验证登录身份，请重新登录；持续失败请联系管理员"],
+    ["login_configuration_error", "登录服务配置异常，请联系管理员"],
+    ["login_session_failed", "无法建立登录会话，请重试；持续失败请联系管理员"],
+    ["user_data_transfer_failed", "无法接续登录前的数据，请重试；持续失败请联系管理员"],
+    ["login_failed", "登录未完成，请重试；持续失败请联系管理员"],
+  ] as const)("shows a recoverable %s from one-time auth current state", async (code, message) => {
     let currentReads = 0;
     const clientResponse = deferred<Response>();
     const fetchImpl = vi.fn<typeof fetch>(async input => {
@@ -388,7 +396,7 @@ describe("Bridge prompt acceptance", () => {
         return new Response(
           JSON.stringify({
             status: "anonymous",
-            loginError: { code: "provider_identity_invalid" },
+            loginError: { code },
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
@@ -411,11 +419,11 @@ describe("Bridge prompt acceptance", () => {
     await vi.waitFor(() =>
       expect(bridge.authentication).toEqual({
         status: "anonymous",
-        loginError: { code: "provider_identity_invalid" },
+        loginError: { code },
       }),
     );
     expect(bridge.notifications.at(-1)).toMatchObject({
-      message: "登录失败，请重试",
+      message,
       notifyType: "error",
     });
     clientResponse.resolve(
@@ -436,13 +444,26 @@ describe("Bridge prompt acceptance", () => {
     expect(currentReads).toBe(1);
     expect(bridge.authentication).toEqual({ status: "anonymous" });
     expect(bridge.notifications.at(-1)).toMatchObject({
-      message: "登录失败，请重试",
+      message,
       notifyType: "error",
     });
     bridge.login();
     expect(assign).toHaveBeenCalledWith(
       "/api/auth/login?returnTo=%2Fchat",
     );
+    bridge.disconnect();
+  });
+
+  it("maps unknown error strings to a safe fallback and ignores malformed errors", async () => {
+    const bridge = await connectBridge(Promise.resolve(new Response(null, { status: 202 })));
+    const { parseBridgeAuthenticationState } = await import("./bridgeStore.svelte");
+    expect(parseBridgeAuthenticationState({
+      status: "anonymous", loginError: { code: "raw-secret-value" },
+    })).toEqual({ status: "anonymous", loginError: { code: "login_failed" } });
+    for (const code of [null, undefined, 42, {}, ""]) {
+      expect(parseBridgeAuthenticationState({ status: "anonymous", loginError: { code } }))
+        .toEqual({ status: "anonymous" });
+    }
     bridge.disconnect();
   });
 

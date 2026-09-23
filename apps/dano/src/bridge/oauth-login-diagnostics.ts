@@ -1,3 +1,5 @@
+import type { BridgeLoginErrorCode } from "../../types/protocol.js";
+
 export type OAuthLoginStage =
   | "provider_exchange"
   | "credential_encryption"
@@ -8,7 +10,14 @@ export type OAuthLoginStage =
 
 // Never log exception text, stacks, URLs, headers, response bodies or identity.
 // Both provider and filesystem exceptions can contain credentials or user data.
+const PROVIDER_UNAVAILABLE_CODES = new Set([
+  "TimeoutError", "AbortError", "OAUTH_TIMEOUT", "OAUTH_ABORT",
+  "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN",
+  "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT",
+  "CERT_HAS_EXPIRED", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "ERR_TLS_CERT_ALTNAME_INVALID",
+]);
 const ERROR_CODES = new Set([
+  ...PROVIDER_UNAVAILABLE_CODES,
   "provider_identity_invalid",
   "OAUTH_RESPONSE_BODY_ERROR",
   "OAUTH_RESPONSE_IS_NOT_CONFORM",
@@ -16,9 +25,6 @@ const ERROR_CODES = new Set([
   "OAUTH_INVALID_RESPONSE",
   "OAUTH_WWW_AUTHENTICATE_CHALLENGE",
   "OAUTH_HTTP_REQUEST_FORBIDDEN",
-  "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN",
-  "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT",
-  "CERT_HAS_EXPIRED", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "ERR_TLS_CERT_ALTNAME_INVALID",
   "EACCES", "EPERM", "ENOSPC", "ENOENT", "EEXIST", "EIO", "ENOTDIR",
 ]);
 const PROVIDER_ERRORS = new Set([
@@ -27,11 +33,7 @@ const PROVIDER_ERRORS = new Set([
   "server_error", "temporarily_unavailable", "invalid_token",
 ]);
 
-export function reportOAuthLoginFailure(
-  stage: OAuthLoginStage,
-  error: unknown,
-  elapsedMs: number,
-): void {
+function describeOAuthLoginFailure(error: unknown) {
   let errorCode = "unclassified";
   let providerError: string | undefined;
   let httpStatus: number | undefined;
@@ -54,11 +56,50 @@ export function reportOAuthLoginFailure(
     }
     current = record.cause;
   }
-  console.warn("OAuth login failed", {
-    stage,
-    elapsedMs: Math.max(0, Math.round(elapsedMs)),
+  return {
     errorCode,
     ...(providerError ? { providerError } : {}),
     ...(httpStatus === undefined ? {} : { httpStatus }),
+  };
+}
+
+export function classifyOAuthLoginFailure(
+  stage: OAuthLoginStage,
+  error: unknown,
+): BridgeLoginErrorCode {
+  // A local failure must not be misattributed to OA, even if a nested exception
+  // contains a network or provider error code from rollback/cleanup.
+  if (stage === "anonymous_transfer") return "user_data_transfer_failed";
+  if (stage === "credential_encryption" || stage === "session_persistence" || stage === "session_rotation") {
+    return "login_session_failed";
+  }
+  const { errorCode, providerError, httpStatus } = describeOAuthLoginFailure(error);
+  if (providerError === "invalid_grant") return "authorization_invalid";
+  if (
+    providerError === "invalid_client" || providerError === "unauthorized_client" ||
+    providerError === "invalid_scope" || providerError === "unsupported_grant_type" ||
+    errorCode === "OAUTH_HTTP_REQUEST_FORBIDDEN"
+  ) return "login_configuration_error";
+  if (
+    PROVIDER_UNAVAILABLE_CODES.has(errorCode) ||
+    providerError === "server_error" || providerError === "temporarily_unavailable" ||
+    httpStatus === 429 || (httpStatus !== undefined && httpStatus >= 500)
+  ) return "provider_unavailable";
+  if (
+    errorCode === "provider_identity_invalid" || providerError === "invalid_token" ||
+    (stage === "credential_validation" && httpStatus === 401)
+  ) return "provider_identity_invalid";
+  return "login_failed";
+}
+
+export function reportOAuthLoginFailure(
+  stage: OAuthLoginStage,
+  error: unknown,
+  elapsedMs: number,
+): void {
+  console.warn("OAuth login failed", {
+    stage,
+    elapsedMs: Math.max(0, Math.round(elapsedMs)),
+    ...describeOAuthLoginFailure(error),
   });
 }
