@@ -113,3 +113,68 @@ export/retirement, then shared model/UI controls and real-service/browser gates.
 
 Final barrier build and extension suite: **211/211 passed**.
 Log: `/private/tmp/dano476-barrier-complete-tests.log`.
+
+## Whole-scope clear coordinator
+
+`MemoryClearCoordinator` now implements the clear path only. It checks every
+pre-barrier writer through owner/scope-bound read-only remote evidence before
+persisting `applying`. Unknown commit results remain pending; a failed task is
+only evidence that extraction stopped, not that its partial data is absent.
+Automatic delivery retry exhaustion now preserves its last phase for this
+reconciliation instead of losing whether a mutation had been sent.
+
+The coordinator removes old source sessions, removes the client-bound memory
+tree through the public recursive API and verifies absence, then commits local
+completion and drops payload/current-memory references. Errors retain the job,
+suppression and cleanup credentials. Restart in `applying` does not depend on
+an archive already removed by the preceding attempt. A dedicated kernel flock
+covers remote cleanup through completion: another cleaner cannot finish later
+and delete a newly authorized version. SIGKILL releases the lock; durable job
+state remains for recovery. No lease timeout is used as permission for a second
+live remote writer.
+
+The six coordinator tests cover pending extraction, another project's state,
+source/clear errors, concurrent cleaners, identity/scope rejection and actual
+child-process SIGKILL during applying. This fault test uses a synthetic
+transport and is not claimed as a real remote-crash test.
+
+### Project extraction issue found during real clear validation
+
+The first real-service run could not confirm the project's initial memory.
+Inspection found that an actor header alone restricted access but did not assign
+message provenance to a peer. Project-bound sessions now explicitly disable
+self extraction and enable peer extraction; append sets `peer_id` from the
+trusted client scope. No model-provided project is accepted.
+
+An intermediate attempt also disabled working memory. On OpenViking 0.4.20,
+`get_session_archive` requires an overview and that setting suppresses it, so
+source verification correctly failed with 404. That unrelated setting was
+removed: ordinary archive generation stays enabled. The adapter still requires
+its real source/archive proof. Failed-run logs are retained as
+`/private/tmp/dano476-real-clear-coordinator-before-peer-fix.log` and
+`/private/tmp/dano476-real-clear-coordinator-working-memory-disabled.log`;
+neither run counts as acceptance.
+
+### Real-service clear and recovery evidence
+
+The corrected fixture completed against the isolated OpenViking service with
+real MiMo extraction in flight. It observed the durable pending barrier,
+confirmed that recall stayed suppressed while extraction completed, removed
+the old source and memory, and verified that another project and another user
+were preserved. A copied old Pi entry was blocked; a fresh explicit save of
+the same fact created a new version; a later coordinator retry did not remove
+that new version. The result is in
+`/private/tmp/dano476-clear-coordinator-6oNYzX/result.json` and the log is
+`/private/tmp/dano476-real-clear-coordinator.log`. Its `browserVerified` field
+is false.
+
+The first project-specific follow-up lost its isolated service connection.
+The local embedding model loaded, but the restricted process could not create
+a macOS Metal command queue. The same model passed the minimal loader outside
+the sandbox, and the service was restarted without changing its data or
+configuration. The pending project clear job remained durable and resumed;
+the follow-up then removed project memory while retaining the newly saved
+global version and the other user's memory. See
+`/private/tmp/dano476-real-project-clear-retry.log` and the synthetic
+`project-clear-result.json`. No browser acceptance or selective governance is
+claimed by either run.
