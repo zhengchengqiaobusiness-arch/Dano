@@ -340,3 +340,33 @@ and governance completed without exercising a successful in-flight semantic
 duplicate. Result: `/private/tmp/dano476-selective-paraphrase-swfKGD/result.json`;
 log: `/private/tmp/dano476-real-selective-paraphrase.log`. This is not proof
 that all paraphrase classifications or derived-document cleanup paths work.
+
+## Integration checkpoint (2026-09-23)
+
+The independent extension PR
+[`josephyoung/pi-openviking#4`](https://github.com/josephyoung/pi-openviking/pull/4)
+merged at `153c9371`; GitHub Actions run `35820402540` published version
+`0.1.6` to npm with provenance. The registry reports both `pi-package` and
+`pi-extension` keywords and integrity
+`sha512-tLC36TbfxfTrtZPDO9k3lzk9RbsEuDlcs2FoAPpxoxPJ43tudZAXDJB+EyWmltlClgeSRTlhtbA4XKELZb9Llw==`.
+Dano now pins this exact version in its package and lockfile.
+
+The extension suite passed **245/245**. Dano's exact-published-dependency
+check, full suite after the latest upstream rebase (**1647 passed, 1 skipped**)
+and build passed. The host uses
+MiMo-v2.5 for a synthetic writer-classifier fixture; all four classifier cases
+passed. The isolated real OpenViking v0.4.20 retirement fixture
+[`openviking-retire-account.mjs`](fixtures/openviking-retire-account.mjs)
+deleted and read back absence for global memory, project memory, and a global
+source session. These results do not substitute for the #476 browser sequence.
+
+Open gates for #476 are a container-backed and in-app Browser run of
+correction into a new chat, forgetting into a new chat, clear confirmation,
+export, and the complete two-user/project isolation path. Shared local Podman
+image storage currently returns `readlink .../storage/overlay: invalid argument`;
+the shared store must not be repaired as part of acceptance. A healthy isolated
+runtime or an approved operational repair is needed before claiming that gate.
+Backup restore of an older OpenViking snapshot can resurrect remote content
+after a locally completed retirement; #477 explicitly requires a matched
+backup/recovery set and deletion replay before release. The completed local
+retirement marker alone is not recovery evidence.

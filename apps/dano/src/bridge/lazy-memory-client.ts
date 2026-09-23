@@ -1,4 +1,5 @@
-import { OwnerMemoryClient, type MemoryExtensionOptions, type Owner } from "@josephyoung/pi-openviking/host";
+import { OwnerMemoryClient, type MemoryExtensionOptions, type MemoryGovernanceClient,
+  type Owner } from "@josephyoung/pi-openviking/host";
 import type { MemoryUserConnection } from "./memory-identity-service.js";
 
 type Client = MemoryExtensionOptions["client"];
@@ -14,8 +15,9 @@ interface Options {
 /** Local construction does not contact OpenViking or provision a USER key.
  * Share one instance across an owner's sessions; retain no mutable current-user
  * state and never pass this object to the untrusted tool worker. */
-export class LazyMemoryClient implements Client {
+export class LazyMemoryClient implements Client, MemoryGovernanceClient {
   readonly owner: Owner;
+  readonly scope: string | null = null;
   readonly #options: Options;
   readonly #active = new Set<Promise<unknown>>();
   #connecting?: Promise<OwnerMemoryClient>;
@@ -74,6 +76,22 @@ export class LazyMemoryClient implements Client {
   findCommit(id: string) { return this.#call(client => client.findCommit(id)); }
   inspect(operation: Parameters<Client["inspect"]>[0]) { return this.#call(client => client.inspect(operation)); }
   readMemory(uri: string) { return this.#call(client => client.readMemory(uri)); }
+  readMemoryLimited(uri: string, maxBytes: number) { return this.#call(client => client.readMemoryLimited(uri, maxBytes)); }
+  memoryDocumentSize(uri: string) { return this.#call(client => client.memoryDocumentSize(uri)); }
+  listMemoryDocuments() { return this.#call(client => client.listMemoryDocuments()); }
+  writerSettled(operation: Parameters<MemoryGovernanceClient["writerSettled"]>[0]) {
+    return this.#call(client => client.writerSettled(operation));
+  }
+  writerSettledAny(operation: Parameters<MemoryGovernanceClient["writerSettledAny"]>[0]) {
+    return this.#call(client => client.writerSettledAny(operation));
+  }
+  clearOwnerData() { return this.#call(client => client.clearOwnerData()); }
+  removeSource(operation: Parameters<MemoryGovernanceClient["removeSource"]>[0]) {
+    return this.#call(client => client.removeSource(operation));
+  }
+  replaceMemory(uri: string, content: string) { return this.#call(client => client.replaceMemory(uri, content)); }
+  removeMemory(uri: string) { return this.#call(client => client.removeMemory(uri)); }
+  clearMemoryScope() { return this.#call(client => client.clearMemoryScope()); }
   recall(query: string, limit: number, signal?: AbortSignal): ReturnType<Client["recall"]> {
     return this.#call(client => client.recall(query, limit, signal), signal);
   }

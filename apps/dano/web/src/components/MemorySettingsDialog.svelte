@@ -7,9 +7,12 @@
   import { t } from "../i18n";
   import { requestMemorySettings, type MemorySettingsChange } from "../utils/memorySettings";
   import MemoryOperations from "./MemoryOperations.svelte";
+  import MemoryGovernance from "./MemoryGovernance.svelte";
 
-  let { open = false, authenticated = false, url = null, operationsUrl = null, themeStyle = "", onClose = () => {} }:
-    { open?: boolean; authenticated?: boolean; url?: string | null; operationsUrl?: string | null; themeStyle?: string; onClose?: () => void } = $props();
+  let { open = false, authenticated = false, url = null, operationsUrl = null,
+    governanceUrl = null, exportUrl = null, themeStyle = "", onClose = () => {} }:
+    { open?: boolean; authenticated?: boolean; url?: string | null; operationsUrl?: string | null;
+      governanceUrl?: string | null; exportUrl?: string | null; themeStyle?: string; onClose?: () => void } = $props();
   let status = $state<UserMemoryStatus | null>(null);
   let loading = $state(false), saving = $state(false), error = $state(false);
   let reload = $state(0);
@@ -108,6 +111,7 @@
         </section>
       {/if}
       {#if operationsUrl}<MemoryOperations url={operationsUrl} />{/if}
+      {#if governanceUrl && exportUrl}<Separator /><MemoryGovernance url={governanceUrl} {exportUrl} />{/if}
     {/if}
   </Dialog.Content>
 </Dialog.Root>

@@ -67,6 +67,15 @@ export class MemoryCredentialStore {
     try { await directory.sync(); } finally { await directory.close(); }
   }
 
+  /** Only after verified remote retirement; retries may find it already absent. */
+  async remove(owner: MemoryOwner): Promise<void> {
+    const binding = this.#binding(owner);
+    if (await this.read(owner) === undefined) return;
+    await fs.unlink(this.#file(binding));
+    const directory = await fs.open(this.#directory, constants.O_RDONLY);
+    try { await directory.sync(); } finally { await directory.close(); }
+  }
+
   #binding(owner: MemoryOwner): string {
     if (![owner.accountId, owner.userId].every(id => /^[A-Za-z0-9_-]{1,128}$/.test(id))) {
       throw new Error("MEMORY_OWNER_INVALID");

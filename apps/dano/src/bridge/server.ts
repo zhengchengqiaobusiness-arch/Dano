@@ -567,6 +567,91 @@ export class BridgeServer {
         return;
       }
 
+      const memoryGovernanceMatch = /^\/api\/clients\/([^/]+)\/memory\/governance(?:\/([a-f0-9-]{36})(?:\/review)?)?$/.exec(pathname);
+      const memoryExportMatch = /^\/api\/clients\/([^/]+)\/memory\/export$/.exec(pathname);
+      if (memoryGovernanceMatch || memoryExportMatch) {
+        const clientId = decodeURIComponent((memoryGovernanceMatch ?? memoryExportMatch)![1]!);
+        const user = this.clientUsers.get(clientId);
+        if (!user || !("username" in user.user)) throw new UserContextError(401, "请先登录后再管理长期记忆");
+        if (req.method === "POST" && req.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
+          throw new HttpError(415, "记忆管理需要 JSON 请求");
+        }
+        let body: Record<string, unknown> | undefined;
+        if (req.method === "POST") {
+          let input: unknown;
+          try { input = await readJsonBody(req); }
+          catch { throw new HttpError(400, "记忆管理请求无效"); }
+          if (!input || typeof input !== "object" || Array.isArray(input)) throw new HttpError(400, "记忆管理请求无效");
+          body = input as Record<string, unknown>;
+        }
+        await this.withUserWrite(clientId, async () => {
+          const runtime = await this.userRuntimeRegistry?.get(user);
+          if (!runtime?.memory) throw new HttpError(503, "长期记忆暂时不可用");
+          const governance = runtime.memory.governance();
+          try {
+            if (memoryExportMatch && req.method === "GET") {
+              const limit = Number(url.searchParams.get("limit") ?? "10");
+              if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new HttpError(400, "导出分页大小无效");
+              const page = await governance.exportPage(limit, url.searchParams.get("cursor") ?? undefined, 1024 * 1024);
+              writeJson(res, 200, page, "no-store"); return;
+            }
+            const jobId = memoryGovernanceMatch?.[2];
+            if (jobId && pathname.endsWith("/review") && req.method === "GET") {
+              writeJson(res, 200, await governance.review(jobId), "no-store"); return;
+            }
+            if (jobId && pathname.endsWith("/review") && req.method === "POST") {
+              const operationId = body?.operationId;
+              if (typeof operationId !== "string" || !/^[a-f0-9-]{36}$/.test(operationId)) throw new HttpError(400, "复核对象无效");
+              let receipt;
+              if (Object.keys(body!).length === 2 && (body?.decision === "target" || body?.decision === "unrelated")) {
+                receipt = await governance.reviewWriter(jobId, operationId, body.decision);
+              } else if (Object.keys(body!).length === 2 && typeof body?.exactText === "string") {
+                receipt = await governance.resolveMergedWriter(jobId, operationId, body.exactText);
+              } else throw new HttpError(400, "复核决定无效");
+              runtime.memory.wakeGovernance();
+              writeJson(res, 200, receipt, "no-store"); return;
+            }
+            if (jobId && req.method === "GET") {
+              writeJson(res, 200, await governance.status(jobId), "no-store"); return;
+            }
+            if (!jobId && req.method === "GET") {
+              writeJson(res, 200, { pending: await governance.pending() ?? null }, "no-store"); return;
+            }
+            if (!jobId && req.method === "POST") {
+              const action = body?.action;
+              let receipt;
+              if (action === "clear" && Object.keys(body!).length === 2 && body?.confirmed === true) {
+                receipt = await governance.clear();
+              } else if ((action === "forget" || action === "correct")
+                && typeof body?.memoryUri === "string" && typeof body?.selectedText === "string"
+                && Object.keys(body!).length === (action === "correct" ? 4 : 3)) {
+                receipt = action === "forget"
+                  ? await governance.forget(body.memoryUri, body.selectedText)
+                  : typeof body.replacementText === "string"
+                    ? await governance.correct(body.memoryUri, body.selectedText, body.replacementText)
+                    : undefined;
+                if (!receipt) throw new HttpError(400, "纠正文本无效");
+              } else throw new HttpError(400, "记忆管理请求无效");
+              runtime.memory.wakeGovernance();
+              writeJson(res, 200, receipt, "no-store"); return;
+            }
+            throw new HttpError(405, "不支持的记忆管理操作");
+          } catch (error) {
+            if (error instanceof HttpError) throw error;
+            const code = error instanceof Error ? error.message : "";
+            if (["MEMORY_TARGET_NOT_FOUND", "MEMORY_TARGET_AMBIGUOUS", "MEMORY_GOVERNANCE_TARGET_MISMATCH",
+              "INVALID_MEMORY_GOVERNANCE", "INVALID_MEMORY_EXPORT_CURSOR"].includes(code)) {
+              throw new HttpError(400, code);
+            }
+            if (["MEMORY_GOVERNANCE_PENDING", "MEMORY_DISABLED", "MEMORY_EXPORT_CHANGED"].includes(code)) {
+              throw new HttpError(409, code);
+            }
+            throw new HttpError(503, "长期记忆暂时不可用，请稍后重试");
+          }
+        });
+        return;
+      }
+
       const clientThemePreferenceMatch =
         /^\/api\/clients\/([^/]+)\/preferences\/theme$/.exec(pathname);
       if (

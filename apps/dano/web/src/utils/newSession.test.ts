@@ -132,7 +132,7 @@ describe("bridge new session response", () => {
 
   it("updates the real store and cache while preserving state on failure", async () => {
     const storage = createStorage();
-    vi.stubGlobal("window", { sessionStorage: storage });
+    vi.stubGlobal("window", { sessionStorage: storage, location: { href: "http://localhost/" } });
     vi.stubGlobal(
       "fetch",
       vi.fn(() => new Promise<Response>(() => {})),
@@ -191,7 +191,7 @@ describe("bridge new session response", () => {
   it("keeps loading while a cached session restore receives another session snapshot", async () => {
     const storage = createStorage();
     writeActiveSessionCache(storage, "/sessions/history.jsonl");
-    vi.stubGlobal("window", { sessionStorage: storage });
+    vi.stubGlobal("window", { sessionStorage: storage, location: { href: "http://localhost/" } });
     vi.stubGlobal(
       "fetch",
       vi.fn(() => new Promise<Response>(() => {})),

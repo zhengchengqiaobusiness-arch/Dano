@@ -27,6 +27,15 @@ describe("memory owner registry", () => {
     expect((await stat(join(directory, files[0]!))).mode & 0o777).toBe(0o600);
     expect(JSON.parse(await readFile(join(directory, files[0]!), "utf8"))).toEqual({ version: 1, danoUserId: "oa.user-1", owner: first });
   });
+  it("removes only the selected owner binding and can repeat local cleanup", async () => {
+    const { registry, directory } = await setup();
+    await registry.get(user("alice"));
+    const bob = await registry.get(user("bob"));
+    await registry.remove(user("alice"));
+    await registry.remove(user("alice"));
+    expect(await readdir(directory)).toHaveLength(1);
+    expect(await registry.get(user("bob"))).toEqual(bob);
+  });
   it("separates IDs that lossy normalization would collapse and separates deployment accounts", async () => {
     const { registry } = await setup();
     const owners = await Promise.all(["a.b", "a_b", "ab", "a-b"].map(id => registry.get(user(id))));

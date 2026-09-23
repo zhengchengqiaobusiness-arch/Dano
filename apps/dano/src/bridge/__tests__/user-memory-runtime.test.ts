@@ -27,8 +27,8 @@ async function harness() {
   const profile: ProtectedSessionTools = { agentDir: join(root, "agent"), memoryStateDirectory: join(root, "state"),
     trustedSkillPaths: [], resolveWorker: async () => worker, dispose: release };
   const services: UserMemoryServices = {
-    owners: { get: vi.fn(async () => ({ accountId: "account", userId: "alice" })) },
-    credentials: { read: vi.fn(async () => undefined), write: vi.fn(async () => {}) },
+    owners: { get: vi.fn(async () => ({ accountId: "account", userId: "alice" })), remove: vi.fn(async () => {}) },
+    credentials: { read: vi.fn(async () => undefined), write: vi.fn(async () => {}), remove: vi.fn(async () => {}) },
     provisioner: { provision: vi.fn(async () => { throw new Error("REMOTE_OFFLINE"); }), verifyUserKey: vi.fn(async () => {}) },
     baseUrl: "https://memory.example.test", requestTimeoutMs: 100, maxContentBytes: 1024, policyVersion: "v1",
     // Fixture-only counter. Production must supply the active model's tokenizer.
@@ -90,6 +90,7 @@ it("preserves isolated tools and damaged memory data when memory state cannot lo
   await writeFile(path, "{damaged", { mode: 0o600 });
   const profile = await h.start();
   expect(profile.memory).toBeUndefined();
+  expect(profile.memoryRetirementBlocked).toBe(true);
   expect(profile.createMemoryExtension).toBeUndefined();
   expect(await profile.resolveWorker(h.workspace)).toBe(h.worker);
   expect(h.release).not.toHaveBeenCalled();
@@ -103,6 +104,7 @@ it("retains ordinary tools when the memory owner registry is unavailable", async
   vi.mocked(h.services.owners.get).mockRejectedValue(new Error("OWNER_STORE_UNREADABLE"));
   const profile = await h.start();
   expect(profile.memory).toBeUndefined();
+  expect(profile.memoryRetirementBlocked).toBe(true);
   expect(await profile.resolveWorker(h.workspace)).toBe(h.worker);
   expect(h.release).not.toHaveBeenCalled();
 });
@@ -157,6 +159,33 @@ it("restores local authorization without needing management access", async () =>
   expect((await h.runtime().status()).enabled).toBe(true);
   expect(h.services.provisioner.provision).not.toHaveBeenCalled();
   expect(h.services.credentials.read).not.toHaveBeenCalled();
+});
+
+it("retains a durable retirement marker and cleanup credentials until remote clear succeeds", async () => {
+  const h = await harness();
+  const profile = await h.start();
+  const owner = await h.services.owners.get(h.context);
+  const stateDirectory = join(profile.memoryStateDirectory!, "memory");
+  const store = new FileStateStore({ owner, directory: stateDirectory, policyVersion: "v1" });
+  let remoteAvailable = false;
+  const clear = vi.spyOn(LazyMemoryClient.prototype, "clearOwnerData").mockImplementation(async () => {
+    if (!remoteAvailable) throw new Error("REMOTE_OFFLINE");
+  });
+
+  await expect(profile.memory!.retire()).rejects.toThrow("MEMORY_RETIREMENT_PENDING");
+  expect((await store.read()).retirement?.phase).toBe("requested");
+  expect(h.services.credentials.remove).not.toHaveBeenCalled();
+  expect(h.services.owners.remove).not.toHaveBeenCalled();
+  await expect(profile.memory!.setEnabled(true)).rejects.toThrow("MEMORY_RETIRED");
+
+  remoteAvailable = true;
+  await profile.memory!.retire();
+  expect((await store.read()).retirement?.phase).toBe("remote_cleared");
+  expect(clear).toHaveBeenCalledTimes(2);
+  expect(h.services.credentials.remove).toHaveBeenCalledOnce();
+  expect(h.services.owners.remove).toHaveBeenCalledOnce();
+  await profile.memory!.finalizeRetirement();
+  await expect(readFile(join(stateDirectory, "state.json"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 it("gives anonymous users only their existing isolated tool profile", async () => {

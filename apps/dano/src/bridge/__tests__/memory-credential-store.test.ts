@@ -30,6 +30,16 @@ describe("memory credential store", () => {
     await store.write(alice, "replacement-user-secret");
     expect(await new MemoryCredentialStore(options).read(alice)).toBe("replacement-user-secret");
   });
+  it("removes only the validated owner credential and tolerates cleanup retry", async () => {
+    const { options, store } = await setup();
+    await store.write(alice, "alice-secret");
+    await store.write(bob, "bob-secret");
+    await store.remove(alice);
+    await store.remove(alice);
+    expect(await store.read(alice)).toBeUndefined();
+    expect(await store.read(bob)).toBe("bob-secret");
+    expect(await readdir(options.directory)).toHaveLength(1);
+  });
   it("authenticates owner metadata, so moving and relabeling ciphertext cannot cross users", async () => {
     const { options, store } = await setup();
     await store.write(alice, "alice-secret");

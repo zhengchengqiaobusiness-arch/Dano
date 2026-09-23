@@ -1342,7 +1342,8 @@
 
   <MemorySettingsDialog open={memorySettingsOpen}
     authenticated={bridge.authentication.status === "authenticated"}
-    url={bridge.memorySettingsUrl} operationsUrl={bridge.memoryOperationsUrl} themeStyle={allStyle}
+    url={bridge.memorySettingsUrl} operationsUrl={bridge.memoryOperationsUrl}
+    governanceUrl={bridge.memoryGovernanceUrl} exportUrl={bridge.memoryExportUrl} themeStyle={allStyle}
     onClose={() => { memorySettingsOpen = false; }} />
 
   <ThemeSettingsDialog

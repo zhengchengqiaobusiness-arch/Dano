@@ -78,4 +78,13 @@ export class MemoryOwnerRegistry {
     try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
     return owner;
   }
+
+  /** Remove the validated local binding after remote memory is cleared. */
+  async remove(context: UserContext): Promise<void> {
+    const owner = await this.get(context);
+    const digest = createHash("sha256").update(JSON.stringify([owner.accountId, context.user.id])).digest("hex");
+    await fs.unlink(path.join(this.#directory, `${digest}.json`));
+    const directory = await fs.open(this.#directory, constants.O_RDONLY);
+    try { await directory.sync(); } finally { await directory.close(); }
+  }
 }

@@ -834,6 +834,21 @@ it("authenticates memory settings, isolates owners and projects only safe status
       return { agentDir, trustedSkillPaths: [], resolveWorker: async workspace => ({
         workspace, assertIsolated: async () => {}, execute: async () => ({}),
       }), memory: {
+        governance() { return {
+          pending: async () => undefined,
+          exportPage: async () => ({ items: [{ uri: `viking://user/${context.user.id}/memories/fact.md`,
+            content: `Fact for ${context.user.id}`, sources: [], revisions: [] }] }),
+          correct: async () => ({ jobId: "00000000-0000-0000-0000-000000000001", status: "pending" }),
+          forget: async () => ({ jobId: "00000000-0000-0000-0000-000000000001", status: "pending" }),
+          clear: async () => ({ jobId: "00000000-0000-0000-0000-000000000001", status: "pending" }),
+          status: async () => ({ jobId: "00000000-0000-0000-0000-000000000001", status: "pending" }),
+          review: async () => ({ stage: "classify", candidates: [] }),
+          reviewWriter: async () => ({ jobId: "00000000-0000-0000-0000-000000000001", status: "pending" }),
+          resolveMergedWriter: async () => ({ jobId: "00000000-0000-0000-0000-000000000001", status: "pending" }),
+        } as unknown as ReturnType<import("../bridge/user-memory-controls.js").UserMemoryControls["governance"]>; },
+        wakeGovernance() {},
+        async retire() {},
+        async finalizeRetirement() {},
         async status() {
           if (state.fail) throw new Error("SYNTHETIC_PRIVATE_ERROR");
           return { enabled: state.enabled, automaticCollection: state.automaticCollection, effectiveAt: "2026-09-18T00:00:00Z",
@@ -896,6 +911,23 @@ it("authenticates memory settings, isolates owners and projects only safe status
   expect(await revoked.json()).toMatchObject({ enabled: true, automaticCollection: false });
   const peer = await fetch(url(bob), { headers: headers(bobToken) });
   expect(await peer.json()).toMatchObject({ enabled: false });
+  const governanceUrl = (client: TestClient) => `${origin}/api/clients/${client.client.id}/memory/governance`;
+  const exportUrl = (client: TestClient) => `${origin}/api/clients/${client.client.id}/memory/export`;
+  expect((await fetch(exportUrl(alice))).status).toBe(401);
+  expect((await fetch(exportUrl(alice), { headers: headers(bobToken) })).status).toBe(403);
+  const exported = await fetch(exportUrl(alice), { headers: headers(aliceToken) });
+  expect(exported.headers.get("cache-control")).toBe("no-store");
+  expect(await exported.json()).toMatchObject({ items: [{ content: "Fact for alice" }] });
+  expect(await (await fetch(exportUrl(bob), { headers: headers(bobToken) })).json())
+    .toMatchObject({ items: [{ content: "Fact for bob" }] });
+  expect((await fetch(governanceUrl(alice), { method: "POST", headers: headers(aliceToken),
+    body: JSON.stringify({ action: "clear", confirmed: false }) })).status).toBe(400);
+  expect((await fetch(governanceUrl(alice), { method: "POST", headers: headers(aliceToken),
+    body: "{invalid" })).status).toBe(400);
+  expect((await fetch(governanceUrl(alice), { method: "POST", headers: headers(bobToken),
+    body: JSON.stringify({ action: "clear", confirmed: true }) })).status).toBe(403);
+  expect((await fetch(governanceUrl(alice), { method: "POST", headers: headers(aliceToken),
+    body: JSON.stringify({ action: "clear", confirmed: true }) })).status).toBe(200);
   expect((await fetch(url(alice), { method: "PUT", headers: headers(aliceToken), body: JSON.stringify({ enabled: false }) })).status).toBe(200);
   expect([...states.values()].every(state => !state.enabled)).toBe(true);
   const operationUrl = (client: TestClient, id: string) => `${origin}/api/clients/${client.client.id}/memory/operations/${id}`;
@@ -952,6 +984,7 @@ it("rejects anonymous memory settings even when a host profile accidentally expo
     protectedToolsForUser: async () => {
       const agentDir = path.join(root, "private"); fs.mkdirSync(agentDir);
       return { agentDir, trustedSkillPaths: [], memory: { status: read, setEnabled: async () => {}, setAutomaticCollection: async () => {}, operation: async () => undefined,
+        governance: () => { throw new Error("SYNTHETIC_GOVERNANCE_UNAVAILABLE"); }, wakeGovernance: () => {}, retire: async () => {}, finalizeRetirement: async () => {},
         operations: async () => ({ items: [], nextCursor: null }), content: async () => undefined },
         resolveWorker: async workspace => ({ workspace, assertIsolated: async () => {}, execute: async () => ({}) }) };
     },

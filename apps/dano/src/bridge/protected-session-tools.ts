@@ -18,6 +18,8 @@ export interface ProtectedSessionTools {
   /** Supervisor-owned private state, outside every tool workspace. */
   readonly memoryStateDirectory?: string;
   readonly memory?: UserMemoryControls;
+  /** Chat may continue when memory initialization fails; account retirement may not. */
+  readonly memoryRetirementBlocked?: true;
   readonly captureMemoryInput?: MemoryInputCapture;
   readonly captureTaskFact?: CaptureProviderTaskFact;
   readonly trustedSkillPaths: readonly string[];

@@ -14,6 +14,7 @@ export interface UserRuntimeContext {
   readonly userId: string;
   readonly backend: DanoBackend;
   readonly memory?: ProtectedSessionTools["memory"];
+  readonly memoryRetirementBlocked?: true;
   readonly defaultWorkspacePath: string;
   readonly sessionsRootPath: string;
   ownsSessionPath(candidatePath: string): boolean;
@@ -152,12 +153,26 @@ export class UserRuntimeRegistry {
   retireUser(userContext: UserContext): Promise<void> {
     const previous = this.retirements.get(userContext.user.id);
     if (previous) return previous;
+    let creating = this.contexts.get(userContext.user.id);
+    if (!creating && "username" in userContext.user && this.options.protectedToolsForUser) {
+      creating = this.create(userContext).catch(error => {
+        this.contexts.delete(userContext.user.id);
+        throw error;
+      });
+      this.contexts.set(userContext.user.id, creating);
+    }
     this.retired.add(userContext.user.id);
-    const creating = this.contexts.get(userContext.user.id);
-    this.contexts.delete(userContext.user.id);
     const retiring = (async () => {
+      let memory: UserRuntimeContext["memory"];
       if (creating) {
         const context = await creating;
+        if (context.memoryRetirementBlocked) {
+          try { await this.disposers.get(context)!(); }
+          finally { this.contexts.delete(userContext.user.id); }
+          throw new Error("MEMORY_RETIREMENT_PENDING");
+        }
+        memory = context.memory;
+        await memory?.retire();
         await this.disposers.get(context)!();
       }
       await fs.promises.rm(userContext.folderPath, { recursive: true, force: true });
@@ -165,8 +180,13 @@ export class UserRuntimeRegistry {
       if (!isPathInsideRoot(userContext.folderPath, sessionsRootPath)) {
         await fs.promises.rm(sessionsRootPath, { recursive: true, force: true });
       }
+      await memory?.finalizeRetirement();
+      this.contexts.delete(userContext.user.id);
     })();
     this.retirements.set(userContext.user.id, retiring);
+    void retiring.finally(() => {
+      if (this.retirements.get(userContext.user.id) === retiring) this.retirements.delete(userContext.user.id);
+    }).catch(() => {});
     return retiring;
   }
 
@@ -218,6 +238,7 @@ export class UserRuntimeRegistry {
       userId: userContext.user.id,
       backend,
       memory: protectedTools?.memory,
+      memoryRetirementBlocked: protectedTools?.memoryRetirementBlocked,
       defaultWorkspacePath,
       sessionsRootPath,
       ownsSessionPath: candidatePath =>
@@ -226,12 +247,17 @@ export class UserRuntimeRegistry {
         isOwnedRuntimePath(workspaceRootPath, candidatePath),
     };
     let disposing: Promise<void> | undefined;
+    let backendDisposed = false, toolsDisposed = false;
     this.disposers.set(context, () => disposing ??= (async () => {
       const errors: unknown[] = [];
-      try { await backend.dispose(); } catch (error) { errors.push(error); }
-      try { await protectedTools?.dispose?.(); } catch (error) { errors.push(error); }
+      if (!backendDisposed) {
+        try { await backend.dispose(); backendDisposed = true; } catch (error) { errors.push(error); }
+      }
+      if (!toolsDisposed) {
+        try { await protectedTools?.dispose?.(); toolsDisposed = true; } catch (error) { errors.push(error); }
+      }
       if (errors.length) throw new AggregateError(errors, "USER_RUNTIME_DISPOSAL_FAILED");
-    })());
+    })().catch(error => { disposing = undefined; throw error }));
     return context;
   }
 

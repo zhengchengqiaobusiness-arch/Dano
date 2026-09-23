@@ -237,6 +237,110 @@ it("waits for retiring workers before deleting user files or completing shutdown
   expect(fs.existsSync(user.folderPath)).toBe(false);
 });
 
+it("keeps authenticated files and cleanup capability when remote memory retirement needs retry", async () => {
+  const base = lifecycleUser();
+  const user: UserContext = { ...base, user: { id: base.user.id, username: "Alice" } };
+  let available = false;
+  const retire = vi.fn(async () => { if (!available) throw new Error("MEMORY_RETIREMENT_PENDING"); });
+  const finalizeRetirement = vi.fn(async () => {});
+  const release = vi.fn(async () => {});
+  const registry = new UserRuntimeRegistry(async () => ({ async dispose() {} }) as never, {
+    protectedToolsForUser: async () => ({ ...protectedProfile(release),
+      memory: { retire, finalizeRetirement } as unknown as ProtectedSessionTools["memory"] }),
+  });
+  await registry.get(user);
+  await expect(registry.retireUser(user)).rejects.toThrow("MEMORY_RETIREMENT_PENDING");
+  expect(fs.existsSync(user.folderPath)).toBe(true);
+  expect(release).not.toHaveBeenCalled();
+  expect(finalizeRetirement).not.toHaveBeenCalled();
+  await expect(registry.get(user)).rejects.toThrow("CLOSED");
+  available = true;
+  await registry.retireUser(user);
+  expect(retire).toHaveBeenCalledTimes(2);
+  expect(release).toHaveBeenCalledTimes(1);
+  expect(finalizeRetirement).toHaveBeenCalledTimes(1);
+  expect(fs.existsSync(user.folderPath)).toBe(false);
+  await registry.dispose();
+});
+
+it("keeps authenticated files when memory failed to initialize and retries cleanup after recovery", async () => {
+  const base = lifecycleUser();
+  const user: UserContext = { ...base, user: { id: base.user.id, username: "Alice" } };
+  let ready = false;
+  const release = vi.fn(async () => {});
+  const retire = vi.fn(async () => {});
+  const finalizeRetirement = vi.fn(async () => {});
+  const registry = new UserRuntimeRegistry(async () => ({ async dispose() {} }) as never, {
+    protectedToolsForUser: async () => ({ ...protectedProfile(release), ...(ready
+      ? { memory: { retire, finalizeRetirement } as unknown as ProtectedSessionTools["memory"] }
+      : { memoryRetirementBlocked: true as const }) }),
+  });
+  await registry.get(user);
+  await expect(registry.retireUser(user)).rejects.toThrow("MEMORY_RETIREMENT_PENDING");
+  expect(fs.existsSync(user.folderPath)).toBe(true);
+  expect(retire).not.toHaveBeenCalled();
+  expect(release).toHaveBeenCalledOnce();
+  ready = true;
+  await registry.retireUser(user);
+  expect(retire).toHaveBeenCalledOnce();
+  expect(finalizeRetirement).toHaveBeenCalledOnce();
+  expect(release).toHaveBeenCalledTimes(2);
+  expect(fs.existsSync(user.folderPath)).toBe(false);
+  await registry.dispose();
+});
+
+it("recreates a retirement runtime after initialization or blocked-profile disposal fails", async () => {
+  const base = lifecycleUser();
+  const user: UserContext = { ...base, user: { id: base.user.id, username: "Alice" } };
+  let failInitialization = true, failDisposal = true;
+  const retire = vi.fn(async () => {});
+  const finalizeRetirement = vi.fn(async () => {});
+  const registry = new UserRuntimeRegistry(async () => ({ async dispose() {} }) as never, {
+    protectedToolsForUser: async () => {
+      if (failInitialization) throw new Error("MEMORY_PROFILE_UNAVAILABLE");
+      return { ...protectedProfile(async () => { if (failDisposal) throw new Error("PROFILE_RELEASE_FAILED"); }),
+        ...(failDisposal ? { memoryRetirementBlocked: true as const }
+          : { memory: { retire, finalizeRetirement } as unknown as ProtectedSessionTools["memory"] }) };
+    },
+  });
+  await expect(registry.retireUser(user)).rejects.toThrow("MEMORY_PROFILE_UNAVAILABLE");
+  expect(fs.existsSync(user.folderPath)).toBe(true);
+  failInitialization = false;
+  await expect(registry.retireUser(user)).rejects.toThrow("USER_RUNTIME_DISPOSAL_FAILED");
+  expect(fs.existsSync(user.folderPath)).toBe(true);
+  failDisposal = false;
+  await registry.retireUser(user);
+  expect(retire).toHaveBeenCalledOnce();
+  expect(finalizeRetirement).toHaveBeenCalledOnce();
+  expect(fs.existsSync(user.folderPath)).toBe(false);
+  await registry.dispose();
+});
+
+it("retries a failed disposer after remote retirement without repeating completed cleanup", async () => {
+  const base = lifecycleUser();
+  const user: UserContext = { ...base, user: { id: base.user.id, username: "Alice" } };
+  let releaseAvailable = false;
+  const retire = vi.fn(async () => {});
+  const finalizeRetirement = vi.fn(async () => {});
+  const backendDispose = vi.fn(async () => {});
+  const release = vi.fn(async () => { if (!releaseAvailable) throw new Error("PROFILE_RELEASE_FAILED"); });
+  const registry = new UserRuntimeRegistry(async () => ({ dispose: backendDispose }) as never, {
+    protectedToolsForUser: async () => ({ ...protectedProfile(release),
+      memory: { retire, finalizeRetirement } as unknown as ProtectedSessionTools["memory"] }),
+  });
+  await registry.get(user);
+  await expect(registry.retireUser(user)).rejects.toThrow("USER_RUNTIME_DISPOSAL_FAILED");
+  expect(fs.existsSync(user.folderPath)).toBe(true);
+  expect(finalizeRetirement).not.toHaveBeenCalled();
+  releaseAvailable = true;
+  await registry.retireUser(user);
+  expect(backendDispose).toHaveBeenCalledOnce();
+  expect(release).toHaveBeenCalledTimes(2);
+  expect(finalizeRetirement).toHaveBeenCalledOnce();
+  expect(fs.existsSync(user.folderPath)).toBe(false);
+  await registry.dispose();
+});
+
 it("reports failed initialization cleanup again at shutdown", async () => {
   const registry = new UserRuntimeRegistry(async () => { throw new Error("START_FAILED"); }, {
     protectedToolsForUser: async () => protectedProfile(async () => { throw new Error("CLOSE_FAILED"); }),

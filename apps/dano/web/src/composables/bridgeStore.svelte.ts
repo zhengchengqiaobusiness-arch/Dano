@@ -3319,6 +3319,12 @@ export function initBridge() {
     get memorySettingsUrl() {
       return clientId ? `/api/clients/${encodeURIComponent(clientId)}/memory/settings` : null;
     },
+    get memoryGovernanceUrl() {
+      return clientId ? `/api/clients/${encodeURIComponent(clientId)}/memory/governance` : null;
+    },
+    get memoryExportUrl() {
+      return clientId ? `/api/clients/${encodeURIComponent(clientId)}/memory/export` : null;
+    },
     get connectionStatus() {
       return connectionStatus;
     },

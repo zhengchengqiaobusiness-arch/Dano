@@ -1,6 +1,7 @@
+import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createOpenVikingExtension, FileStateStore, MemoryDelivery, DeliveryScheduler,
-  type MemoryExtensionOptions } from "@josephyoung/pi-openviking/host";
+  MemoryGovernanceService, MemoryGovernanceScheduler, type MemoryExtensionOptions } from "@josephyoung/pi-openviking/host";
 import type { IsolatedToolExecutor } from "@josephyoung/pi-openviking/worker-tools";
 import type { MemoryOwnerRegistry } from "./memory-owner-registry.js";
 import type { MemoryCredentialStore } from "./memory-credential-store.js";
@@ -15,11 +16,12 @@ import { memoryOperationPage, projectMemoryOperation } from "./memory-operation-
 import { MemoryUserProvenance } from "./memory-user-provenance.js";
 import { UserMemoryCollection, type UserMemoryCollectionOptions } from "./user-memory-collection.js";
 import { MemoryTaskFacts, type ProviderTaskFactInput } from "./memory-task-facts.js";
+import { memoryWriterClassifier } from "./memory-writer-classifier.js";
 
 type SchedulerPolicy = Omit<ConstructorParameters<typeof DeliveryScheduler>[0], "store" | "delivery">;
 export interface UserMemoryServices {
-  owners: Pick<MemoryOwnerRegistry, "get">;
-  credentials: Pick<MemoryCredentialStore, "read" | "write">;
+  owners: Pick<MemoryOwnerRegistry, "get" | "remove">;
+  credentials: Pick<MemoryCredentialStore, "read" | "write" | "remove">;
   provisioner: Pick<MemoryProvisioner, "provision" | "verifyUserKey">;
   baseUrl: string;
   requestTimeoutMs: number;
@@ -36,21 +38,33 @@ export class UserMemoryRuntime implements UserMemoryControls {
   readonly #store: FileStateStore;
   readonly #delivery: MemoryDelivery;
   readonly #scheduler: DeliveryScheduler;
+  readonly #governance: MemoryGovernanceService;
+  readonly #governanceScheduler: MemoryGovernanceScheduler;
   readonly #client: LazyMemoryClient;
   readonly #options: UserMemoryServices;
+  readonly #context: UserContext;
+  readonly #stateDirectory: string;
   readonly provenance: MemoryUserProvenance;
   readonly #collection?: UserMemoryCollection;
   #taskFacts?: MemoryTaskFacts;
   #settings: Promise<void> = Promise.resolve();
   #closed = false;
+  #retired = false;
+  #retiredComplete = false;
+  #retiring?: Promise<void>;
   #closing?: Promise<void>;
   #captureAuthorizationRead?: ReturnType<FileStateStore["read"]>;
 
-  private constructor(store: FileStateStore, client: LazyMemoryClient, options: UserMemoryServices, sessionRoot?: string) {
+  private constructor(store: FileStateStore, client: LazyMemoryClient, options: UserMemoryServices,
+    context: UserContext, stateDirectory: string, sessionRoot?: string) {
     this.#store = store; this.#client = client; this.#options = options;
+    this.#context = context; this.#stateDirectory = stateDirectory;
     this.provenance = new MemoryUserProvenance(store.owner);
     this.#delivery = new MemoryDelivery({ store, transport: client, maxPayloadBytes: options.policy.maxPayloadBytes });
     this.#scheduler = new DeliveryScheduler({ ...options.scheduler, store, delivery: this.#delivery });
+    this.#governance = new MemoryGovernanceService(store, client, this.#delivery,
+      options.collection ? memoryWriterClassifier(options.collection.selector) : undefined);
+    this.#governanceScheduler = new MemoryGovernanceScheduler(this.#governance, options.scheduler.pollIntervalMs);
     if (options.collection) {
       if (!sessionRoot) throw new Error("PROTECTED_MEMORY_SESSION_ROOT_REQUIRED");
       this.#collection = new UserMemoryCollection({ store, delivery: this.#delivery, sessionRoot,
@@ -89,19 +103,21 @@ export class UserMemoryRuntime implements UserMemoryControls {
         return configured.selector.complete(input);
       },
     } } : undefined;
-    const runtime = new UserMemoryRuntime(store, client, { ...options, collection }, sessionRoot);
+    const runtime = new UserMemoryRuntime(store, client, { ...options, collection }, context, join(stateDirectory, "memory"), sessionRoot);
     runtime.#taskFacts = taskFacts;
     try {
       // Runtime creation completes before this user's authenticated controls or
       // sessions are published by UserRuntimeRegistry. Invalidate an obsolete
       // grant before either scheduler can claim work under the new host policy.
       const state = await store.read();
+      runtime.#retired = Boolean(state.retirement);
       if (state.authorization.automaticCollection && (!collection
         || state.authorization.collectionConsent?.policyVersion !== collection.policyVersion)) {
         await runtime.#delivery.revokeCollection();
       }
       runtime.#scheduler.start();
-      runtime.#collection?.start();
+      runtime.#governanceScheduler.start();
+      if (!runtime.#retired) runtime.#collection?.start();
       return runtime;
     } catch (error) {
       await runtime.close();
@@ -110,9 +126,19 @@ export class UserMemoryRuntime implements UserMemoryControls {
   }
 
   extension(worker: IsolatedToolExecutor) {
-    this.#assertOpen();
+    if (this.#closed) throw new Error("MEMORY_RUNTIME_CLOSED");
     const memory = createOpenVikingExtension({ owner: this.#store.owner, client: this.#client, stateStore: this.#store,
       policy: this.#options.policy, collection: this.#collection?.extension,
+      governance: {
+        owner: this.#store.owner,
+        scope: this.#client.scope,
+        correct: (...args) => this.#governance.correct(...args),
+        forget: (...args) => this.#governance.forget(...args),
+        clear: () => this.#governance.clear(),
+        exportPage: (...args) => this.#governance.exportPage(...args),
+        status: id => this.#governance.status(id),
+        wake: () => this.#governanceScheduler.wake(),
+      },
       assertToolIsolation: async () => { this.#assertOpen(); await worker.assertIsolated(); },
       wakeDelivery: () => { if (!this.#closed) this.#scheduler.wake(); } });
     return ((pi) => {
@@ -244,7 +270,40 @@ export class UserMemoryRuntime implements UserMemoryControls {
     return { operationId: id, index, total: operation.memoryUris.length, text };
   }
 
-  #assertOpen(): void { if (this.#closed) throw new Error("MEMORY_RUNTIME_CLOSED"); }
+  governance() { this.#assertOpen(); return this.#governance; }
+  wakeGovernance() { this.#assertOpen(); this.#governanceScheduler.wake(); }
+
+  #assertOpen(): void {
+    if (this.#closed) throw new Error("MEMORY_RUNTIME_CLOSED");
+    if (this.#retired) throw new Error("MEMORY_RETIRED");
+  }
+
+  retire(): Promise<void> {
+    if (this.#retiredComplete) return Promise.resolve();
+    if (this.#retiring) return this.#retiring;
+    if (this.#closed) return Promise.reject(new Error("MEMORY_RUNTIME_CLOSED"));
+    this.#retired = true;
+    this.#retiring = (async () => {
+      let result;
+      try { result = await this.#governance.retire(); }
+      finally { await this.#collection?.stop(); }
+      if (result.status !== "complete") throw new Error("MEMORY_RETIREMENT_PENDING");
+      await this.#scheduler.stop();
+      await this.#governanceScheduler.stop();
+      await this.#client.close();
+      await this.#options.credentials.remove(this.#store.owner);
+      await this.#options.owners.remove(this.#context);
+      this.#retiredComplete = true;
+    })().catch(error => { this.#retiring = undefined; throw error; });
+    return this.#retiring;
+  }
+
+  /** Keep the durable remote-clear marker through outer user-folder deletion.
+   * A failed delete can then retry without provisioning a fresh credential. */
+  async finalizeRetirement(): Promise<void> {
+    if (!this.#retiredComplete) throw new Error("MEMORY_RETIREMENT_PENDING");
+    await rm(this.#stateDirectory, { recursive: true, force: true });
+  }
 
   close(): Promise<void> {
     if (this.#closing) return this.#closing;
@@ -254,6 +313,7 @@ export class UserMemoryRuntime implements UserMemoryControls {
     this.#closing = (async () => {
       try { await this.#collection?.stop(); }
       finally {
+        await this.#governanceScheduler.stop();
         // Stop new scheduler claims, settle network requests, then let the active
         // tick persist its receipts before the host releases the user's workers.
         await this.#scheduler.stop(0);
@@ -292,7 +352,7 @@ export function withUserMemory(
         // failed owner/state data here, and never fall back to unisolated tools.
         // Recheck the boundary in case initialization failed on isolation itself.
         await worker.assertIsolated();
-        return profile;
+        return { ...profile, memoryRetirementBlocked: true };
       }
       onRuntime(context, runtime);
       const bound = runtime;
