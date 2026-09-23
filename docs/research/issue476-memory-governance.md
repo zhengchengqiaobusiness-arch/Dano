@@ -400,8 +400,13 @@ Final review found that the management JSON download included only already
 loaded pages and hid ambiguous-target errors. The UI now requests every
 server page before creating a file, fails without a partial download if
 pagination changes, and prompts for a longer unique selection on an
-ambiguous target. Its utility tests cover both fixes; browser verification
-of this follow-up image is still pending.
+ambiguous target. While an export is in progress, governance controls are
+disabled so a confirmed action cannot be silently dropped. Utility and
+component tests cover these paths. On the follow-up image, the in-app Browser
+downloaded a six-item JSON export with source and revision metadata and no
+remaining cursor. A repeated phrase in one saved document produced the
+specific ambiguous-target guidance without creating a pending governance job.
+Screenshot: `/private/tmp/dano476-browser-_m894l8g/ambiguous-target-guidance-c4702fb8.jpg`.
 
 The published `0.1.8` pin passed the isolated real-service clear fixture with
 Alice global and project scopes plus Bob's separate account. An actual
@@ -412,6 +417,7 @@ branch was rejected, and a new explicit save was retained. Result:
 
 The first full Dano suite run with the isolation services still active had
 **1649 passed, 1 skipped, 1 timeout** in the live provider Skill gate. That
-single file passed **10/10** when rerun alone. The full suite still needs a
-contention-free run. This section does not claim #477 backup, upgrade,
-rollback, quality, latency or cost release gates.
+single file passed **10/10** when rerun alone. A controlled two-worker full
+run passed **1650 tests with 1 skipped**; the new governance-controls test
+passed separately after that run. This section does not claim #477 backup,
+upgrade, rollback, quality, latency or cost release gates.

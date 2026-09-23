@@ -50,7 +50,7 @@
   }
 
   async function decide(decision: Parameters<typeof submitGovernanceReview>[3]) {
-    if (!pending || saving) return;
+    if (!pending || saving || exporting) return;
     saving = true; error = false;
     try {
       pending = await submitGovernanceReview(url, pending.jobId, new AbortController().signal, decision);
@@ -80,7 +80,7 @@
 
   async function loadMore() {
     const cursor = page?.nextCursor;
-    if (!cursor || loading) return;
+    if (!cursor || loading || exporting) return;
     loading = true; error = false;
     try {
       const next = await exportMemoryPage(exportUrl, new AbortController().signal, cursor);
@@ -116,8 +116,8 @@
         <div class="flex flex-col gap-2 rounded-md border p-3">
           <pre class="whitespace-pre-wrap break-words text-sm">{candidate.candidateText}</pre>
           <div class="flex flex-wrap gap-2">
-            <Button disabled={saving} onclick={() => decide({ operationId: candidate.operationId, decision: "target" })}>{t("memory.reviewTarget")}</Button>
-            <Button variant="outline" disabled={saving} onclick={() => decide({ operationId: candidate.operationId, decision: "unrelated" })}>{t("memory.reviewUnrelated")}</Button>
+            <Button disabled={saving || exporting} onclick={() => decide({ operationId: candidate.operationId, decision: "target" })}>{t("memory.reviewTarget")}</Button>
+            <Button variant="outline" disabled={saving || exporting} onclick={() => decide({ operationId: candidate.operationId, decision: "unrelated" })}>{t("memory.reviewUnrelated")}</Button>
           </div>
         </div>
       {/each}
@@ -132,7 +132,7 @@
           <label for={`merged-memory-text-${candidate.operationId}`}>{t("memory.mergedExactText")}</label>
           <Textarea id={`merged-memory-text-${candidate.operationId}`} value={mergedTexts[candidate.operationId] ?? ""}
             oninput={event => { mergedTexts[candidate.operationId] = event.currentTarget.value; }} />
-          <Button disabled={saving || !mergedTexts[candidate.operationId]?.trim()}
+          <Button disabled={saving || exporting || !mergedTexts[candidate.operationId]?.trim()}
             onclick={() => decide({ operationId: candidate.operationId, exactText: mergedTexts[candidate.operationId] })}>{t("memory.removeReviewedText")}</Button>
         </div>
       {/each}
@@ -166,9 +166,9 @@
           <label for="replacement-memory-text">{t("memory.replacementText")}</label>
           <Textarea id="replacement-memory-text" bind:value={replacementText} />
           <div class="flex flex-wrap gap-2">
-            <Button disabled={saving || !selectedText.trim() || !replacementText.trim()}
+            <Button disabled={saving || exporting || !selectedText.trim() || !replacementText.trim()}
               onclick={() => mutate({ action: "correct", memoryUri: item.uri, selectedText, replacementText })}>{t("memory.correct")}</Button>
-            <Button variant="destructive" disabled={saving || !selectedText.trim()}
+            <Button variant="destructive" disabled={saving || exporting || !selectedText.trim()}
               onclick={() => mutate({ action: "forget", memoryUri: item.uri, selectedText })}>{t("memory.forget")}</Button>
           </div>
         {/if}
@@ -178,7 +178,7 @@
   {/if}
   {#if pending?.errorCode === "MEMORY_GOVERNANCE_CLEAR_REQUIRED" || (!pending && page)}
     <AlertDialog.Root>
-      <AlertDialog.Trigger class={buttonVariants({ variant: "destructive" })}>{t("memory.clearAll")}</AlertDialog.Trigger>
+      <AlertDialog.Trigger disabled={saving || exporting || loading} class={buttonVariants({ variant: "destructive" })}>{t("memory.clearAll")}</AlertDialog.Trigger>
       <AlertDialog.Content>
         <AlertDialog.Header>
           <AlertDialog.Title>{t("memory.clearTitle")}</AlertDialog.Title>
@@ -186,7 +186,7 @@
         </AlertDialog.Header>
         <AlertDialog.Footer>
           <AlertDialog.Cancel>{t("memory.cancel")}</AlertDialog.Cancel>
-          <AlertDialog.Action variant="destructive" onclick={() => mutate({ action: "clear", confirmed: true })}>{t("memory.confirmClear")}</AlertDialog.Action>
+          <AlertDialog.Action variant="destructive" disabled={saving || exporting} onclick={() => mutate({ action: "clear", confirmed: true })}>{t("memory.confirmClear")}</AlertDialog.Action>
         </AlertDialog.Footer>
       </AlertDialog.Content>
     </AlertDialog.Root>
