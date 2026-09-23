@@ -47,7 +47,8 @@ const selected = original.split('\n').find(line => line.includes('青岚旧版�
 assert(selected);
 const unrelated = await delivery.save(source('unrelated'), '我的长期偏好：常用茶饮为乌龙茶。');
 assert.equal(unrelated.phase, 'queued');
-const service = new MemoryGovernanceService(store, client, delivery);
+const service = new MemoryGovernanceService(store, client, delivery,
+  async ({ candidateText }) => candidateText.includes('乌龙茶') ? 'unrelated' : 'uncertain');
 const revised = selected.replace('青岚旧版小结', '岚峰新版小结');
 const receipt = await service.correct(uri, selected, revised);
 let complete = receipt.status === 'complete';

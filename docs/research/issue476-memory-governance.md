@@ -310,3 +310,33 @@ this paraphrase was removed. Governance must stay pending on such ambiguity
 or gain a verifiable source-level resolution path before #476 can be accepted.
 Dano management integration, account retirement, browser acceptance, package
 publication and exact Dano pin remain outstanding.
+
+The extension now takes a trusted host classifier for those pre-barrier facts.
+It records `target` or `unrelated` with the governance job; no decision keeps
+the job pending with `MEMORY_GOVERNANCE_REVIEW_REQUIRED`. An authenticated
+management service can inspect the candidates and record a decision, including
+after restart. Targeted queued writes are revoked before sending. Accepted
+target writes are reconciled, their source removed, and an exclusive derived
+document deleted. A derivative shared with an unrelated current source stays
+pending for review. Candidate plaintext is erased on verified completion.
+The extension serial suite passes **237/237** after this change
+(`/private/tmp/dano476-classifier-all-tests.log`). Dano still needs to supply
+the actual classifier and management UI; a synthetic classifier in unit tests
+does not establish real-model accuracy.
+
+The real selective-drain fixture now runs against the current extension with
+an explicit synthetic `unrelated` decision. It completed while preserving the
+queued tea preference and removing the old report title. Result:
+`/private/tmp/dano476-selective-drain-dxoEtr/result.json`; log:
+`/private/tmp/dano476-real-selective-drain-classifier.log`. This validates
+the coordinator path, not MiMo classification. A further unit guard keeps a
+job pending for review when an accepted old paraphrase merges into the same
+document, because exact-text replacement cannot prove that paraphrase gone.
+
+`fixtures/openviking-selective-paraphrase.mjs` probed a fresh isolated account
+with a second paraphrased queued write. OpenViking returned
+`MEMORY_NO_EXTRACTED_FACT` for that second source, so the old fact was absent
+and governance completed without exercising a successful in-flight semantic
+duplicate. Result: `/private/tmp/dano476-selective-paraphrase-swfKGD/result.json`;
+log: `/private/tmp/dano476-real-selective-paraphrase.log`. This is not proof
+that all paraphrase classifications or derived-document cleanup paths work.
