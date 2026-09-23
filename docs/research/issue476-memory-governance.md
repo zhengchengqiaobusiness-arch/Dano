@@ -349,7 +349,7 @@ merged at `153c9371`; GitHub Actions run `35820402540` published version
 `0.1.6` to npm with provenance. The registry reports both `pi-package` and
 `pi-extension` keywords and integrity
 `sha512-tLC36TbfxfTrtZPDO9k3lzk9RbsEuDlcs2FoAPpxoxPJ43tudZAXDJB+EyWmltlClgeSRTlhtbA4XKELZb9Llw==`.
-Dano now pins this exact version in its package and lockfile.
+At this checkpoint Dano pinned this exact version in its package and lockfile.
 
 The extension suite passed **245/245**. Dano's exact-published-dependency
 check, full suite after the latest upstream rebase (**1647 passed, 1 skipped**)
@@ -370,3 +370,48 @@ Backup restore of an older OpenViking snapshot can resurrect remote content
 after a locally completed retirement; #477 explicitly requires a matched
 backup/recovery set and deletion replay before release. The completed local
 retirement marker alone is not recovery evidence.
+
+## Browser and published-package follow-up (2026-09-23)
+
+The independent extension fixes [#5](https://github.com/josephyoung/pi-openviking/pull/5)
+and [#6](https://github.com/josephyoung/pi-openviking/pull/6) were merged and
+published by the GitHub Actions trusted publisher as `0.1.7` and `0.1.8`.
+The former accepts the source ID used by real Pi explicit saves during
+management export. The latter blocks model `memory_export` while memory is
+paused, while authenticated management export remains available. Dano now
+pins `@josephyoung/pi-openviking@0.1.8` and product version `0.2.34`.
+
+The isolated Podman image built from this commit ran with the production OA
+login, MiMo-v2.5 and a fresh OpenViking v0.4.20 service on the fixed trusted
+HTTPS entry `https://localhost:18711`. In the Codex in-app Browser, explicit
+save and new-chat recall, correction and new-chat recall, forget and new-chat
+absence, clear confirmation, management export, and pause/resume were observed.
+After pause, a model `memory_export` call returned `blocked/MEMORY_DISABLED`
+and a new chat did not reveal the saved synthetic fact. The management export
+remained available while paused. With separate automatic-collection consent,
+an ordinary synthetic preference produced an `automatic/ready` operation and
+was recalled in a new chat. Revocation left main memory enabled and subsequent
+ordinary conversation created no new collection request. The final image also
+passed real Browser text, model-triggered `bash ls`, and synthetic image
+description. Redacted screenshots are in
+`/private/tmp/dano476-browser-_m894l8g/`.
+
+Final review found that the management JSON download included only already
+loaded pages and hid ambiguous-target errors. The UI now requests every
+server page before creating a file, fails without a partial download if
+pagination changes, and prompts for a longer unique selection on an
+ambiguous target. Its utility tests cover both fixes; browser verification
+of this follow-up image is still pending.
+
+The published `0.1.8` pin passed the isolated real-service clear fixture with
+Alice global and project scopes plus Bob's separate account. An actual
+in-flight extraction finished while the global clear stayed pending; the old
+source and recall were removed, the project and Bob remained readable, an old
+branch was rejected, and a new explicit save was retained. Result:
+`/private/tmp/dano476-clear-coordinator-XnTtZj/result.json`.
+
+The first full Dano suite run with the isolation services still active had
+**1649 passed, 1 skipped, 1 timeout** in the live provider Skill gate. That
+single file passed **10/10** when rerun alone. The full suite still needs a
+contention-free run. This section does not claim #477 backup, upgrade,
+rollback, quality, latency or cost release gates.

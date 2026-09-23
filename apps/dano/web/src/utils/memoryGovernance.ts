@@ -11,7 +11,13 @@ async function json(url: string, signal: AbortSignal, body?: unknown): Promise<u
   const response = await fetch(url, body === undefined ? { signal, cache: "no-store" } : {
     method: "POST", signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
-  if (!response.ok) throw new Error(response.status === 401 ? "MEMORY_LOGIN_REQUIRED" : "MEMORY_GOVERNANCE_UNAVAILABLE");
+  if (!response.ok) {
+    if (response.status === 400) {
+      const data = await response.json().catch(() => null) as { error?: unknown } | null;
+      if (data?.error === "MEMORY_TARGET_AMBIGUOUS") throw new Error("MEMORY_TARGET_AMBIGUOUS");
+    }
+    throw new Error(response.status === 401 ? "MEMORY_LOGIN_REQUIRED" : "MEMORY_GOVERNANCE_UNAVAILABLE");
+  }
   return response.json();
 }
 
@@ -74,4 +80,18 @@ export async function exportMemoryPage(url: string, signal: AbortSignal, cursor?
       || typeof source.createdAt !== "string" || !Number.isFinite(Date.parse(source.createdAt))))
     || (page.nextCursor !== undefined && typeof page.nextCursor !== "string")) throw new Error("MEMORY_EXPORT_UNAVAILABLE");
   return page;
+}
+
+export async function exportAllMemories(url: string, signal: AbortSignal): Promise<ExportPage> {
+  const items: ExportedMemory[] = [], cursors = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    signal.throwIfAborted();
+    const page = await exportMemoryPage(url, signal, cursor);
+    items.push(...page.items);
+    cursor = page.nextCursor;
+    if (cursor && (cursors.has(cursor) || !page.items.length)) throw new Error("MEMORY_EXPORT_UNAVAILABLE");
+    if (cursor) cursors.add(cursor);
+  } while (cursor);
+  return { items };
 }

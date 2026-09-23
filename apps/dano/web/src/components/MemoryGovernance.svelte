@@ -4,7 +4,7 @@
   import { Button, buttonVariants } from "$lib/components/ui/button";
   import { Textarea } from "$lib/components/ui/textarea";
   import { t } from "../i18n";
-  import { exportMemoryPage, governanceReview, pendingGovernance, startGovernance,
+  import { exportAllMemories, exportMemoryPage, governanceReview, pendingGovernance, startGovernance,
     submitGovernanceReview, type ExportPage, type GovernanceReceipt, type GovernanceReview } from "../utils/memoryGovernance";
 
   let { url, exportUrl }: { url: string; exportUrl: string } = $props();
@@ -14,15 +14,17 @@
   let activeUri = $state<string | null>(null);
   let selectedText = $state(""), replacementText = $state("");
   let mergedTexts = $state<Record<string, string>>({});
-  let loading = $state(false), saving = $state(false), error = $state(false);
+  let loading = $state(false), saving = $state(false), exporting = $state(false);
+  let error = $state(false), ambiguous = $state(false);
   let refresh = $state(0), generation = 0;
+  let exportController: AbortController | null = null;
 
   $effect(() => {
     const target = url, exportTarget = exportUrl;
     void refresh;
     const current = ++generation;
     const controller = new AbortController();
-    loading = true; error = false;
+    loading = true; error = false; ambiguous = false;
     void (async () => {
       const job = await pendingGovernance(target, controller.signal);
       const [nextReview, nextPage] = job
@@ -35,14 +37,15 @@
     })().catch(() => { if (generation === current && !controller.signal.aborted) error = true; })
       .finally(() => { if (generation === current) loading = false; });
     const timer = setInterval(() => { if (pending && !saving) refresh++; }, 5000);
-    return () => { generation++; controller.abort(); clearInterval(timer); };
+    return () => { generation++; controller.abort(); exportController?.abort(); clearInterval(timer); };
   });
 
   async function mutate(action: Parameters<typeof startGovernance>[2]) {
-    if (saving) return;
-    saving = true; error = false;
+    if (saving || exporting) return;
+    saving = true; error = false; ambiguous = false;
     try { pending = await startGovernance(url, new AbortController().signal, action); refresh++; }
-    catch { error = true; }
+    catch (cause) { if (cause instanceof Error && cause.message === "MEMORY_TARGET_AMBIGUOUS") ambiguous = true;
+      else error = true; }
     finally { saving = false; }
   }
 
@@ -59,13 +62,20 @@
     finally { saving = false; }
   }
 
-  function downloadPage() {
-    if (!page) return;
-    const blob = new Blob([JSON.stringify(page, null, 2)], { type: "application/json" });
-    const href = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = href; link.download = "dano-memory-export.json"; link.click();
-    setTimeout(() => URL.revokeObjectURL(href), 0);
+  async function downloadAll() {
+    if (!page || loading || saving || exporting) return;
+    const controller = new AbortController(), current = generation;
+    exportController = controller; exporting = true; error = false;
+    try {
+      const complete = await exportAllMemories(exportUrl, controller.signal);
+      if (controller.signal.aborted || current !== generation) return;
+      const blob = new Blob([JSON.stringify(complete, null, 2)], { type: "application/json" });
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = href; link.download = "dano-memory-export.json"; link.click();
+      setTimeout(() => URL.revokeObjectURL(href), 0);
+    } catch { if (!controller.signal.aborted) error = true; }
+    finally { if (exportController === controller) { exportController = null; exporting = false; } }
   }
 
   async function loadMore() {
@@ -88,7 +98,11 @@
   {#if error}
     <Alert.Root variant="destructive"><Alert.Description>{t("memory.governanceUnavailable")}</Alert.Description></Alert.Root>
   {/if}
+  {#if ambiguous}
+    <Alert.Root variant="destructive"><Alert.Description>{t("memory.targetAmbiguous")}</Alert.Description></Alert.Root>
+  {/if}
   {#if loading}<p role="status">{t("memory.loading")}</p>{/if}
+  {#if exporting}<p role="status">{t("memory.exporting")}</p>{/if}
   {#if pending}
     <Alert.Root><Alert.Description>
       {t("memory.governancePending")}{#if pending.errorCode} ({pending.errorCode}){/if}
@@ -125,7 +139,7 @@
     {/if}
   {:else if page}
     <p class="text-sm text-muted-foreground">{t("memory.governanceExplanation")}</p>
-    <Button variant="outline" size="sm" onclick={downloadPage}>{t("memory.exportPage")}</Button>
+    <Button variant="outline" size="sm" disabled={loading || saving || exporting} onclick={downloadAll}>{t("memory.exportPage")}</Button>
     {#each page.items as item (item.uri)}
       <div class="flex flex-col gap-2 rounded-md border p-3">
         <p class="break-all text-sm text-muted-foreground">{item.uri}</p>
@@ -160,7 +174,7 @@
         {/if}
       </div>
     {/each}
-    {#if page.nextCursor}<Button variant="outline" disabled={loading} onclick={loadMore}>{t("memory.morePages")}</Button>{/if}
+    {#if page.nextCursor}<Button variant="outline" disabled={loading || exporting} onclick={loadMore}>{t("memory.morePages")}</Button>{/if}
   {/if}
   {#if pending?.errorCode === "MEMORY_GOVERNANCE_CLEAR_REQUIRED" || (!pending && page)}
     <AlertDialog.Root>
