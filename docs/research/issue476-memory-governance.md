@@ -407,6 +407,14 @@ downloaded a six-item JSON export with source and revision metadata and no
 remaining cursor. A repeated phrase in one saved document produced the
 specific ambiguous-target guidance without creating a pending governance job.
 Screenshot: `/private/tmp/dano476-browser-_m894l8g/ambiguous-target-guidance-c4702fb8.jpg`.
+The last UI change was compiled from `e3b98fd9` into isolated image
+`localhost/dano476-protected-image:e3b98fd9`. This test image reuses the
+previously verified `0.2.34` runtime and replaces its built Dano assets;
+the temporary proxy CA and network settings existed only in the build stage.
+Image inspection confirmed no proxy or extra-CA runtime environment. The
+fixed HTTPS Browser entry reconnected and rendered the final management UI;
+see `/private/tmp/dano476-browser-_m894l8g/final-governance-e3b98fd9.jpg`.
+This test image does not satisfy #477's separate clean release-build gate.
 
 The published `0.1.8` pin passed the isolated real-service clear fixture with
 Alice global and project scopes plus Bob's separate account. An actual
@@ -417,7 +425,8 @@ branch was rejected, and a new explicit save was retained. Result:
 
 The first full Dano suite run with the isolation services still active had
 **1649 passed, 1 skipped, 1 timeout** in the live provider Skill gate. That
-single file passed **10/10** when rerun alone. A controlled two-worker full
-run passed **1650 tests with 1 skipped**; the new governance-controls test
-passed separately after that run. This section does not claim #477 backup,
-upgrade, rollback, quality, latency or cost release gates.
+single file passed **10/10** when rerun alone. After the last UI change, a
+controlled two-worker full run passed **142 files, 1651 tests, 1 skipped**.
+`pnpm run check` found no type or Svelte errors or warnings. This section does
+not claim #477 backup, upgrade, rollback, quality, latency or cost release
+gates.
