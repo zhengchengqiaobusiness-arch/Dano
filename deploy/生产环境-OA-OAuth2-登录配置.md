@@ -197,7 +197,7 @@ API 健康检查不能代替真实登录验收。使用受控浏览器完成以�
 | 现象 | 优先检查 |
 | --- | --- |
 | 点击登录后立即回 Dano | 可能只是 OA 已有 Browser Session；确认 callback 是否收到 code/state，不要直接判定失败或成功 |
-| 回到 Dano 后提示登录失败 | 按 `callback_received`、token exchange、identity 三个阶段定位；只记录 HTTP 状态、OA 业务码和失败阶段 |
+| 回到 Dano 后提示登录失败 | 查看应用 stderr 的 `OAuth login failed` 记录，按 `stage`、白名单 `errorCode` / `providerError` 和可用的 `httpStatus` 定位 |
 | OA 报 Redirect URI 不匹配 | 比较 OA Client 和 `DANO_OAUTH_REDIRECT_URI` 的 scheme、host、port、path，必须逐字符一致 |
 | Token/身份接口返回 HTML 404/405 | 检查是否遗漏 `/admin-api`，以及请求是否打到了 OA nginx 的错误 location |
 | OA HTTP 200 但登录失败 | 检查响应顶层 `code`；Dano 会读取 `{code,data}`，业务码非成功仍是 Provider 失败 |
@@ -205,7 +205,18 @@ API 健康检查不能代替真实登录验收。使用受控浏览器完成以�
 | `SELF_SIGNED_CERT_IN_CHAIN` | 把签发 OA 证书的 CA 加入容器信任链并重建容器；不要设置全局跳过 TLS 校验 |
 | refresh 失败 | 确认 OA Client 启用 `refresh_token`、refresh token 未过期且固定 Header/Client 认证方式仍正确 |
 
-日志中禁止记录 authorization code、state、Client Secret、access token、refresh token、Cookie、完整 Provider 响应或用户账号。排障信息只保留稳定的阶段名、HTTP 状态和 OA 业务码。
+回调诊断的 `stage` 区分 `provider_exchange`（授权码交换及首次身份读取）、
+`credential_encryption`、`credential_validation`（发布会话前再次校验身份）、
+`session_persistence`、`anonymous_transfer` 和 `session_rotation`。
+`elapsedMs` 是本次回调进入处理后到失败的总耗时。`unclassified` 表示异常没有可安全输出的已知错误码，
+不等于未知阶段或已经排除该阶段。诊断不会重试授权码、放宽身份校验或改变浏览器错误投影。
+
+浏览器的一次性错误记录读后即删，最长有效期为 5 分钟；事后应查询应用日志，而不是依赖该文件。
+state 失效或缺少浏览器绑定 Cookie 会直接重定向回首页，不会生成上述异常诊断。
+
+日志中禁止记录 authorization code、state、Client Secret、access token、refresh token、Cookie、
+完整 Provider 响应、用户账号、原始异常消息及调用栈。应用只输出固定阶段、耗时、HTTP 状态和白名单错误分类；
+不要为了排查而开启包含回调 query string 的访问日志。
 
 ## 七、会话和登出边界
 

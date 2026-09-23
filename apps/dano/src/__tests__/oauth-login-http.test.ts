@@ -27,6 +27,7 @@ const runtimeRoots: string[] = [];
 const providerServers: http.Server[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(controllers.splice(0).map(controller => controller.stop()));
   await Promise.all(
     authentications.splice(0).map(authentication => authentication.dispose()),
@@ -1058,6 +1059,7 @@ describe("OAuth authentication over HTTP", () => {
 
     expect(rejection).toBeInstanceOf(Error);
     expect((rejection as Error).message).toBe("Provider identity request failed");
+    expect((rejection as Error).cause).toEqual({ status: 401 });
     expect(String(rejection)).not.toMatch(
       /renewed-http-failure-secret|refresh-http-failure-secret/,
     );
@@ -1397,6 +1399,7 @@ describe("OAuth authentication over HTTP", () => {
   });
 
   it("rolls back a failed Anonymous User transfer and keeps the guest usable", async () => {
+    const diagnostic = vi.spyOn(console, "warn").mockImplementation(() => {});
     const externalUserId = "rollback-owner";
     const revoked: string[] = [];
     const provider: OAuthProviderAdapter = {
@@ -1447,6 +1450,9 @@ describe("OAuth authentication over HTTP", () => {
       /^dano_auth_error=[A-Za-z0-9_-]{43};/,
     );
     expect(revoked).toEqual([]);
+    expect(diagnostic).toHaveBeenCalledWith("OAuth login failed", expect.objectContaining({
+      stage: "anonymous_transfer",
+    }));
     expect(
       fs.readdirSync(path.join(runtimeRootPath, "auth", "login-sessions")),
     ).toHaveLength(1);
@@ -1896,6 +1902,7 @@ describe("OAuth authentication over HTTP", () => {
   });
 
   it("leaves no partial state after an invalid code", async () => {
+    const diagnostic = vi.spyOn(console, "warn").mockImplementation(() => {});
     const setup = {
       tokenStatus: 400,
       tokenResponse: { error: "invalid_grant" },
@@ -1937,6 +1944,17 @@ describe("OAuth authentication over HTTP", () => {
       status: "anonymous",
       loginError: { code: "provider_login_failed" },
     });
+    expect(diagnostic).toHaveBeenCalledWith("OAuth login failed", {
+      stage: "provider_exchange",
+      elapsedMs: expect.any(Number),
+      errorCode: "OAUTH_RESPONSE_BODY_ERROR",
+      providerError: "invalid_grant",
+      httpStatus: 400,
+    });
+    expect(JSON.stringify(diagnostic.mock.calls)).not.toMatch(
+      /fixture|failure-secret|failure-client|state=|code=/,
+    );
+    diagnostic.mockRestore();
     expect(
       fs.readdirSync(path.join(runtimeRootPath, "auth", "login-sessions")),
     ).toEqual([]);
@@ -2018,6 +2036,7 @@ describe("OAuth authentication over HTTP", () => {
   });
 
   it("leaves no partial state when credential encryption fails", async () => {
+    const diagnostic = vi.spyOn(console, "warn").mockImplementation(() => {});
     const credentialEncryptionKey = {
       version: "test-v1",
       key: Buffer.alloc(32, 3) as Uint8Array,
@@ -2059,6 +2078,9 @@ describe("OAuth authentication over HTTP", () => {
     expect(callback.headers.get("set-cookie")).toMatch(
       /^dano_auth_error=[A-Za-z0-9_-]{43};/,
     );
+    expect(diagnostic).toHaveBeenCalledWith("OAuth login failed", expect.objectContaining({
+      stage: "credential_encryption",
+    }));
     expect(
       fs.readdirSync(path.join(runtimeRootPath, "auth", "login-sessions")),
     ).toEqual([]);

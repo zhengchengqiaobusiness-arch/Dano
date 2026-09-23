@@ -36,6 +36,10 @@ import {
   type ClientUserResolution,
   UserContextError,
 } from "./user-context.js";
+import {
+  reportOAuthLoginFailure,
+  type OAuthLoginStage,
+} from "./oauth-login-diagnostics.js";
 
 const FLOW_COOKIE_NAME = "dano_oauth_flow";
 const LOGIN_COOKIE_NAME = "dano_login";
@@ -710,6 +714,8 @@ async function handleCallback(
     return;
   }
 
+  const startedAt = performance.now();
+  let stage: OAuthLoginStage = "provider_exchange";
   try {
     const code = url.searchParams.get("code");
     if (url.searchParams.has("error") || !code) {
@@ -723,6 +729,7 @@ async function handleCallback(
     });
     let user = externalIdentityUser(result.identity);
     const credential = validCredential(result.credential);
+    stage = "credential_encryption";
     const sessionId = randomOpaqueId();
     const sessionKey = digest(sessionId);
     const createdAt = options.now();
@@ -741,6 +748,7 @@ async function handleCallback(
     };
     const sessionPath = loginSessionPath(options.sessionsPath, sessionId);
     await options.withUserRevocationBarrier(user.id, async () => {
+      stage = "credential_validation";
       const validatedIdentity = options.provider.validateCredential
         ? await options.provider.validateCredential(credential)
         : result.identity;
@@ -750,6 +758,7 @@ async function handleCallback(
       }
       user = validatedUser;
       try {
+        stage = "session_persistence";
         await options.mutateLoginSessions(() =>
           writeLoginSession(sessionPath, { ...session, user: validatedUser }),
         );
@@ -772,6 +781,7 @@ async function handleCallback(
     });
     try {
       if (consumed.transaction.anonymousUserId) {
+        stage = "anonymous_transfer";
         await options.lifecycle.transferAnonymousUser(
           req.headers,
           consumed.transaction.anonymousUserId,
@@ -781,6 +791,7 @@ async function handleCallback(
           },
         );
       }
+      stage = "session_rotation";
       const replacedLoginSessionId =
         consumed.transaction.replacedLoginSessionId;
       const replacedUserId = replacedLoginSessionId
@@ -835,6 +846,7 @@ async function handleCallback(
       options.sessionAbsoluteTtlMs,
     );
   } catch (error) {
+    reportOAuthLoginFailure(stage, error, performance.now() - startedAt);
     const code =
       error instanceof OAuthProviderContractError
         ? error.code

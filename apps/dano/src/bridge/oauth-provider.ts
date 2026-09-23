@@ -322,7 +322,9 @@ async function fetchExternalIdentity(
     "GET",
   );
   if (!response.ok) {
-    throw new Error("Provider identity request failed");
+    throw new Error("Provider identity request failed", {
+      cause: { status: response.status },
+    });
   }
   return parseExternalIdentity(await response.json());
 }
