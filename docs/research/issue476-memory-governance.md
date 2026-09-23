@@ -270,3 +270,43 @@ the browser acceptance is still pending.
 
 Post-review extension type check/build and serial suite passed **230/230**.
 Log: `/private/tmp/dano476-review-fixes-suite.log`.
+
+## Fact-level follow-up (2026-09-23, still unpublished)
+
+The second review showed that the earlier selection barrier still discarded
+unrelated automatic candidates, and that one automatic operation could contain
+several facts. The extension now records each selected fact as an independent
+operation and remote Session. A selective job waits for registered pre-barrier
+collection requests and their outbox operations before remote editing. It
+keeps current facts from the same pi entry, uses fact-specific source digests
+for the targeted operation, and blocks any later replay of the old entry after
+the barrier completes. A shared document whose selected text cannot be tied
+to one source fails with `MEMORY_TARGET_AMBIGUOUS` before mutation. This is a
+safe ambiguity result, not a completed correction.
+
+The export transport now limits HTTP response bytes before JSON decoding,
+even if OpenViking's `stat` size is stale. The page budget includes serialized
+source metadata and cursor; the configured document limit cannot exceed the
+transport limit. The extension serial suite passes **234/234** after these
+changes (`/private/tmp/dano476-fact-all-tests5.log`).
+
+`fixtures/openviking-fact-split.mjs` and
+`fixtures/openviking-fact-split-verify.mjs` ran against isolated OpenViking
+and MiMo with a fresh synthetic account. Result:
+`/private/tmp/dano476-fact-split-fQk3jr/result.json` and
+`/private/tmp/dano476-fact-split-fQk3jr/recall-result.json`; logs:
+`/private/tmp/dano476-real-fact-split.log` and
+`/private/tmp/dano476-real-fact-split-verify.log`. The two facts in one source
+became independent operations; after forgetting the tea fact, the unrelated
+meeting fact remained current and recallable, while old tea text was absent
+from both remote documents and recall. The real service placed them in
+different documents. Unit tests additionally cover shared-document ambiguity
+and an old branch selecting a second old phrase from the same entry.
+
+An unresolved path remains: an already queued extraction from a different
+source can finish with a semantic paraphrase of the deleted fact in another
+document. Exact-text document editing and source digests cannot prove that
+this paraphrase was removed. Governance must stay pending on such ambiguity
+or gain a verifiable source-level resolution path before #476 can be accepted.
+Dano management integration, account retirement, browser acceptance, package
+publication and exact Dano pin remain outstanding.
