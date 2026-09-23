@@ -178,3 +178,22 @@ global version and the other user's memory. See
 `/private/tmp/dano476-real-project-clear-retry.log` and the synthetic
 `project-clear-result.json`. No browser acceptance or selective governance is
 claimed by either run.
+
+## Scoped export groundwork
+
+`MemoryExportService` reads document content and known source metadata only
+through the current host-bound owner/project transport. The caller can choose
+a bounded page size and opaque cursor, but cannot supply an owner or project.
+The cursor binds owner, scope and state revision; malformed, cross-scope and
+stale cursors fail closed. The transport checks every listed document URI under
+its bound memory tree, and the export service rechecks state after remote reads.
+A pending governance job suppresses export of that scope so content already
+marked for deletion is not returned. Paused memory still permits export.
+
+The synthetic real-service follow-up paged Alice global, Alice project and
+Bob global separately. It verified that Alice's newly saved content and
+source metadata appeared, the cleared project did not, Bob's memory remained
+isolated, and no API keys were emitted. Result:
+`/private/tmp/dano476-clear-coordinator-6oNYzX/export-result.json`; log:
+`/private/tmp/dano476-real-export.log`. This is a host-side export probe, not
+the browser export acceptance or the full account-retirement path.
