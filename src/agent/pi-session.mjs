@@ -1,6 +1,6 @@
 import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { dataRoot, packageRoot, recordingDir } from "../paths.mjs";
+import { dataRoot, docDir, packageRoot, recordingDir } from "../paths.mjs";
 import { readGoal } from "../evidence/store.mjs";
 import { applyPiModelConfig } from "./pi-model.mjs";
 import { installOpenAIToolCallStreamCompatibility } from "./openai-stream-compat.mjs";
@@ -59,11 +59,23 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
   const promptText = await readFile(path.join(packageRoot(), "src", "agent", "prompt.md"), "utf8");
   const playwrightSkill = await readFile(path.join(packageRoot(), "skill", "playwright-cli", "SKILL.md"), "utf8");
   const deriveSkill = await readFile(path.join(packageRoot(), "skill", "derive-client", "SKILL.md"), "utf8");
+  const writingDir = path.join(packageRoot(), "skill", "writing-for-agents");
+  const writingSkill = await readFile(path.join(writingDir, "SKILL.md"), "utf8");
+  const writingMechanics = await readFile(path.join(writingDir, "SKILL-MECHANICS.md"), "utf8");
+  const guideNames = [
+    "skill-generator-workflow.md",
+    "skill-generator-auth-and-token.md",
+    "skill-generator-live-options.md",
+    "skill-generator-ask-user-question-guide.md",
+  ];
+  const guides = await Promise.all(guideNames.map(async (name) => (
+    `# ${name}\n${await readFile(path.join(docDir(), name), "utf8")}`
+  )));
   const goal = await readGoal(recordingId);
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
-    systemPromptOverride: () => [promptText, playwrightSkill, deriveSkill, JSON.stringify(goal)].join("\n\n"),
+    systemPromptOverride: () => [promptText, playwrightSkill, deriveSkill, writingSkill, writingMechanics, ...guides, JSON.stringify(goal)].join("\n\n"),
   });
   const customTools = wrapHostTools(host);
   const created = await createAgentSession({

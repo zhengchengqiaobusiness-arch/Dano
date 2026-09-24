@@ -22,6 +22,35 @@ function parseNodes(yaml) {
       ariaRef: ref[1],
     });
   }
+  return annotateColumns(nodes);
+}
+
+export function annotateColumns(nodes) {
+  const headers = [];
+  let column = 0;
+  let readingHeaders = true;
+  for (const node of nodes) {
+    if (node.role === "columnheader") {
+      if (!readingHeaders) {
+        headers.length = 0;
+        column = 0;
+        readingHeaders = true;
+      }
+      headers.push(node.name || "");
+      continue;
+    }
+    if (node.role === "row" || node.role === "rowgroup") {
+      column = 0;
+      if (headers.length) readingHeaders = false;
+      continue;
+    }
+    if ((node.role === "cell" || node.role === "gridcell") && headers.length) {
+      readingHeaders = false;
+      node.column = headers[column] || "";
+      column += 1;
+      if (column >= headers.length) column = 0;
+    }
+  }
   return nodes;
 }
 
@@ -53,7 +82,8 @@ export async function takeSnapshot(recordingId) {
         frame,
       });
       const label = node.name ? `${node.role} "${node.name}"` : node.role;
-      lines.push(`- ${label} ref=${ref}`);
+      const column = node.column ? ` ${node.column}` : "";
+      lines.push(`- ${label} ref=${ref}${column}`);
       refs.push(ref);
     }
   }

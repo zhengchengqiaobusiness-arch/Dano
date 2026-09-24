@@ -28,12 +28,12 @@ const TOOL_SPECS = [
   { name: "network_get", description: "按 id 读取一条请求的全文。body_missing 表示没有正文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
   { name: "evidence_get", description: "按 id 读取一条证据全文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
   { name: "read_page_asset", description: "读取本场已捕获、与入口同源的 javascript 响应。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
-  { name: "read_guide", description: "仅当本场请求是 JSON、鉴权在头里、且有选项接口时，读取 doc 下已有指南之一。不要把文件复制进 Skill 包。", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
+  { name: "read_guide", description: "写 Skill 之前读取调用方要求。name 只能是 skill-generator-workflow.md、skill-generator-auth-and-token.md、skill-generator-live-options.md、skill-generator-ask-user-question-guide.md。", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
   { name: "assist", description: "登录或验证码挡住时调用。这次调用会停住，直到人在预览里处理完并确认。返回里的 snapshot 才是确认后的当前页，从那张快照接着做。", parameters: { type: "object", properties: { reason: { type: "string" } }, required: ["reason"] } },
   { name: "append_goal", description: "只填充目标里仍为空的键，写入原句。", parameters: { type: "object", properties: { key: { type: "string" }, text: { type: "string" } }, required: ["key", "text"] } },
   { name: "write_skill_file", description: "只写 SKILL.md、scripts/client.py、references/api.md。", parameters: { type: "object", properties: { relative_path: { type: "string" }, contents: { type: "string" } }, required: ["relative_path", "contents"] } },
   { name: "read_skill_file", description: "读取已写的 Skill 文件。", parameters: { type: "object", properties: { relative_path: { type: "string" } }, required: ["relative_path"] } },
-  { name: "run_skill_command", description: "在 Skill 目录执行 python scripts/client.py。", parameters: { type: "object", properties: { argv: { type: "array" } }, required: ["argv"] } },
+  { name: "run_skill_command", description: "在 Skill 目录执行 python scripts/client.py。argv 是字符串数组，例如 [\"python\", \"scripts/client.py\", \"list\"]。", parameters: { type: "object", properties: { argv: { type: "array", items: { type: "string" } } }, required: ["argv"] } },
   { name: "verify_skill", description: "写入 config 后校验。通过后停止。", parameters: { type: "object", properties: {} } },
 ];
 
@@ -122,7 +122,7 @@ export function hostTools(recording) {
     },
     async read_guide(args) {
       const name = path.basename(String(args.name || ""));
-      if (!GUIDE_NAMES.includes(name)) return { ok: false, error: "unknown_guide" };
+      if (!GUIDE_NAMES.includes(name)) return { ok: false, error: "unknown_guide", names: GUIDE_NAMES };
       const text = await readFile(path.join(docDir(), name), "utf8");
       return { ok: true, name, text };
     },
@@ -156,7 +156,9 @@ export function hostTools(recording) {
       return readSkillFile(skillId(), args.relative_path);
     },
     async run_skill_command(args) {
-      const argv = Array.isArray(args.argv) ? args.argv.map(String) : [];
+      const argv = (Array.isArray(args.argv) ? args.argv : String(args.argv || "").split(/\s+/)).map((item) => (
+        typeof item === "string" ? item : String(item?.text || item?.value || item?.arg || "")
+      )).filter(Boolean);
       if (!["python", "python3"].includes(argv[0]) || argv[1] !== "scripts/client.py") {
         return { ok: false, error: "command_rejected" };
       }
@@ -250,6 +252,7 @@ function toTypeBox(schema) {
     if (value.type === "integer") boxed = Type.Integer();
     else if (value.type === "boolean") boxed = Type.Boolean();
     else if (value.type === "object") boxed = Type.Object({}, { additionalProperties: true });
+    else if (value.type === "array" && value.items?.type === "string") boxed = Type.Array(Type.String());
     else if (value.type === "array") boxed = Type.Array(Type.Object({}, { additionalProperties: true }));
     else boxed = Type.String();
     shape[key] = required.has(key) ? boxed : Type.Optional(boxed);

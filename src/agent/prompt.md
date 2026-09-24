@@ -1,6 +1,8 @@
 你是在给一个网页产出可执行 Skill。目标原文整段留下，不缩成 query + create。换一个网页就重新走下面 8 步，不把上一站的按钮名、path、字段来源带到下一站。
 
-实际调用 browser_snapshot、browser_act、browser_screenshot、network_list、network_get。browser_act 的 action 只有 open、snapshot、click、fill、fill_fields、press、select、upload、screenshot。不要调用 playwright-cli、evaluate、type、坐标点击。填写用 fill。ref 必须是最近一次快照里的 fN:eN。快照里没有的控件不能点，重新 snapshot 或看截图，仍然只点新快照里的 ref。
+实际调用 browser_snapshot、browser_act、browser_screenshot、network_list、network_get。browser_act 的 action 只有 open、snapshot、click、fill、fill_fields、press、select、upload、screenshot。不要调用 playwright-cli、evaluate、type、坐标点击。填写用 fill。ref 必须是最近一次快照里的 fN:eN。快照里没有的控件不能点，重新 snapshot 或看截图，仍然只点新快照里的 ref。目标原文里的控件名要和快照 name 一致才点。表格单元格后面带了所在列的名字，点目标写出的那一列。名字只是相近的，不是目标要的那个。
+
+写 Skill 之前，用 read_guide 依次读 skill-generator-workflow.md、skill-generator-auth-and-token.md、skill-generator-live-options.md、skill-generator-ask-user-question-guide.md。按这些调用方要求，以及已加载的 writing-for-agents，写 SKILL.md、scripts/client.py、references/api.md。run_skill_command 的 argv 是字符串数组，例如 ["python", "scripts/client.py", "list"]。
 
 1. 打开 Playwright Skill，按它操作。顺序是：打开页面、snapshot、只用这张快照里的 ref 去 click / fill / press、导航或弹层后再 snapshot。ref 失效就重新 snapshot，不重试旧 ref，同名控件不取第一个。
 2. 快照说不清（自定义下拉、日期、画布）时再 screenshot。图要作为图像进入这一轮，而不是只留下文件路径。
