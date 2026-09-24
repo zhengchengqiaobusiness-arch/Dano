@@ -1,0 +1,378 @@
+html,
+body,
+#root,
+.studio-root {
+  color-scheme: dark;
+  scrollbar-width: thin;
+  scrollbar-color: #3d4856 #121820;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3d4856 #121820;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner,
+*::-webkit-scrollbar-button {
+  background: #121820;
+  border: 0;
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #3d4856;
+  border-radius: 8px;
+  border: 2px solid #121820;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #526070;
+}
+
+.ant-switch .ant-switch-handle::before {
+  background: #9aa5b1 !important;
+}
+
+.ant-switch-checked .ant-switch-handle::before {
+  background: #9aa5b1 !important;
+}
+
+.ant-slider .ant-slider-handle::after {
+  background-color: #9aa5b1;
+  box-shadow: 0 0 0 2px #3d9e90;
+}
+
+.studio-root {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0c1016;
+  color: #c5cdd6;
+}
+
+.studio-header {
+  flex-shrink: 0;
+  height: 64px;
+  padding: 0 20px;
+  display: grid;
+  grid-template-columns: auto minmax(420px, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  border-bottom: 1px solid #1a222c;
+  background: #10161c;
+}
+
+.studio-header-steps {
+  min-width: 0;
+  max-width: 760px;
+  justify-self: center;
+  width: 100%;
+}
+
+.studio-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.studio-logo {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #ecfdf5;
+  font-size: 20px;
+  font-weight: 600;
+  background: radial-gradient(circle at 35% 30%, #4aa89a, #1a4a44 70%);
+  box-shadow: none;
+}
+
+.studio-brand-title {
+  font-size: 16px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.studio-brand-sub {
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.3;
+}
+
+.studio-tabs {
+  display: flex;
+  align-items: stretch;
+  height: 64px;
+  gap: 8px;
+}
+
+.studio-tabs button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 14px;
+  padding: 0 14px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.studio-tabs button.is-active {
+  color: #f8fafc;
+  border-bottom-color: #14b8a6;
+}
+
+.studio-header-right {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.studio-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.studio-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.studio-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #1f2937;
+  background: #0f141c;
+}
+
+.studio-url {
+  flex: 1;
+  min-width: 160px;
+}
+
+.studio-workspace {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  background: #0c1016;
+}
+
+.studio-preview-host {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0e141d;
+}
+
+.studio-hero {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 32px 24px;
+}
+
+.studio-hero-pi {
+  width: 112px;
+  height: 112px;
+  border-radius: 28px;
+  display: grid;
+  place-items: center;
+  font-size: 56px;
+  color: #ecfdf5;
+  background:
+    radial-gradient(circle at 35% 30%, rgba(94, 234, 212, 0.95), rgba(13, 148, 136, 0.2) 58%),
+    #0f766e;
+  box-shadow: 0 0 48px rgba(20, 184, 166, 0.28);
+  margin-bottom: 22px;
+}
+
+.studio-hero h1 {
+  margin: 0 0 10px;
+  font-size: 28px;
+  font-weight: 650;
+}
+
+.studio-hero p {
+  margin: 0 0 22px;
+  max-width: 520px;
+  color: #94a3b8;
+  line-height: 1.7;
+}
+
+.studio-pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+
+.studio-pills button {
+  appearance: none;
+  border: 1px solid #334155;
+  background: #151b24;
+  color: #e2e8f0;
+  border-radius: 999px;
+  padding: 7px 14px;
+  cursor: pointer;
+}
+
+.studio-pills button:hover {
+  border-color: #14b8a6;
+  color: #ccfbf1;
+}
+
+.studio-session {
+  width: min(380px, 26vw);
+  min-width: 300px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: #10161c;
+  border-left: 1px solid #1a222c;
+}
+
+.studio-session-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #1a222c;
+}
+
+.studio-session-head .ant-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.studio-session-title {
+  font-size: 14px;
+  font-weight: 650;
+  min-width: 0;
+}
+
+.studio-session-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+}
+
+.studio-session-foot {
+  flex-shrink: 0;
+  padding: 12px;
+  border-top: 1px solid #1a222c;
+}
+
+.studio-session-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.studio-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.studio-result {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.studio-catalog {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+}
+
+.skill-catalog-page {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.skill-catalog-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.skill-catalog-pager {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding: 8px 0 0;
+}
+
+.skill-catalog-page .ant-table-wrapper,
+.skill-catalog-page .ant-spin-nested-loading,
+.skill-catalog-page .ant-spin-container,
+.skill-catalog-page .ant-table,
+.skill-catalog-page .ant-table-container {
+  height: 100%;
+}
+
+.skill-catalog-page .ant-table-body,
+.skill-catalog-page .ant-table-content {
+  overflow: hidden !important;
+}
+
+.studio-app-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px;
+}
+
+.studio-app-content.is-recording,
+.studio-app-content.is-catalog {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.studio-app-content.is-catalog {
+  padding: 12px 16px;
+}

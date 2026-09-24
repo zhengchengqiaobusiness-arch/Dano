@@ -1,0 +1,19 @@
+{
+  "name": "playwright-cabp",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node --env-file=.env src/server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check src/server.mjs && npm test"
+  },
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "^0.73.1",
+    "@sinclair/typebox": "^0.34.52",
+    "playwright": "^1.62.1",
+    "ws": "^8.18.3"
+  }
+}
