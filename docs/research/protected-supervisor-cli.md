@@ -60,6 +60,10 @@ the installation, runtime, session, identity and host-state roots. Only this pat
 goes into the supervisor profile; put the private `memory-service.json` inside
 that directory with mode 0600. The supervisor derives the service-state directory
 as `hostStateRoot/memory-service`; callers cannot inject it into the host profile.
+When memory is configured, `memoryRecoveryDirectory` is also required. It is a
+separate host-owned mode-0700 volume that must survive restoration of older
+host-state and OpenViking volumes. The supervisor rejects overlap with either
+state, configuration, installation or identity roots.
 
 After dropping privileges, the host reads and validates the private configuration,
 starts the configured tokenizer workers and composes owner-bound memory with the

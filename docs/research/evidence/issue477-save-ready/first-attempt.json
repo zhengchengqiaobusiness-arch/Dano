@@ -1,0 +1,27 @@
+{
+  "suite": "issue477-frozen-save-ready",
+  "fixture": "docs/research/fixtures/issue477-save-ready.json",
+  "candidate": {
+    "dano": "0.2.42",
+    "piOpenViking": "0.1.13",
+    "openViking": "v0.4.20",
+    "model": "mimo-v2.5",
+    "imageId": "b7a9f62c395f47857d58a7ab12e99fd15f134512f5283ed0a9973cc7990280e4"
+  },
+  "caseId": "S-01",
+  "browserToolCall": true,
+  "sourceFact": "验收专用灯塔代号是云汀201。",
+  "modelToolArgument": "验收专用灯塔代号是云汀2020",
+  "operation": {
+    "phase": "ready",
+    "createdAtLocalSecond": "2026-09-24 13:01:28",
+    "readyAtLocalSecond": "2026-09-24 13:04:21",
+    "elapsedSecondsAtUiPrecision": 173,
+    "thresholdSeconds": 60,
+    "readbackMatchesSource": false
+  },
+  "serviceObservation": "OpenViking VLM reported one retryable Connection error during extraction",
+  "result": "failed: wrong fact entered model tool argument and save-to-ready exceeded the limit",
+  "cleanup": "Wrong synthetic document and separate warmup document were forgotten by exact full-text selection; governance export no longer listed either document",
+  "remainingFixedCases": "S-02 through S-10 were not run on this failed candidate; this is not a p95 estimate"
+}

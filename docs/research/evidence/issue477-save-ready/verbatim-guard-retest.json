@@ -1,0 +1,18 @@
+{
+  "suite": "issue477-frozen-save-ready",
+  "fixture": "docs/research/fixtures/issue477-save-ready.json",
+  "candidate": {
+    "dano": "0.2.43",
+    "piOpenViking": "0.1.14",
+    "openViking": "v0.4.20",
+    "model": "mimo-v2.5",
+    "imageId": "1f1eea87390f08390a8a76fee9bc8c96427c598777b06dc906bc9ea4cd5c6371"
+  },
+  "caseId": "S-01",
+  "browser": "Codex in-app Browser at https://localhost:18711/ with authenticated OA account",
+  "startedAt": "2026-09-24T06:23:25.322Z",
+  "sourceFact": "验收专用灯塔代号是云汀201。",
+  "result": "blocked by MEMORY_SOURCE_MISMATCH before creating a save operation",
+  "browserEvidence": "Assistant reported the mismatch error; save-record list gained no operation for this attempt; governance export did not show the previous wrong fact after image upgrade",
+  "assessment": "Fail-closed guard passed; successful save and healthy save-ready p95 are not established"
+}

@@ -1,0 +1,34 @@
+{
+  "danoVersion": "0.2.43",
+  "piOpenVikingVersion": "0.1.14",
+  "openVikingVersion": "v0.4.20",
+  "openVikingImage": "ghcr.io/volcengine/openviking:v0.4.20@sha256:b9827753d035f4157b5b318865907fd18f738924ad6398c86feb1182f209825b",
+  "platformDigests": {
+    "linux/amd64": "sha256:571fb4e12c66365d3552464617cc9aee8edbdec63e0f7d3ced3beb19db15b742",
+    "linux/arm64": "sha256:d1f3730128f3bde654e7996a88909cb47e4ec08d407806a464da5d91aa64c870"
+  },
+  "embedding": {
+    "imageVersion": "b11118",
+    "image": "ghcr.io/ggml-org/llama.cpp:server@sha256:fb8f521cdfee1b763a6ef0d6633922e780c1393c03b49945526550cf55010343",
+    "platformDigests": {
+      "linux/amd64": "sha256:7172d1d57ce2d28f806599bab68c6210ee765a5a6b9b4d3b48dbc4d6bc377aa0",
+      "linux/arm64": "sha256:f5a2ce21182f96c1aba91a967ecc1b21d60cd182191d0cc09672c386bae3dd8c"
+    },
+    "modelFile": "bge-small-zh-v1.5-f16.gguf",
+    "modelName": "bge-small-zh-v1.5-f16",
+    "modelSha256": "ab9b81d9cd329c712eee379cf0068eabe6a5e2a01d0def61535eba9384085e2c",
+    "dimension": 512
+  },
+  "reranker": {
+    "imageVersion": "b11118",
+    "image": "ghcr.io/ggml-org/llama.cpp:server@sha256:fb8f521cdfee1b763a6ef0d6633922e780c1393c03b49945526550cf55010343",
+    "platformDigests": {
+      "linux/amd64": "sha256:7172d1d57ce2d28f806599bab68c6210ee765a5a6b9b4d3b48dbc4d6bc377aa0",
+      "linux/arm64": "sha256:f5a2ce21182f96c1aba91a967ecc1b21d60cd182191d0cc09672c386bae3dd8c"
+    },
+    "modelFile": "bge-reranker-v2-m3-Q4_K_M.gguf",
+    "modelName": "bge-reranker-v2-m3",
+    "modelSha256": "e186a244ed455b4ab66ec64339ce7427a6ae13f5c0b5e544de96e50f0f8b3673",
+    "modelSource": "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/blob/main/bge-reranker-v2-m3-Q4_K_M.gguf"
+  }
+}

@@ -8,6 +8,7 @@ import type { MemoryCredentialStore } from "./memory-credential-store.js";
 import type { MemoryProvisioner } from "./memory-provisioner.js";
 import { MemoryIdentityService } from "./memory-identity-service.js";
 import { LazyMemoryClient } from "./lazy-memory-client.js";
+import type { MemoryReranker } from "./memory-reranker.js";
 import type { ProtectedSessionTools } from "./protected-session-tools.js";
 import type { UserMemoryControls, UserMemoryStatus } from "./user-memory-controls.js";
 import type { UserContext } from "./user-context.js";
@@ -17,6 +18,8 @@ import { MemoryUserProvenance } from "./memory-user-provenance.js";
 import { UserMemoryCollection, type UserMemoryCollectionOptions } from "./user-memory-collection.js";
 import { MemoryTaskFacts, type ProviderTaskFactInput } from "./memory-task-facts.js";
 import { memoryWriterClassifier } from "./memory-writer-classifier.js";
+import { MemoryRecoveryJournal, RecoveryStateStore } from "./memory-recovery-journal.js";
+import type { GovernanceStateStore } from "@josephyoung/pi-openviking/host";
 
 type SchedulerPolicy = Omit<ConstructorParameters<typeof DeliveryScheduler>[0], "store" | "delivery">;
 export interface UserMemoryServices {
@@ -28,14 +31,16 @@ export interface UserMemoryServices {
   maxContentBytes: number;
   policyVersion: string;
   policy: MemoryExtensionOptions["policy"];
+  reranker?: MemoryReranker;
   scheduler: SchedulerPolicy;
   collection?: UserMemoryCollectionOptions;
+  recoveryDirectory?: string;
 }
 
 /** One authenticated user's shared authorization/outbox, with per-session
  * extension factories. Construct only after supervisor isolation is verified. */
 export class UserMemoryRuntime implements UserMemoryControls {
-  readonly #store: FileStateStore;
+  readonly #store: GovernanceStateStore;
   readonly #delivery: MemoryDelivery;
   readonly #scheduler: DeliveryScheduler;
   readonly #governance: MemoryGovernanceService;
@@ -55,7 +60,7 @@ export class UserMemoryRuntime implements UserMemoryControls {
   #closing?: Promise<void>;
   #captureAuthorizationRead?: ReturnType<FileStateStore["read"]>;
 
-  private constructor(store: FileStateStore, client: LazyMemoryClient, options: UserMemoryServices,
+  private constructor(store: GovernanceStateStore, client: LazyMemoryClient, options: UserMemoryServices,
     context: UserContext, stateDirectory: string, sessionRoot?: string) {
     this.#store = store; this.#client = client; this.#options = options;
     this.#context = context; this.#stateDirectory = stateDirectory;
@@ -80,9 +85,13 @@ export class UserMemoryRuntime implements UserMemoryControls {
     await worker.assertIsolated();
     const owner = await options.owners.get(context);
     const identity = new MemoryIdentityService({ ...options, assertToolIsolation: () => worker.assertIsolated() });
+    const baseStore = new FileStateStore({ owner, directory: join(stateDirectory, "memory"), policyVersion: options.policyVersion });
+    const journal = options.recoveryDirectory
+      ? await MemoryRecoveryJournal.open(options.recoveryDirectory, owner, await baseStore.read()) : undefined;
+    const store = journal ? new RecoveryStateStore(baseStore, journal) : baseStore;
     const client = new LazyMemoryClient({ owner, baseUrl: options.baseUrl, timeoutMs: options.requestTimeoutMs,
-      connect: () => identity.connect(context), assertToolIsolation: () => worker.assertIsolated() });
-    const store = new FileStateStore({ owner, directory: join(stateDirectory, "memory"), policyVersion: options.policyVersion });
+      connect: () => identity.connect(context), assertToolIsolation: () => worker.assertIsolated(), reranker: options.reranker,
+      journal });
     const configured = options.collection;
     const taskFacts = configured?.taskFacts ? new MemoryTaskFacts({ ...configured.taskFacts, store,
       userId: context.user.id, policyVersion: configured.policyVersion, timeoutMs: configured.lifecycleTimeoutMs }) : undefined;

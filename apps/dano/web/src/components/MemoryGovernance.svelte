@@ -149,7 +149,8 @@
             <p>{t("memory.sources")}</p>
             {#each item.sources as source (`${source.sessionId}:${source.entryId}`)}
               <p>{t(source.kind === "automatic" ? "memory.sourceAutomatic" : "memory.sourceExplicit")}
-                · {t(source.status === "revoked" ? "memory.sourceRevoked" : "memory.sourceCurrent")}
+                · {t(source.status === "revoked" ? "memory.sourceRevoked"
+                  : source.status === "preserved" ? "memory.sourcePreserved" : "memory.sourceCurrent")}
                 · <time datetime={source.createdAt}>{new Date(source.createdAt).toLocaleString()}</time></p>
               <p class="break-all">{t("memory.sourceSession")}: {source.sessionId}</p>
             {/each}

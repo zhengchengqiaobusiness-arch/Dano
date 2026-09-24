@@ -1,6 +1,6 @@
 export interface GovernanceReceipt { jobId: string; status: "pending" | "complete" | "superseded"; errorCode?: string }
 export interface ExportedMemory { uri: string; content: string;
-  sources: Array<{ kind: "explicit" | "automatic"; status: "current" | "revoked";
+  sources: Array<{ kind: "explicit" | "automatic"; status: "current" | "preserved" | "revoked";
     sessionId: string; entryId: string; createdAt: string }>;
   revisions: Array<{ kind: string; revision: number; createdAt: string; completedAt?: string }> }
 export interface ExportPage { items: ExportedMemory[]; nextCursor?: string }
@@ -75,7 +75,7 @@ export async function exportMemoryPage(url: string, signal: AbortSignal, cursor?
   if (!Array.isArray(page.items) || page.items.some(item => !item || typeof item.uri !== "string"
     || typeof item.content !== "string" || !Array.isArray(item.sources) || !Array.isArray(item.revisions)
     || item.sources.some(source => !source || (source.kind !== "explicit" && source.kind !== "automatic")
-      || (source.status !== "current" && source.status !== "revoked")
+      || (source.status !== "current" && source.status !== "preserved" && source.status !== "revoked")
       || typeof source.sessionId !== "string" || typeof source.entryId !== "string"
       || typeof source.createdAt !== "string" || !Number.isFinite(Date.parse(source.createdAt))))
     || (page.nextCursor !== undefined && typeof page.nextCursor !== "string")) throw new Error("MEMORY_EXPORT_UNAVAILABLE");

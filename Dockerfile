@@ -11,6 +11,14 @@ ENV PNPM_STORE_DIR=/tmp/pnpm-store
 ENV DANO_DEFAULT_NPM_REGISTRY=https://mirrors.cloud.tencent.com/npm/
 ARG NPM_REGISTRY=
 ARG NPM_CONFIG_REGISTRY=
+# Optional build-only proxy trust. Bind a public CA using podman build -v;
+# ARG values do not become runtime image environment variables.
+ARG NODE_EXTRA_CA_CERTS
+ARG NODE_OPTIONS
+ARG COREPACK_NPM_REGISTRY
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
 RUN registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-$DANO_DEFAULT_NPM_REGISTRY}}" \
   && npm config set registry "$registry" \
   && npm_config_registry="$registry" corepack enable \
@@ -23,11 +31,11 @@ COPY pnpm-lock.yaml* ./
 RUN registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-$DANO_DEFAULT_NPM_REGISTRY}}" \
   && npm_config_registry="$registry" \
   npm_config_fetch_timeout=600000 \
-  pnpm install --frozen-lockfile=false --store-dir="$PNPM_STORE_DIR" --package-import-method=copy
+  pnpm install --frozen-lockfile --store-dir="$PNPM_STORE_DIR" --package-import-method=copy
 
 COPY . .
 RUN pnpm run build
-RUN pnpm --store-dir="$PNPM_STORE_DIR" --offline --filter @dano/app --prod deploy /prod/dano
+RUN CI=true pnpm --store-dir="$PNPM_STORE_DIR" --filter @dano/app --prod deploy /prod/dano
 
 FROM node:22-bookworm-slim AS runtime
 
@@ -35,6 +43,13 @@ WORKDIR /app
 ENV DANO_DEFAULT_NPM_REGISTRY=https://mirrors.cloud.tencent.com/npm/
 ARG NPM_REGISTRY=
 ARG NPM_CONFIG_REGISTRY=
+ARG NODE_EXTRA_CA_CERTS
+ARG NODE_OPTIONS
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG PIP_CERT
+ARG PIP_INDEX_URL
 RUN registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-$DANO_DEFAULT_NPM_REGISTRY}}" \
   && npm config set registry "$registry" \
   && npm_config_registry="$registry" npm install --global open-websearch@2.1.11
@@ -72,6 +87,11 @@ COPY deploy/system-prompt.mjs ./deploy/system-prompt.mjs
 COPY apps/dano/runtime/skill-seed.mjs ./apps/dano/runtime/skill-seed.mjs
 COPY apps/dano/runtime/product-name.mjs ./apps/dano/runtime/product-name.mjs
 COPY apps/dano/runtime/system-prompt.mjs ./apps/dano/runtime/system-prompt.mjs
+# Build-only Git source routing, used when the pinned public Skill source is
+# mirrored near an isolated builder. Keep it after the dependency layers.
+ARG GIT_CONFIG_COUNT
+ARG GIT_CONFIG_KEY_0
+ARG GIT_CONFIG_VALUE_0
 RUN mkdir -p /app/open-websearch-skill-seed \
   && cd /app/open-websearch-skill-seed \
   && registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-$DANO_DEFAULT_NPM_REGISTRY}}" \
@@ -98,6 +118,9 @@ CMD ["node", "./dist/server/main.js"]
 # loading Dano; secrets belong in the separately provisioned private config.
 FROM runtime AS protected-runtime
 USER root
+COPY apps/dano/runtime/replay-memory-deletions.mjs ./replay-memory-deletions.mjs
+COPY apps/dano/runtime/bootstrap-memory-recovery.mjs ./bootstrap-memory-recovery.mjs
+COPY apps/dano/runtime/reconcile-memory-recovery.mjs ./runtime/reconcile-memory-recovery.mjs
 ENTRYPOINT ["node", "./dist/server/protected-main.js"]
 CMD []
 

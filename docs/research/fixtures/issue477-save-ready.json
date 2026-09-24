@@ -1,0 +1,36 @@
+{
+  "purpose": "Issue #465 Spec 11.1 healthy explicit-save-to-ready latency",
+  "frozenAt": "2026-09-24",
+  "environment": {
+    "entry": "https://localhost:18711/",
+    "client": "Codex in-app Browser, existing isolated OA test account",
+    "dano": "0.2.42",
+    "piOpenViking": "0.1.13",
+    "openViking": "v0.4.20",
+    "chatAndExtractionModel": "mimo-v2.5",
+    "imageId": "b7a9f62c395f47857d58a7ab12e99fd15f134512f5283ed0a9973cc7990280e4",
+    "cpus": 4,
+    "ramBytes": 4076376064
+  },
+  "method": {
+    "order": "sequential, one new chat per case",
+    "promptTemplate": "请明确调用 memory_save 仅保存这一条长期事实：{fact}。保存后告诉我提交状态，不要声称已就绪。",
+    "start": "Dano operation createdAt at accepted explicit save",
+    "end": "Dano operation updatedAt when phase is ready, corroborated by memory readback",
+    "failure": "record every attempt, including failed or timeout; do not silently replace cases",
+    "warmup": "one separate browser pilot is excluded from the fixed ten cases",
+    "thresholdP95Ms": 60000
+  },
+  "cases": [
+    { "id": "S-01", "fact": "验收专用灯塔代号是云汀201。" },
+    { "id": "S-02", "fact": "验收专用航线代号是澄浦202。" },
+    { "id": "S-03", "fact": "验收专用车站代号是松屿203。" },
+    { "id": "S-04", "fact": "验收专用仓库代号是望溪204。" },
+    { "id": "S-05", "fact": "验收专用花园代号是临川205。" },
+    { "id": "S-06", "fact": "验收专用展厅代号是青浦206。" },
+    { "id": "S-07", "fact": "验收专用码头代号是雨澜207。" },
+    { "id": "S-08", "fact": "验收专用书房代号是星汀208。" },
+    { "id": "S-09", "fact": "验收专用工坊代号是石湾209。" },
+    { "id": "S-10", "fact": "验收专用驿站代号是岚渡210。" }
+  ]
+}

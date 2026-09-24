@@ -1,0 +1,37 @@
+{
+  "date": "2026-09-24",
+  "candidate": {
+    "danoVersion": "0.2.42",
+    "imageId": "b7a9f62c395f47857d58a7ab12e99fd15f134512f5283ed0a9973cc7990280e4",
+    "buildTarget": "protected-runtime",
+    "publicSkillTag": "v2.1.11",
+    "publicSkillCommit": "3094fa558fce35a8373e45ed5a6c43362e206906"
+  },
+  "existingConfigUpgrade": {
+    "queueLimitAbsentInOriginalPrivateConfig": true,
+    "originalConfigAndDataVolumesReused": true,
+    "httpsHealth": "ok",
+    "containerHealth": "healthy",
+    "restartCount": 0,
+    "authenticatedBrowserSessionRestored": true,
+    "priorChatAndMemoryManagementVisible": true
+  },
+  "browser": {
+    "plainText": "7+5 answered 12",
+    "bash": "model executed ls and reported uploads",
+    "imageFixture": "fixed synthetic shapes.png outside the checkout",
+    "imageRead": ["red circle", "blue square", "yellow triangle"],
+    "screenshots": ["browser-chat.jpg", "browser-acceptance.jpg"]
+  },
+  "checks": {
+    "memoryTokenizerAndHostConfigTests": "13 passed",
+    "typeAndSvelteCheck": "passed",
+    "releaseManifestCheck": "passed",
+    "fullVitest": "145 files passed; 1675 tests passed; 1 skipped"
+  },
+  "limitations": [
+    "Independent second OA Browser user not verified",
+    "Frozen 80-case six-category matrix x3 not complete",
+    "Healthy save-ready p95 and rollback gates not complete"
+  ]
+}

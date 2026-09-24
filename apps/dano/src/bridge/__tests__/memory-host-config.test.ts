@@ -11,7 +11,7 @@ function config() {
     maxContentBytes: 16384, policyVersion: "v1",
     policy: { maxPayloadBytes: 4096, recallTimeoutMs: 1000, recallTokenBudget: 1500, recallLimit: 5, minimumScore: 0.5 },
     scheduler: { pollIntervalMs: 1000, initialBackoffMs: 1000, maxBackoffMs: 5000, maxAttemptsPerPhase: 5, maxOperationsPerTick: 4 },
-    tokenizerLimits: { maxAssetBytes: 65536, maxInputBytes: 8192, startupTimeoutMs: 2000 },
+    tokenizerLimits: { maxAssetBytes: 65536, maxInputBytes: 8192, startupTimeoutMs: 2000, maxQueuedRequests: 8 },
     tokenizers: [{ model: { provider: "fixture", api: "openai-completions", id: "fixture" },
       tokenizer: { path: "/installed/tokenizer.json", sha256: "a".repeat(64) },
       config: { path: "/installed/tokenizer_config.json", sha256: "b".repeat(64) } }] };
@@ -27,6 +27,7 @@ it("normalizes the service origin and requires explicit policies and model bindi
     (value: any) => { value.baseUrl = "https://user:SYNTHETIC_PRIVATE_KEY@example.test/"; },
     (value: any) => { value.scheduler.maxBackoffMs = 1; },
     (value: any) => { value.policy.recallTokenBudget = 0; },
+    (value: any) => { value.tokenizerLimits.maxQueuedRequests = 0; },
     (value: any) => { value.tokenizers = []; },
     (value: any) => { value.tokenizers[0].tokenizer.path = "./workspace/model.json"; },
   ]) {
@@ -34,6 +35,12 @@ it("normalizes the service origin and requires explicit policies and model bindi
     expect(() => parseMemoryHostConfig(value)).toThrow("INVALID_MEMORY_HOST_CONFIG");
     try { parseMemoryHostConfig(value); } catch (error) { expect(String(error)).not.toContain("SYNTHETIC_PRIVATE_KEY"); }
   }
+});
+it("starts from a private config written before tokenizer queuing was introduced", () => {
+  const old = config();
+  const { maxQueuedRequests, ...previousLimits } = old.tokenizerLimits;
+  const parsed = parseMemoryHostConfig({ ...old, tokenizerLimits: previousLimits });
+  expect(parsed.tokenizerLimits).toEqual({ ...previousLimits, maxQueuedRequests });
 });
 it("loads private configuration and treats only a missing file as unconfigured", async () => {
   const root = await directory();
@@ -76,4 +83,18 @@ it("accepts explicit bounded collection configuration and rejects model/tool pay
     const changed = structuredClone(collection); mutate(changed);
     expect(() => parseMemoryHostConfig({ ...config(), collection: changed })).toThrow("INVALID_MEMORY_HOST_CONFIG");
   }
+});
+
+it("accepts a private bounded reranker endpoint and rejects unsafe overrides", () => {
+  const reranker = { url: "http://reranker:8080/v1/rerank", model: "synthetic-reranker",
+    minimumLogit: 0, timeoutMs: 900, maxInputBytes: 16384, maxDocumentBytes: 4096, maxCandidates: 2 };
+  expect(parseMemoryHostConfig({ ...config(), reranker }).reranker).toEqual(reranker);
+  for (const changed of [
+    { ...reranker, url: "http://user:password@reranker:8080/v1/rerank" },
+    { ...reranker, url: "http://reranker:8080/other" },
+    { ...reranker, minimumLogit: Infinity },
+    { ...reranker, timeoutMs: 0 },
+    { ...reranker, maxDocumentBytes: 20000 },
+    { ...reranker, maxCandidates: 0 },
+  ]) expect(() => parseMemoryHostConfig({ ...config(), reranker: changed })).toThrow("INVALID_MEMORY_HOST_CONFIG");
 });

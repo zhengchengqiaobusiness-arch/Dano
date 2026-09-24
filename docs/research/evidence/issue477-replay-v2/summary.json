@@ -1,0 +1,34 @@
+{
+  "date": "2026-09-24",
+  "danoVersion": "0.2.39",
+  "piOpenVikingVersion": "0.1.12",
+  "openVikingVersion": "v0.4.20",
+  "protectedImageId": "ce3db0c7b493b5113c52fd7a4dcb310b8ba3eaa6c11f63734467632fdd2d143b",
+  "legacyLedger": {
+    "owners": 1,
+    "deletedUris": 2,
+    "removedSources": 1,
+    "retainedDocuments": 1,
+    "expectedDocuments": 3,
+    "result": "passed_on_restored_real_service"
+  },
+  "twoOwnerLedger": {
+    "owners": 2,
+    "deletedUris": 2,
+    "removedSources": 0,
+    "retainedDocuments": 0,
+    "expectedDocuments": 9,
+    "result": "passed_on_real_service_and_idempotent_rerun_passed",
+    "testData": "One temporary synthetic document per owner was removed; both original document sets were retained."
+  },
+  "preflight": {
+    "duplicateOwner": "INVALID_LEDGER at load with networking disabled",
+    "wrongSecondOwnerStateHash": "POST_SNAPSHOT_STATE_MISMATCH at load with networking disabled",
+    "afterWrongHash": "Both temporary documents still existed before the valid replay removed them."
+  },
+  "remaining": [
+    "Automatic append-only capture of deletion and revocation operations outside older snapshots",
+    "Multi-user upgrade-window reconciliation and complete rollback policy",
+    "Full Spec 11.1 and 11.2 acceptance"
+  ]
+}

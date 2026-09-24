@@ -1,0 +1,21 @@
+{
+  "recordedAt": "2026-09-24",
+  "environment": "isolated Podman OpenViking v0.4.20 on dano477-finalqueue memory-backend",
+  "image": "localhost/dano477-protected:0.2.41-receipt",
+  "imageId": "3d8569c7463f310c3097d47214e74e41a5fb3f3764a62cae3a7c897480ea2c79",
+  "users": 2,
+  "syntheticAccountCreated": true,
+  "syntheticDocumentsBeforeReplay": 2,
+  "checkpointOwners": 2,
+  "checkpointJournalBytes": 0,
+  "laterDeletionEvents": 2,
+  "olderLocalStatesRestored": 2,
+  "preflightPassed": true,
+  "replayPassed": true,
+  "documentsAbsentAfterReplay": 2,
+  "newerStateRevisionsOverlaid": 2,
+  "privateReceiptsVerified": 2,
+  "secondReplayPassed": true,
+  "syntheticAccountDeleted": true,
+  "scopeLimit": "current-service two-owner deletion and receipt retry; not old-image or old-volume multi-user rollback, source revocation, credential rotation, or new-writer reconciliation"
+}

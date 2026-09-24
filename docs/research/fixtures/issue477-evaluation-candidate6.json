@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "frozenAt": "2026-09-24",
+  "caseFile": "issue477-evaluation.json",
+  "caseSha256": "8c1ad95d69ab6f58e601d48b353aeea60b63365a65a507de917ed5bc9bca250c",
+  "purpose": "Evaluate bounded tokenizer queuing with five complete concurrent Dano/MiMo user requests and unchanged Spec 11.1 thresholds",
+  "candidate": {
+    "dano": "0.2.42",
+    "piOpenViking": "0.1.13",
+    "openViking": "v0.4.20",
+    "embedding": "bge-small-zh-v1.5-f16",
+    "reranker": "bge-reranker-v2-m3-Q4_K_M",
+    "chatModel": "mimo-v2.5",
+    "extractionModel": "mimo-v2.5",
+    "platform": "linux/arm64",
+    "cpus": 4,
+    "ramBytes": 4076376064,
+    "localImageId": "818178ce3f8ddc025bbc9200475c5b922c332064b41a11d6b93ded13b00ed368"
+  },
+  "runtime": {
+    "tokenizerMaxQueuedRequests": 8,
+    "recallTimeoutMs": 2000,
+    "recallTokenBudget": 1500,
+    "rerankerTimeoutMs": 900,
+    "rerankerMaxCandidates": 1,
+    "rerankerMinimumLogit": 0
+  },
+  "workload": {
+    "syntheticAuthenticatedUsers": 5,
+    "completeRequests": 100,
+    "requestsPerUser": 20,
+    "recallRequestsPerUser": 14,
+    "irrelevantRequestsPerUser": 6,
+    "freshChatPerRequest": true,
+    "failurePolicy": "record every attempt, including failed commands and model responses"
+  },
+  "unchangedThresholds": {
+    "recallSourceHitMin": 0.9,
+    "recallCorrectMin": 0.9,
+    "irrelevantNoInjectionMin": 0.9,
+    "isolationDeletionAuthorizationFailuresAllowed": 0,
+    "steadyRecallAddedP95Ms": 1000,
+    "hardMemoryWaitMaxMs": 2000,
+    "injectedTokenMax": 1500,
+    "healthySaveReadyP95Ms": 60000,
+    "incrementalModelCostRatioMax": 0.2
+  }
+}

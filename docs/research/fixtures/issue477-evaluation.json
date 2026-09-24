@@ -1,0 +1,854 @@
+{
+  "version": 1,
+  "frozenAt": "2026-09-23",
+  "purpose": "Dano #465 Spec 11.1 release evaluation; synthetic users and facts only",
+  "execution": {
+    "repetitionsPerCase": 3,
+    "workloadUsers": 5,
+    "workloadRequests": 100,
+    "concurrentUsers": 5,
+    "freshChatForCorrectionAndDeletion": true,
+    "failurePolicy": "record every attempt; do not change thresholds after execution"
+  },
+  "candidate": {
+    "dano": "0.2.35",
+    "piOpenViking": "0.1.12",
+    "openViking": "v0.4.20",
+    "embedding": "bge-small-zh-v1.5-f16",
+    "chatModel": "mimo-v2.5",
+    "extractionModel": "mimo-v2.5",
+    "platform": "linux/arm64",
+    "cpus": 4,
+    "ramBytes": 4076376064
+  },
+  "policy": {
+    "recallTimeoutMs": 2000,
+    "recallTokenBudget": 1500,
+    "recallLimit": 5,
+    "minimumScore": 0.1,
+    "requestTimeoutMs": 15000,
+    "deliveryPollIntervalMs": 500,
+    "deliveryMaxOperationsPerTick": 5
+  },
+  "prices": {
+    "observedOn": "2026-09-23",
+    "currency": "USD",
+    "unit": "per_million_tokens",
+    "mimoV25InputCacheHit": 0.0028,
+    "mimoV25InputCacheMiss": 0.14,
+    "mimoV25Output": 0.28,
+    "embeddingMarginalApiPrice": null,
+    "embeddingCostMethod": "local pinned llama.cpp GGUF; report measured host utilization separately, not as zero total infrastructure cost",
+    "source": "https://platform.xiaomimimo.com/docs/zh-CN/integration/roocode"
+  },
+  "thresholds": {
+    "recallSourceHitMin": 0.9,
+    "recallCorrectMin": 0.9,
+    "irrelevantNoInjectionMin": 0.9,
+    "isolationDeletionAuthorizationFailuresAllowed": 0,
+    "steadyRecallAddedP95Ms": 1000,
+    "hardMemoryWaitMaxMs": 2000,
+    "injectedTokenMax": 1500,
+    "healthySaveReadyP95Ms": 60000,
+    "incrementalModelCostRatioMax": 0.2
+  },
+  "sourcePlan": {
+    "alice": "eval477_alice_facts",
+    "bob": "eval477_bob_facts",
+    "chen": "eval477_chen_facts",
+    "dina": "eval477_dina_facts",
+    "eva": "eval477_eva_facts"
+  },
+  "cases": [
+    {
+      "id": "R-01-01",
+      "category": "recall",
+      "owner": "alice",
+      "sourceSessionId": "eval477_alice_facts",
+      "fact": "我的项目代号是青岚41。",
+      "question": "我的项目代号是什么？",
+      "expected": "青岚41",
+      "forbidden": [
+        "白榆52"
+      ]
+    },
+    {
+      "id": "R-01-02",
+      "category": "recall",
+      "owner": "alice",
+      "sourceSessionId": "eval477_alice_facts",
+      "fact": "我的图表配色是橘色。",
+      "question": "我的图表应使用什么颜色？",
+      "expected": "橘色",
+      "forbidden": [
+        "紫色"
+      ]
+    },
+    {
+      "id": "R-01-03",
+      "category": "recall",
+      "owner": "alice",
+      "sourceSessionId": "eval477_alice_facts",
+      "fact": "我的周会日期是周三。",
+      "question": "我的周会定在星期几？",
+      "expected": "周三",
+      "forbidden": [
+        "周四"
+      ]
+    },
+    {
+      "id": "R-01-04",
+      "category": "recall",
+      "owner": "alice",
+      "sourceSessionId": "eval477_alice_facts",
+      "fact": "我的工作区简称是松林。",
+      "question": "我的工作区简称是什么？",
+      "expected": "松林",
+      "forbidden": [
+        "海湾"
+      ]
+    },
+    {
+      "id": "R-02-01",
+      "category": "recall",
+      "owner": "bob",
+      "sourceSessionId": "eval477_bob_facts",
+      "fact": "我的项目代号是白榆52。",
+      "question": "我的项目代号是什么？",
+      "expected": "白榆52",
+      "forbidden": [
+        "星河63"
+      ]
+    },
+    {
+      "id": "R-02-02",
+      "category": "recall",
+      "owner": "bob",
+      "sourceSessionId": "eval477_bob_facts",
+      "fact": "我的图表配色是紫色。",
+      "question": "我的图表应使用什么颜色？",
+      "expected": "紫色",
+      "forbidden": [
+        "绿色"
+      ]
+    },
+    {
+      "id": "R-02-03",
+      "category": "recall",
+      "owner": "bob",
+      "sourceSessionId": "eval477_bob_facts",
+      "fact": "我的周会日期是周四。",
+      "question": "我的周会定在星期几？",
+      "expected": "周四",
+      "forbidden": [
+        "周五"
+      ]
+    },
+    {
+      "id": "R-02-04",
+      "category": "recall",
+      "owner": "bob",
+      "sourceSessionId": "eval477_bob_facts",
+      "fact": "我的工作区简称是海湾。",
+      "question": "我的工作区简称是什么？",
+      "expected": "海湾",
+      "forbidden": [
+        "石桥"
+      ]
+    },
+    {
+      "id": "R-03-01",
+      "category": "recall",
+      "owner": "chen",
+      "sourceSessionId": "eval477_chen_facts",
+      "fact": "我的项目代号是星河63。",
+      "question": "我的项目代号是什么？",
+      "expected": "星河63",
+      "forbidden": [
+        "云杉74"
+      ]
+    },
+    {
+      "id": "R-03-02",
+      "category": "recall",
+      "owner": "chen",
+      "sourceSessionId": "eval477_chen_facts",
+      "fact": "我的图表配色是绿色。",
+      "question": "我的图表应使用什么颜色？",
+      "expected": "绿色",
+      "forbidden": [
+        "蓝色"
+      ]
+    },
+    {
+      "id": "R-03-03",
+      "category": "recall",
+      "owner": "chen",
+      "sourceSessionId": "eval477_chen_facts",
+      "fact": "我的周会日期是周五。",
+      "question": "我的周会定在星期几？",
+      "expected": "周五",
+      "forbidden": [
+        "周二"
+      ]
+    },
+    {
+      "id": "R-03-04",
+      "category": "recall",
+      "owner": "chen",
+      "sourceSessionId": "eval477_chen_facts",
+      "fact": "我的工作区简称是石桥。",
+      "question": "我的工作区简称是什么？",
+      "expected": "石桥",
+      "forbidden": [
+        "山谷"
+      ]
+    },
+    {
+      "id": "R-04-01",
+      "category": "recall",
+      "owner": "dina",
+      "sourceSessionId": "eval477_dina_facts",
+      "fact": "我的项目代号是云杉74。",
+      "question": "我的项目代号是什么？",
+      "expected": "云杉74",
+      "forbidden": [
+        "竹影85"
+      ]
+    },
+    {
+      "id": "R-04-02",
+      "category": "recall",
+      "owner": "dina",
+      "sourceSessionId": "eval477_dina_facts",
+      "fact": "我的图表配色是蓝色。",
+      "question": "我的图表应使用什么颜色？",
+      "expected": "蓝色",
+      "forbidden": [
+        "红色"
+      ]
+    },
+    {
+      "id": "R-04-03",
+      "category": "recall",
+      "owner": "dina",
+      "sourceSessionId": "eval477_dina_facts",
+      "fact": "我的周会日期是周二。",
+      "question": "我的周会定在星期几？",
+      "expected": "周二",
+      "forbidden": [
+        "周一"
+      ]
+    },
+    {
+      "id": "R-04-04",
+      "category": "recall",
+      "owner": "dina",
+      "sourceSessionId": "eval477_dina_facts",
+      "fact": "我的工作区简称是山谷。",
+      "question": "我的工作区简称是什么？",
+      "expected": "山谷",
+      "forbidden": [
+        "湖畔"
+      ]
+    },
+    {
+      "id": "R-05-01",
+      "category": "recall",
+      "owner": "eva",
+      "sourceSessionId": "eval477_eva_facts",
+      "fact": "我的项目代号是竹影85。",
+      "question": "我的项目代号是什么？",
+      "expected": "竹影85",
+      "forbidden": [
+        "青岚41"
+      ]
+    },
+    {
+      "id": "R-05-02",
+      "category": "recall",
+      "owner": "eva",
+      "sourceSessionId": "eval477_eva_facts",
+      "fact": "我的图表配色是红色。",
+      "question": "我的图表应使用什么颜色？",
+      "expected": "红色",
+      "forbidden": [
+        "橘色"
+      ]
+    },
+    {
+      "id": "R-05-03",
+      "category": "recall",
+      "owner": "eva",
+      "sourceSessionId": "eval477_eva_facts",
+      "fact": "我的周会日期是周一。",
+      "question": "我的周会定在星期几？",
+      "expected": "周一",
+      "forbidden": [
+        "周三"
+      ]
+    },
+    {
+      "id": "R-05-04",
+      "category": "recall",
+      "owner": "eva",
+      "sourceSessionId": "eval477_eva_facts",
+      "fact": "我的工作区简称是湖畔。",
+      "question": "我的工作区简称是什么？",
+      "expected": "湖畔",
+      "forbidden": [
+        "松林"
+      ]
+    },
+    {
+      "id": "C-01-01",
+      "category": "correction",
+      "owner": "alice",
+      "sourceCase": "R-01-01",
+      "old": "青岚41",
+      "replacement": "新-青岚41",
+      "question": "我的项目代号是什么？",
+      "expected": "新-青岚41",
+      "forbidden": [
+        "青岚41"
+      ],
+      "requiresFreshChat": true
+    },
+    {
+      "id": "C-01-02",
+      "category": "correction",
+      "owner": "alice",
+      "sourceCase": "R-01-02",
+      "old": "橘色",
+      "replacement": "深橘色",
+      "question": "我的图表应使用什么颜色？",
+      "expected": "深橘色",
+      "forbidden": [
+        "橘色"
+      ],
+      "requiresFreshChat": true
+    },
+    {
+      "id": "C-02-01",
+      "category": "correction",
+      "owner": "bob",
+      "sourceCase": "R-02-01",
+      "old": "白榆52",
+      "replacement": "新-白榆52",
+      "question": "我的项目代号是什么？",
+      "expected": "新-白榆52",
+      "forbidden": [
+        "白榆52"
+      ],
+      "requiresFreshChat": true
+    },
+    {
+      "id": "C-02-02",
+      "category": "correction",
+      "owner": "bob",
+      "sourceCase": "R-02-02",
+      "old": "紫色",
+      "replacement": "深紫色",
+      "question": "我的图表应使用什么颜色？",
+      "expected": "深紫色",
+      "forbidden": [
+        "紫色"
+      ],
+      "requiresFreshChat": true
+    },
+    {
+      "id": "C-03-01",
+      "category": "correction",
+      "owner": "chen",
+      "sourceCase": "R-03-01",
+      "old": "星河63",
+      "replacement": "新-星河63",
+      "question": "我的项目代号是什么？",
+      "expected": "新-星河63",
+      "forbidden": [
+        "星河63"
+      ],
+      "requiresFreshChat": true
+    },
+    {
+      "id": "C-03-02",
+      "category": "correction",
+      "owner": "chen",
+      "sourceCase": "R-03-02",
+      "old": "绿色",
+      "replacement": "深绿色",
+      "question": "我的图表应使用什么颜色？",
+      "expected": "深绿色",
+      "forbidden": [
+        "绿色"
+      ],
+      "requiresFreshChat": true
+    },
+    {
+      "id": "C-04-01",
+      "category": "correction",
+      "owner": "dina",
+      "sourceCase": "R-04-01",
+      "old": "云杉74",
+      "replacement": "新-云杉74",
+      "question": "我的项目代号是什么？",
+      "expected": "新-云杉74",
+      "forbidden": [
+        "云杉74"
+      ],
+      "requiresFreshChat": true
+    },
+    {
+      "id": "C-04-02",
+      "category": "correction",
+      "owner": "dina",
+      "sourceCase": "R-04-02",
+      "old": "蓝色",
+      "replacement": "深蓝色",
+      "question": "我的图表应使用什么颜色？",
+      "expected": "深蓝色",
+      "forbidden": [
+        "蓝色"
+      ],
+      "requiresFreshChat": true
+    },
+    {
+      "id": "C-05-01",
+      "category": "correction",
+      "owner": "eva",
+      "sourceCase": "R-05-01",
+      "old": "竹影85",
+      "replacement": "新-竹影85",
+      "question": "我的项目代号是什么？",
+      "expected": "新-竹影85",
+      "forbidden": [
+        "竹影85"
+      ],
+      "requiresFreshChat": true
+    },
+    {
+      "id": "C-05-02",
+      "category": "correction",
+      "owner": "eva",
+      "sourceCase": "R-05-02",
+      "old": "红色",
+      "replacement": "深红色",
+      "question": "我的图表应使用什么颜色？",
+      "expected": "深红色",
+      "forbidden": [
+        "红色"
+      ],
+      "requiresFreshChat": true
+    },
+    {
+      "id": "I-01-01",
+      "category": "isolation",
+      "actor": "alice",
+      "targetOwner": "bob",
+      "operation": "search",
+      "targetSourceCase": "R-02-01",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-01-02",
+      "category": "isolation",
+      "actor": "alice",
+      "targetOwner": "bob",
+      "operation": "directRead",
+      "targetSourceCase": "R-02-02",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-01-03",
+      "category": "isolation",
+      "actor": "alice",
+      "targetOwner": "bob",
+      "operation": "directWrite",
+      "targetSourceCase": "R-02-03",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-01-04",
+      "category": "isolation",
+      "actor": "alice",
+      "targetOwner": "bob",
+      "operation": "export",
+      "targetSourceCase": "R-02-04",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-01-05",
+      "category": "isolation",
+      "actor": "alice",
+      "targetOwner": "bob",
+      "operation": "replay",
+      "targetSourceCase": "R-02-01",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-02-01",
+      "category": "isolation",
+      "actor": "bob",
+      "targetOwner": "chen",
+      "operation": "search",
+      "targetSourceCase": "R-03-01",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-02-02",
+      "category": "isolation",
+      "actor": "bob",
+      "targetOwner": "chen",
+      "operation": "directRead",
+      "targetSourceCase": "R-03-02",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-02-03",
+      "category": "isolation",
+      "actor": "bob",
+      "targetOwner": "chen",
+      "operation": "directWrite",
+      "targetSourceCase": "R-03-03",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-02-04",
+      "category": "isolation",
+      "actor": "bob",
+      "targetOwner": "chen",
+      "operation": "export",
+      "targetSourceCase": "R-03-04",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-02-05",
+      "category": "isolation",
+      "actor": "bob",
+      "targetOwner": "chen",
+      "operation": "replay",
+      "targetSourceCase": "R-03-01",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-03-01",
+      "category": "isolation",
+      "actor": "chen",
+      "targetOwner": "dina",
+      "operation": "search",
+      "targetSourceCase": "R-04-01",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-03-02",
+      "category": "isolation",
+      "actor": "chen",
+      "targetOwner": "dina",
+      "operation": "directRead",
+      "targetSourceCase": "R-04-02",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-03-03",
+      "category": "isolation",
+      "actor": "chen",
+      "targetOwner": "dina",
+      "operation": "directWrite",
+      "targetSourceCase": "R-04-03",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-03-04",
+      "category": "isolation",
+      "actor": "chen",
+      "targetOwner": "dina",
+      "operation": "export",
+      "targetSourceCase": "R-04-04",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-03-05",
+      "category": "isolation",
+      "actor": "chen",
+      "targetOwner": "dina",
+      "operation": "replay",
+      "targetSourceCase": "R-04-01",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-04-01",
+      "category": "isolation",
+      "actor": "dina",
+      "targetOwner": "eva",
+      "operation": "search",
+      "targetSourceCase": "R-05-01",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-04-02",
+      "category": "isolation",
+      "actor": "dina",
+      "targetOwner": "eva",
+      "operation": "directRead",
+      "targetSourceCase": "R-05-02",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-04-03",
+      "category": "isolation",
+      "actor": "dina",
+      "targetOwner": "eva",
+      "operation": "directWrite",
+      "targetSourceCase": "R-05-03",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-04-04",
+      "category": "isolation",
+      "actor": "dina",
+      "targetOwner": "eva",
+      "operation": "export",
+      "targetSourceCase": "R-05-04",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "I-04-05",
+      "category": "isolation",
+      "actor": "dina",
+      "targetOwner": "eva",
+      "operation": "replay",
+      "targetSourceCase": "R-05-01",
+      "expected": "denied_without_target_content_or_mutation"
+    },
+    {
+      "id": "D-01-01",
+      "category": "deletion",
+      "owner": "alice",
+      "sourceCase": "R-01-01",
+      "scenario": "directForget",
+      "expected": "absent_from_new_chat_and_memory_chain",
+      "requiresFreshChat": true
+    },
+    {
+      "id": "D-01-02",
+      "category": "deletion",
+      "owner": "alice",
+      "sourceCase": "R-01-02",
+      "scenario": "oldRecallLedger",
+      "expected": "absent_from_new_chat_and_memory_chain",
+      "requiresFreshChat": true
+    },
+    {
+      "id": "D-02-01",
+      "category": "deletion",
+      "owner": "bob",
+      "sourceCase": "R-02-01",
+      "scenario": "oldQueue",
+      "expected": "absent_from_new_chat_and_memory_chain",
+      "requiresFreshChat": true
+    },
+    {
+      "id": "D-02-02",
+      "category": "deletion",
+      "owner": "bob",
+      "sourceCase": "R-02-02",
+      "scenario": "asyncExtraction",
+      "expected": "absent_from_new_chat_and_memory_chain",
+      "requiresFreshChat": true
+    },
+    {
+      "id": "D-03-01",
+      "category": "deletion",
+      "owner": "chen",
+      "sourceCase": "R-03-01",
+      "scenario": "olderBackupRestore",
+      "expected": "absent_from_new_chat_and_memory_chain",
+      "requiresFreshChat": true
+    },
+    {
+      "id": "D-03-02",
+      "category": "deletion",
+      "owner": "chen",
+      "sourceCase": "R-03-02",
+      "scenario": "directForget",
+      "expected": "absent_from_new_chat_and_memory_chain",
+      "requiresFreshChat": true
+    },
+    {
+      "id": "D-04-01",
+      "category": "deletion",
+      "owner": "dina",
+      "sourceCase": "R-04-01",
+      "scenario": "oldRecallLedger",
+      "expected": "absent_from_new_chat_and_memory_chain",
+      "requiresFreshChat": true
+    },
+    {
+      "id": "D-04-02",
+      "category": "deletion",
+      "owner": "dina",
+      "sourceCase": "R-04-02",
+      "scenario": "oldQueue",
+      "expected": "absent_from_new_chat_and_memory_chain",
+      "requiresFreshChat": true
+    },
+    {
+      "id": "D-05-01",
+      "category": "deletion",
+      "owner": "eva",
+      "sourceCase": "R-05-01",
+      "scenario": "asyncExtraction",
+      "expected": "absent_from_new_chat_and_memory_chain",
+      "requiresFreshChat": true
+    },
+    {
+      "id": "D-05-02",
+      "category": "deletion",
+      "owner": "eva",
+      "sourceCase": "R-05-02",
+      "scenario": "olderBackupRestore",
+      "expected": "absent_from_new_chat_and_memory_chain",
+      "requiresFreshChat": true
+    },
+    {
+      "id": "N-01-01",
+      "category": "irrelevant",
+      "owner": "alice",
+      "question": "请算 17 加 28。",
+      "expected": "no_unrelated_memory_injection"
+    },
+    {
+      "id": "N-01-02",
+      "category": "irrelevant",
+      "owner": "alice",
+      "question": "请写一句关于窗外天气的问候，不使用个人资料。",
+      "expected": "no_unrelated_memory_injection"
+    },
+    {
+      "id": "N-02-01",
+      "category": "irrelevant",
+      "owner": "bob",
+      "question": "请算 17 加 28。",
+      "expected": "no_unrelated_memory_injection"
+    },
+    {
+      "id": "N-02-02",
+      "category": "irrelevant",
+      "owner": "bob",
+      "question": "请写一句关于窗外天气的问候，不使用个人资料。",
+      "expected": "no_unrelated_memory_injection"
+    },
+    {
+      "id": "N-03-01",
+      "category": "irrelevant",
+      "owner": "chen",
+      "question": "请算 17 加 28。",
+      "expected": "no_unrelated_memory_injection"
+    },
+    {
+      "id": "N-03-02",
+      "category": "irrelevant",
+      "owner": "chen",
+      "question": "请写一句关于窗外天气的问候，不使用个人资料。",
+      "expected": "no_unrelated_memory_injection"
+    },
+    {
+      "id": "N-04-01",
+      "category": "irrelevant",
+      "owner": "dina",
+      "question": "请算 17 加 28。",
+      "expected": "no_unrelated_memory_injection"
+    },
+    {
+      "id": "N-04-02",
+      "category": "irrelevant",
+      "owner": "dina",
+      "question": "请写一句关于窗外天气的问候，不使用个人资料。",
+      "expected": "no_unrelated_memory_injection"
+    },
+    {
+      "id": "N-05-01",
+      "category": "irrelevant",
+      "owner": "eva",
+      "question": "请算 17 加 28。",
+      "expected": "no_unrelated_memory_injection"
+    },
+    {
+      "id": "N-05-02",
+      "category": "irrelevant",
+      "owner": "eva",
+      "question": "请写一句关于窗外天气的问候，不使用个人资料。",
+      "expected": "no_unrelated_memory_injection"
+    },
+    {
+      "id": "A-01",
+      "category": "authorization",
+      "owner": "alice",
+      "scenario": "defaultOff",
+      "expected": "state_transition_and_no_unauthorized_replay"
+    },
+    {
+      "id": "A-02",
+      "category": "authorization",
+      "owner": "bob",
+      "scenario": "singleSaveNoAutoConsent",
+      "expected": "state_transition_and_no_unauthorized_replay"
+    },
+    {
+      "id": "A-03",
+      "category": "authorization",
+      "owner": "chen",
+      "scenario": "pauseBeforeClaim",
+      "expected": "state_transition_and_no_unauthorized_replay"
+    },
+    {
+      "id": "A-04",
+      "category": "authorization",
+      "owner": "dina",
+      "scenario": "pauseInFlight",
+      "expected": "state_transition_and_no_unauthorized_replay"
+    },
+    {
+      "id": "A-05",
+      "category": "authorization",
+      "owner": "eva",
+      "scenario": "resumeNoBackfill",
+      "expected": "state_transition_and_no_unauthorized_replay"
+    },
+    {
+      "id": "A-06",
+      "category": "authorization",
+      "owner": "alice",
+      "scenario": "autoConsentSeparate",
+      "expected": "state_transition_and_no_unauthorized_replay"
+    },
+    {
+      "id": "A-07",
+      "category": "authorization",
+      "owner": "bob",
+      "scenario": "pauseReadExportDelete",
+      "expected": "state_transition_and_no_unauthorized_replay"
+    },
+    {
+      "id": "A-08",
+      "category": "authorization",
+      "owner": "chen",
+      "scenario": "revokeBeforeRetry",
+      "expected": "state_transition_and_no_unauthorized_replay"
+    },
+    {
+      "id": "A-09",
+      "category": "authorization",
+      "owner": "dina",
+      "scenario": "restartPaused",
+      "expected": "state_transition_and_no_unauthorized_replay"
+    },
+    {
+      "id": "A-10",
+      "category": "authorization",
+      "owner": "eva",
+      "scenario": "clearRequiresConfirmation",
+      "expected": "state_transition_and_no_unauthorized_replay"
+    }
+  ]
+}

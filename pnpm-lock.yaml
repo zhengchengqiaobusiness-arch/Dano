@@ -38,6 +38,9 @@ importers:
       vitest:
         specifier: ^4.1.6
         version: 4.1.8(@opentelemetry/api@1.9.0)(@types/node@25.9.2)(happy-dom@20.10.6)(vite@8.0.16(@types/node@25.9.2)(esbuild@0.28.1)(jiti@2.7.0)(terser@5.49.0)(tsx@4.23.1)(yaml@2.9.0))
+      yaml:
+        specifier: 2.9.0
+        version: 2.9.0
 
   apps/dano:
     dependencies:
@@ -57,8 +60,8 @@ importers:
         specifier: 0.2.17
         version: 0.2.17(@earendil-works/pi-coding-agent@0.85.1(ws@8.21.0)(zod@4.4.3))
       '@josephyoung/pi-openviking':
-        specifier: 0.1.8
-        version: 0.1.8(@earendil-works/pi-coding-agent@0.85.1(ws@8.21.0)(zod@4.4.3))
+        specifier: 0.1.14
+        version: 0.1.14(@earendil-works/pi-coding-agent@0.85.1(ws@8.21.0)(zod@4.4.3))
       atomically:
         specifier: 2.1.1
         version: 2.1.1
@@ -1374,8 +1377,8 @@ packages:
     peerDependencies:
       '@earendil-works/pi-coding-agent': '*'
 
-  '@josephyoung/pi-openviking@0.1.8':
-    resolution: {integrity: sha512-LDPgApOYbtQ8DFtEoUCYnstLeheAoQpGr200E5oPxjbCqHEJa84uHk9timKMKnH36CQ4pLArVfJ4bkGR6gdIBg==}
+  '@josephyoung/pi-openviking@0.1.14':
+    resolution: {integrity: sha512-DQnNWOnen6DdlFJB2BsKt1WRg0AOO9fygguDW4HkV+SfJpBKDb/KWITs603xu6hQuZbz+/T6xWsSB2xSFxH6cw==}
     engines: {node: '>=22.19.0'}
     hasBin: true
     peerDependencies:
@@ -6342,7 +6345,7 @@ snapshots:
       '@earendil-works/pi-coding-agent': 0.85.1(ws@8.21.0)(zod@4.4.3)
       shell-quote: 1.8.4
 
-  '@josephyoung/pi-openviking@0.1.8(@earendil-works/pi-coding-agent@0.85.1(ws@8.21.0)(zod@4.4.3))':
+  '@josephyoung/pi-openviking@0.1.14(@earendil-works/pi-coding-agent@0.85.1(ws@8.21.0)(zod@4.4.3))':
     dependencies:
       '@earendil-works/pi-coding-agent': 0.85.1(ws@8.21.0)(zod@4.4.3)
       '@openviking/sdk': 0.1.0

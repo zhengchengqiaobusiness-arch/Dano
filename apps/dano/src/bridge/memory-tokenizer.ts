@@ -14,10 +14,21 @@ export interface MemoryTokenizerLimits {
   maxAssetBytes: number;
   maxInputBytes: number;
   startupTimeoutMs: number;
+  maxQueuedRequests: number;
 }
+/** Bounded queue for version-1 private configs created before this field existed. */
+export const DEFAULT_MAX_QUEUED_REQUESTS = 8;
 const key = (model: MemoryModelIdentity) => JSON.stringify([model.provider, model.api, model.id]);
-interface Pending { id: number; resolve(value: number): void; reject(error: Error): void; cleanup(): void }
-interface Slot { worker: Worker; failed: boolean; pending?: Pending }
+interface CountRequest {
+  id: number;
+  text: string;
+  signal: AbortSignal;
+  resolve(value: number): void;
+  reject(error: Error): void;
+  abort(): void;
+  settled: boolean;
+}
+interface Slot { worker: Worker; failed: boolean; pending?: CountRequest; queue: CountRequest[] }
 
 /** Trusted, explicitly configured model bindings. No network downloads or model-name guesses. */
 export class MemoryTokenizers {
@@ -29,7 +40,7 @@ export class MemoryTokenizers {
   private constructor(limits: MemoryTokenizerLimits) { this.#limits = { ...limits }; }
 
   static async create(bindings: readonly MemoryTokenizerBinding[], limits: MemoryTokenizerLimits): Promise<MemoryTokenizers> {
-    if (![limits.maxAssetBytes, limits.maxInputBytes, limits.startupTimeoutMs]
+    if (![limits.maxAssetBytes, limits.maxInputBytes, limits.startupTimeoutMs, limits.maxQueuedRequests]
       .every(value => Number.isSafeInteger(value) && value > 0)) throw new Error("INVALID_MEMORY_TOKENIZER_LIMITS");
     const service = new MemoryTokenizers(limits);
     try {
@@ -47,7 +58,7 @@ export class MemoryTokenizers {
     // This module is a build entry; using its own URL keeps source and built
     // execution on the same implementation without eval or dynamic user code.
     const worker = new Worker(new URL(import.meta.url), { workerData: { kind: "dano-memory-tokenizer", binding, limits: this.#limits }, execArgv: [] });
-    const slot: Slot = { worker, failed: false };
+    const slot: Slot = { worker, failed: false, queue: [] };
     this.#slots.set(key(binding.model), slot);
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -55,8 +66,14 @@ export class MemoryTokenizers {
       }, this.#limits.startupTimeoutMs);
       const fail = () => {
         slot.failed = true; clearTimeout(timer);
-        slot.pending?.cleanup(); slot.pending?.reject(new Error("MEMORY_TOKENIZER_UNAVAILABLE"));
-        slot.pending = undefined; reject(new Error("MEMORY_TOKENIZER_UNAVAILABLE"));
+        if (slot.pending) {
+          const pending = slot.pending;
+          slot.pending = undefined;
+          worker.unref();
+          this.#settle(pending, new Error("MEMORY_TOKENIZER_UNAVAILABLE"));
+        }
+        for (const queued of slot.queue.splice(0)) this.#settle(queued, new Error("MEMORY_TOKENIZER_UNAVAILABLE"));
+        reject(new Error("MEMORY_TOKENIZER_UNAVAILABLE"));
       };
       worker.on("error", fail);
       worker.on("exit", fail);
@@ -64,33 +81,68 @@ export class MemoryTokenizers {
         if (message?.type === "ready") { clearTimeout(timer); resolve(); return; }
         const pending = slot.pending;
         if (!pending || message?.id !== pending.id) return;
-        slot.pending = undefined; pending.cleanup();
-        if (message.type === "count" && Number.isSafeInteger(message.count) && message.count >= 0) pending.resolve(message.count);
-        else pending.reject(new Error("MEMORY_TOKENIZER_UNAVAILABLE"));
+        slot.pending = undefined; worker.unref();
+        if (message.type === "count" && Number.isSafeInteger(message.count) && message.count >= 0) {
+          this.#settle(pending, undefined, message.count);
+        } else this.#settle(pending, new Error("MEMORY_TOKENIZER_UNAVAILABLE"));
+        this.#dispatch(slot);
       });
     });
     worker.unref();
   }
 
-  /** One outstanding count per model. Saturation omits recall instead of queuing chat behind it. */
+  #settle(request: CountRequest, error?: Error, count?: number): void {
+    if (request.settled) return;
+    request.settled = true;
+    request.signal.removeEventListener("abort", request.abort);
+    if (error) request.reject(error);
+    else request.resolve(count!);
+  }
+
+  #dispatch(slot: Slot): void {
+    if (this.#closed || slot.failed || slot.pending) return;
+    while (slot.queue.length) {
+      const next = slot.queue.shift()!;
+      if (next.signal.aborted) {
+        this.#settle(next, new Error("MEMORY_TOKENIZER_ABORTED"));
+        continue;
+      }
+      slot.pending = next;
+      slot.worker.ref();
+      try { slot.worker.postMessage({ id: next.id, text: next.text }); }
+      catch {
+        slot.pending = undefined;
+        slot.worker.unref();
+        this.#settle(next, new Error("MEMORY_TOKENIZER_UNAVAILABLE"));
+        continue;
+      }
+      return;
+    }
+  }
+
+  /** Bounded per-model FIFO; each caller's recall deadline also bounds its wait. */
   countTokens = (text: string, context: { model: MemoryModelIdentity; signal: AbortSignal }): Promise<number> => {
     try {
       context.signal.throwIfAborted();
       if (this.#closed) throw new Error("MEMORY_TOKENIZERS_CLOSED");
       const slot = this.#slots.get(key(context.model));
       if (!slot || slot.failed) throw new Error("MEMORY_TOKENIZER_UNAVAILABLE");
-      if (slot.pending) throw new Error("MEMORY_TOKENIZER_BUSY");
       if (Buffer.byteLength(text, "utf8") > this.#limits.maxInputBytes) throw new Error("MEMORY_TOKENIZER_INPUT_TOO_LARGE");
+      if (slot.pending && slot.queue.length >= this.#limits.maxQueuedRequests) throw new Error("MEMORY_TOKENIZER_BUSY");
       return new Promise<number>((resolve, reject) => {
-        const id = ++this.#sequence;
-        const abort = () => { slot.worker.unref(); reject(new Error("MEMORY_TOKENIZER_ABORTED")); };
-        const cleanup = () => { context.signal.removeEventListener("abort", abort); slot.worker.unref(); };
-        slot.pending = { id, resolve, reject, cleanup };
-        context.signal.addEventListener("abort", abort, { once: true });
-        slot.worker.ref();
-        // An aborted job keeps its slot until the worker finishes, bounding the queue.
-        try { slot.worker.postMessage({ id, text }); }
-        catch { slot.pending = undefined; cleanup(); reject(new Error("MEMORY_TOKENIZER_UNAVAILABLE")); }
+        const request: CountRequest = { id: ++this.#sequence, text, signal: context.signal,
+          resolve, reject, abort: () => {}, settled: false };
+        request.abort = () => {
+          if (slot.pending !== request) {
+            const index = slot.queue.indexOf(request);
+            if (index >= 0) slot.queue.splice(index, 1);
+          }
+          // Keep an active job's slot until the worker acknowledges it.
+          this.#settle(request, new Error("MEMORY_TOKENIZER_ABORTED"));
+        };
+        context.signal.addEventListener("abort", request.abort, { once: true });
+        slot.queue.push(request);
+        this.#dispatch(slot);
       });
     } catch (error) { return Promise.reject(error); }
   };
@@ -99,7 +151,13 @@ export class MemoryTokenizers {
     if (this.#closing) return this.#closing;
     this.#closed = true;
     for (const slot of this.#slots.values()) {
-      slot.pending?.cleanup(); slot.pending?.reject(new Error("MEMORY_TOKENIZERS_CLOSED")); slot.pending = undefined;
+      if (slot.pending) {
+        const pending = slot.pending;
+        slot.pending = undefined;
+        slot.worker.unref();
+        this.#settle(pending, new Error("MEMORY_TOKENIZERS_CLOSED"));
+      }
+      for (const queued of slot.queue.splice(0)) this.#settle(queued, new Error("MEMORY_TOKENIZERS_CLOSED"));
     }
     this.#closing = Promise.all([...this.#slots.values()].map(slot => slot.worker.terminate()))
       .then(() => { this.#slots.clear(); });

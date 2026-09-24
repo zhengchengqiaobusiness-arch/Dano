@@ -1,0 +1,27 @@
+{
+  "candidate": {
+    "dano": "0.2.41",
+    "piOpenViking": "0.1.13",
+    "openViking": "v0.4.20",
+    "model": "mimo-v2.5",
+    "tokenizerRevision": "63651580ca774f8504f676040460aed3e1244ac1"
+  },
+  "surface": "published package standard entry through protected ordinary Pi CLI RPC in isolated Podman image",
+  "assertions": {
+    "standardCliRpc": true,
+    "realService": true,
+    "explicitConsent": true,
+    "ready": true,
+    "viewContentAndSource": true,
+    "newSessionRecall": true,
+    "pause": true,
+    "automaticCollectionUnapproved": true,
+    "credentialAbsentFromEvents": true
+  },
+  "syntheticAccountDeleted": true,
+  "limitations": [
+    "One synthetic USER and one save/recall case",
+    "No independent Browser owner or full quality matrix",
+    "Additional probe layer above rebuilt Dano image"
+  ]
+}

@@ -25,7 +25,7 @@ async function fixture() {
     encryptionKey: "ab".repeat(32), encryptionKeyVersion: "v1", requestTimeoutMs: 1000, maxContentBytes: 16384, policyVersion: "v1",
     policy: { maxPayloadBytes: 4096, recallTimeoutMs: 1000, recallTokenBudget: 1500, recallLimit: 5, minimumScore: 0.5 },
     scheduler: { pollIntervalMs: 1000, initialBackoffMs: 1000, maxBackoffMs: 5000, maxAttemptsPerPhase: 5, maxOperationsPerTick: 4 },
-    tokenizerLimits: { maxAssetBytes: 65536, maxInputBytes: 8192, startupTimeoutMs: 5000 },
+    tokenizerLimits: { maxAssetBytes: 65536, maxInputBytes: 8192, startupTimeoutMs: 5000, maxQueuedRequests: 8 },
     tokenizers: [{ model,
       tokenizer: await asset("tokenizer.json", { version: "1.0", added_tokens: [], normalizer: null,
         pre_tokenizer: { type: "Whitespace" }, post_processor: null, decoder: null,

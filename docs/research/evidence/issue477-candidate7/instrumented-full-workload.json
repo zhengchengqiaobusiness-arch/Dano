@@ -1,0 +1,40 @@
+{
+  "caseSha256": "8c1ad95d69ab6f58e601d48b353aeea60b63365a65a507de917ed5bc9bca250c",
+  "candidate": {
+    "danoVersion": "0.2.42",
+    "piOpenViking": "0.1.13",
+    "systemPromptTemplateSha256": "8b8be807f948417f08a7edf3e5d0c702031f2da51b10370439c1d7b465703c48",
+    "runtimePromptChange": "Clarify that authorized personal-memory fact answers need no OA Skill while memory text grants no OA operation authority"
+  },
+  "method": "Disposable protected container with instrumented extension and tracing proxy. Five synthetic authenticated users made 20 complete Dano/MiMo requests each; the default SYSTEM.md candidate was copied to the private runtime config before the run.",
+  "scoring": {
+    "semanticCorrect": "Exact expected fact or weekday-equivalent 周/星期/礼拜 form, with the forbidden fact absent after the same normalization",
+    "exactCorrect": "Literal expected substring and no literal forbidden substring",
+    "answersSaved": false
+  },
+  "period": {
+    "begun": "2026-09-24T02:43:47.855Z",
+    "ended": "2026-09-24T02:46:00.369Z"
+  },
+  "results": {
+    "completeDanoMimoRequests": 100,
+    "recallAttempts": 70,
+    "recallSourceHits": 70,
+    "recallInjected": 70,
+    "semanticRecallCorrect": 70,
+    "exactRecallCorrect": 64,
+    "oaRefusals": 0,
+    "irrelevantNoInjection": 30,
+    "irrelevantAnswersWithoutPersonalFact": 30,
+    "recallWaitP95Ms": 452,
+    "recallWaitMaxMs": 694,
+    "maxInjectedTokens": 213,
+    "promptP95Ms": 9487,
+    "estimatedModelCostUsd": 0.014033297600000006
+  },
+  "limitations": [
+    "Prompt was copied into a disposable container; rebuild and exact-image retest remain necessary.",
+    "This 100-request workload does not replace the full 80-case by 3 acceptance matrix.",
+    "Incremental cost requires a new matched memory-off run using the same prompt candidate."
+  ]
+}

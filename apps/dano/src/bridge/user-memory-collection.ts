@@ -1,5 +1,5 @@
 import { CollectionFactSelector, CollectionScheduler, CollectionSessionRegistry,
-  type CollectionSchedulerOptions, type FileStateStore, type MemoryDelivery,
+  type CollectionSchedulerOptions, type StateStore, type MemoryDelivery,
   type MemoryExtensionOptions } from "@josephyoung/pi-openviking/host";
 import type { MemoryUserProvenance } from "./memory-user-provenance.js";
 import type { MemoryTaskFactConfig } from "./memory-task-facts.js";
@@ -19,7 +19,7 @@ export class UserMemoryCollection {
   readonly extension: NonNullable<MemoryExtensionOptions["collection"]>;
   readonly #scheduler: CollectionScheduler;
 
-  constructor(options: { store: FileStateStore; delivery: MemoryDelivery; sessionRoot: string;
+  constructor(options: { store: StateStore; delivery: MemoryDelivery; sessionRoot: string;
     provenance: MemoryUserProvenance; configuration: UserMemoryCollectionOptions;
     wakeDelivery(): void }) {
     const configured = options.configuration;

@@ -41,7 +41,7 @@ export async function runProtectedHost(): Promise<number> {
           modelsPath: join(getAgentDir(), "models.json"), refreshOnCreate: false, allowModelNetwork: false,
           signal: stopped.signal }).catch(error => { collectionModels = undefined; throw error; });
         return collectionModels;
-      });
+      }, profile.memory.recoveryDirectory);
     search = await startManagedSearch({ signal: stopped.signal,
       host: process.env.OPEN_WEBSEARCH_HOST, port: process.env.OPEN_WEBSEARCH_PORT,
       onFailure: () => { searchFailed = true; stopped.abort(new Error("SEARCH_DAEMON_EXITED")); } });

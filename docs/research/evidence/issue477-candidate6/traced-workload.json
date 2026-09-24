@@ -1,0 +1,40 @@
+{
+  "candidate": "issue477-evaluation-candidate6.json",
+  "kind": "disposable instrumented synthetic stack; proxy and extension debug logs were not part of the published package or canonical image",
+  "period": {
+    "begun": "2026-09-24T02:35:03.476Z",
+    "ended": "2026-09-24T02:38:02.734Z"
+  },
+  "workload": {
+    "syntheticUsers": 5,
+    "completeDanoMimoRequests": 100,
+    "recallRequests": 70,
+    "irrelevantRequests": 30
+  },
+  "retrieval": {
+    "searchHttp200": 100,
+    "rerankHttp200": 100,
+    "recallSourceContainsExpected": 70
+  },
+  "context": {
+    "recallInjected": 70,
+    "irrelevantNoInjection": 30,
+    "cachedContextReuses": 2,
+    "recallWaitP95Ms": 759,
+    "recallWaitMaxMs": 837,
+    "injectedTokenMax": 213,
+    "errors": 0
+  },
+  "model": {
+    "strictExactRecallCorrect": 57,
+    "recallAttempts": 70,
+    "irrelevantResponseNoFact": 30,
+    "promptP95Ms": 14747,
+    "estimatedModelCostUsd": 0.009417895199999995
+  },
+  "limitations": [
+    "An instrumented disposable container was used to observe context injection; this run is diagnostic, not a canonical image release proof.",
+    "Strict string scoring treats equivalent weekday forms such as 周三 and 星期三 as different.",
+    "Despite complete retrieval and injection, strict model-answer quality is below the frozen 90% gate."
+  ]
+}

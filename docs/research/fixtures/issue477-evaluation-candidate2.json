@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "frozenAt": "2026-09-24",
+  "caseFile": "issue477-evaluation.json",
+  "caseSha256": "8c1ad95d69ab6f58e601d48b353aeea60b63365a65a507de917ed5bc9bca250c",
+  "purpose": "Re-evaluate the unchanged Spec 11.1 cases after the failed vector-only relevance baseline",
+  "candidate": {
+    "dano": "0.2.36",
+    "piOpenViking": "0.1.12",
+    "openViking": "v0.4.20",
+    "embedding": "bge-small-zh-v1.5-f16",
+    "reranker": "bge-reranker-v2-m3-Q4_K_M",
+    "chatModel": "mimo-v2.5",
+    "extractionModel": "mimo-v2.5",
+    "platform": "linux/arm64",
+    "cpus": 4,
+    "ramBytes": 4076376064
+  },
+  "reranker": {
+    "image": "ghcr.io/ggml-org/llama.cpp:server@sha256:fb8f521cdfee1b763a6ef0d6633922e780c1393c03b49945526550cf55010343",
+    "modelSha256": "e186a244ed455b4ab66ec64339ce7427a6ae13f5c0b5e544de96e50f0f8b3673",
+    "url": "http://reranker:8080/v1/rerank",
+    "model": "bge-reranker-v2-m3",
+    "minimumLogit": 0,
+    "timeoutMs": 750,
+    "maxInputBytes": 16384,
+    "maxDocumentBytes": 4096,
+    "failureBehavior": "omit all memory for this request"
+  },
+  "unchangedThresholds": {
+    "recallSourceHitMin": 0.9,
+    "recallCorrectMin": 0.9,
+    "irrelevantNoInjectionMin": 0.9,
+    "isolationDeletionAuthorizationFailuresAllowed": 0,
+    "steadyRecallAddedP95Ms": 1000,
+    "hardMemoryWaitMaxMs": 2000,
+    "injectedTokenMax": 1500,
+    "healthySaveReadyP95Ms": 60000,
+    "incrementalModelCostRatioMax": 0.2
+  },
+  "pricing": {
+    "observedOn": "2026-09-23",
+    "currency": "USD",
+    "unit": "per_million_tokens",
+    "mimoV25InputCacheHit": 0.0028,
+    "mimoV25InputCacheMiss": 0.14,
+    "mimoV25Output": 0.28,
+    "source": "https://platform.xiaomimimo.com/docs/zh-CN/integration/roocode",
+    "localReranker": "Report CPU/RAM usage separately; no API token fee is assumed"
+  }
+}

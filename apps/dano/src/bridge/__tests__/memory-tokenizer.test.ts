@@ -12,7 +12,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 const model = { provider: "fixture", api: "openai-completions", id: "word-level" };
-const limits = { maxAssetBytes: 10000, maxInputBytes: 500, startupTimeoutMs: 5000 };
+const limits = { maxAssetBytes: 10000, maxInputBytes: 500, startupTimeoutMs: 5000, maxQueuedRequests: 4 };
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "dano-tokenizer-")); roots.push(root);
   const write = async (name: string, value: unknown) => {
@@ -48,16 +48,37 @@ it("checks asset hashes and rejects symlinks, oversized assets and duplicate mod
   await expect(MemoryTokenizers.create([binding], { ...limits, maxAssetBytes: 1 })).rejects.toThrow("MEMORY_TOKENIZER_UNAVAILABLE");
   await expect(MemoryTokenizers.create([binding, binding], limits)).rejects.toThrow("INVALID_MEMORY_TOKENIZER_BINDING");
 });
-it("bounds concurrent work, supports cancellation and rejects work after close", async () => {
+it("counts five simultaneous requests for one model without dropping recall", async () => {
+  const { service } = await start();
+  const counts = await Promise.all(Array.from({ length: 5 }, () =>
+    service.countTokens("hello world", { model, signal: new AbortController().signal })));
+  expect(counts).toEqual([2, 2, 2, 2, 2]);
+});
+it("bounds queued work, supports cancellation and rejects work after close", async () => {
   const { service } = await start();
   const controller = new AbortController();
   const first = service.countTokens("hello", { model, signal: controller.signal });
   const rejected = expect(first).rejects.toThrow("MEMORY_TOKENIZER_ABORTED");
-  await expect(service.countTokens("world", { model, signal: new AbortController().signal })).rejects.toThrow("MEMORY_TOKENIZER_BUSY");
+  const second = service.countTokens("world", { model, signal: new AbortController().signal });
   controller.abort(); await rejected;
+  expect(await second).toBe(1);
   await expect(service.countTokens("hello", { model, signal: controller.signal })).rejects.toBeDefined();
   const closing = service.close(); expect(service.close()).toBe(closing); await closing;
   await expect(service.countTokens("hello", { model, signal: new AbortController().signal })).rejects.toThrow("MEMORY_TOKENIZERS_CLOSED");
+});
+it("releases an aborted queued request and rejects requests beyond the configured bound", async () => {
+  const binding = await fixture();
+  const service = await MemoryTokenizers.create([binding], { ...limits, maxQueuedRequests: 1 }); services.push(service);
+  const first = service.countTokens("hello", { model, signal: new AbortController().signal });
+  const controller = new AbortController();
+  const second = service.countTokens("world", { model, signal: controller.signal });
+  const rejected = expect(second).rejects.toThrow("MEMORY_TOKENIZER_ABORTED");
+  await expect(service.countTokens("hello", { model, signal: new AbortController().signal }))
+    .rejects.toThrow("MEMORY_TOKENIZER_BUSY");
+  controller.abort(); await rejected;
+  const replacement = service.countTokens("world", { model, signal: new AbortController().signal });
+  expect(await first).toBe(1);
+  expect(await replacement).toBe(1);
 });
 it("limits UTF-8 input bytes before posting work", async () => {
   const { service } = await start();

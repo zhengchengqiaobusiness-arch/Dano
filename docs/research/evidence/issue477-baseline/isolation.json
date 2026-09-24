@@ -1,0 +1,542 @@
+[
+  {
+    "id": "I-01-01",
+    "repeat": 1,
+    "operation": "search",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-01-02",
+    "repeat": 1,
+    "operation": "directRead",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-01-03",
+    "repeat": 1,
+    "operation": "directWrite",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-01-04",
+    "repeat": 1,
+    "operation": "export",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-01-05",
+    "repeat": 1,
+    "operation": "replay",
+    "status": 200,
+    "leaked": false,
+    "acceptedIntoActorNamespace": true,
+    "passed": true
+  },
+  {
+    "id": "I-02-01",
+    "repeat": 1,
+    "operation": "search",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-02-02",
+    "repeat": 1,
+    "operation": "directRead",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-02-03",
+    "repeat": 1,
+    "operation": "directWrite",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-02-04",
+    "repeat": 1,
+    "operation": "export",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-02-05",
+    "repeat": 1,
+    "operation": "replay",
+    "status": 200,
+    "leaked": false,
+    "acceptedIntoActorNamespace": true,
+    "passed": true
+  },
+  {
+    "id": "I-03-01",
+    "repeat": 1,
+    "operation": "search",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-03-02",
+    "repeat": 1,
+    "operation": "directRead",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-03-03",
+    "repeat": 1,
+    "operation": "directWrite",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-03-04",
+    "repeat": 1,
+    "operation": "export",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-03-05",
+    "repeat": 1,
+    "operation": "replay",
+    "status": 200,
+    "leaked": false,
+    "acceptedIntoActorNamespace": true,
+    "passed": true
+  },
+  {
+    "id": "I-04-01",
+    "repeat": 1,
+    "operation": "search",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-04-02",
+    "repeat": 1,
+    "operation": "directRead",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-04-03",
+    "repeat": 1,
+    "operation": "directWrite",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-04-04",
+    "repeat": 1,
+    "operation": "export",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-04-05",
+    "repeat": 1,
+    "operation": "replay",
+    "status": 200,
+    "leaked": false,
+    "acceptedIntoActorNamespace": true,
+    "passed": true
+  },
+  {
+    "id": "I-01-01",
+    "repeat": 2,
+    "operation": "search",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-01-02",
+    "repeat": 2,
+    "operation": "directRead",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-01-03",
+    "repeat": 2,
+    "operation": "directWrite",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-01-04",
+    "repeat": 2,
+    "operation": "export",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-01-05",
+    "repeat": 2,
+    "operation": "replay",
+    "status": 200,
+    "leaked": false,
+    "acceptedIntoActorNamespace": true,
+    "passed": true
+  },
+  {
+    "id": "I-02-01",
+    "repeat": 2,
+    "operation": "search",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-02-02",
+    "repeat": 2,
+    "operation": "directRead",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-02-03",
+    "repeat": 2,
+    "operation": "directWrite",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-02-04",
+    "repeat": 2,
+    "operation": "export",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-02-05",
+    "repeat": 2,
+    "operation": "replay",
+    "status": 200,
+    "leaked": false,
+    "acceptedIntoActorNamespace": true,
+    "passed": true
+  },
+  {
+    "id": "I-03-01",
+    "repeat": 2,
+    "operation": "search",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-03-02",
+    "repeat": 2,
+    "operation": "directRead",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-03-03",
+    "repeat": 2,
+    "operation": "directWrite",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-03-04",
+    "repeat": 2,
+    "operation": "export",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-03-05",
+    "repeat": 2,
+    "operation": "replay",
+    "status": 200,
+    "leaked": false,
+    "acceptedIntoActorNamespace": true,
+    "passed": true
+  },
+  {
+    "id": "I-04-01",
+    "repeat": 2,
+    "operation": "search",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-04-02",
+    "repeat": 2,
+    "operation": "directRead",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-04-03",
+    "repeat": 2,
+    "operation": "directWrite",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-04-04",
+    "repeat": 2,
+    "operation": "export",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-04-05",
+    "repeat": 2,
+    "operation": "replay",
+    "status": 200,
+    "leaked": false,
+    "acceptedIntoActorNamespace": true,
+    "passed": true
+  },
+  {
+    "id": "I-01-01",
+    "repeat": 3,
+    "operation": "search",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-01-02",
+    "repeat": 3,
+    "operation": "directRead",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-01-03",
+    "repeat": 3,
+    "operation": "directWrite",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-01-04",
+    "repeat": 3,
+    "operation": "export",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-01-05",
+    "repeat": 3,
+    "operation": "replay",
+    "status": 200,
+    "leaked": false,
+    "acceptedIntoActorNamespace": true,
+    "passed": true
+  },
+  {
+    "id": "I-02-01",
+    "repeat": 3,
+    "operation": "search",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-02-02",
+    "repeat": 3,
+    "operation": "directRead",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-02-03",
+    "repeat": 3,
+    "operation": "directWrite",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-02-04",
+    "repeat": 3,
+    "operation": "export",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-02-05",
+    "repeat": 3,
+    "operation": "replay",
+    "status": 200,
+    "leaked": false,
+    "acceptedIntoActorNamespace": true,
+    "passed": true
+  },
+  {
+    "id": "I-03-01",
+    "repeat": 3,
+    "operation": "search",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-03-02",
+    "repeat": 3,
+    "operation": "directRead",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-03-03",
+    "repeat": 3,
+    "operation": "directWrite",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-03-04",
+    "repeat": 3,
+    "operation": "export",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-03-05",
+    "repeat": 3,
+    "operation": "replay",
+    "status": 200,
+    "leaked": false,
+    "acceptedIntoActorNamespace": true,
+    "passed": true
+  },
+  {
+    "id": "I-04-01",
+    "repeat": 3,
+    "operation": "search",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-04-02",
+    "repeat": 3,
+    "operation": "directRead",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-04-03",
+    "repeat": 3,
+    "operation": "directWrite",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-04-04",
+    "repeat": 3,
+    "operation": "export",
+    "status": 403,
+    "leaked": false,
+    "acceptedIntoActorNamespace": false,
+    "passed": true
+  },
+  {
+    "id": "I-04-05",
+    "repeat": 3,
+    "operation": "replay",
+    "status": 200,
+    "leaked": false,
+    "acceptedIntoActorNamespace": true,
+    "passed": true
+  }
+]

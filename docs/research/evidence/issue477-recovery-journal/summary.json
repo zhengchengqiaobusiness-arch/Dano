@@ -1,0 +1,34 @@
+{
+  "date": "2026-09-24",
+  "scope": "isolated local OpenViking v0.4.20 and synthetic USER only",
+  "danoVersion": "0.2.40",
+  "piOpenVikingVersion": "0.1.12",
+  "protectedImageId": "adab700147944be0aa422912abdca7fddc4147e0966fbda776d1234685862718",
+  "owner": "dano477_reconcile_synthetic_01",
+  "eventsAfterCheckpoint": ["removeSource", "removeMemory"],
+  "matchedOldVolumeRehearsal": {
+    "stoppedStackBeforeCopy": true,
+    "oldProtectedDataCopyComparedEqual": true,
+    "oldOpenVikingDataCopyComparedEqual": true,
+    "restoredDataRevisionBeforeReplay": 2,
+    "recoveryMirrorRevision": 3,
+    "oldOpenVikingDocumentPresentBeforeReplay": true,
+    "oldOpenVikingSessionPresentBeforeReplay": true,
+    "preflight": "passed; owners=1; events=2",
+    "replay": "passed; owners=1; events=2",
+    "documentPresentAfterReplay": false,
+    "sessionPresentAfterReplay": false,
+    "restoredDataRevisionAfterReplay": 3,
+    "secondReplay": "passed; owners=1; events=2",
+    "alternateContainerRemoved": true,
+    "oldVolumeClonesRemoved": true,
+    "syntheticUserRemoved": true,
+    "testDataRecoveryCheckpointVolumesRemoved": true
+  },
+  "limitations": [
+    "One synthetic USER; no other owner's data was deleted",
+    "The restored OpenViking volume includes unrelated existing test data, but no independent second-owner browser verification was performed",
+    "No new owner, new writer, credential rotation, incomplete governance job or arbitrary upgrade-window operation was reconciled",
+    "The old source image was the same 0.2.40 candidate; this does not replace a full old-version to candidate matched rollback"
+  ]
+}

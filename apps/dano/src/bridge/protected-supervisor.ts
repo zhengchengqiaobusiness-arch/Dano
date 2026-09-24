@@ -17,6 +17,7 @@ export interface ProtectedSupervisorOptions {
   sessionsRoot: string;
   hostStateRoot: string;
   memoryConfigDirectory?: string;
+  memoryRecoveryDirectory?: string;
   identities: { directory: string; firstUid: number; firstGid: number; count: number; lockTimeoutMs: number };
   maxWorkers: number;
   broker: WorkerSupervisorOptions["broker"];
@@ -81,14 +82,22 @@ export async function runProtectedSupervisor(options: ProtectedSupervisorOptions
     || inside(options.sessionsRoot, options.hostStateRoot) || inside(options.hostStateRoot, options.sessionsRoot)) throw unsafe();
   const identities = new WorkerIdentityRegistry({ ...options.identities, hostUid: host.hostUid, hostGid: host.hostGid });
   const installation = await realpath(options.broker.installationDir);
-  if (options.memoryConfigDirectory !== undefined) {
+  if ((options.memoryConfigDirectory === undefined) !== (options.memoryRecoveryDirectory === undefined)) throw unsafe();
+  if (options.memoryConfigDirectory !== undefined && options.memoryRecoveryDirectory !== undefined) {
     const directory = options.memoryConfigDirectory;
     if (!isAbsolute(directory) || resolve(directory) !== directory || await realpath(directory) !== directory
       || [...roots, installation].some(root => inside(root, directory) || inside(directory, root))) throw unsafe();
     const metadata = await lstat(directory);
     if (!metadata.isDirectory() || metadata.uid !== host.hostUid || metadata.gid !== host.hostGid
       || (metadata.mode & 0o7777) !== 0o700) throw unsafe();
-    host.memory = { configurationDirectory: directory, stateDirectory: join(options.hostStateRoot, "memory-service") };
+    const recovery = options.memoryRecoveryDirectory;
+    if (!isAbsolute(recovery) || resolve(recovery) !== recovery || await realpath(recovery) !== recovery
+      || [...roots, installation, directory].some(root => inside(root, recovery) || inside(recovery, root))) throw unsafe();
+    const recoveryMetadata = await lstat(recovery);
+    if (!recoveryMetadata.isDirectory() || recoveryMetadata.uid !== host.hostUid || recoveryMetadata.gid !== host.hostGid
+      || (recoveryMetadata.mode & 0o7777) !== 0o700) throw unsafe();
+    host.memory = { configurationDirectory: directory, stateDirectory: join(options.hostStateRoot, "memory-service"),
+      recoveryDirectory: recovery };
   }
   await rootInstallation(installation);
   const entry = await rootFile(fileURLToPath(new URL("./protected-host-entry.js", import.meta.url)));

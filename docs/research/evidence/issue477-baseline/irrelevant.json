@@ -1,0 +1,242 @@
+[
+  {
+    "id": "N-01-01",
+    "repeat": 1,
+    "returned": 1,
+    "selectedAtCandidateScore": 1,
+    "topScore": 0.5095755457878113,
+    "latencyMs": 54.15
+  },
+  {
+    "id": "N-01-02",
+    "repeat": 1,
+    "returned": 1,
+    "selectedAtCandidateScore": 1,
+    "topScore": 0.44062983989715576,
+    "latencyMs": 17.52
+  },
+  {
+    "id": "N-02-01",
+    "repeat": 1,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.5354921817779541,
+    "latencyMs": 12.66
+  },
+  {
+    "id": "N-02-02",
+    "repeat": 1,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.45686832070350647,
+    "latencyMs": 12.51
+  },
+  {
+    "id": "N-03-01",
+    "repeat": 1,
+    "returned": 2,
+    "selectedAtCandidateScore": 2,
+    "topScore": 0.47888311743736267,
+    "latencyMs": 10.78
+  },
+  {
+    "id": "N-03-02",
+    "repeat": 1,
+    "returned": 2,
+    "selectedAtCandidateScore": 2,
+    "topScore": 0.4488717019557953,
+    "latencyMs": 14.85
+  },
+  {
+    "id": "N-04-01",
+    "repeat": 1,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.45840251445770264,
+    "latencyMs": 12.35
+  },
+  {
+    "id": "N-04-02",
+    "repeat": 1,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.3537546396255493,
+    "latencyMs": 11.58
+  },
+  {
+    "id": "N-05-01",
+    "repeat": 1,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.4965291917324066,
+    "latencyMs": 8.76
+  },
+  {
+    "id": "N-05-02",
+    "repeat": 1,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.42945876717567444,
+    "latencyMs": 12.71
+  },
+  {
+    "id": "N-01-01",
+    "repeat": 2,
+    "returned": 1,
+    "selectedAtCandidateScore": 1,
+    "topScore": 0.5095755457878113,
+    "latencyMs": 26.49
+  },
+  {
+    "id": "N-01-02",
+    "repeat": 2,
+    "returned": 1,
+    "selectedAtCandidateScore": 1,
+    "topScore": 0.44062983989715576,
+    "latencyMs": 12.02
+  },
+  {
+    "id": "N-02-01",
+    "repeat": 2,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.5354921817779541,
+    "latencyMs": 13.12
+  },
+  {
+    "id": "N-02-02",
+    "repeat": 2,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.45686832070350647,
+    "latencyMs": 14.37
+  },
+  {
+    "id": "N-03-01",
+    "repeat": 2,
+    "returned": 2,
+    "selectedAtCandidateScore": 2,
+    "topScore": 0.47888311743736267,
+    "latencyMs": 18.05
+  },
+  {
+    "id": "N-03-02",
+    "repeat": 2,
+    "returned": 2,
+    "selectedAtCandidateScore": 2,
+    "topScore": 0.4488717019557953,
+    "latencyMs": 12.06
+  },
+  {
+    "id": "N-04-01",
+    "repeat": 2,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.45840251445770264,
+    "latencyMs": 10.03
+  },
+  {
+    "id": "N-04-02",
+    "repeat": 2,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.3537546396255493,
+    "latencyMs": 15.95
+  },
+  {
+    "id": "N-05-01",
+    "repeat": 2,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.4965291917324066,
+    "latencyMs": 11.51
+  },
+  {
+    "id": "N-05-02",
+    "repeat": 2,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.42945876717567444,
+    "latencyMs": 12.98
+  },
+  {
+    "id": "N-01-01",
+    "repeat": 3,
+    "returned": 1,
+    "selectedAtCandidateScore": 1,
+    "topScore": 0.5095755457878113,
+    "latencyMs": 28.8
+  },
+  {
+    "id": "N-01-02",
+    "repeat": 3,
+    "returned": 1,
+    "selectedAtCandidateScore": 1,
+    "topScore": 0.44062983989715576,
+    "latencyMs": 15.89
+  },
+  {
+    "id": "N-02-01",
+    "repeat": 3,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.5354921817779541,
+    "latencyMs": 8.7
+  },
+  {
+    "id": "N-02-02",
+    "repeat": 3,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.45686832070350647,
+    "latencyMs": 15.63
+  },
+  {
+    "id": "N-03-01",
+    "repeat": 3,
+    "returned": 2,
+    "selectedAtCandidateScore": 2,
+    "topScore": 0.47888311743736267,
+    "latencyMs": 15.42
+  },
+  {
+    "id": "N-03-02",
+    "repeat": 3,
+    "returned": 2,
+    "selectedAtCandidateScore": 2,
+    "topScore": 0.4488717019557953,
+    "latencyMs": 14.43
+  },
+  {
+    "id": "N-04-01",
+    "repeat": 3,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.45840251445770264,
+    "latencyMs": 12.01
+  },
+  {
+    "id": "N-04-02",
+    "repeat": 3,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.3537546396255493,
+    "latencyMs": 16.1
+  },
+  {
+    "id": "N-05-01",
+    "repeat": 3,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.4965291917324066,
+    "latencyMs": 11.14
+  },
+  {
+    "id": "N-05-02",
+    "repeat": 3,
+    "returned": 4,
+    "selectedAtCandidateScore": 4,
+    "topScore": 0.42945876717567444,
+    "latencyMs": 16.77
+  }
+]

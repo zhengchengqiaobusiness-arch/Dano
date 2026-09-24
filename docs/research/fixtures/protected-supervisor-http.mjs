@@ -72,6 +72,9 @@ if (withMemory) {
   options.memoryConfigDirectory = join(root, 'private-config');
   await mkdir(options.memoryConfigDirectory, { mode: 0o700 });
   await chown(options.memoryConfigDirectory, hostUid, hostGid);
+  options.memoryRecoveryDirectory = join(root, 'memory-recovery');
+  await mkdir(options.memoryRecoveryDirectory, { mode: 0o700 });
+  await chown(options.memoryRecoveryDirectory, hostUid, hostGid);
   const asset = async (name, value) => {
     const path = join(root, name), bytes = JSON.stringify(value); await writeFile(path, bytes, { mode: 0o644 });
     return { path, sha256: createHash('sha256').update(bytes).digest('hex') };
@@ -80,7 +83,7 @@ if (withMemory) {
     encryptionKey: 'ab'.repeat(32), encryptionKeyVersion: 'v1', requestTimeoutMs: 100, maxContentBytes: 16384, policyVersion: 'v1',
     policy: { maxPayloadBytes: 4096, recallTimeoutMs: 1000, recallTokenBudget: 1500, recallLimit: 5, minimumScore: 0.5 },
     scheduler: { pollIntervalMs: 1000, initialBackoffMs: 1000, maxBackoffMs: 5000, maxAttemptsPerPhase: 5, maxOperationsPerTick: 4 },
-    tokenizerLimits: { maxAssetBytes: 65536, maxInputBytes: 8192, startupTimeoutMs: 5000 },
+    tokenizerLimits: { maxAssetBytes: 65536, maxInputBytes: 8192, startupTimeoutMs: 5000, maxQueuedRequests: 8 },
     tokenizers: [{ model: { provider: 'fixture', api: 'openai-completions', id: 'fixture' },
       tokenizer: await asset('tokenizer.json', { version: '1.0', added_tokens: [], normalizer: null,
         pre_tokenizer: { type: 'Whitespace' }, post_processor: null, decoder: null,

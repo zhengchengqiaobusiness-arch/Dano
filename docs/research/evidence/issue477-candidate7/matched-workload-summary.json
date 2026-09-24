@@ -1,0 +1,47 @@
+{
+  "image": {
+    "tag": "localhost/dano477-protected:0.2.42-memory-prompt",
+    "id": "8a314b153305ddd747144ad4a2a6a38d74c0158fdb03b97292d8af4dd503b2b",
+    "construction": "single SYSTEM.md COPY layer atop the previously full-built 0.2.42 queue image; full-source Dockerfile rebuild was blocked by Podman disk exhaustion"
+  },
+  "workload": {
+    "fiveSyntheticAuthenticatedUsers": true,
+    "completeRequestsPerArm": 100,
+    "sameFrozenCases": true,
+    "on": {
+      "phase": "workload-image-on",
+      "begun": "2026-09-24T02:55:21.639Z",
+      "ended": "2026-09-24T02:57:51.685Z",
+      "attempts": 100,
+      "completed": 100,
+      "recallCorrect": 69,
+      "recallAttempts": 70,
+      "irrelevantResponseNoFact": 30,
+      "irrelevantAttempts": 30,
+      "promptP95Ms": 13976,
+      "estimatedModelCostUsd": 0.010675694399999998
+    },
+    "off": {
+      "phase": "workload-image-off",
+      "begun": "2026-09-24T02:58:04.230Z",
+      "ended": "2026-09-24T03:03:13.193Z",
+      "attempts": 100,
+      "completed": 100,
+      "recallCorrect": 4,
+      "recallAttempts": 70,
+      "irrelevantResponseNoFact": 30,
+      "irrelevantAttempts": 30,
+      "promptP95Ms": 30021,
+      "estimatedModelCostUsd": 0.0193191264
+    },
+    "incrementalEstimatedModelCostRatio": -0.44740283908489786,
+    "onSemanticRecallCorrect": 69,
+    "onExactRecallCorrect": 64,
+    "onOARefusals": 1
+  },
+  "interpretation": [
+    "The on arm meets the 90% semantic-answer and 20% incremental-cost thresholds for this workload.",
+    "The cost ratio is an observed matched-workload result; different answer lengths and model cache usage prevent attributing the full difference to memory alone.",
+    "Full-source image rebuild, browser/provider proof, save-ready timing, and the 80-case x3 matrix remain open."
+  ]
+}

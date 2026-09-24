@@ -2,7 +2,196 @@
 
 This directory contains deployment-specific defaults and proxy config.
 
-## Protected memory image (acceptance only)
+## Protected memory release candidate
+
+The opt-in release combination is recorded in
+[`memory-release.json`](memory-release.json): the Dano product version recorded there,
+the exact `@josephyoung/pi-openviking` version recorded there, and upstream OpenViking `v0.4.20`
+at the recorded multi-platform OCI index digest. The platform manifests are
+recorded alongside the index so the selected Linux architecture can be checked
+after pull. The Dockerfile uses `pnpm install --frozen-lockfile`; the extension
+and all runtime tools are installed in the image build, never on startup.
+Run `node scripts/check-memory-release.mjs` before building.
+
+For an opt-in deployment, provision these distinct resources before Compose:
+
+- A private deploy-control directory `DANO_OPENVIKING_CONFIG_DIR`, mode 0700,
+  with `ov.conf` mode 0600. Set `server.host` to `0.0.0.0`, port `1933`, a
+  nonempty root key, and absolute `storage.workspace` to
+  `/app/.openviking/data`. Configure `vlm` for extraction independently from
+  `embedding.dense`. The fixed candidate uses `embedding.dense.provider` =
+  `openai`, `api_base` = `http://embedding:8080/v1`, the manifest's model name
+  and dimension, and `encoding_format` = `float`.
+  Do not put this config, its key, or model credentials in source, image,
+  Compose environment, or a command line.
+- A read-only model asset directory `DANO_OPENVIKING_MODELS_DIR` for the
+  independent Embedding and reranking services. Set `DANO_EMBEDDING_IMAGE`,
+  `DANO_EMBEDDING_MODEL_FILE` and `DANO_EMBEDDING_MODEL_NAME` from the release
+  manifest, as well as `DANO_RERANKER_IMAGE`, `DANO_RERANKER_MODEL_FILE` and
+  `DANO_RERANKER_MODEL_NAME`. The release check hashes both GGUF files before
+  startup. Both services run the pinned upstream llama.cpp server with no
+  published host ports.
+- An external named `DANO_OPENVIKING_DATA_VOLUME` for OpenViking's
+  `/app/.openviking`, separate from the protected Dano config/data volumes.
+  Keep the Dano source checkout, deploy-control files and runtime state in
+  different paths. The private Dano `memory-service.json` must name
+  `http://openviking:1933` as its origin and retain the management-key and
+  encryption-key versions across restart and recovery.
+  For this candidate its private `reranker` object must set `url` to
+  `http://reranker:8080/v1/rerank`, `model` to the manifest model name,
+  `minimumLogit` to `0`, `timeoutMs` to `900`, `maxInputBytes` to `16384`,
+  `maxDocumentBytes` to `4096`, and `maxCandidates` to `1`. These are frozen in
+  [the fifth evaluation configuration](../docs/research/fixtures/issue477-evaluation-candidate5.json).
+  A malformed or unavailable reranker omits memory for that request; it does
+  not fall back to the vector-only result that failed the relevance gate.
+
+Set `DANO_OPENVIKING_IMAGE` to the exact `openVikingImage` value in the release
+manifest, then run `node scripts/check-memory-release.mjs --deployment`.
+Append `deploy/compose/memory.yml` to the base and protected overlays. It
+attaches Dano and OpenViking to the internal `memory-backend` network; only
+OpenViking also joins the model-provider egress network. The Embedding
+service remains only on the internal network. The overlay publishes no
+OpenViking, Embedding or reranker host port and uses the official OpenViking image
+without VikingBot. Dano does
+not depend on OpenViking health to start, so disabled or unavailable memory
+must leave ordinary chat available. Do not add an OpenViking port mapping or
+put the management key in `app.environment`. Podman may inject host proxy
+variables into the container; `DANO_MEMORY_NO_PROXY` must include `embedding`,
+`openviking`, `reranker`, loopback addresses and any model provider reached directly.
+OpenViking `v0.4.20` `/find` uses its QUICK vector path even when a server-side
+reranker is configured. Dano therefore applies the bounded reranker to the
+USER-scoped results before injection, under the existing two-second memory
+wait fuse.
+
+Before restoring any volume snapshot, stop Dano and OpenViking together and
+retain a newer deletion/revocation record outside the snapshot. An older
+OpenViking image or data snapshot can contain forgotten facts; do not resume
+Dano from that snapshot until deletion replay and readback have completed.
+For a stopped-stack backup, export the runtime, agent-config, workspaces,
+protected config/data and OpenViking data named volumes plus the private
+deploy-control directory, and record archive hashes and image digests. Back up
+the separate memory-recovery volume as a privacy-critical, monotonically newer
+asset; never replace it with the copy from an older data snapshot. Keep
+the archives and recovery journal private. A
+rollback must restore matching image, config, state and OpenViking data, not
+only an image tag. Bring up only the internal OpenViking and Embedding services
+after import. Overlay the newer owner state and replay every later deletion
+and revocation before starting Dano or exposing nginx.
+
+The protected image contains `replay-memory-deletions.mjs`. Run it as a
+one-off container on the internal memory network with the restored protected
+config and data volumes mounted read-only and a post-snapshot ledger mounted
+read-only. The command takes the config directory, data directory and ledger
+path as positional arguments. It verifies **all** restored owner-state hashes
+and owner bindings, decrypts each owner-bound USER credential locally and
+checks every OpenViking identity before any remote mutation. It then removes
+the listed sources and document URIs, restores retained documents and reads
+back each complete public document set. It prints aggregate counts only. A
+changed state hash, duplicate owner, missing credential or owner mismatch
+fails before remote mutation. A partial remote failure requires rerunning the
+same ledger; the public operations and readback are designed for idempotent
+retry. Version 1 accepts one owner with `owner`, `statePath`,
+`postStateSha256`, `deleteUris`, `sourceSessionIds`, `retainedDocuments` and
+`expectedDocumentUris`. Version 2 wraps one or more entries with those same
+fields in `{ "version": 2, "owners": [...] }`. Overlay every newer owner state
+and credential before running either format. Maintain the ledger separately
+from the older snapshot. `retainedDocuments` contains the public document body,
+not OpenViking's physical `MEMORY_FIELDS` trailer. The ledger is private data;
+do not put it in source control or logs. This command replays a supplied
+ledger. Dano `0.2.40` also mirrors owner state and fsyncs remote deletion
+intents to the separate recovery volume. For snapshots created after this
+journal was enabled, the protected image includes
+`/app/runtime/reconcile-memory-recovery.mjs`. Stop Dano and OpenViking before
+the backup, then run its `checkpoint` command with the protected data root,
+recovery root and a new private checkpoint file outside both volumes:
+
+```sh
+node /app/runtime/reconcile-memory-recovery.mjs checkpoint \
+  /var/lib/dano-protected /var/lib/dano-memory-recovery /checkpoint/snapshot.json
+```
+
+Keep that checkpoint with the old volume archives. It binds each owner's old
+state hash to the byte position and SHA-256 prefix of the independent journal.
+On rollback, retain the **newer** recovery volume, restore the old data/config
+and OpenViking volumes, then start only the internal OpenViking dependencies.
+Run `preflight` and `replay` with the protected config root, restored data
+root, newer recovery root and checkpoint file, in that order. The one-off
+container must run as the protected host UID/GID with the data volume writable
+for state locks and the recovery/checkpoint volumes read-only:
+
+```sh
+node /app/runtime/reconcile-memory-recovery.mjs preflight \
+  /etc/dano-protected /var/lib/dano-protected /var/lib/dano-memory-recovery /checkpoint/snapshot.json
+node /app/runtime/reconcile-memory-recovery.mjs replay \
+  /etc/dano-protected /var/lib/dano-protected /var/lib/dano-memory-recovery /checkpoint/snapshot.json
+```
+
+The command checks every owner, state hash, journal prefix and credential before the first
+remote mutation; it replays later deletion intents, reads back their effects,
+then records a private checkpoint-bound replay receipt beside each owner state
+before atomically replacing that owner's state. Owners are replaced in sequence;
+a partial multi-owner update is retryable. Keep these receipts with
+the restored protected data; a retry after overlay rejects a different or
+missing checkpoint. It prints only aggregate counts and can be rerun after a
+partial remote failure. Do not start Dano or
+expose nginx until replay succeeds.
+
+This command fails closed when a new owner or completed writer appears after
+the checkpoint, a governance job remains in progress, a credential is missing
+or invalid, or the snapshot and journal diverge. Those cases require a separate
+upgrade-window reconciliation; neither command may silently discard newer
+memory or treat a failed preflight as acceptance. The older supplied-ledger
+command remains the recovery path for backups without this checkpoint.
+
+For an existing deployment, stop Dano before introducing the recovery volume.
+Run `node /app/bootstrap-memory-recovery.mjs
+/var/lib/dano-protected/host-state /var/lib/dano-memory-recovery` in a one-off
+container as the protected host UID/GID with the protected data and recovery
+volumes mounted. The command scans every owner state, validates private paths
+and owner bindings, and copies each current owner state into an initially empty
+recovery volume. It prints only the owner count and is idempotent for unchanged
+state. The protected runtime rejects existing owners without this bootstrap or
+whose restored state differs from the mirror. Keep Dano stopped until the
+bootstrap completes; this is a one-time migration, not a substitute for
+checkpointing and reconciling later recovery events.
+The protected data mount must be writable during bootstrap because the state
+store opens its owner lock file; stop the app first and leave that mount under
+the protected host UID/GID.
+
+An isolated #477 rehearsal restored an older snapshot into new volumes, proved
+both old URIs were present, replayed one later forget before starting Dano,
+and verified in the in-app Browser that a fresh chat could not retrieve the
+forgotten code while the unrelated preference remained. This establishes the
+tested sequence for that synthetic owner. The version-2 replay also removed
+one temporary document per synthetic USER and preserved both original document
+sets; a wrong second-owner state hash stopped before touching either.
+Automatic multi-owner ledger capture, revocation coverage and the full
+upgrade/rollback policy remain #477 release gates.
+
+The tested compatibility pair is Dano `0.2.34` with pi-openviking `0.1.8` and
+Dano `0.2.35` with pi-openviking `0.1.11`, both using OpenViking `v0.4.20` and
+owner-state version 1. A ready old fact survived the candidate image upgrade.
+The matched rollback imported **all** old data/config volumes into fresh
+volumes and used the old image; an operation accepted during the upgrade
+window was separately recorded and deliberately resubmitted in the synthetic
+test under a new operation ID. An old operation created while OpenViking was
+offline remained `session_unknown`/“result needs verification”; no version
+blindly replayed it. This unresolved queue outcome and a supported policy for
+arbitrary upgrade-window operations still block a general release claim.
+The Dano `0.2.40` recovery candidate pinned pi-openviking `0.1.12`: its same-ID empty-Session
+retry recovered that actual old snapshot operation to ready against the real
+fixed OpenViking service in a one-off container. The complete final image was
+then run from the old six-volume snapshot: the in-app Browser showed the old
+pending task as ready and a new chat recalled both old and recovered facts.
+General multi-user upgrade-window reconciliation remains a separate gate.
+The Dano `0.2.41` candidate pins pi-openviking `0.1.13`. In the real
+OpenViking service and the in-app Browser, a selected fact in a merged memory
+document was corrected, its old sources were revoked, unrelated facts remained,
+and a new chat recalled the replacement. See the release manifest for the
+current version pair and [the #477 evidence](../docs/research/issue477-memory-release.md)
+for its remaining acceptance gates.
+
+### Protected image entry
 
 Build the opt-in supervisor target from the same repository Dockerfile:
 
@@ -35,6 +224,16 @@ The default Dockerfile target remains `default-runtime`, inheriting the existing
 non-root app entrypoint. Selecting `protected-runtime` is explicit and does not
 change ordinary deployments.
 
+The protected entry does not run `docker-entrypoint.sh` or discover Skills from
+the mutable Agent Config Directory. List each image-owned Skill directory in
+the supervisor profile's `host.trustedSkillPaths`, using its absolute path
+under `/app` (for example,
+`/app/open-websearch-skill-seed/.agents/skills/open-websearch`). The supervisor
+verifies these paths are in the image installation, and the worker mounts them
+read-only. An empty list means the protected session has no Skills, even if a
+copy exists under the Agent Config Directory. Keep the Skill content and this
+allowlist in the same reviewed image/configuration release.
+
 For isolated Compose acceptance, append `deploy/compose/protected.yml` to the
 base Compose file and the selected exposure overlay. Set
 `DANO_PROTECTED_IMAGE`, `DANO_PROTECTED_CONFIG_VOLUME` and
@@ -44,18 +243,38 @@ included with protected data rather than the base runtime bind mount.
 These are external Linux volumes;
 Compose does not create or initialize them and does not remove them on `down`.
 Record their exact names for deliberate acceptance cleanup and backup.
+When the memory overlay is enabled, also provision a distinct external
+`DANO_MEMORY_RECOVERY_VOLUME`. It is mounted at
+`/var/lib/dano-memory-recovery` and must be excluded from any rollback that
+restores older protected data or OpenViking snapshots. Own its root by the
+protected host UID/GID with mode 0700; keep its contents private.
 
 Provision `/etc/dano-protected/supervisor.json` as root-owned mode 0600, with
 root-owned non-writable ancestors. Provision `/etc/dano-protected/agent` and
 `/etc/dano-protected/memory` as host-UID/GID-owned mode 0700; credential files
 inside them must be mode 0600. Set the profile's `memoryConfigDirectory` to
-the latter path and configure tokenizer asset paths explicitly. Put distinct
+the latter path and `memoryRecoveryDirectory` to
+`/var/lib/dano-memory-recovery`; configure tokenizer asset paths explicitly. Put distinct
 runtime, session, host-state and identity roots beneath
 `/var/lib/dano-protected`; their ownership must satisfy the supervisor contract.
+If protected Skills invoke Python, put `/usr/local/lib/dano-python/bin` first
+in the profile's `broker.path`, ahead of the required system executable
+directories. The broker launches workers with this explicit path, so the
+image's `ENV PATH` does not supply the Python virtual environment to those
+workers. Verify `python -c 'import httpx'` through the authenticated Browser's
+model-triggered bash before running an OA Skill; a direct app-container shell
+uses a different environment and does not verify this boundary.
 For a fresh deployment, let the supervisor create those empty child roots.
 Never reuse a pre-existing identity range or initialize it against unrelated
 data. Configuration remains writable to the appropriate owner because Pi
 persists host settings, while the supervisor JSON remains root-owned.
+Before starting the protected host, render `/app/deploy/runtime-defaults/SYSTEM.md`
+into `/etc/dano-protected/agent/SYSTEM.md` with the image's
+`deploy/render-system-prompt.mjs --replace` as the configured host UID/GID.
+The protected entry bypasses the ordinary entrypoint, so a raw template would
+leave `{产品名称}` in the model prompt. Verify the deployed file has no
+placeholder and matches the effective product name, then confirm the identity
+in a fresh Browser chat.
 
 The existing OAuth configuration, nginx and exposure settings still apply.
 This overlay supplies no substitute identity provider and does not certify

@@ -1,0 +1,34 @@
+{
+  "candidate": {
+    "dano": "0.2.41",
+    "piOpenViking": "0.1.13",
+    "openViking": "v0.4.20",
+    "model": "mimo-v2.5"
+  },
+  "surface": "authenticated Codex in-app Browser on the fixed trusted localhost HTTPS entry",
+  "scenario": "one synthetic stable preference in Alice's account, without an explicit memory_save request",
+  "observations": {
+    "initialMemoryEnabled": true,
+    "initialAutomaticCollectionUnauthorized": true,
+    "separateCollectionConsent": true,
+    "collectionOperationObservedProcessingThenReady": true,
+    "collectionSourceMarkedAutomatic": true,
+    "newChatRecalledCollectedFact": true,
+    "collectionConsentRevoked": true,
+    "existingCollectedFactStillRecalledAfterRevocation": true,
+    "targetedForgetRemovedSyntheticFact": true,
+    "newChatAfterForgetAnsweredUnknown": true,
+    "unrelatedMemoryStillRecalled": true,
+    "syntheticCredentialOnlyChatCreatedNoNewVisibleOperation": true,
+    "syntheticCredentialAndBenignPreferenceChatCreatedNoNewVisibleOperation": true,
+    "syntheticCredentialAbsentFromManagementList": true,
+    "finalMemoryEnabled": true,
+    "finalAutomaticCollectionUnauthorized": true
+  },
+  "limitations": [
+    "One owner, one synthetic fact and one browser repetition",
+    "The two synthetic credential chats produced no visible delivery operation during the observation window; selector execution and a fact-level redaction decision were not independently observed",
+    "No complete sensitive-information exclusion, inference filter or in-flight revocation matrix",
+    "No independently authenticated Bob browser context or fixed three-repetition evaluation"
+  ]
+}

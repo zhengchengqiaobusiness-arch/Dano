@@ -17,12 +17,15 @@ it("projects a complete administrator profile without applying hidden defaults",
   expect(parsed.broker).not.toBe(input.broker);
 });
 it("accepts a private configuration path but leaves host state derivation to the supervisor", () => {
-  const input = { ...profile(), memoryConfigDirectory: "/private-config" };
+  const input = { ...profile(), memoryConfigDirectory: "/private-config", memoryRecoveryDirectory: "/recovery" };
   expect(parseProtectedSupervisorProfile(input)).toEqual(input);
   expect(() => parseProtectedSupervisorProfile({ ...input, memoryConfigDirectory: "./config" })).toThrow();
+  expect(() => parseProtectedSupervisorProfile({ ...input, memoryRecoveryDirectory: "./recovery" })).toThrow();
+  expect(() => parseProtectedSupervisorProfile({ ...profile(), memoryConfigDirectory: "/private-config" })).toThrow();
   expect(() => parseProtectedSupervisorProfile({ ...input, host: { ...input.host,
     memory: { configurationDirectory: "/private-config", stateDirectory: "/workspace" } } })).toThrow();
-  const memory = { configurationDirectory: "/private-config", stateDirectory: "/host-state/memory-service" };
+  const memory = { configurationDirectory: "/private-config", stateDirectory: "/host-state/memory-service",
+    recoveryDirectory: "/recovery" };
   expect(parseProtectedHostProfile({ ...input.host, memory }).memory).toEqual(memory);
   for (const invalid of [{ ...memory, managementKey: "PRIVATE" }, { ...memory, stateDirectory: "relative" }, null]) {
     expect(() => parseProtectedHostProfile({ ...input.host, memory: invalid })).toThrow("INVALID_PROTECTED_HOST_PROFILE");

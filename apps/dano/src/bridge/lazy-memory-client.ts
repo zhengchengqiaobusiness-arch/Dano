@@ -1,6 +1,8 @@
 import { OwnerMemoryClient, type MemoryExtensionOptions, type MemoryGovernanceClient,
   type Owner } from "@josephyoung/pi-openviking/host";
 import type { MemoryUserConnection } from "./memory-identity-service.js";
+import type { MemoryReranker } from "./memory-reranker.js";
+import type { MemoryRecoveryJournal } from "./memory-recovery-journal.js";
 
 type Client = MemoryExtensionOptions["client"];
 interface Options {
@@ -10,6 +12,8 @@ interface Options {
   /** Bound by the host to one authenticated UserContext, never a tool input. */
   connect(): Promise<MemoryUserConnection>;
   assertToolIsolation(): Promise<void>;
+  reranker?: MemoryReranker;
+  journal?: MemoryRecoveryJournal;
 }
 
 /** Local construction does not contact OpenViking or provision a USER key.
@@ -53,6 +57,7 @@ export class LazyMemoryClient implements Client, MemoryGovernanceClient {
     if (signal?.aborted) return Promise.reject(signal.reason);
     if (this.#closed) return Promise.reject(new Error("MEMORY_RUNTIME_CLOSED"));
     const pending = (async () => {
+      this.#options.journal?.assertHealthy();
       await this.#options.assertToolIsolation();
       signal?.throwIfAborted();
       if (this.#closed) throw new Error("MEMORY_RUNTIME_CLOSED");
@@ -60,6 +65,7 @@ export class LazyMemoryClient implements Client, MemoryGovernanceClient {
       await this.#options.assertToolIsolation();
       if (this.#closed) throw new Error("MEMORY_RUNTIME_CLOSED");
       signal?.throwIfAborted();
+      this.#options.journal?.assertHealthy();
       // Preserve receipts of already-sent mutations even when shutdown starts.
       return operation(client);
     })();
@@ -85,15 +91,34 @@ export class LazyMemoryClient implements Client, MemoryGovernanceClient {
   writerSettledAny(operation: Parameters<MemoryGovernanceClient["writerSettledAny"]>[0]) {
     return this.#call(client => client.writerSettledAny(operation));
   }
-  clearOwnerData() { return this.#call(client => client.clearOwnerData()); }
+  clearOwnerData() { return this.#call(async client => {
+    await this.#options.journal?.append({ kind: "clearOwnerData" });
+    return client.clearOwnerData();
+  }); }
   removeSource(operation: Parameters<MemoryGovernanceClient["removeSource"]>[0]) {
-    return this.#call(client => client.removeSource(operation));
+    return this.#call(async client => {
+      await this.#options.journal?.append({ kind: "removeSource", remoteSessionId: operation.remoteSessionId });
+      return client.removeSource(operation);
+    });
   }
-  replaceMemory(uri: string, content: string) { return this.#call(client => client.replaceMemory(uri, content)); }
-  removeMemory(uri: string) { return this.#call(client => client.removeMemory(uri)); }
-  clearMemoryScope() { return this.#call(client => client.clearMemoryScope()); }
+  replaceMemory(uri: string, content: string) { return this.#call(async client => {
+    await this.#options.journal?.append({ kind: "replaceMemory", uri, content });
+    return client.replaceMemory(uri, content);
+  }); }
+  removeMemory(uri: string) { return this.#call(async client => {
+    await this.#options.journal?.append({ kind: "removeMemory", uri });
+    return client.removeMemory(uri);
+  }); }
+  clearMemoryScope() { return this.#call(async client => {
+    await this.#options.journal?.append({ kind: "clearMemoryScope" });
+    return client.clearMemoryScope();
+  }); }
   recall(query: string, limit: number, signal?: AbortSignal): ReturnType<Client["recall"]> {
-    return this.#call(client => client.recall(query, limit, signal), signal);
+    return this.#call(async client => {
+      const found = await client.recall(query,
+        this.#options.reranker ? Math.min(limit, this.#options.reranker.maxCandidates) : limit, signal);
+      return this.#options.reranker ? this.#options.reranker.filter(query, found, signal) : found;
+    }, signal);
   }
 
   /** Reject new work and wait for identity checks and sent requests to settle.

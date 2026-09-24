@@ -1,0 +1,57 @@
+{
+  "candidate": {
+    "dano": "0.2.41",
+    "piOpenViking": "0.1.13",
+    "openViking": "v0.4.20"
+  },
+  "scope": "production-generated leave Skill copied read-only into an isolated probe layer; no business mutation",
+  "productionInventory": {
+    "leaveSkillPresent": true,
+    "oaUrlConfigured": true,
+    "tenantKeyConfigured": true
+  },
+  "browser": {
+    "authenticated": true,
+    "skillDiscovered": true,
+    "operationChoiceRendered": true,
+    "createFormRendered": true,
+    "formFields": [
+      "days",
+      "reason",
+      "endTime",
+      "ccedList",
+      "leaveType",
+      "startTime"
+    ],
+    "formCancelled": true,
+    "businessMutation": false
+  },
+  "failures": {
+    "businessUserList": {
+      "httpStatus": 200,
+      "contentType": "text/html",
+      "json": false
+    },
+    "initialProtectedWorkerPython": "supervisor_operation_failed",
+    "directReadOnlyOptionLookup": "authentication_headers_unavailable"
+  },
+  "diagnosticControls": {
+    "ordinaryProtectedBashPassed": true,
+    "venvHttpxPassedAfterWorkerPathCorrection": true,
+    "generatedSkillResolvesItsOwnAuthHeadersBeforeBusinessRequest": true,
+    "protectedWorkerProjectsNoTenantKeyOrBrowserState": true,
+    "directContainerLookupHasNoBrowserLoginBinding": true
+  },
+  "restored": {
+    "image": "localhost/dano477-protected:0.2.41-receipt",
+    "originalSupervisorProfile": true,
+    "oaEnvironmentRemovedFromContainer": true,
+    "fixedHttpsSmokePassed": true
+  },
+  "limitations": [
+    "No authenticated business option readback",
+    "No completed OA form submission or mutation",
+    "Generated Skill and production OA credentials were not added to the shipped Dano image",
+    "Correcting the Python PATH alone does not resolve the generated Skill's pre-request credential lookup"
+  ]
+}

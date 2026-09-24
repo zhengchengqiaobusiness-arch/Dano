@@ -1,0 +1,116 @@
+# Opt-in release overlay. Provision the private configuration directory and
+# persistent volume before starting this stack. Never publish port 1933.
+services:
+  app:
+    volumes:
+      - memory-recovery:/var/lib/dano-memory-recovery
+    environment:
+      NO_PROXY: ${DANO_MEMORY_NO_PROXY:-embedding,openviking,reranker,localhost,127.0.0.1}
+      no_proxy: ${DANO_MEMORY_NO_PROXY:-embedding,openviking,reranker,localhost,127.0.0.1}
+    networks:
+      - memory-backend
+
+  openviking:
+    image: ${DANO_OPENVIKING_IMAGE:?DANO_OPENVIKING_IMAGE must include an immutable digest}
+    restart: unless-stopped
+    command: ["--without-bot"]
+    depends_on:
+      embedding:
+        condition: service_healthy
+    environment:
+      OPENVIKING_CONFIG_FILE: /etc/openviking/ov.conf
+      # Podman can inject host HTTP proxies. Keep internal model traffic direct.
+      NO_PROXY: ${DANO_MEMORY_NO_PROXY:-embedding,openviking,localhost,127.0.0.1}
+      no_proxy: ${DANO_MEMORY_NO_PROXY:-embedding,openviking,localhost,127.0.0.1}
+    volumes:
+      - ${DANO_OPENVIKING_CONFIG_DIR:?DANO_OPENVIKING_CONFIG_DIR is required}:/etc/openviking:ro
+      - openviking-data:/app/.openviking
+    expose:
+      - "1933"
+    networks:
+      - memory-backend
+      - memory-model-egress
+    healthcheck:
+      test: ["CMD", "openviking-entrypoint", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  embedding:
+    image: ${DANO_EMBEDDING_IMAGE:?DANO_EMBEDDING_IMAGE must include an immutable digest}
+    restart: unless-stopped
+    command:
+      - --model
+      - /models/${DANO_EMBEDDING_MODEL_FILE:?DANO_EMBEDDING_MODEL_FILE is required}
+      - --alias
+      - ${DANO_EMBEDDING_MODEL_NAME:?DANO_EMBEDDING_MODEL_NAME is required}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --embedding
+      - --pooling
+      - mean
+      - --no-webui
+    volumes:
+      - ${DANO_OPENVIKING_MODELS_DIR:?DANO_OPENVIKING_MODELS_DIR is required}:/models:ro
+    expose:
+      - "8080"
+    networks:
+      - memory-backend
+    healthcheck:
+      test: ["CMD", "curl", "--noproxy", "*", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  reranker:
+    image: ${DANO_RERANKER_IMAGE:?DANO_RERANKER_IMAGE must include an immutable digest}
+    restart: unless-stopped
+    command:
+      - --model
+      - /models/${DANO_RERANKER_MODEL_FILE:?DANO_RERANKER_MODEL_FILE is required}
+      - --alias
+      - ${DANO_RERANKER_MODEL_NAME:?DANO_RERANKER_MODEL_NAME is required}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --embedding
+      - --pooling
+      - rank
+      - --reranking
+      - --no-webui
+      - -c
+      - "1024"
+      - -b
+      - "1024"
+    volumes:
+      - ${DANO_OPENVIKING_MODELS_DIR:?DANO_OPENVIKING_MODELS_DIR is required}:/models:ro
+    expose:
+      - "8080"
+    networks:
+      - memory-backend
+    healthcheck:
+      test: ["CMD", "curl", "--noproxy", "*", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+networks:
+  memory-backend:
+    internal: true
+  # OpenViking needs outbound access to the configured extraction/embedding
+  # providers. No other service joins this network and no port is published.
+  memory-model-egress:
+
+volumes:
+  memory-recovery:
+    external: true
+    name: ${DANO_MEMORY_RECOVERY_VOLUME:?DANO_MEMORY_RECOVERY_VOLUME is required}
+  openviking-data:
+    external: true
+    name: ${DANO_OPENVIKING_DATA_VOLUME:?DANO_OPENVIKING_DATA_VOLUME is required}

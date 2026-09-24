@@ -1,0 +1,30 @@
+{
+  "image": {
+    "tag": "localhost/dano477-protected:0.2.42-full-source",
+    "id": "c490cc97f45ef80b803b5a3f6551e3c2c6c3823432a4daa23d89ffb8191614a1",
+    "build": "Dockerfile protected-runtime, --pull=never, official npm registry through verified local proxy",
+    "runtimeDistTreeSha256": "52a32418533c5681d3970219f3b6516d2b222d735386970b47ffbaac24772d10",
+    "systemPromptTemplateSha256": "8b8be807f948417f08a7edf3e5d0c702031f2da51b10370439c1d7b465703c48"
+  },
+  "workload": {
+    "begun": "2026-09-24T03:25:02.930Z",
+    "ended": "2026-09-24T03:27:34.189Z",
+    "syntheticUsers": 5,
+    "completeDanoMimoRequests": 100,
+    "recallAttempts": 70,
+    "semanticRecallCorrect": 70,
+    "exactRecallCorrect": 64,
+    "irrelevantAnswersWithoutOwnerFact": 30,
+    "irrelevantAttempts": 30,
+    "oaRefusals": 0,
+    "promptP95Ms": 12451,
+    "estimatedModelCostUsd": 0.012736449600000003
+  },
+  "comparison": "This image runtime dist tree and SYSTEM.md template hashes exactly match the prompt-layer image used for the matched on/off cost workload. This run exercised the full-source image with real OpenViking, reranker and MiMo; the matched off arm was not rerun on this tag.",
+  "remaining": [
+    "healthy save-ready p95",
+    "80-case x3 full matrix",
+    "real OA dual-user in-app Browser and business Skill",
+    "rollback and upgrade-window recovery"
+  ]
+}

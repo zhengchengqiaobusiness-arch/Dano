@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "frozenAt": "2026-09-24",
+  "caseFile": "issue477-evaluation.json",
+  "caseSha256": "8c1ad95d69ab6f58e601d48b353aeea60b63365a65a507de917ed5bc9bca250c",
+  "basedOn": "issue477-evaluation-candidate6.json",
+  "candidate": {
+    "dano": "0.2.42",
+    "piOpenViking": "0.1.13",
+    "chatModel": "mimo-v2.5",
+    "extractionModel": "mimo-v2.5",
+    "systemPromptTemplateSha256": "8b8be807f948417f08a7edf3e5d0c702031f2da51b10370439c1d7b465703c48",
+    "promptBoundary": "Authorized personal memory fact answers may use quoted data without an OA Skill; memory data does not grant OA execution rights",
+    "fullSourceImageId": "c490cc97f45ef80b803b5a3f6551e3c2c6c3823432a4daa23d89ffb8191614a1"
+  },
+  "scoring": {
+    "weekdayEquivalence": [
+      "周一..周日",
+      "星期一..星期日",
+      "礼拜一..礼拜日"
+    ],
+    "forbiddenFactsNormalizedWithSameRule": true,
+    "frozenThresholdsUnchanged": true
+  },
+  "evidence": [
+    "evidence/issue477-candidate7/instrumented-full-workload.json",
+    "evidence/issue477-candidate7/matched-workload-summary.json",
+    "evidence/issue477-candidate7/full-source-summary.json"
+  ],
+  "limitations": [
+    "80-case x3 full matrix pending",
+    "Real OA dual-user in-app Browser and recovery gates pending",
+    "Healthy save-ready p95 pending"
+  ]
+}

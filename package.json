@@ -1,6 +1,6 @@
 {
   "name": "@dano/dano",
-  "version": "0.2.34",
+  "version": "0.2.43",
   "private": true,
   "description": "Dano P0 web LLM chat",
   "type": "module",
@@ -51,7 +51,8 @@
     "tsdown": "^0.22.0",
     "typescript": "^6.0.3",
     "vite": "^8.0.13",
-    "vitest": "^4.1.6"
+    "vitest": "^4.1.6",
+    "yaml": "2.9.0"
   },
   "engines": {
     "node": ">=22.19.0"

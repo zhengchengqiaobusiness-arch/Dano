@@ -18,6 +18,9 @@ The container ships a dedicated Python virtual environment on PATH, providing
 both `python` and `python3` and the HTTPX version pinned in
 `deploy/python-requirements.txt`. Dependencies are installed at image build time,
 not by model-driven commands during a Skill run.
+In protected mode, the broker replaces the image PATH with its configured
+`broker.path`. That explicit path must include `/usr/local/lib/dano-python/bin`
+for model-triggered Python Skills; the image ENV alone is insufficient.
 
 HTTPX top-level `get`/`request` functions, `Client` and `AsyncClient` are supported
 through their standard `HTTPTransport` / `AsyncHTTPTransport` send methods.
