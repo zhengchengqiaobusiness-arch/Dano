@@ -6,6 +6,7 @@ import { defineTool } from "@mariozechner/pi-coding-agent";
 import { packageRoot, docDir, skillDir as skillPath } from "../paths.mjs";
 import { appendEvidence, getEvidence, listEvidence, appendGoal, readGoal } from "../evidence/store.mjs";
 import { runAction } from "../browser/actions.mjs";
+import { persistBrowserSession } from "../browser/session.mjs";
 import { takeSnapshot } from "../browser/snapshot.mjs";
 import { getNetwork, listNetwork } from "../browser/network.mjs";
 import { readSkillFile, skillIdFor, writeSkillFile } from "../skillpack/files.mjs";
@@ -28,7 +29,7 @@ const TOOL_SPECS = [
   { name: "evidence_get", description: "按 id 读取一条证据全文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
   { name: "read_page_asset", description: "读取本场已捕获、与入口同源的 javascript 响应。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
   { name: "read_guide", description: "仅当本场请求是 JSON、鉴权在头里、且有选项接口时，读取 doc 下已有指南之一。不要把文件复制进 Skill 包。", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
-  { name: "assist", description: "登录或验证码挡住时停下来，等人在同一个浏览器里处理。", parameters: { type: "object", properties: { reason: { type: "string" } }, required: ["reason"] } },
+  { name: "assist", description: "登录或验证码挡住时调用。这次调用会停住，直到人在预览里处理完并确认。返回里的 snapshot 才是确认后的当前页，从那张快照接着做。", parameters: { type: "object", properties: { reason: { type: "string" } }, required: ["reason"] } },
   { name: "append_goal", description: "只填充目标里仍为空的键，写入原句。", parameters: { type: "object", properties: { key: { type: "string" }, text: { type: "string" } }, required: ["key", "text"] } },
   { name: "write_skill_file", description: "只写 SKILL.md、scripts/client.py、references/api.md。", parameters: { type: "object", properties: { relative_path: { type: "string" }, contents: { type: "string" } }, required: ["relative_path", "contents"] } },
   { name: "read_skill_file", description: "读取已写的 Skill 文件。", parameters: { type: "object", properties: { relative_path: { type: "string" } }, required: ["relative_path"] } },
@@ -67,7 +68,7 @@ export function toolNames() {
 export function hostTools(recording) {
   const id = recording.id;
   const skillId = () => recording.skillId || skillIdFor(recording.subsystem, id);
-  return {
+  const tools = {
     async browser_open(args) {
       const result = await runAction(id, { action: "open", url: args.url });
       await appendEvidence(id, { kind: "action", summary: "open", body: result, body_missing: false });
@@ -131,7 +132,18 @@ export function hostTools(recording) {
       recording.assistReason = String(args.reason || "");
       recording.humanCanClick = true;
       recording.emit?.();
-      return { ok: true, paused: true };
+      const note = await new Promise((resolve) => {
+        recording.releaseAssist = resolve;
+      });
+      recording.releaseAssist = null;
+      if (recording.finished) return { ok: false, stopped: true };
+      recording.paused = false;
+      recording.status = "recording";
+      recording.assistReason = "";
+      recording.emit?.();
+      const snapshot = await tools.browser_snapshot();
+      await persistBrowserSession(id);
+      return { ok: true, continued: true, note: String(note || ""), snapshot };
     },
     async append_goal(args) {
       return appendGoal(id, args.key, args.text);
@@ -203,6 +215,7 @@ export function hostTools(recording) {
       return { goal, snapshot, index };
     },
   };
+  return tools;
 }
 
 export function wrapHostTools(host) {

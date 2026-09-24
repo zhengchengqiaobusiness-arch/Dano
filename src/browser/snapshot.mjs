@@ -1,10 +1,5 @@
 import { browserSession } from "./session.mjs";
 
-const INTERACTIVE = new Set([
-  "button", "link", "textbox", "checkbox", "radio", "combobox", "searchbox",
-  "slider", "spinbutton", "tab", "menuitem", "option", "switch", "treeitem",
-]);
-
 function frameKey(frame) {
   const parent = frame.parentFrame();
   const parentId = parent?._guid || parent?.url() || "";
@@ -13,18 +8,19 @@ function frameKey(frame) {
 
 function parseNodes(yaml) {
   const nodes = [];
-  const context = [];
   for (const line of String(yaml || "").split(/\n/)) {
-    const heading = line.match(/^\s*- (heading|region)(?: "([^"]*)")?/);
-    if (heading) {
-      context.push(`${heading[1]} ${heading[2] || ""}`.trim());
-      if (context.length > 4) context.shift();
-    }
-    const match = line.match(/^\s*- ([a-zA-Z]+)(?: "([^"]*)")?/);
-    if (!match) continue;
-    const role = match[1].toLowerCase();
-    if (!INTERACTIVE.has(role)) continue;
-    nodes.push({ role, name: match[2] || "", context: context.slice(-2).join(" / ") });
+    let raw = line.replace(/^\s*-\s*/, "").trim();
+    if (raw.startsWith("'") && raw.endsWith("'")) raw = raw.slice(1, -1);
+    const ref = raw.match(/\[ref=([^\]]+)\]/);
+    const role = raw.match(/^([a-zA-Z]+)/);
+    if (!ref || !role) continue;
+    const named = raw.match(/^[a-zA-Z]+ "((?:\\.|[^"])*)"/);
+    const trailing = raw.match(/\]:\s*(.+)$/);
+    nodes.push({
+      role: role[1].toLowerCase(),
+      name: named ? named[1].replace(/\\"/g, '"') : (trailing ? trailing[1].trim() : ""),
+      ariaRef: ref[1],
+    });
   }
   return nodes;
 }
@@ -45,25 +41,19 @@ export async function takeSnapshot(recordingId) {
     lines.push(`frame ${frameId} ${frame.url()}`);
     let yaml = "";
     try {
-      yaml = await frame.locator("body").ariaSnapshot();
+      yaml = await frame.locator("body").ariaSnapshot({ mode: "ai" });
     } catch {
       yaml = "";
     }
-    const counts = new Map();
-    let local = 0;
     for (const node of parseNodes(yaml)) {
-      local += 1;
-      const key = `${node.role}\n${node.name}`;
-      const nth = counts.get(key) || 0;
-      counts.set(key, nth + 1);
-      const ref = `${frameId}:e${local}`;
-      const locator = node.name
-        ? frame.getByRole(node.role, { name: node.name, exact: true }).nth(nth)
-        : frame.getByRole(node.role).nth(nth);
-      state.refs.set(ref, { locator, epoch: state.epoch, frame });
+      const ref = `${frameId}:${node.ariaRef}`;
+      state.refs.set(ref, {
+        locator: frame.locator(`aria-ref=${node.ariaRef}`),
+        epoch: state.epoch,
+        frame,
+      });
       const label = node.name ? `${node.role} "${node.name}"` : node.role;
-      const where = node.context ? ` ${node.context}` : "";
-      lines.push(`- ${label} ref=${ref}${where}`);
+      lines.push(`- ${label} ref=${ref}`);
       refs.push(ref);
     }
   }
@@ -72,7 +62,9 @@ export async function takeSnapshot(recordingId) {
 
 export function locatorFor(recordingId, ref) {
   const state = browserSession(recordingId);
-  const hit = state?.refs.get(ref);
+  const raw = String(ref || "").trim();
+  const key = /^e\d+$/i.test(raw) ? `f0:${raw}` : raw;
+  const hit = state?.refs.get(key);
   if (!hit || hit.epoch !== state.epoch) return null;
   return hit;
 }

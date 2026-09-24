@@ -1,5 +1,9 @@
 # 执行稿：按 Cursor 产出 Skill 的方式做录制
 
+禁止偏移：某一页点不中、树或自定义控件不在无障碍快照里，不得因此新增选择器。不许写 `data-pi-ref`、`data-cabp-ref` 或任何页面属性，不许按可见文字、指针样式、坐标中心补 ref，不许改回 `visible-controls`。只能重新 snapshot，或把截图作为图像交回这一轮，仍然只点最新快照里的 `fN:eN`。没有 ref 就停，不另写一套点击。`eN` 只当作主 frame 的 `f0:eN`。aria 行若被单引号整行包住，先去掉引号再认 role，这是在读同一张快照，不是新控件来源。
+
+
+
 本文件只定做法。具体文件、函数和消息以同目录 `MIGRATION-IMPLEMENT.md` 为准。依据是：用户给出一个网页和要产出的内容，Cursor 实际会打开页面、按快照点、看请求、写一份 Skill、再把 Skill 里的命令跑一遍。产品把这几步固定下来。不要再设计能力信封、共用执行器或第二套页面协议。不要改 `E:\python\try\Dano` 的任何文件。新代码都写在 `playwright_CABP`，能新写的就新写。
 
 开工目录：`E:\python\try\playwright_CABP`  
@@ -84,7 +88,7 @@ derive-client：原样保存
 
 一只有头 Chromium，一个 context，视口 1440×900。`loadStorageState(start_url)` 有则恢复。键是 origin，函数新写为 `loadStorageState(targetUrl)`、`saveStorageState(targetUrl, state)`，文件按 host 放在 `data/sessions/`。不要从登录响应猜 token，不要按录制号存登录态。
 
-快照用 `frame.locator("body").ariaSnapshot()`。主 frame `f0`，其余按 url 与父序号为 `f1`、`f2`。ref 形如 `f0:e12`。同一名字两个控件就两个 ref。epoch 在导航或 DOM 大改后加 1，旧 ref 返回 `stale_ref` 和新快照，点击次数不变。
+快照用 `frame.locator("body").ariaSnapshot({ mode: "ai" })`。行里的 `[ref=eN]` 原样保留，对外写成 `f0:eN`。点击用该 frame 的 `aria-ref=eN`，不再用 `getByRole` 重找。主 frame `f0`，其余按 url 与父序号为 `f1`、`f2`。同一名字两个控件就两个 ref。epoch 在导航或 DOM 大改后加 1，旧 ref 返回 `stale_ref` 和新快照，点击次数不变。
 
 动作只接受当前 epoch 的 ref：`open`、`snapshot`、`click`、`fill`、`fill_fields`、`press`、`select`、`upload`、`screenshot`。`fill_fields` 每项自带 ref。填完读回值，日期、树、滑块读 `inputValue` 或 `aria-valuenow`，不一致返回 `value_not_applied`。下拉是两次动作：打开，再点新快照里的选项 ref。离开入口 origin 返回 `origin_denied`。不自动重试，不设三次失败上限。禁止用 `page.evaluate` 改框架内部状态来造请求。
 
@@ -102,7 +106,7 @@ Pi 启动只取 `AuthStorage.create`、`ModelRegistry.create`、`applyPiModelCon
 
 工具名：`browser_open`、`browser_snapshot`、`browser_act`、`browser_screenshot`、`network_list`、`network_get`、`evidence_get`、`read_page_asset`、`read_guide`、`assist`、`append_goal`、`write_skill_file`、`read_skill_file`、`run_skill_command`、`verify_skill`。`read_guide` 只读 `doc/` 里已有的四份指南，且不打进消费者包。`append_goal` 只填 `goal.json` 里仍为空的键。`run_skill_command` 在包目录里执行 Pi 指定的读命令，把 stdout、stderr、退出码存成 `verify` 证据。
 
-`start` 之后立刻 `session.prompt(目标原文 + URL)`。`assist` 后停止 prompt，直到 WebSocket 的 `steer` 或 `pi_message`。上一轮 prompt 没结束不要再调。`abort` / `stop_pi` / `cancel` 时 `dispose` 并 `saveStorageState`。
+`start` 之后立刻 `session.prompt(目标原文 + URL)`。`assist` 后停止 prompt，直到 WebSocket 的 `steer` 或 `pi_message`。上一轮 prompt 没结束不要再调。一轮结束后若还没 `verify_skill` 成功且未暂停，再 prompt，让 Pi 按已有证据写三份文件、跑读命令并校验。程序不写 Skill 正文。这样最多再进行 4 次。`abort` / `stop_pi` / `cancel` 时 `dispose` 并 `saveStorageState`。
 
 ---
 
@@ -132,9 +136,9 @@ config/auth.local.json    程序写。{ "headers": {} }
 | `secret_in_source` | 手册、脚本、references 含 token、password、cookie 值 |
 | `command_not_run` | `SKILL.md` 里的读命令没有成功的 `verify` 证据 |
 | `evidence_missing` | 字段或绑定引用的证据 id 不存在 |
-| `unknown_in_command` | 未解决字段出现在可执行命令里 |
-| `recorded_literal_default` | 脚本默认值与某条请求里该键全等，且没有常量原因 |
 | `handbook_rewritten` | pack 之后 `SKILL.md` 或 `scripts/client.py` 与 Pi 写入的内容不一致 |
+
+未解决字段和录到的字面量是否能当默认参数，由 Pi 写进 `references/api.md`。程序不按字段名或值相等判失败。
 
 有鉴权头且上述通过：`skill_ready`。通过但没有头：`skill_written_needs_auth`。读命令的 401 记为 `auth_expired`，不用录制正文顶替。
 

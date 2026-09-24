@@ -74,8 +74,20 @@ export async function runAction(recordingId, input) {
       }
       return { ok: true, snapshot: await takeSnapshot(recordingId) };
     }
-    if (!hit) return stale(recordingId);
-    if (action === "click") await hit.locator.click();
+    if (!hit) {
+      console.log(`[browser] ${action} ref=${input.ref || ""} stale`);
+      return stale(recordingId);
+    }
+    console.log(`[browser] ${action} ref=${input.ref || ""}`);
+    if (action === "click") {
+      try {
+        await hit.locator.click();
+      } catch (error) {
+        const message = String(error?.message || "click_failed").split("\n")[0];
+        console.log(`[browser] click failed ${message}`);
+        return { ok: false, error: message, snapshot: await takeSnapshot(recordingId) };
+      }
+    }
     if (action === "fill") {
       try {
         await hit.locator.fill(String(input.text ?? ""));

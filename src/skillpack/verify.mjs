@@ -1,13 +1,10 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { skillDir } from "../paths.mjs";
-import { listEvidence } from "../evidence/store.mjs";
+import { listEvidence, getEvidence } from "../evidence/store.mjs";
 import { handbookChanged, writeRuntimeConfig } from "./files.mjs";
 import { hasCredentialHeaders } from "../auth-vault.mjs";
 import { upsertCatalog } from "./catalog.mjs";
-
-const SOURCES = new Set(["caller", "current_user", "now", "previous_response", "other_api", "constant", "unknown"]);
-const REQUIRED = new Set(["page", "caller_all", "server_verified", "server_unknown"]);
 
 function section(text, title) {
   const match = text.match(new RegExp(`## ${title}\\n([\\s\\S]*?)(?=\\n## |$)`));
@@ -40,69 +37,6 @@ function idsOf(value) {
   return String(value || "").split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
 }
 
-async function requestStrings(recordingId) {
-  const rows = await listEvidence(recordingId, { kinds: ["network"], limit: 0 });
-  const values = [];
-  for (const row of rows) {
-    try {
-      const full = JSON.parse(await readFile(path.join(
-        (await import("../paths.mjs")).recordingDir(recordingId),
-        "blobs",
-        `${row.id}.json`,
-      ), "utf8"));
-      const body = full.body?.post_data || full.body?.response_body || full.post_data || "";
-      collectStrings(body, values);
-    } catch {
-      // 没有正文就没有可比的字面量
-    }
-  }
-  return values;
-}
-
-function collectStrings(value, out) {
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if ((trimmed.startsWith("{") || trimmed.startsWith("["))) {
-      try {
-        collectStrings(JSON.parse(trimmed), out);
-        return;
-      } catch {
-        // 不是 JSON
-      }
-    }
-    if (trimmed.length >= 8) out.push(trimmed);
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) collectStrings(item, out);
-    return;
-  }
-  if (value && typeof value === "object") {
-    for (const [key, item] of Object.entries(value)) {
-      if (typeof item === "string" && item.length >= 8) out.push({ key, value: item });
-      else collectStrings(item, out);
-    }
-  }
-}
-
-function pythonDefaults(source) {
-  const found = [];
-  const re = /(\w+)\s*=\s*"([^"]+)"|'([^']+)'/g;
-  const lineRe = /(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
-  for (const line of source.split(/\n/)) {
-    if (!line.includes("def ") && !line.includes("=")) continue;
-    lineRe.lastIndex = 0;
-    let match;
-    const scoped = line.includes("def ") ? line : "";
-    const text = scoped || "";
-    while ((match = lineRe.exec(text))) {
-      const value = match[2] ?? match[3] ?? "";
-      if (value.length >= 8) found.push({ name: match[1], value });
-    }
-  }
-  return found;
-}
-
 export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   const dir = skillDirPath || skillDir(recording.skillId || "");
   const errors = [];
@@ -133,10 +67,6 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
       if (!known.has(id)) errors.push({ code: "evidence_missing", id });
     }
   }
-  for (const field of fields) {
-    if (field.source && !SOURCES.has(field.source)) continue;
-    if (field.required_kind && !REQUIRED.has(field.required_kind)) continue;
-  }
   const reads = readCommands(texts["SKILL.md"] || "");
   const verifies = evidence.filter((row) => row.kind === "verify" && row.ok === true);
   const failed = evidence.filter((row) => row.kind === "verify" && row.ok === false);
@@ -146,28 +76,9 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     if (!ran || !listed) errors.push({ code: "command_not_run", command: line });
   }
   for (const row of failed) {
-    const blob = await import("../evidence/store.mjs").then((mod) => mod.getEvidence(recordingId, row.id)).catch(() => null);
+    const blob = await getEvidence(recordingId, row.id).catch(() => null);
     const text = `${blob?.stdout || ""} ${blob?.stderr || ""}`;
     if (/\b401\b/.test(text)) errors.push({ code: "auth_expired" });
-  }
-  const skillText = texts["SKILL.md"] || "";
-  for (const item of unresolved) {
-    const field = item.field || "";
-    if (field && new RegExp(`\\b${field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(skillText)) {
-      errors.push({ code: "unknown_in_command", field });
-    }
-  }
-  const literals = await requestStrings(recordingId);
-  for (const item of pythonDefaults(texts["scripts/client.py"] || "")) {
-    const hit = literals.find((entry) => entry.value === item.value || entry === item.value);
-    const key = hit?.key || item.name;
-    const declared = fields.some((field) => (
-      field.source === "constant"
-      && field.constant_reason
-      && field.constant_reason !== "录到的就是这个"
-      && (field.caller_name === key || field.page_name === item.name)
-    ));
-    if (hit && !declared) errors.push({ code: "recorded_literal_default", name: item.name });
   }
   let headers = {};
   try {

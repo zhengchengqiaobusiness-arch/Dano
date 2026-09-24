@@ -1,5 +1,9 @@
 # 施工说明：playwright_CABP
 
+禁止偏移：点击只执行当前 epoch 的 aria ref，格式 `fN:eN`。某一页没有出现在 `ariaSnapshot()` 里，就返回没有这个 ref，让 Pi 重新 snapshot 或看截图。禁止 `data-pi-ref`、`data-cabp-ref`、按文字或坐标补控件、`page.evaluate` 改页面。`eN` 仅映射为 `f0:eN`。解析快照时允许去掉包住整行的单引号。
+
+
+
 发给 Cursor 执行。做法以同目录 `EXECUTE-MIGRATION.md` 为准：Pi 按 Playwright Skill 点页面，按 derive-client 为这一站写客户端，把读命令跑通后才算 Skill。本文件只补「文件怎么建、函数怎么签、消息长什么样」。不要再设计别的架构。
 
 不要改 `E:\python\try\Dano` 里的任何文件，包括 `Pi_check` 和 `skillfrontend`。新界面写在本目录 `web/`。能新写的模块都新写。只有 Pi SDK、Playwright、两份 Skill 原文、已有的 `doc/` 四份指南不重写。
@@ -166,7 +170,7 @@ export async function takeSnapshot(recordingId)
 // { epoch, text, refs }
 ```
 
-遍历 `page.frames()`。主 frame 的 `frame_id` 为 `f0`。其余 frame 排序键是 `parent._guid 或 url + url`，同一页面重复调用序号不变。每个 frame：`frame.locator("body").ariaSnapshot()`。给可交互节点编号 `e1`…，对外 ref 为 `` `${frameId}:${localRef}` ``。同一 accessible name 出现两次，两条都保留，文本中带上最近的 heading 或 region。把 ref 映射到该 epoch 的 Locator，存在 session 上。导航（`framenavigated`）时 epoch 加 1 并清空映射。
+遍历 `page.frames()`。主 frame 的 `frame_id` 为 `f0`。其余 frame 排序键是 `parent._guid 或 url + url`，同一页面重复调用序号不变。每个 frame：`frame.locator("body").ariaSnapshot({ mode: "ai" })`。使用快照里已有的 `[ref=eN]`，对外 ref 为 `` `${frameId}:${ariaRef}` ``。Locator 是 `aria-ref=`，不用 `getByRole` 再找一次。同一名字出现两次，两条都保留。把 ref 映射到该 epoch 的 Locator，存在 session 上。导航（`framenavigated`）时 epoch 加 1 并清空映射。
 
 `src/browser/actions.mjs`
 
@@ -355,9 +359,9 @@ python scripts/client.py <子命令> ...
 | `secret_in_source` | `SKILL.md`、`scripts/client.py`、`references/api.md` 匹配 `/Bearer\s+[A-Za-z0-9._\-]+/`、`password` 后接赋值、或 `cookie` 后接长令牌。`auth.local.json` 不参与这条 |
 | `command_not_run` | `SKILL.md` 里以 `python scripts/client.py` 或 `python3 scripts/client.py` 开头、且不含 `--confirm` 的每一行，都要有一条 `ok: true` 的 `verify` 证据，`argv` 用空格连起来与该行相同（忽略首尾空白）。这些行也必须出现在 `references/api.md` 的「已验证读命令」里 |
 | `evidence_missing` | `evidence_ids` 里的 id 在本场 evidence 中不存在 |
-| `unknown_in_command` | 「未解决」的 `field` 作为整词出现在 `SKILL.md` |
-| `recorded_literal_default` | `scripts/client.py` 函数默认参数里，长度不少于 8 的字符串，与某条请求 JSON 的字符串值全等，且 `references/api.md` 里没有同名字段同时满足 `source: constant` 与非空 `constant_reason` |
 | `handbook_rewritten` | pack 前后 `SKILL.md` 与 `scripts/client.py` 的 sha256 变化。pack 只许写 `config/` |
+
+未解决字段是否写进命令、默认值是否把录到的字面量当成下次参数，由 Pi 写在 `references/api.md`。程序不按字段名出现、也不按请求值全等来判失败。
 
 有 `usableAuthHeaders` 且 `errors` 为空：会话 `status = "skill_ready"`。`errors` 为空但没有可用头：`skill_written_needs_auth`。有 errors：`verify_failed`。读命令退出码对应 HTTP 401：额外 code `auth_expired`，状态不是 `skill_ready`。
 
@@ -486,7 +490,7 @@ CORS：`http://127.0.0.1:5173` 与 `http://localhost:5173`。
 
 `test/goal.test.mjs`：`start` 消息的 `goal_text` 与 `goal.json` 全等，不是 `query`。
 
-`test/verify.test.mjs`：分别造出第 9 节每个 code。`recorded_literal_default` 用一条请求 JSON 里的 12 字符字符串，写进 `client.py` 的默认参数，且 `constant_reason` 为空。长度为 1 的 `"1"` 不得触发这条。
+`test/verify.test.mjs`：分别造出仍由程序检查的 code：`missing_file`、`secret_in_source`、`command_not_run`、`evidence_missing`、`handbook_rewritten`、`auth_expired`。程序不造 `unknown_in_command` 或 `recorded_literal_default`。
 
 `test/api-session.test.mjs`：起 HTTP 与 WebSocket，发 `start`（带 `tenant`），收到 `type: "frame"` 且 `data` 非空，收到的 `snapshot.run_id` 以 `rec_` 开头。此测试不调用真实模型，`startRecordingPi` 换成注入的假对象。假对象的 `prompt` 依次调用 host 的 `browser_snapshot`、点中 `inner-b` 的 `browser_act`、`network_get`、`write_skill_file` 三件、`run_skill_command`（读命令退出码 0）、`verify_skill`。断言 `SKILL.md` 与写入字节相同。不提供 token 时最终 snapshot `status` 为 `skill_written_needs_auth`。`src/agent/pi-session.mjs` 源码含 `createAgentSession` 与 `session.prompt`。
 

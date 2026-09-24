@@ -250,7 +250,7 @@ body,
 }
 
 .studio-session {
-  width: min(380px, 26vw);
+  width: min(460px, 34vw);
   min-width: 300px;
   flex-shrink: 0;
   display: flex;

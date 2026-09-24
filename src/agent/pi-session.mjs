@@ -6,6 +6,36 @@ import { applyPiModelConfig } from "./pi-model.mjs";
 import { installOpenAIToolCallStreamCompatibility } from "./openai-stream-compat.mjs";
 import { hostTools, toolNames, wrapHostTools } from "./tools.mjs";
 
+function toolLine(toolName, args) {
+  const action = args?.action ? ` ${args.action}` : "";
+  const ref = args?.ref ? ` ${args.ref}` : "";
+  return `${toolName}${action}${ref}`;
+}
+
+function resultLine(result) {
+  const text = result?.content?.find?.((item) => item?.type === "text")?.text || "";
+  if (!text) return result?.isError ? "失败" : "完成";
+  try {
+    const body = JSON.parse(text);
+    if (body?.ok === false) return `失败 ${String(body.error || "").split("\n")[0].slice(0, 180)}`;
+    if (body?.ok === true) return "完成";
+    if (Array.isArray(body?.refs)) return `完成 refs=${body.refs.length}`;
+    if (body?.image_in_conversation) return "完成 图像";
+  } catch {
+    // 不是 JSON 就只留一行
+  }
+  return text.split("\n")[0].slice(0, 180);
+}
+
+const SKILL_TOOLS = new Set(["write_skill_file", "run_skill_command", "verify_skill"]);
+const MAX_SKILL_CONTINUES = 4;
+
+export function nextRecordingPrompt({ finished, paused, progressed, continues }) {
+  if (finished || paused || continues >= MAX_SKILL_CONTINUES) return null;
+  if (progressed) return "已写入文件或跑过命令。读命令没跑完就继续跑，然后调用 verify_skill。页面操作的总结不是结束。";
+  return "Skill 还没产出。根据已有证据写 SKILL.md、scripts/client.py、references/api.md，跑其中的读命令，再调用 verify_skill。不要停在页面任务的总结上。";
+}
+
 let startOverride = null;
 
 export function setStartRecordingPi(fn) {
@@ -49,6 +79,35 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
     sessionManager: SessionManager.inMemory(),
   });
   const session = created.session;
+  let lastTool = "";
+  let progressed = false;
+  let continues = 0;
+  session.subscribe?.((event) => {
+    const type = String(event?.type || "");
+    const assistant = event?.assistantMessageEvent;
+    if (type === "message_update" && assistant?.type === "thinking_delta" && assistant.delta) {
+      recording?.emitThought?.({ kind: "thinking", text: assistant.delta, stream: true });
+    }
+    if (type === "message_update" && assistant?.type === "text_delta" && assistant.delta) {
+      recording?.emitThought?.({ kind: "text", text: assistant.delta, stream: true });
+    }
+    if (type === "tool_execution_start") {
+      if (SKILL_TOOLS.has(event.toolName)) progressed = true;
+      lastTool = toolLine(event.toolName, event.args);
+      console.log(`[pi] 调用 ${lastTool}`);
+      recording?.emitThought?.({ kind: "tool", phase: "start", text: lastTool });
+    }
+    if (type === "tool_execution_end") {
+      const line = `${lastTool || event.toolName || "tool"} ${resultLine(event.result)}`;
+      console.log(`[pi] ${line}`);
+      recording?.emitThought?.({
+        kind: "tool",
+        phase: "end",
+        ok: !event.isError,
+        text: line,
+      });
+    }
+  });
   let prompting = null;
   const queued = [];
   async function prompt(text) {
@@ -64,7 +123,20 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
       prompting = null;
       if (recording?.paused || recording?.finished) return;
       const next = queued.shift();
-      if (next) await prompt(next);
+      if (next) {
+        await prompt(next);
+        return;
+      }
+      const follow = nextRecordingPrompt({
+        finished: recording?.finished,
+        paused: recording?.paused,
+        progressed,
+        continues,
+      });
+      progressed = false;
+      if (!follow) return;
+      continues += 1;
+      await prompt(follow);
     }
   }
   const goalText = `${goal.goal_text || ""}\n${goal.page_url || ""}`;

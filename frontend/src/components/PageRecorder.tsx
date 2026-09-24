@@ -993,7 +993,7 @@ export default function PageRecorder({
   }, [viewStage, historyOpen]);
 
   function isUsefulRecorderThought(chunk: ThoughtChunk) {
-    if (chunk.kind === "tool") return true;
+    if (chunk.kind === "tool" || chunk.kind === "thinking") return true;
     if (chunk.kind === "user") return Boolean(String(chunk.text || "").trim());
     const text = String(chunk.text || "").trim();
     if (!text) return false;
@@ -1015,6 +1015,11 @@ export default function PageRecorder({
     if (chunk.kind === "user") {
       const text = String(chunk.text || "").trim();
       return text ? { ...chunk, text } : null;
+    }
+    if (chunk.kind === "thinking" || chunk.kind === "tool" || chunk.kind === "text") {
+      const text = String(chunk.text || "");
+      if (!text) return null;
+      return { ...chunk, text };
     }
     const text = sanitizePublicThoughtText(String(chunk.text || (chunk.kind === "tool" ? "正在操作页面" : "")));
     if (!text) return chunk.kind === "tool" ? { kind: "tool", phase: chunk.phase, ok: chunk.ok, text: "正在操作页面" } : null;
@@ -3485,7 +3490,7 @@ export default function PageRecorder({
       return (
         <div key={`thought-${index}`} style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
           {statusIcon}
-          <Text style={{ fontSize: 13, lineHeight: 1.65 }}>
+          <Text style={{ fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
             {item.text || "正在继续"}
             {isPending ? "…" : ""}
           </Text>

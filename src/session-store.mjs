@@ -32,7 +32,19 @@ export async function loadStorageState(targetUrl) {
   }
 }
 
+export function hasSessionMaterial(state) {
+  if (!state || typeof state !== "object") return false;
+  const cookies = Array.isArray(state.cookies) ? state.cookies : [];
+  if (cookies.some((cookie) => String(cookie?.value || "").trim())) return true;
+  const origins = Array.isArray(state.origins) ? state.origins : [];
+  return origins.some((item) => {
+    const rows = Array.isArray(item?.localStorage) ? item.localStorage : [];
+    return rows.some((row) => String(row?.value || "").trim());
+  });
+}
+
 export async function saveStorageState(targetUrl, state) {
+  if (!hasSessionMaterial(state)) return null;
   const file = hostFile(targetUrl);
   await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, `${JSON.stringify(state)}\n`, "utf8");

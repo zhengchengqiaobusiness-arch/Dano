@@ -44,6 +44,7 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
       if (message.type === "start") {
         const stored = message.storage_state || await loadStorageState(message.start_url);
         recording = await createRecording(message);
+        recording.emitThought = (thought) => send({ type: "thought", ...thought });
         recording.emit = () => {
           send(snapshotMessage(recording));
           persist(recording);
@@ -112,21 +113,32 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
         return;
       }
       if (message.type === "steer" || message.type === "pi_message") {
+        const text = message.text || "人已继续，从当前页面接着做";
+        if (typeof recording.releaseAssist === "function") {
+          const release = recording.releaseAssist;
+          recording.releaseAssist = null;
+          release(text);
+          return;
+        }
         recording.paused = false;
         if (recording.status === "waiting_operator") recording.status = "recording";
+        recording.assistReason = "";
         send(snapshotMessage(recording));
-        const text = message.text || "人已继续，从当前页面接着做";
-        send({ type: "thought", kind: "text", text: "继续" });
         await recording.pi?.prompt(text);
         recording.emit();
         return;
       }
       if (message.type === "abort" || message.type === "stop_pi" || message.type === "cancel") {
+        recording.finished = true;
+        if (typeof recording.releaseAssist === "function") {
+          const release = recording.releaseAssist;
+          recording.releaseAssist = null;
+          release("stopped");
+        }
         await recording.pi?.dispose?.();
         const page = getPage(recording.id);
         if (page) await saveStorageState(recording.startUrl, await page.context().storageState());
         recording.status = "stopped";
-        recording.finished = true;
         clearInterval(frameTimer);
         await closeBrowser(recording.id);
         recording.emit();
@@ -134,7 +146,14 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
     });
     ws.on("close", () => {
       clearInterval(frameTimer);
-      if (recording) closeBrowser(recording.id);
+      if (!recording) return;
+      recording.finished = true;
+      if (typeof recording.releaseAssist === "function") {
+        const release = recording.releaseAssist;
+        recording.releaseAssist = null;
+        release("stopped");
+      }
+      closeBrowser(recording.id);
     });
   });
 }

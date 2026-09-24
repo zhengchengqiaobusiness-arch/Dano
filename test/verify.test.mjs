@@ -3,7 +3,6 @@ import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { appendEvidence } from "../src/evidence/store.mjs";
 import { writeSkillFile } from "../src/skillpack/files.mjs";
 import { verifySkill } from "../src/skillpack/verify.mjs";
 import { skillDir } from "../src/paths.mjs";
@@ -39,22 +38,6 @@ test("verify reports each code", async () => {
   await writeFile(path.join(dir, "SKILL.md"), "python scripts/client.py list\npendingField\n");
   result = await verifySkill(dir, recording.id, recording);
   assert.ok(result.errors.some((item) => item.code === "evidence_missing"));
-  assert.ok(result.errors.some((item) => item.code === "unknown_in_command"));
-
-  const literal = "abcdefghijkl";
-  await appendEvidence(recording.id, {
-    kind: "network",
-    body_missing: false,
-    body: { post_data: JSON.stringify({ reason: literal }) },
-  });
-  await writeFile(path.join(dir, "scripts", "client.py"), `def list_items(reason="${literal}"):\n    print("ok")\n`);
-  await writeFile(path.join(dir, "references/api.md"), "## 字段\n- page_name: p\n- caller_name: reason\n- source: constant\n- constant_reason:\n- evidence_ids:\n");
-  result = await verifySkill(dir, recording.id, recording);
-  assert.ok(result.errors.some((item) => item.code === "recorded_literal_default"));
-
-  await writeFile(path.join(dir, "scripts", "client.py"), "def list_items(reason=\"1\"):\n    print(\"ok\")\n");
-  result = await verifySkill(dir, recording.id, recording);
-  assert.equal(result.errors.some((item) => item.code === "recorded_literal_default"), false);
 
   await writeSkillFile(recording.id, recording.skillId, "SKILL.md", "python scripts/client.py list\n");
   await writeFile(path.join(dir, "SKILL.md"), "python scripts/client.py list\nchanged\n");

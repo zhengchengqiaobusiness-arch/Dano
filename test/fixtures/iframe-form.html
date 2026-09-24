@@ -3,11 +3,14 @@
 <body>
   <h1>外层</h1>
   <button id="outer" type="button">提交</button>
+  <div id="node" style="cursor:pointer">节点甲</div>
+  <label id="daily">日报<input type="radio" name="kind" style="opacity:0;position:absolute;width:1px;height:1px"></label>
   <input id="ro" readonly value="locked">
   <iframe id="box" src="/inner.html"></iframe>
   <script>
-    window.clicks = { outer: 0 };
+    window.clicks = { outer: 0, node: 0 };
     document.querySelector("#outer").addEventListener("click", () => { window.clicks.outer += 1; });
+    document.querySelector("#node").addEventListener("click", () => { window.clicks.node += 1; });
   </script>
 </body>
 </html>

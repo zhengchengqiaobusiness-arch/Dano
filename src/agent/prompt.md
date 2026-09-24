@@ -1,5 +1,7 @@
 你是在给一个网页产出可执行 Skill。目标原文整段留下，不缩成 query + create。换一个网页就重新走下面 8 步，不把上一站的按钮名、path、字段来源带到下一站。
 
+实际调用 browser_snapshot、browser_act、browser_screenshot、network_list、network_get。browser_act 的 action 只有 open、snapshot、click、fill、fill_fields、press、select、upload、screenshot。不要调用 playwright-cli、evaluate、type、坐标点击。填写用 fill。ref 必须是最近一次快照里的 fN:eN。快照里没有的控件不能点，重新 snapshot 或看截图，仍然只点新快照里的 ref。
+
 1. 打开 Playwright Skill，按它操作。顺序是：打开页面、snapshot、只用这张快照里的 ref 去 click / fill / press、导航或弹层后再 snapshot。ref 失效就重新 snapshot，不重试旧 ref，同名控件不取第一个。
 2. 快照说不清（自定义下拉、日期、画布）时再 screenshot。图要作为图像进入这一轮，而不是只留下文件路径。
 3. 点完去看网络。先列出这次动作附近的 xhr/fetch，再打开某一条的方法、URL、正文和响应。对不上就改一个字段再点一次，看哪个键变了。不用字段名像、值相等、排除法认定绑定。
@@ -11,4 +13,4 @@
 
 每个可执行命令都要在 references/api.md 里指向证据 id。没有证据 id 的命令不要写进 SKILL.md。
 同一 path 若新增和修改的请求条件不同，写成两个命令。顺序写在手册里；只有存在绑定才把上一步的值传入下一步。前一步失败就停，保留已完成的结果。
-写完先跑读命令。失败就改脚本。通过后停止。
+写完先跑读命令。失败就改脚本。调用 verify_skill 并通过后才停止。页面上的操作做完不算结束。

@@ -1,4 +1,4 @@
-import { originFromUrl } from "../session-store.mjs";
+import { originFromUrl, saveStorageState } from "../session-store.mjs";
 import { attachNetwork } from "./network.mjs";
 
 const sessions = new Map();
@@ -25,10 +25,13 @@ export async function openBrowser({ recordingId, url, storageState, viewport }) 
     actionSeq: 0,
   };
   page.on("framenavigated", (frame) => {
-    if (frame === page.mainFrame()) {
-      state.epoch += 1;
-      state.refs.clear();
-    }
+    if (frame !== page.mainFrame()) return;
+    state.epoch += 1;
+    state.refs.clear();
+    clearTimeout(state.persistTimer);
+    state.persistTimer = setTimeout(() => {
+      persistBrowserSession(recordingId).catch(() => {});
+    }, 500);
   });
   sessions.set(recordingId, state);
   if (url) await page.goto(url, { waitUntil: "domcontentloaded" });
@@ -39,9 +42,23 @@ export function getPage(recordingId) {
   return sessions.get(recordingId)?.page || null;
 }
 
+export async function persistBrowserSession(recordingId) {
+  const state = sessions.get(recordingId);
+  if (!state?.context) return null;
+  try {
+    const saved = await state.context.storageState();
+    const url = state.page?.url?.() || state.origin;
+    return await saveStorageState(url, saved);
+  } catch {
+    return null;
+  }
+}
+
 export async function closeBrowser(recordingId) {
   const state = sessions.get(recordingId);
   if (!state) return;
+  clearTimeout(state.persistTimer);
+  await persistBrowserSession(recordingId);
   sessions.delete(recordingId);
   await state.browser.close().catch(() => {});
 }
