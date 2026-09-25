@@ -836,6 +836,7 @@ export default function PageRecorder({
   const snapshotRef = useRef<WorkflowSnapshot | null>(null);
   const actionRef = useRef("");
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const previewHostRef = useRef<HTMLDivElement | null>(null);
   const lastViewportRef = useRef("");
   const viewportTimerRef = useRef<number | null>(null);
@@ -1386,7 +1387,7 @@ export default function PageRecorder({
   }
 
   function previewDeviceScale() {
-    return 1;
+    return Math.min(2, window.devicePixelRatio || 1);
   }
 
   function readPreviewViewport() {
@@ -1396,7 +1397,7 @@ export default function PageRecorder({
     return {
       width: Math.max(DESKTOP_VIEWPORT.width, width >= 640 ? width : DESKTOP_VIEWPORT.width),
       height: Math.max(DESKTOP_VIEWPORT.height, height >= 400 ? height : DESKTOP_VIEWPORT.height),
-      devicePixelRatio: 1,
+      devicePixelRatio: previewDeviceScale(),
     };
   }
 
@@ -1715,6 +1716,8 @@ export default function PageRecorder({
         }
       } else if (incoming.type === "frame") {
         queueFrame(incoming);
+      } else if (incoming.type === "needs_file") {
+        fileInputRef.current?.click();
       } else if (incoming.type === "input_error") {
         message.warning(String(incoming.detail || "页面操作没有执行"));
       } else if (incoming.type === "error") {
@@ -2787,6 +2790,23 @@ export default function PageRecorder({
           className="studio-preview-host"
           style={{ flex: 1, minHeight: 0, borderRadius: 8 }}
         >
+          <input
+            ref={fileInputRef}
+            type="file"
+            style={{ display: "none" }}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (!file) return;
+              const reader = new FileReader();
+              reader.onload = () => {
+                const text = String(reader.result || "");
+                const data = text.includes(",") ? text.slice(text.indexOf(",") + 1) : "";
+                send({ type: "file", name: file.name, data });
+              };
+              reader.readAsDataURL(file);
+            }}
+          />
           <canvas
             ref={canvasRef}
             onPointerDown={onPointerDown}

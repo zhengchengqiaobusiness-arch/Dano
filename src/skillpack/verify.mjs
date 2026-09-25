@@ -127,6 +127,33 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   }
   errors.push(...citationErrors(texts["scripts/client.py"] || "", requests, "scripts/client.py"));
   errors.push(...citationErrors(texts["references/api.md"] || "", requests, "references/api.md"));
+  const actionRows = evidence.filter((row) => row.kind === "action");
+  for (const row of actionRows) {
+    const summary = String(row.summary || "");
+    const named = summary.match(/^(?:fill|fill_fields|select|upload):(.*)$/);
+    if (!named) continue;
+    for (const field of named[1].split("|").map((item) => item.trim()).filter((item) => item.length >= 2)) {
+      if (!skillMd.includes(field)) {
+        errors.push({
+          code: "caller_field_missing",
+          field,
+          file: "SKILL.md",
+          hint: "这个控件在页面上填过，要在 SKILL.md 里作为调用方必答问题出现，不能只问其中一部分",
+        });
+      }
+    }
+  }
+  const uploads = actionRows.filter((row) => String(row.summary || "").startsWith("upload:"));
+  if (actionRows.some((row) => row.summary === "needs_upload") && !uploads.length) {
+    errors.push({ code: "attachment_unresolved", hint: "文件选择已打开。对同一 ref 调用 upload，并采用这次发出的请求" });
+  }
+  for (const row of uploads) {
+    const blob = await getEvidence(recordingId, row.id).catch(() => null);
+    const fired = blob?.body?.requests;
+    if (!Array.isArray(fired) || !fired.length) {
+      errors.push({ code: "attachment_unresolved", hint: "upload 没有发出请求。附件要跟着这次请求写进提交正文，不能省略" });
+    }
+  }
   for (const row of failed) {
     const blob = await getEvidence(recordingId, row.id).catch(() => null);
     const text = `${blob?.stdout || ""} ${blob?.stderr || ""}`;

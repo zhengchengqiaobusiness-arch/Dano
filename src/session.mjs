@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile, cp } from "node:fs/promises";
 import path from "node:path";
 import { dataRoot, recordingDir, skillDir } from "./paths.mjs";
 import { newRecordingId, writeInitialGoal } from "./evidence/store.mjs";
-import { skillIdFor } from "./skillpack/files.mjs";
+import { skillIdFor, writeRuntimeConfig } from "./skillpack/files.mjs";
 
 const recordings = new Map();
 
@@ -98,6 +98,7 @@ export async function exportSkill(id, outDir) {
     return { status: "not_ready", verify: recording?.verify || null };
   }
   const source = recording.skillDir || skillDir(recording.skillId);
+  await writeRuntimeConfig(recording, recording.skillId);
   const target = String(outDir || "").trim() || path.join(dataRoot(), "export", recording.skillId);
   const dest = path.resolve(target);
   await cp(source, dest, { recursive: true });

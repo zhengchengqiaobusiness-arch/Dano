@@ -1,3 +1,4 @@
+import { headersFromStorageState, writeAuthVault } from "../auth-vault.mjs";
 import { originFromUrl, saveStorageState } from "../session-store.mjs";
 import { attachNetwork } from "./network.mjs";
 
@@ -11,7 +12,8 @@ export async function openBrowser({ recordingId, url, storageState, viewport }) 
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({ headless: true });
   const size = viewport?.width && viewport?.height ? viewport : { width: 1440, height: 900 };
-  const contextOptions = { viewport: size };
+  const scale = Math.min(2, Math.max(1, Number(viewport?.devicePixelRatio) || 2));
+  const contextOptions = { viewport: size, deviceScaleFactor: scale };
   if (storageState) contextOptions.storageState = storageState;
   const context = await browser.newContext(contextOptions);
   attachNetwork(recordingId, context);
@@ -24,6 +26,9 @@ export async function openBrowser({ recordingId, url, storageState, viewport }) 
     lastPointerMoveAt: 0,
     actionSeq: 0,
   };
+  page.on("filechooser", (chooser) => {
+    state.pendingFileChooser = chooser;
+  });
   page.on("framenavigated", (frame) => {
     if (frame !== page.mainFrame()) return;
     state.epoch += 1;
@@ -48,6 +53,8 @@ export async function persistBrowserSession(recordingId) {
   try {
     const saved = await state.context.storageState();
     const url = state.page?.url?.() || state.origin;
+    const headers = headersFromStorageState(saved);
+    if (Object.keys(headers).length) await writeAuthVault(recordingId, headers);
     return await saveStorageState(url, saved);
   } catch {
     return null;
@@ -70,7 +77,7 @@ export async function captureFrame(recordingId) {
   if (state.capturing) return null;
   state.capturing = true;
   try {
-    const bytes = await page.screenshot({ type: "jpeg", quality: 60 });
+    const bytes = await page.screenshot({ type: "jpeg", quality: 92 });
     const size = page.viewportSize() || state.viewport;
     return {
       data: Buffer.from(bytes).toString("base64"),

@@ -1,7 +1,15 @@
+import { writeFile, mkdir } from "node:fs/promises";
+import path from "node:path";
+import { recordingDir } from "../paths.mjs";
 import { originFromUrl } from "../session-store.mjs";
 import { browserSession } from "./session.mjs";
 import { locatorFor, takeSnapshot } from "./snapshot.mjs";
 import { beginAction, endAction, listNetwork, waitForAction } from "./network.mjs";
+
+const PROBE_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64",
+);
 
 const ACTIONS = new Set(["open", "snapshot", "click", "fill", "fill_fields", "press", "select", "upload", "screenshot"]);
 
@@ -66,6 +74,7 @@ export async function runAction(recordingId, input) {
   try {
     if (action === "fill_fields") {
       const fields = Array.isArray(input.fields) ? input.fields : [];
+      const filled = [];
       for (const field of fields) {
         if (!field || typeof field.ref !== "string" || typeof field.text !== "string") {
           return { ok: false, error: "value_not_applied", ref: field?.ref || "", snapshot: await takeSnapshot(recordingId) };
@@ -76,8 +85,9 @@ export async function runAction(recordingId, input) {
         if (!(await readBack(item.locator, field.text))) {
           return { ok: false, error: "value_not_applied", ref: field.ref, snapshot: await takeSnapshot(recordingId) };
         }
+        if (item.label) filled.push(item.label);
       }
-      return { ok: true, snapshot: await takeSnapshot(recordingId) };
+      return { ok: true, filled, snapshot: await takeSnapshot(recordingId) };
     }
     if (!hit) {
       console.log(`[browser] ${action} ref=${input.ref || ""} stale`);
@@ -85,12 +95,29 @@ export async function runAction(recordingId, input) {
     }
     console.log(`[browser] ${action} ref=${input.ref || ""}`);
     if (action === "click") {
+      const chooserWait = state.page.waitForEvent("filechooser", { timeout: 8000 }).catch(() => null);
       try {
         await hit.locator.click({ timeout: 8000 });
       } catch (error) {
+        const chooser = state.pendingFileChooser || await Promise.race([
+          chooserWait,
+          new Promise((resolve) => setTimeout(() => resolve(null), 400)),
+        ]);
+        if (chooser) {
+          state.pendingFileChooser = chooser;
+          return { ok: false, error: "needs_upload", ref: input.ref, requests: requestsDuring(), snapshot: await takeSnapshot(recordingId) };
+        }
         const message = String(error?.message || "click_failed").split("\n")[0];
         console.log(`[browser] click failed ${message}`);
         return { ok: false, error: message, requests: requestsDuring(), snapshot: await takeSnapshot(recordingId) };
+      }
+      const chooser = state.pendingFileChooser || await Promise.race([
+        chooserWait,
+        new Promise((resolve) => setTimeout(() => resolve(null), 800)),
+      ]);
+      if (chooser) {
+        state.pendingFileChooser = chooser;
+        return { ok: false, error: "needs_upload", ref: input.ref, requests: requestsDuring(), snapshot: await takeSnapshot(recordingId) };
       }
     }
     if (action === "fill") {
@@ -105,13 +132,29 @@ export async function runAction(recordingId, input) {
     }
     if (action === "press") await hit.locator.press(String(input.key || input.text || ""));
     if (action === "select") await hit.locator.selectOption(String(input.text ?? ""));
-    if (action === "upload") await hit.locator.setInputFiles(String(input.file_path || ""));
-    if (action === "click") await waitForAction(recordingId, actionId);
+    let filled = [];
+    if (action === "fill" || action === "select") filled = [hit.label || ""].filter(Boolean);
+    if (action === "upload") {
+      const dir = path.join(recordingDir(recordingId), "uploads");
+      await mkdir(dir, { recursive: true });
+      const filePath = String(input.file_path || "").trim() || path.join(dir, "attachment.png");
+      if (!input.file_path) await writeFile(filePath, PROBE_PNG);
+      if (state.pendingFileChooser) {
+        await state.pendingFileChooser.setFiles(filePath);
+        state.pendingFileChooser = null;
+      } else {
+        await hit.locator.setInputFiles(filePath);
+      }
+      filled = [hit.label || ""].filter(Boolean);
+    }
+    if (action === "click" || action === "upload" || action === "fill" || action === "select") {
+      await waitForAction(recordingId, actionId);
+    }
     const snapshot = await takeSnapshot(recordingId);
     const requests = requestsDuring();
     return action === "click"
       ? { ok: true, clicked: hit.label || "", requests, snapshot }
-      : { ok: true, requests, snapshot };
+      : { ok: true, filled, requests, snapshot };
   } finally {
     endAction(recordingId);
   }

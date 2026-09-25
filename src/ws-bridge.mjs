@@ -1,5 +1,7 @@
 import { WebSocketServer } from "ws";
-import { captureFrame, closeBrowser, getPage, openBrowser } from "./browser/session.mjs";
+import { appendEvidence } from "./evidence/store.mjs";
+import { browserSession, captureFrame, closeBrowser, getPage, openBrowser } from "./browser/session.mjs";
+import { beginAction, endAction, listNetwork, waitForAction } from "./browser/network.mjs";
 import { loadStorageState, saveStorageState } from "./session-store.mjs";
 import { createRecording, emit, persist, snapshotMessage } from "./session.mjs";
 import { hostTools } from "./agent/tools.mjs";
@@ -76,6 +78,35 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
         send({ type: "error", detail: "not_started" });
         return;
       }
+      if (message.type === "file") {
+        const state = browserSession(recording.id);
+        const chooser = state?.pendingFileChooser;
+        if (!chooser) {
+          send({ type: "input_error", detail: "没有打开的文件选择" });
+          return;
+        }
+        const name = String(message.name || "attachment.bin");
+        const bytes = Buffer.from(String(message.data || ""), "base64");
+        const actionId = beginAction(recording.id, null, { anyFrame: true });
+        try {
+          await chooser.setFiles({ name, mimeType: "application/octet-stream", buffer: bytes });
+          state.pendingFileChooser = null;
+          await waitForAction(recording.id, actionId);
+          const requests = listNetwork(recording.id, { action_id: actionId });
+          await appendEvidence(recording.id, {
+            kind: "action",
+            summary: `upload:${name}`,
+            body: { ok: true, filled: [name], requests },
+            body_missing: false,
+          });
+        } catch (error) {
+          send({ type: "input_error", detail: error.message });
+        } finally {
+          endAction(recording.id);
+        }
+        setTimeout(pushFrame, 100);
+        return;
+      }
       if (message.type === "input") {
         const page = getPage(recording.id);
         const event = message.event || {};
@@ -90,11 +121,26 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
             recording.lastPointerMoveAt = now;
             await page.mouse.move(x, y);
           } else if (kind === "pointer_down") {
+            recording.manualAction = beginAction(recording.id, null, { anyFrame: true });
             await page.mouse.move(x, y);
             await page.mouse.down({ button: event.button || "left" });
           } else if (kind === "pointer_up") {
             await page.mouse.move(x, y);
             await page.mouse.up({ button: event.button || "left" });
+            const actionId = recording.manualAction || "";
+            recording.manualAction = "";
+            if (actionId) {
+              await waitForAction(recording.id, actionId);
+              endAction(recording.id);
+              const requests = listNetwork(recording.id, { action_id: actionId });
+              await appendEvidence(recording.id, {
+                kind: "action",
+                summary: "manual_click",
+                body: { ok: true, requests },
+                body_missing: false,
+              });
+            }
+            if (browserSession(recording.id)?.pendingFileChooser) send({ type: "needs_file" });
           } else if (kind === "scroll") {
             await page.mouse.wheel(Number(event.dx || 0), Number(event.dy || 0));
           } else if (kind === "text" && event.text) {

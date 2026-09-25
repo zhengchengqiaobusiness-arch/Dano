@@ -3,6 +3,7 @@ import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { appendEvidence } from "../evidence/store.mjs";
 import { requestIndexRow } from "../skillpack/request-keys.mjs";
+import { noteLoginBody, noteRequestHeaders } from "../auth-vault.mjs";
 
 const NOISE = /sockjs|websocket|favicon\.ico/i;
 const bags = new Map();
@@ -12,10 +13,10 @@ function bag(recordingId) {
   return bags.get(recordingId);
 }
 
-export function beginAction(recordingId, frame) {
+export function beginAction(recordingId, frame, { anyFrame = false } = {}) {
   const state = bag(recordingId);
   state.seq += 1;
-  const action = { id: `act_${state.seq}`, frame, started: Date.now(), open: true };
+  const action = { id: `act_${state.seq}`, frame, anyFrame, started: Date.now(), open: true };
   state.action = action;
   return action.id;
 }
@@ -31,6 +32,7 @@ export function attachNetwork(recordingId, context) {
     const type = request.resourceType();
     if (type !== "xhr" && type !== "fetch") return;
     if (NOISE.test(request.url())) return;
+    noteRequestHeaders(recordingId, request.headers());
     state.seq += 1;
     const id = `req_${state.items.length + 1}`;
     const started = Date.now();
@@ -51,7 +53,7 @@ export function attachNetwork(recordingId, context) {
       content_type: "",
     };
     const action = state.action;
-    if (action?.open && started >= action.started && action.frame && item.frame === action.frame) {
+    if (action?.open && started >= action.started && (action.anyFrame || (action.frame && item.frame === action.frame))) {
       item.action_id = action.id;
     }
     state.items.push(item);
@@ -65,12 +67,13 @@ export function attachNetwork(recordingId, context) {
     item.ended_at = Date.now();
     item.content_type = response.headers()["content-type"] || "";
     const action = state.action;
-    if (!item.action_id && action?.open && item.started_at >= action.started && action.frame && item.frame === action.frame) {
+    if (!item.action_id && action?.open && item.started_at >= action.started && (action.anyFrame || (action.frame && item.frame === action.frame))) {
       item.action_id = action.id;
     }
     try {
       item.response_body = await response.text();
       item.body_missing = false;
+      noteLoginBody(recordingId, item.response_body);
     } catch {
       item.response_body = null;
       item.body_missing = true;

@@ -91,7 +91,13 @@ export function hostTools(recording) {
         }
       }
       const result = await runAction(id, args);
-      await appendEvidence(id, { kind: "action", summary: args.action, body: result, body_missing: false });
+      const names = Array.isArray(result.filled) ? result.filled.filter(Boolean) : [];
+      const summary = result.error === "needs_upload"
+        ? "needs_upload"
+        : names.length
+          ? `${args.action}:${names.join("|")}`
+          : args.action;
+      await appendEvidence(id, { kind: "action", summary, body: result, body_missing: false });
       return result;
     },
     async browser_screenshot(args) {
