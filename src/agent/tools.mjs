@@ -8,16 +8,18 @@ import { appendEvidence, getEvidence, listEvidence, appendGoal, readGoal } from 
 import { runAction } from "../browser/actions.mjs";
 import { persistBrowserSession } from "../browser/session.mjs";
 import { takeSnapshot } from "../browser/snapshot.mjs";
-import { getNetwork, listNetwork } from "../browser/network.mjs";
+import { getNetwork, listNetwork, requestKeyIndex } from "../browser/network.mjs";
 import { readSkillFile, skillIdFor, writeSkillFile } from "../skillpack/files.mjs";
 import { finishSkill } from "../skillpack/verify.mjs";
 
-const GUIDE_NAMES = [
-  "skill-generator-workflow.md",
-  "skill-generator-auth-and-token.md",
-  "skill-generator-live-options.md",
-  "skill-generator-ask-user-question-guide.md",
-];
+const GUIDE_FILES = {
+  "skill-generator-auth-and-token.md": path.join(docDir(), "skill-generator-auth-and-token.md"),
+  "skill-generator-live-options.md": path.join(docDir(), "skill-generator-live-options.md"),
+  "skill-generator-ask-user-question-guide.md": path.join(docDir(), "skill-generator-ask-user-question-guide.md"),
+  "writing-for-agents.md": path.join(packageRoot(), "skill", "writing-for-agents", "SKILL.md"),
+  "writing-for-agents-mechanics.md": path.join(packageRoot(), "skill", "writing-for-agents", "SKILL-MECHANICS.md"),
+};
+const GUIDE_NAMES = Object.keys(GUIDE_FILES);
 
 const TOOL_SPECS = [
   { name: "browser_open", description: "打开入口同源的地址。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
@@ -28,7 +30,7 @@ const TOOL_SPECS = [
   { name: "network_get", description: "按 id 读取一条请求的全文。body_missing 表示没有正文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
   { name: "evidence_get", description: "按 id 读取一条证据全文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
   { name: "read_page_asset", description: "读取本场已捕获、与入口同源的 javascript 响应。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
-  { name: "read_guide", description: "写 Skill 之前读取调用方要求。name 只能是 skill-generator-workflow.md、skill-generator-auth-and-token.md、skill-generator-live-options.md、skill-generator-ask-user-question-guide.md。", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
+  { name: "read_guide", description: "写 Skill 前读取一份文档。name 见返回的 names。鉴权、提问、活选项和写作方法都从这里读，写进 SKILL.md、scripts/client.py、references/api.md。本场没有 CONTRACT.json 和 flow.py。", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
   { name: "assist", description: "登录或验证码挡住时调用。这次调用会停住，直到人在预览里处理完并确认。返回里的 snapshot 才是确认后的当前页，从那张快照接着做。", parameters: { type: "object", properties: { reason: { type: "string" } }, required: ["reason"] } },
   { name: "append_goal", description: "只填充目标里仍为空的键，写入原句。", parameters: { type: "object", properties: { key: { type: "string" }, text: { type: "string" } }, required: ["key", "text"] } },
   { name: "write_skill_file", description: "只写 SKILL.md、scripts/client.py、references/api.md。", parameters: { type: "object", properties: { relative_path: { type: "string" }, contents: { type: "string" } }, required: ["relative_path", "contents"] } },
@@ -122,8 +124,8 @@ export function hostTools(recording) {
     },
     async read_guide(args) {
       const name = path.basename(String(args.name || ""));
-      if (!GUIDE_NAMES.includes(name)) return { ok: false, error: "unknown_guide", names: GUIDE_NAMES };
-      const text = await readFile(path.join(docDir(), name), "utf8");
+      if (!GUIDE_FILES[name]) return { ok: false, error: "unknown_guide", names: GUIDE_NAMES };
+      const text = await readFile(GUIDE_FILES[name], "utf8");
       return { ok: true, name, text };
     },
     async assist(args) {
@@ -160,7 +162,7 @@ export function hostTools(recording) {
         typeof item === "string" ? item : String(item?.text || item?.value || item?.arg || "")
       )).filter(Boolean);
       if (!["python", "python3"].includes(argv[0]) || argv[1] !== "scripts/client.py") {
-        return { ok: false, error: "command_rejected" };
+        return { ok: false, error: "command_rejected", argv: ["python", "scripts/client.py"] };
       }
       const cwd = skillPath(skillId());
       const result = await new Promise((resolve) => {
@@ -214,7 +216,7 @@ export function hostTools(recording) {
       const snaps = await listEvidence(id, { kinds: ["snapshot"], limit: 1 });
       let snapshot = null;
       if (snaps[0]) snapshot = await getEvidence(id, snaps[0].id);
-      return { goal, snapshot, index };
+      return { goal, snapshot, index, requests: requestKeyIndex(id) };
     },
   };
   return tools;

@@ -5,6 +5,7 @@ import { listEvidence, getEvidence } from "../evidence/store.mjs";
 import { handbookChanged, writeRuntimeConfig } from "./files.mjs";
 import { hasCredentialHeaders } from "../auth-vault.mjs";
 import { upsertCatalog } from "./catalog.mjs";
+import { requestIndexRow, citationErrors } from "./request-keys.mjs";
 
 function section(text, title) {
   const match = text.match(new RegExp(`## ${title}\\n([\\s\\S]*?)(?=\\n## |$)`));
@@ -51,7 +52,7 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     }
   }
   if (await handbookChanged(recordingId, dir)) errors.push({ code: "handbook_rewritten" });
-  const secret = /Bearer\s+[A-Za-z0-9._\-]+|password\s*[:=]\s*\S+|cookie\s*[:=]\s*\S{8,}/i;
+  const secret = /Bearer\s+[A-Za-z0-9._\-]{8,}|password\s*[:=]\s*\S+|cookie\s*[:=]\s*\S{8,}/i;
   for (const rel of ["SKILL.md", "scripts/client.py", "references/api.md"]) {
     if (secret.test(texts[rel] || "")) errors.push({ code: "secret_in_source", path: rel });
   }
@@ -75,6 +76,14 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     const listed = verifiedLines.some((item) => item === line);
     if (!ran || !listed) errors.push({ code: "command_not_run", command: line });
   }
+  const requests = [];
+  for (const row of evidence.filter((item) => item.kind === "network")) {
+    const blob = await getEvidence(recordingId, row.id).catch(() => null);
+    const body = blob?.body && typeof blob.body === "object" ? blob.body : blob;
+    if (body?.path || body?.post_data) requests.push(requestIndexRow({ ...body, id: row.id }));
+  }
+  const cited = `${texts["scripts/client.py"] || ""}\n${texts["references/api.md"] || ""}`;
+  errors.push(...citationErrors(cited, requests));
   for (const row of failed) {
     const blob = await getEvidence(recordingId, row.id).catch(() => null);
     const text = `${blob?.stdout || ""} ${blob?.stderr || ""}`;

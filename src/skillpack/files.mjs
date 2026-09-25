@@ -53,7 +53,9 @@ export async function handbookChanged(recordingId, dir) {
 
 export async function writeSkillFile(recordingId, skillId, relativePath, contents) {
   const rel = String(relativePath || "").replaceAll("\\", "/");
-  if (!WRITABLE.has(rel) || rel.startsWith("config/")) return { ok: false, error: "frozen_file" };
+  if (!WRITABLE.has(rel) || rel.startsWith("config/")) {
+    return { ok: false, error: "frozen_file", writable: [...WRITABLE] };
+  }
   const dir = skillDir(skillId);
   const file = path.join(dir, rel);
   await mkdir(path.dirname(file), { recursive: true });
@@ -64,7 +66,7 @@ export async function writeSkillFile(recordingId, skillId, relativePath, content
 
 export async function readSkillFile(skillId, relativePath) {
   const rel = String(relativePath || "").replaceAll("\\", "/");
-  if (!WRITABLE.has(rel)) return { ok: false, error: "frozen_file" };
+  if (!WRITABLE.has(rel)) return { ok: false, error: "frozen_file", writable: [...WRITABLE] };
   const text = await readFile(path.join(skillDir(skillId), rel), "utf8");
   return { ok: true, contents: text };
 }

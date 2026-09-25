@@ -76,14 +76,16 @@ export async function takeSnapshot(recordingId) {
     }
     for (const node of parseNodes(yaml)) {
       const ref = `${frameId}:${node.ariaRef}`;
+      const label = node.name ? `${node.role} "${node.name}"` : node.role;
+      const column = node.column ? ` ${node.column}` : "";
+      const shown = `${label}${column}`;
       state.refs.set(ref, {
         locator: frame.locator(`aria-ref=${node.ariaRef}`),
         epoch: state.epoch,
         frame,
+        label: shown,
       });
-      const label = node.name ? `${node.role} "${node.name}"` : node.role;
-      const column = node.column ? ` ${node.column}` : "";
-      lines.push(`- ${label} ref=${ref}${column}`);
+      lines.push(`- ${shown} ref=${ref}`);
       refs.push(ref);
     }
   }

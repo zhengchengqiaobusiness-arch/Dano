@@ -81,7 +81,7 @@ export async function runAction(recordingId, input) {
     console.log(`[browser] ${action} ref=${input.ref || ""}`);
     if (action === "click") {
       try {
-        await hit.locator.click();
+        await hit.locator.click({ timeout: 8000 });
       } catch (error) {
         const message = String(error?.message || "click_failed").split("\n")[0];
         console.log(`[browser] click failed ${message}`);
@@ -101,7 +101,8 @@ export async function runAction(recordingId, input) {
     if (action === "press") await hit.locator.press(String(input.key || input.text || ""));
     if (action === "select") await hit.locator.selectOption(String(input.text ?? ""));
     if (action === "upload") await hit.locator.setInputFiles(String(input.file_path || ""));
-    return { ok: true, snapshot: await takeSnapshot(recordingId) };
+    const snapshot = await takeSnapshot(recordingId);
+    return action === "click" ? { ok: true, clicked: hit.label || "", snapshot } : { ok: true, snapshot };
   } finally {
     endAction(recordingId);
   }

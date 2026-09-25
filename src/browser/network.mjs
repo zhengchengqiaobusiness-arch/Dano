@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { appendEvidence } from "../evidence/store.mjs";
+import { requestIndexRow } from "../skillpack/request-keys.mjs";
 
 const NOISE = /sockjs|websocket|favicon\.ico/i;
 const bags = new Map();
@@ -112,7 +113,12 @@ export function listNetwork(recordingId, { after_id = "", action_id = "" } = {})
     body_bytes: row.response_body == null ? 0 : Buffer.byteLength(String(row.response_body)),
     body_missing: row.body_missing,
     action_id: row.action_id,
+    keys: requestIndexRow(row).keys,
   }));
+}
+
+export function requestKeyIndex(recordingId) {
+  return bag(recordingId).items.map((row) => requestIndexRow(row));
 }
 
 export function getNetwork(recordingId, id) {

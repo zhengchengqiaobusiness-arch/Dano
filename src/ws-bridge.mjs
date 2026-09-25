@@ -124,7 +124,11 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
         if (recording.status === "waiting_operator") recording.status = "recording";
         recording.assistReason = "";
         send(snapshotMessage(recording));
-        await recording.pi?.prompt(text);
+        try {
+          await recording.pi?.prompt(text);
+        } catch (error) {
+          send({ type: "error", detail: error.message });
+        }
         recording.emit();
         return;
       }

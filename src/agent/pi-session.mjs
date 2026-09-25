@@ -1,6 +1,6 @@
 import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { dataRoot, docDir, packageRoot, recordingDir } from "../paths.mjs";
+import { dataRoot, packageRoot, recordingDir } from "../paths.mjs";
 import { readGoal } from "../evidence/store.mjs";
 import { applyPiModelConfig } from "./pi-model.mjs";
 import { installOpenAIToolCallStreamCompatibility } from "./openai-stream-compat.mjs";
@@ -18,7 +18,7 @@ function resultLine(result) {
   try {
     const body = JSON.parse(text);
     if (body?.ok === false) return `失败 ${String(body.error || "").split("\n")[0].slice(0, 180)}`;
-    if (body?.ok === true) return "完成";
+    if (body?.ok === true) return body.clicked ? `完成 ${body.clicked}` : "完成";
     if (Array.isArray(body?.refs)) return `完成 refs=${body.refs.length}`;
     if (body?.image_in_conversation) return "完成 图像";
   } catch {
@@ -33,7 +33,7 @@ const MAX_SKILL_CONTINUES = 4;
 export function nextRecordingPrompt({ finished, paused, progressed, continues }) {
   if (finished || paused || continues >= MAX_SKILL_CONTINUES) return null;
   if (progressed) return "已写入文件或跑过命令。读命令没跑完就继续跑，然后调用 verify_skill。页面操作的总结不是结束。";
-  return "Skill 还没产出。根据已有证据写 SKILL.md、scripts/client.py、references/api.md，跑其中的读命令，再调用 verify_skill。不要停在页面任务的总结上。";
+  return "Skill 还没产出。先用 read_guide 读完名单里的文档。再看下面 requests 的方法、路径、证据 id 和正文键，用 network_get 打开要采用的全文。按目标原文的每一段写 SKILL.md、scripts/client.py、references/api.md，跑读命令，调用 verify_skill。";
 }
 
 let startOverride = null;
@@ -57,25 +57,11 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
   const resolved = applyPiModelConfig(authStorage, modelRegistry);
   installOpenAIToolCallStreamCompatibility({ baseUrl: resolved.baseUrl });
   const promptText = await readFile(path.join(packageRoot(), "src", "agent", "prompt.md"), "utf8");
-  const playwrightSkill = await readFile(path.join(packageRoot(), "skill", "playwright-cli", "SKILL.md"), "utf8");
-  const deriveSkill = await readFile(path.join(packageRoot(), "skill", "derive-client", "SKILL.md"), "utf8");
-  const writingDir = path.join(packageRoot(), "skill", "writing-for-agents");
-  const writingSkill = await readFile(path.join(writingDir, "SKILL.md"), "utf8");
-  const writingMechanics = await readFile(path.join(writingDir, "SKILL-MECHANICS.md"), "utf8");
-  const guideNames = [
-    "skill-generator-workflow.md",
-    "skill-generator-auth-and-token.md",
-    "skill-generator-live-options.md",
-    "skill-generator-ask-user-question-guide.md",
-  ];
-  const guides = await Promise.all(guideNames.map(async (name) => (
-    `# ${name}\n${await readFile(path.join(docDir(), name), "utf8")}`
-  )));
   const goal = await readGoal(recordingId);
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
-    systemPromptOverride: () => [promptText, playwrightSkill, deriveSkill, writingSkill, writingMechanics, ...guides, JSON.stringify(goal)].join("\n\n"),
+    systemPromptOverride: () => [promptText, JSON.stringify(goal)].join("\n\n"),
   });
   const customTools = wrapHostTools(host);
   const created = await createAgentSession({
@@ -128,12 +114,15 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
       queued.push(text);
       return prompting;
     }
-    prompting = session.prompt(text);
     try {
+      prompting = session.prompt(text);
       await prompting;
+    } catch (error) {
+      if (!session.isStreaming) throw error;
+      await session.steer(text);
     } finally {
       prompting = null;
-      if (recording?.paused || recording?.finished) return;
+      if (recording?.paused || recording?.finished || session.isStreaming) return;
       const next = queued.shift();
       if (next) {
         await prompt(next);
@@ -148,17 +137,23 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
       progressed = false;
       if (!follow) return;
       continues += 1;
-      await prompt(follow);
+      const current = typeof host.context === "function" ? await host.context() : {};
+      await prompt(`${follow}\n${JSON.stringify({ requests: current.requests || [] })}`);
     }
   }
   const goalText = `${goal.goal_text || ""}\n${goal.page_url || ""}`;
   const context = typeof host.context === "function" ? await host.context() : {};
-  await prompt(`${goalText}\n${JSON.stringify({ snapshot: context.snapshot, index: context.index })}`);
+  await prompt(`${goalText}\n${JSON.stringify({ snapshot: context.snapshot, index: context.index, requests: context.requests || [] })}`);
   return {
     prompt: async (text) => {
+      const message = text || "人已继续，从当前页面接着做";
       if (recording?.paused) recording.paused = false;
       if (recording?.status === "waiting_operator") recording.status = "recording";
-      await prompt(text || "人已继续，从当前页面接着做");
+      if (session.isStreaming) {
+        await session.steer(message);
+        return;
+      }
+      await prompt(message);
     },
     dispose: () => session.dispose?.(),
   };
