@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { citationErrors, keysFromPostData } from "../src/skillpack/request-keys.mjs";
+import { citationErrors, keysFromPostData, requestIndexRow } from "../src/skillpack/request-keys.mjs";
 
 const body = {
   creator: "1",
@@ -25,4 +25,11 @@ test("a cited path must exist, and every key of that request must be written", (
   assert.ok(citationErrors(partial, requests).some((item) => item.code === "key_not_written" && item.key === "creator"));
   const full = ["/admin-api/oa/report/save", ...requests[0].keys].join("\n");
   assert.equal(citationErrors(full, requests).length, 0);
+  const queried = requestIndexRow({ id: "req_2", method: "GET", path: "/admin-api/oa/report/statistics", query: "deptId=1&reportType=1", post_data: "" });
+  assert.ok(queried.keys.includes("deptId"));
+  assert.equal(queried.keys.includes("1"), false);
+  assert.ok(citationErrors("/admin-api/oa/report/statistics", [queried]).some((item) => item.key === "deptId"));
+  const client = "/admin-api/oa/report/save\nitems.append({'content': content, 'itemType': 1, '_X_ROW_KEY': key, 'sort': 0, 'progress': 0})";
+  assert.equal(citationErrors(client, requests).some((item) => item.key === "items[].content"), false);
+  assert.ok(citationErrors(client, requests).some((item) => item.key === "creator"));
 });

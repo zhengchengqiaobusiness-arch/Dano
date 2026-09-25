@@ -11,6 +11,7 @@ import { takeSnapshot } from "../browser/snapshot.mjs";
 import { getNetwork, listNetwork, requestKeyIndex } from "../browser/network.mjs";
 import { readSkillFile, skillIdFor, writeSkillFile } from "../skillpack/files.mjs";
 import { finishSkill } from "../skillpack/verify.mjs";
+import { GUIDE_NAMES } from "./guides.mjs";
 
 const GUIDE_FILES = {
   "skill-generator-auth-and-token.md": path.join(docDir(), "skill-generator-auth-and-token.md"),
@@ -19,7 +20,6 @@ const GUIDE_FILES = {
   "writing-for-agents.md": path.join(packageRoot(), "skill", "writing-for-agents", "SKILL.md"),
   "writing-for-agents-mechanics.md": path.join(packageRoot(), "skill", "writing-for-agents", "SKILL-MECHANICS.md"),
 };
-const GUIDE_NAMES = Object.keys(GUIDE_FILES);
 
 const TOOL_SPECS = [
   { name: "browser_open", description: "打开入口同源的地址。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
@@ -126,7 +126,9 @@ export function hostTools(recording) {
       const name = path.basename(String(args.name || ""));
       if (!GUIDE_FILES[name]) return { ok: false, error: "unknown_guide", names: GUIDE_NAMES };
       const text = await readFile(GUIDE_FILES[name], "utf8");
-      return { ok: true, name, text };
+      const saved = await appendEvidence(id, { kind: "guide", summary: name, body: name, body_missing: false });
+      const scope = "本场只写 SKILL.md、scripts/client.py、references/api.md。文档里的 CONTRACT.json、flow.py、CAPABILITIES.md、INPUT_FORMS.md、OPTIONS.md 不要创建。鉴权、提问和活选项写进这三份。";
+      return { ok: true, name, evidence_id: saved.id, text: `${scope}\n\n${text}` };
     },
     async assist(args) {
       recording.paused = true;

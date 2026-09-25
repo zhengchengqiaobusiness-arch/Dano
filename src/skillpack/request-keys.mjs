@@ -26,12 +26,22 @@ export function keysFromPostData(postData) {
   return [...bodyKeyPaths(parsed)];
 }
 
+export function keysFromQuery(query) {
+  const text = String(query || "").replace(/^\?/, "");
+  if (!text) return [];
+  return [...new URLSearchParams(text).keys()];
+}
+
 export function requestIndexRow(row) {
+  const keys = new Set([
+    ...keysFromPostData(row.post_data ?? row.body?.post_data),
+    ...keysFromQuery(row.query ?? row.body?.query),
+  ]);
   return {
     id: row.id,
     method: row.method || "",
     path: row.path || "",
-    keys: keysFromPostData(row.post_data ?? row.body?.post_data),
+    keys: [...keys],
   };
 }
 
@@ -45,19 +55,32 @@ export function citedPaths(text) {
   return [...found];
 }
 
-export function citationErrors(skillText, requests) {
+function keyWritten(text, key) {
+  if (text.includes(key)) return true;
+  const parts = String(key).split(".").map((part) => part.replace(/\[\]/g, "")).filter(Boolean);
+  return parts.length > 0 && parts.every((part) => text.includes(part));
+}
+
+export function citationErrors(skillText, requests, file = "") {
   const errors = [];
+  const seen = new Set();
+  const push = (error) => {
+    const id = [error.code, error.file, error.path, error.key].join("|");
+    if (seen.has(id)) return;
+    seen.add(id);
+    errors.push(error);
+  };
   const text = String(skillText || "");
   const rows = Array.isArray(requests) ? requests : [];
   const knownPaths = new Set(rows.map((row) => row.path).filter(Boolean));
   for (const cited of citedPaths(text)) {
     const hit = [...knownPaths].some((path) => path === cited || path.endsWith(cited) || cited.endsWith(path));
-    if (!hit) errors.push({ code: "path_not_in_evidence", path: cited });
+    if (!hit) push({ code: "path_not_in_evidence", path: cited, file });
   }
   for (const row of rows) {
     if (!row.path || !text.includes(row.path)) continue;
     for (const key of row.keys || []) {
-      if (!text.includes(key)) errors.push({ code: "key_not_written", path: row.path, key, id: row.id });
+      if (!keyWritten(text, key)) push({ code: "key_not_written", path: row.path, key, id: row.id, file });
     }
   }
   return errors;

@@ -6,6 +6,7 @@ import { handbookChanged, writeRuntimeConfig } from "./files.mjs";
 import { hasCredentialHeaders } from "../auth-vault.mjs";
 import { upsertCatalog } from "./catalog.mjs";
 import { requestIndexRow, citationErrors } from "./request-keys.mjs";
+import { GUIDE_NAMES } from "../agent/guides.mjs";
 
 function section(text, title) {
   const match = text.match(new RegExp(`## ${title}\\n([\\s\\S]*?)(?=\\n## |$)`));
@@ -60,7 +61,6 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   const fields = blocks(section(api, "字段"), "page_name");
   const bindings = blocks(section(api, "绑定"), "from");
   const unresolved = blocks(section(api, "未解决"), "field");
-  const verifiedLines = section(api, "已验证读命令").split(/\n/).map((line) => line.trim()).filter((line) => line.startsWith("python"));
   const evidence = await listEvidence(recordingId, { limit: 0 });
   const known = new Set(evidence.map((row) => row.id));
   for (const group of [...fields, ...bindings, ...unresolved]) {
@@ -68,13 +68,41 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
       if (!known.has(id)) errors.push({ code: "evidence_missing", id });
     }
   }
+  const readGuides = new Set(evidence.filter((row) => row.kind === "guide").map((row) => row.summary));
+  for (const name of GUIDE_NAMES) {
+    if (!readGuides.has(name)) errors.push({ code: "guide_not_read", name });
+  }
   const reads = readCommands(texts["SKILL.md"] || "");
-  const verifies = evidence.filter((row) => row.kind === "verify" && row.ok === true);
+  if (!reads.length && texts["SKILL.md"]) {
+    errors.push({
+      code: "command_not_run",
+      file: "SKILL.md",
+      hint: "在 SKILL.md 写一行以 python scripts/client.py 开头的读命令，再用相同 argv 调用 run_skill_command",
+    });
+  }
   const failed = evidence.filter((row) => row.kind === "verify" && row.ok === false);
   for (const line of reads) {
-    const ran = verifies.some((row) => (row.argv || []).join(" ") === line);
-    const listed = verifiedLines.some((item) => item === line);
-    if (!ran || !listed) errors.push({ code: "command_not_run", command: line });
+    let ran = false;
+    for (const row of evidence.filter((item) => item.kind === "verify" && (item.argv || []).join(" ") === line)) {
+      if (row.ok === true) {
+        ran = true;
+        break;
+      }
+      const blob = await getEvidence(recordingId, row.id).catch(() => null);
+      const output = `${blob?.stdout || ""}\n${blob?.stderr || ""}`;
+      if (/AuthExpired|缺少鉴权|没有鉴权|请提供 token|账号未登录|\b401\b/.test(output)) {
+        ran = true;
+        break;
+      }
+    }
+    if (!ran) {
+      errors.push({
+        code: "command_not_run",
+        command: line,
+        file: "SKILL.md",
+        hint: "run_skill_command 的 argv 用空格拼起来要等于这一行。没有鉴权而停止可以；其它失败要先改到能跑",
+      });
+    }
   }
   const requests = [];
   for (const row of evidence.filter((item) => item.kind === "network")) {
@@ -82,8 +110,8 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     const body = blob?.body && typeof blob.body === "object" ? blob.body : blob;
     if (body?.path || body?.post_data) requests.push(requestIndexRow({ ...body, id: row.id }));
   }
-  const cited = `${texts["scripts/client.py"] || ""}\n${texts["references/api.md"] || ""}`;
-  errors.push(...citationErrors(cited, requests));
+  errors.push(...citationErrors(texts["scripts/client.py"] || "", requests, "scripts/client.py"));
+  errors.push(...citationErrors(texts["references/api.md"] || "", requests, "references/api.md"));
   for (const row of failed) {
     const blob = await getEvidence(recordingId, row.id).catch(() => null);
     const text = `${blob?.stdout || ""} ${blob?.stderr || ""}`;

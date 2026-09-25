@@ -50,6 +50,10 @@ export function attachNetwork(recordingId, context) {
       frame: request.frame(),
       content_type: "",
     };
+    const action = state.action;
+    if (action?.open && started >= action.started && action.frame && item.frame === action.frame) {
+      item.action_id = action.id;
+    }
     state.items.push(item);
     request._cabpId = id;
   });
@@ -61,9 +65,9 @@ export function attachNetwork(recordingId, context) {
     item.ended_at = Date.now();
     item.content_type = response.headers()["content-type"] || "";
     const action = state.action;
-    const within = item.ended_at - item.started_at <= 1500;
-    const during = action?.open && item.started_at >= action.started;
-    if (during && within && action.frame && item.frame === action.frame) item.action_id = action.id;
+    if (!item.action_id && action?.open && item.started_at >= action.started && action.frame && item.frame === action.frame) {
+      item.action_id = action.id;
+    }
     try {
       item.response_body = await response.text();
       item.body_missing = false;
@@ -95,6 +99,19 @@ export function attachNetwork(recordingId, context) {
       body_missing: item.body_missing,
       body: stored,
     }).catch(() => {});
+  });
+}
+
+export function waitForAction(recordingId, actionId, timeout = 800) {
+  const state = bag(recordingId);
+  const started = Date.now();
+  return new Promise((resolve) => {
+    const tick = () => {
+      const pending = state.items.some((row) => row.action_id === actionId && !row.ended_at);
+      if (!pending || Date.now() - started >= timeout) resolve();
+      else setTimeout(tick, 50);
+    };
+    tick();
   });
 }
 

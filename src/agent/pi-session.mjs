@@ -17,6 +17,10 @@ function resultLine(result) {
   if (!text) return result?.isError ? "失败" : "完成";
   try {
     const body = JSON.parse(text);
+    if (Array.isArray(body?.errors) && body.errors.length) {
+      const codes = body.errors.map((item) => [item.code, item.file, item.key, item.command, item.hint].filter(Boolean).join(":")).slice(0, 3).join(" ");
+      return `失败 ${codes}`.slice(0, 180);
+    }
     if (body?.ok === false) return `失败 ${String(body.error || "").split("\n")[0].slice(0, 180)}`;
     if (body?.ok === true) return body.clicked ? `完成 ${body.clicked}` : "完成";
     if (Array.isArray(body?.refs)) return `完成 refs=${body.refs.length}`;
@@ -30,10 +34,11 @@ function resultLine(result) {
 const SKILL_TOOLS = new Set(["write_skill_file", "run_skill_command", "verify_skill"]);
 const MAX_SKILL_CONTINUES = 4;
 
-export function nextRecordingPrompt({ finished, paused, progressed, continues }) {
+export function nextRecordingPrompt({ finished, paused, progressed, continues, verifyErrors }) {
   if (finished || paused || continues >= MAX_SKILL_CONTINUES) return null;
-  if (progressed) return "已写入文件或跑过命令。读命令没跑完就继续跑，然后调用 verify_skill。页面操作的总结不是结束。";
-  return "Skill 还没产出。先用 read_guide 读完名单里的文档。再看下面 requests 的方法、路径、证据 id 和正文键，用 network_get 打开要采用的全文。按目标原文的每一段写 SKILL.md、scripts/client.py、references/api.md，跑读命令，调用 verify_skill。";
+  const errors = Array.isArray(verifyErrors) && verifyErrors.length ? `\n${JSON.stringify(verifyErrors)}` : "";
+  if (progressed) return `已写入文件或跑过命令。读命令没跑完就继续跑，然后调用 verify_skill。页面操作的总结不是结束。${errors}`;
+  return `Skill 还没产出。先用 read_guide 读完名单里的文档。再看下面 requests 的方法、路径、证据 id 和正文键，用 network_get 打开要采用的全文。按目标原文的每一段写 SKILL.md、scripts/client.py、references/api.md，跑读命令，调用 verify_skill。${errors}`;
 }
 
 let startOverride = null;
@@ -133,6 +138,7 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
         paused: recording?.paused,
         progressed,
         continues,
+        verifyErrors: recording?.verify?.errors,
       });
       progressed = false;
       if (!follow) return;

@@ -1,7 +1,7 @@
 import { originFromUrl } from "../session-store.mjs";
 import { browserSession } from "./session.mjs";
 import { locatorFor, takeSnapshot } from "./snapshot.mjs";
-import { beginAction, endAction } from "./network.mjs";
+import { beginAction, endAction, listNetwork, waitForAction } from "./network.mjs";
 
 const ACTIONS = new Set(["open", "snapshot", "click", "fill", "fill_fields", "press", "select", "upload", "screenshot"]);
 
@@ -57,7 +57,12 @@ export async function runAction(recordingId, input) {
   }
   const hit = locatorFor(recordingId, input.ref);
   const frame = hit?.frame || null;
-  beginAction(recordingId, frame);
+  const actionId = beginAction(recordingId, frame);
+  const requestsDuring = () => listNetwork(recordingId, { action_id: actionId }).map((row) => ({
+    id: row.id,
+    method: row.method,
+    path: row.path,
+  }));
   try {
     if (action === "fill_fields") {
       const fields = Array.isArray(input.fields) ? input.fields : [];
@@ -85,7 +90,7 @@ export async function runAction(recordingId, input) {
       } catch (error) {
         const message = String(error?.message || "click_failed").split("\n")[0];
         console.log(`[browser] click failed ${message}`);
-        return { ok: false, error: message, snapshot: await takeSnapshot(recordingId) };
+        return { ok: false, error: message, requests: requestsDuring(), snapshot: await takeSnapshot(recordingId) };
       }
     }
     if (action === "fill") {
@@ -101,8 +106,12 @@ export async function runAction(recordingId, input) {
     if (action === "press") await hit.locator.press(String(input.key || input.text || ""));
     if (action === "select") await hit.locator.selectOption(String(input.text ?? ""));
     if (action === "upload") await hit.locator.setInputFiles(String(input.file_path || ""));
+    if (action === "click") await waitForAction(recordingId, actionId);
     const snapshot = await takeSnapshot(recordingId);
-    return action === "click" ? { ok: true, clicked: hit.label || "", snapshot } : { ok: true, snapshot };
+    const requests = requestsDuring();
+    return action === "click"
+      ? { ok: true, clicked: hit.label || "", requests, snapshot }
+      : { ok: true, requests, snapshot };
   } finally {
     endAction(recordingId);
   }
