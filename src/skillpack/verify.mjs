@@ -5,7 +5,7 @@ import { listEvidence, getEvidence } from "../evidence/store.mjs";
 import { handbookChanged, writeRuntimeConfig } from "./files.mjs";
 import { hasCredentialHeaders } from "../auth-vault.mjs";
 import { upsertCatalog } from "./catalog.mjs";
-import { requestIndexRow, citationErrors } from "./request-keys.mjs";
+import { requestIndexRow, citationErrors, citedPaths } from "./request-keys.mjs";
 import { GUIDE_NAMES } from "../agent/guides.mjs";
 
 function section(text, title) {
@@ -72,8 +72,23 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   for (const name of GUIDE_NAMES) {
     if (!readGuides.has(name)) errors.push({ code: "guide_not_read", name });
   }
-  const reads = readCommands(texts["SKILL.md"] || "");
-  if (!reads.length && texts["SKILL.md"]) {
+  const skillMd = texts["SKILL.md"] || "";
+  if (skillMd && !/^---\n[\s\S]*?\bname:\s*\S+/m.test(skillMd)) {
+    errors.push({ code: "not_invocable", file: "SKILL.md", hint: "开头写 name 和 description，调用方靠 description 启用" });
+  }
+  if (/disable-model-invocation:\s*true/.test(skillMd)) {
+    errors.push({ code: "not_invocable", file: "SKILL.md", hint: "不要写 disable-model-invocation，否则调用方的智能体不会启用" });
+  }
+  const reads = readCommands(skillMd);
+  const businessReads = reads.filter((line) => !/^python3?\s+scripts\/client\.py\s+show-config\s*$/.test(line));
+  if (citedPaths(texts["scripts/client.py"] || "").length && !businessReads.length) {
+    errors.push({
+      code: "command_not_run",
+      file: "SKILL.md",
+      hint: "show-config 只检查配置。再写一条打到证据路径的读命令，并用相同 argv 跑 run_skill_command",
+    });
+  }
+  if (!reads.length && skillMd) {
     errors.push({
       code: "command_not_run",
       file: "SKILL.md",

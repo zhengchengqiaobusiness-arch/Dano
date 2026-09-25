@@ -127,7 +127,7 @@ export function hostTools(recording) {
       if (!GUIDE_FILES[name]) return { ok: false, error: "unknown_guide", names: GUIDE_NAMES };
       const text = await readFile(GUIDE_FILES[name], "utf8");
       const saved = await appendEvidence(id, { kind: "guide", summary: name, body: name, body_missing: false });
-      const scope = "本场只写 SKILL.md、scripts/client.py、references/api.md。文档里的 CONTRACT.json、flow.py、CAPABILITIES.md、INPUT_FORMS.md、OPTIONS.md 不要创建。鉴权、提问和活选项写进这三份。";
+      const scope = "本场只写 SKILL.md、scripts/client.py、references/api.md。文档里的 CONTRACT.json、flow.py、CAPABILITIES.md、INPUT_FORMS.md、OPTIONS.md 不要创建。鉴权、提问和活选项写进这三份。SKILL.md 用 name 和 description 让调用方启用，不要写 disable-model-invocation。业务读命令要打到证据里的路径，不能只有 show-config。";
       return { ok: true, name, evidence_id: saved.id, text: `${scope}\n\n${text}` };
     },
     async assist(args) {

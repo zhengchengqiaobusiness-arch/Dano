@@ -1,4 +1,5 @@
 import { browserSession } from "./session.mjs";
+import { readGoal } from "../evidence/store.mjs";
 
 function frameKey(frame) {
   const parent = frame.parentFrame();
@@ -62,7 +63,15 @@ export async function takeSnapshot(recordingId) {
   const rest = frames.filter((frame) => frame !== main).sort((a, b) => frameKey(a).localeCompare(frameKey(b)));
   const ordered = [main, ...rest];
   state.refs.clear();
+  let goalText = "";
+  try {
+    const goal = await readGoal(recordingId);
+    goalText = `${goal.goal_text || ""}`;
+  } catch {
+    goalText = "";
+  }
   const lines = [`epoch ${state.epoch}`];
+  const exact = [];
   const refs = [];
   for (let index = 0; index < ordered.length; index += 1) {
     const frame = ordered[index];
@@ -86,9 +95,12 @@ export async function takeSnapshot(recordingId) {
         label: shown,
       });
       lines.push(`- ${shown} ref=${ref}`);
+      const inGoal = (value) => value.length >= 2 && goalText.includes(value);
+      if (inGoal(node.name || "") || inGoal(node.column || "")) exact.push(`- ${shown} ref=${ref}`);
       refs.push(ref);
     }
   }
+  if (exact.length) lines.splice(1, 0, "goal_exact", ...exact);
   return { epoch: state.epoch, text: lines.join("\n"), refs };
 }
 
