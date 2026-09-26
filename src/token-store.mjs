@@ -50,10 +50,14 @@ export async function writeTokenRecord(tenant, subsystem, headers) {
   return { ...payload, has_token: hasCredentialHeaders(payload.headers) };
 }
 
-export async function writeAuthLocalFile(packageDir, headers) {
+export async function writeAuthLocalFile(packageDir, headers, credential = null) {
   const target = path.join(packageDir, "config", "auth.local.json");
   await mkdir(path.dirname(target), { recursive: true });
-  await writeFile(target, `${JSON.stringify({ headers: usableAuthHeaders(headers) }, null, 2)}\n`, "utf8");
+  const payload = { headers: usableAuthHeaders(headers) };
+  if (credential?.url && credential?.method) {
+    payload.credential = { method: String(credential.method), url: String(credential.url) };
+  }
+  await writeFile(target, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   return target;
 }
 

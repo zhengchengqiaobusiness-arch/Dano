@@ -73,7 +73,7 @@ export function attachNetwork(recordingId, context) {
     try {
       item.response_body = await response.text();
       item.body_missing = false;
-      noteLoginBody(recordingId, item.response_body);
+      noteLoginBody(recordingId, item.response_body, { method: item.method, url: item.url });
     } catch {
       item.response_body = null;
       item.body_missing = true;
@@ -136,6 +136,8 @@ export function listNetwork(recordingId, { after_id = "", action_id = "" } = {})
       body_missing: row.body_missing,
       action_id: row.action_id,
       keys: index.keys,
+      ...(index.empty ? { empty: index.empty } : {}),
+      ...(index.issues_credential ? { issues_credential: true } : {}),
     };
   });
 }

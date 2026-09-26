@@ -63,6 +63,14 @@ function isTemplate(line) {
   return /[<>[\]]/.test(line);
 }
 
+export function actionEvidenceSummary(action, result) {
+  if (result?.error === "needs_upload") return "needs_upload";
+  if (result?.uploaded) return `upload:${result.clicked || "file"}`;
+  const names = Array.isArray(result?.filled) ? result.filled.filter(Boolean) : [];
+  if (names.length) return `${action}:${names.join("|")}`;
+  return action;
+}
+
 export function filledLabels(evidence) {
   const labels = [];
   for (const row of evidence || []) {
@@ -213,6 +221,13 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
           : "run_skill_command 的 argv 用空格拼起来要等于这一行。没有鉴权而停止可以；其它失败要先改到能跑",
       });
     }
+  }
+  if (requests.some((item) => item.issues_credential) && !clientText.includes("credential")) {
+    errors.push({
+      code: "credential_not_used",
+      file: "scripts/client.py",
+      hint: "证据里有签发访问凭证的请求。业务请求前按 config/auth.local.json 的 credential 重放，失败或仍是 401 再停止",
+    });
   }
   errors.push(...citationErrors(clientText, requests, "scripts/client.py"));
   errors.push(...citationErrors(texts["references/api.md"] || "", requests, "references/api.md"));

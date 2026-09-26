@@ -10,7 +10,7 @@ import { persistBrowserSession } from "../browser/session.mjs";
 import { takeSnapshot } from "../browser/snapshot.mjs";
 import { getNetwork, listNetwork, requestKeyIndex } from "../browser/network.mjs";
 import { readSkillFile, skillIdFor, writeSkillFile } from "../skillpack/files.mjs";
-import { filledLabels, finishSkill } from "../skillpack/verify.mjs";
+import { actionEvidenceSummary, filledLabels, finishSkill } from "../skillpack/verify.mjs";
 import { GUIDE_NAMES, guideBody } from "./guides.mjs";
 import { logLine } from "../log.mjs";
 
@@ -92,12 +92,7 @@ export function hostTools(recording) {
         }
       }
       const result = await runAction(id, args);
-      const names = Array.isArray(result.filled) ? result.filled.filter(Boolean) : [];
-      const summary = result.error === "needs_upload"
-        ? "needs_upload"
-        : names.length
-          ? `${args.action}:${names.join("|")}`
-          : args.action;
+      const summary = actionEvidenceSummary(args.action, result);
       await appendEvidence(id, { kind: "action", summary, body: result, body_missing: false });
       return result;
     },

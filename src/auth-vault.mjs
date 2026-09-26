@@ -94,17 +94,23 @@ export function headersFromStorageState(state) {
   return usableAuthHeaders(headers);
 }
 
-export function headersFromLoginPayload(raw) {
+function loginBody(raw) {
   let data = raw;
   if (typeof raw === "string") {
     try {
       data = JSON.parse(raw);
     } catch {
-      return {};
+      return null;
     }
   }
-  if (!data || typeof data !== "object") return {};
-  const body = data.data && typeof data.data === "object" ? data.data : data;
+  if (!data || typeof data !== "object") return null;
+  const nested = data.data;
+  return nested && typeof nested === "object" && !Array.isArray(nested) ? nested : data;
+}
+
+export function headersFromLoginPayload(raw) {
+  const body = loginBody(raw);
+  if (!body) return {};
   const token = body.accessToken || body.access_token || body.token;
   if (!token || isSealedHeaderValue(token)) return {};
   const headers = { Authorization: asAuthorization(token) };
@@ -113,13 +119,69 @@ export function headersFromLoginPayload(raw) {
   return usableAuthHeaders(headers);
 }
 
-export async function writeAuthVault(recordingId, headers) {
+export function issuedCredential(raw) {
+  const body = loginBody(raw);
+  if (!body) return null;
+  const accessToken = body.accessToken || body.access_token;
+  const refreshToken = body.refreshToken || body.refresh_token;
+  if (!accessToken || !refreshToken || isSealedHeaderValue(accessToken) || isSealedHeaderValue(refreshToken)) return null;
+  return {
+    accessToken: String(accessToken),
+    refreshToken: String(refreshToken),
+    expiresTime: Number(body.expiresTime || body.expires_at || 0) || 0,
+  };
+}
+
+export function rollCredentialUrl(url, previousSecret, nextSecret) {
+  if (!previousSecret || !nextSecret || previousSecret === nextSecret) return url;
+  const parsed = new URL(url);
+  for (const [key, value] of [...parsed.searchParams.entries()]) {
+    if (value === previousSecret) parsed.searchParams.set(key, nextSecret);
+  }
+  return parsed.toString();
+}
+
+export async function writeAuthVault(recordingId, headers, extra = {}) {
   const file = vaultPath(recordingId);
   await mkdir(path.dirname(file), { recursive: true });
   const previous = await readAuthVault(recordingId);
-  const payload = { headers: { ...usableAuthHeaders(previous.headers), ...usableAuthHeaders(headers) } };
+  const payload = {
+    headers: { ...usableAuthHeaders(previous.headers), ...usableAuthHeaders(headers) },
+  };
+  const credential = extra.credential || previous.credential;
+  if (credential?.url && credential?.method) {
+    payload.credential = { method: String(credential.method), url: String(credential.url) };
+    if (credential.refresh_token) payload.credential.refresh_token = String(credential.refresh_token);
+  }
+  if (extra.expiresTime || previous.expiresTime) payload.expiresTime = extra.expiresTime || previous.expiresTime;
   await writeFile(file, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   return payload;
+}
+
+export async function refreshVault(recordingId) {
+  const vault = await readAuthVault(recordingId);
+  const cred = vault.credential;
+  if (!cred?.url || !cred.method) return vault;
+  let text = "";
+  try {
+    const response = await fetch(cred.url, { method: cred.method });
+    text = await response.text();
+  } catch {
+    return vault;
+  }
+  const issued = issuedCredential(text);
+  const headers = headersFromLoginPayload(text);
+  if (!issued || !Object.keys(headers).length) return vault;
+  const params = [...new URL(cred.url).searchParams.values()];
+  const sent = cred.refresh_token || (params.length === 1 ? params[0] : "");
+  return writeAuthVault(recordingId, headers, {
+    credential: {
+      method: cred.method,
+      url: rollCredentialUrl(cred.url, sent, issued.refreshToken),
+      refresh_token: issued.refreshToken,
+    },
+    expiresTime: issued.expiresTime,
+  });
 }
 
 export function noteRequestHeaders(recordingId, headers) {
@@ -132,8 +194,18 @@ export function noteRequestHeaders(recordingId, headers) {
   writeAuthVault(recordingId, usable).catch(() => {});
 }
 
-export function noteLoginBody(recordingId, text) {
+export function noteLoginBody(recordingId, text, request = {}) {
   const headers = headersFromLoginPayload(text);
-  if (!Object.keys(headers).length) return;
-  writeAuthVault(recordingId, headers).catch(() => {});
+  const issued = issuedCredential(text);
+  if (!Object.keys(headers).length && !issued) return;
+  const extra = {};
+  if (issued && request.url) {
+    extra.credential = {
+      method: String(request.method || "POST").toUpperCase(),
+      url: String(request.url),
+      refresh_token: issued.refreshToken,
+    };
+    extra.expiresTime = issued.expiresTime;
+  }
+  return writeAuthVault(recordingId, headers, extra).catch(() => {});
 }

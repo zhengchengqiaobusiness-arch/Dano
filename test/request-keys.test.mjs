@@ -37,6 +37,26 @@ test("a cited path must exist, and every key of that request must be written", (
   assert.ok(citationErrors(client, requests).some((item) => item.key === "creator"));
 });
 
+test("empty values and a credential-issuing response stay facts on the request", () => {
+  const row = requestIndexRow({
+    id: "req_9",
+    method: "POST",
+    path: "/session/refresh",
+    post_data: JSON.stringify({ companyId: null, title: "kept", items: [] }),
+    query: "deptId=&reportType=1",
+    response_body: JSON.stringify({ data: { accessToken: "abc12345", refreshToken: "ref12345", expiresTime: 1 } }),
+  });
+  assert.ok(row.empty.includes("companyId"));
+  assert.ok(row.empty.includes("items[]"));
+  assert.ok(row.empty.includes("deptId"));
+  assert.equal(row.empty.includes("title"), false);
+  assert.equal(row.issues_credential, true);
+  assert.equal(row.keys.includes("abc12345"), false);
+  const plain = requestIndexRow({ id: "req_1", method: "GET", path: "/list", response_body: JSON.stringify({ data: { id: 1 } }) });
+  assert.equal(plain.issues_credential, undefined);
+  assert.equal(plain.empty, undefined);
+});
+
 test("a key in another function does not satisfy the function that sends the path", () => {
   const requests = [{ id: "req_1", method: "POST", path: "/api/save", keys: ["owner", "state"] }];
   const client = [

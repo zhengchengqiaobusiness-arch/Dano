@@ -1,7 +1,10 @@
-export function bodyKeyPaths(value, prefix = "", out = new Set()) {
+import { issuedCredential } from "../auth-vault.mjs";
+
+export function bodyKeyPaths(value, prefix = "", out = new Set(), empty = null) {
   if (Array.isArray(value)) {
     const next = prefix ? `${prefix}[]` : "[]";
-    for (const item of value) bodyKeyPaths(item, next, out);
+    if (empty && !value.length) empty.add(next);
+    for (const item of value) bodyKeyPaths(item, next, out, empty);
     return out;
   }
   if (!value || typeof value !== "object") return out;
@@ -9,7 +12,8 @@ export function bodyKeyPaths(value, prefix = "", out = new Set()) {
     if (key.startsWith("_")) continue;
     const next = prefix ? `${prefix}.${key}` : key;
     out.add(next);
-    bodyKeyPaths(item, next, out);
+    if (empty && (item === null || item === "")) empty.add(next);
+    bodyKeyPaths(item, next, out, empty);
   }
   return out;
 }
@@ -33,16 +37,38 @@ export function keysFromQuery(query) {
   return [...new URLSearchParams(text).keys()];
 }
 
+function emptyFromQuery(query) {
+  const text = String(query || "").replace(/^\?/, "");
+  if (!text) return [];
+  return [...new URLSearchParams(text).entries()].filter(([, value]) => value === "").map(([key]) => key);
+}
+
 export function requestIndexRow(row) {
   const keys = new Set([
     ...keysFromPostData(row.post_data ?? row.body?.post_data),
     ...keysFromQuery(row.query ?? row.body?.query),
   ]);
+  const empty = new Set(emptyFromQuery(row.query ?? row.body?.query));
+  const post = row.post_data ?? row.body?.post_data;
+  if (post) {
+    let parsed = post;
+    if (typeof post === "string") {
+      try {
+        parsed = JSON.parse(post);
+      } catch {
+        parsed = null;
+      }
+    }
+    if (parsed) bodyKeyPaths(parsed, "", new Set(), empty);
+  }
+  const issued = issuedCredential(row.response_body ?? row.body?.response_body);
   return {
     id: row.id,
     method: row.method || "",
     path: row.path || "",
     keys: [...keys],
+    ...(empty.size ? { empty: [...empty] } : {}),
+    ...(issued ? { issues_credential: true } : {}),
   };
 }
 

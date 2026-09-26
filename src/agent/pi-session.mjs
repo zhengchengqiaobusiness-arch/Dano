@@ -46,7 +46,7 @@ export function nextRecordingPrompt({ finished, paused, progressed, continues, v
   if (finished || paused || continues >= MAX_SKILL_CONTINUES) return null;
   const errors = Array.isArray(verifyErrors) && verifyErrors.length ? `\n${JSON.stringify(verifyErrors)}` : "";
   const lead = progressed ? "页面操作的总结不是结束。" : "Skill 还没产出。";
-  return `${lead}read_guide 读完名单。对照目标原文、requests 里每条的方法、路径、证据 id 和键，以及 filled 里的控件名，写 SKILL.md、scripts/client.py、references/api.md。要采用的请求用 network_get 打开全文。键写在引用这条 path 的函数里。scripts/client.py 只用 Python 标准库。跑读命令，再 verify_skill。${errors}`;
+  return `${lead}read_guide 读完名单。对照目标原文、requests（方法、路径、证据 id、keys、empty、issues_credential）和 filled 里的控件名，写三个文件。要采用的请求用 network_get 打开全文。调用方会执行的命令要带上 keys：来自参数，或命令里先按证据再读。empty 里的键传空。录到的字面值不写进默认参数。filled 里每个控件名在 SKILL.md 各占一行必填。issues_credential 的请求按 auth.local.json 的 credential 在业务请求前重放，失败或 401 再停止。DANO_AUTH_HEADERS 只覆盖同名头。scripts/client.py 只用 Python 标准库。跑读命令，再 verify_skill。${errors}`;
 }
 
 let startOverride = null;

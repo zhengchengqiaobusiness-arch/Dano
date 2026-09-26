@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { writeSkillFile } from "../src/skillpack/files.mjs";
-import { verifySkill } from "../src/skillpack/verify.mjs";
+import { actionEvidenceSummary, verifySkill } from "../src/skillpack/verify.mjs";
 import { skillDir } from "../src/paths.mjs";
 import { appendEvidence } from "../src/evidence/store.mjs";
 
@@ -204,6 +204,37 @@ test("a key counts only inside the function that cites the path", async () => {
   assert.equal(result.errors.some((item) => ["key_omitted", "follow_get_missing", "unresolved_adopted", "extra_required", "caller_arg_missing"].includes(item.code)), false);
   assert.ok(result.filled.some((label) => label.includes("工作内容")));
   assert.ok(result.requests.some((item) => item.path === "/api/save" && item.keys.includes("state") && item.keys.includes("owner")));
+});
+
+test("a click that writes a file is recorded as an upload, and a credential request must be replayed", async () => {
+  assert.equal(actionEvidenceSummary("click", { uploaded: true, clicked: "button \"上传\"" }), "upload:button \"上传\"");
+  assert.equal(actionEvidenceSummary("fill", { filled: ["textbox \"标题\""] }), "fill:textbox \"标题\"");
+  await useData();
+  const shape = { id: "rec_verify_cred", tenant: "", subsystem: "app", skillId: "app.rec_verify_cred", startUrl: "http://127.0.0.1/" };
+  const dir = skillDir(shape.skillId);
+  await mkdir(path.join(dir, "scripts"), { recursive: true });
+  await mkdir(path.join(dir, "references"), { recursive: true });
+  await mkdir(path.join(dir, "config"), { recursive: true });
+  await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\n");
+  await writeFile(path.join(dir, "scripts/client.py"), "import json\n");
+  await writeFile(path.join(dir, "references/api.md"), "");
+  await writeFile(path.join(dir, "config/runtime.json"), "{}\n");
+  await writeFile(path.join(dir, "config/auth.local.json"), "{\"headers\":{}}\n");
+  await appendEvidence(shape.id, {
+    kind: "network",
+    summary: "POST /session/refresh",
+    body: {
+      method: "POST",
+      path: "/session/refresh",
+      response_body: JSON.stringify({ data: { accessToken: "abc12345", refreshToken: "ref12345" } }),
+    },
+  });
+  const missing = await verifySkill(dir, shape.id, shape);
+  assert.ok(missing.errors.some((item) => item.code === "credential_not_used"));
+  assert.ok(missing.requests.some((item) => item.issues_credential === true));
+  await writeFile(path.join(dir, "scripts/client.py"), "import json\ncredential = auth['credential']\n");
+  const used = await verifySkill(dir, shape.id, shape);
+  assert.equal(used.errors.some((item) => item.code === "credential_not_used"), false);
 });
 
 test("a script that imports outside the standard library cannot be called", async () => {
