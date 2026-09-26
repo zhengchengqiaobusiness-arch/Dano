@@ -5,6 +5,7 @@ import { readGoal } from "../evidence/store.mjs";
 import { applyPiModelConfig } from "./pi-model.mjs";
 import { installOpenAIToolCallStreamCompatibility } from "./openai-stream-compat.mjs";
 import { hostTools, toolNames, wrapHostTools } from "./tools.mjs";
+import { logLine } from "../log.mjs";
 
 function toolLine(toolName, args) {
   const action = args?.action ? ` ${args.action}` : "";
@@ -18,11 +19,18 @@ function resultLine(result) {
   try {
     const body = JSON.parse(text);
     if (Array.isArray(body?.errors) && body.errors.length) {
-      const codes = body.errors.map((item) => [item.code, item.file, item.key, item.command, item.hint].filter(Boolean).join(":")).slice(0, 3).join(" ");
-      return `失败 ${codes}`.slice(0, 180);
+      const codes = body.errors.map((item) => [item.code, item.name, item.field, item.path, item.file, item.key, item.command].filter(Boolean).join(":")).slice(0, 8).join(" ");
+      return `失败 ${codes}`.slice(0, 500);
     }
-    if (body?.ok === false) return `失败 ${String(body.error || "").split("\n")[0].slice(0, 180)}`;
-    if (body?.ok === true) return body.clicked ? `完成 ${body.clicked}` : "完成";
+    if (body?.ok === false) {
+      const extra = [body.error, ...(body.names || []), ...(body.writable || [])].filter(Boolean).join(" ");
+      return `失败 ${extra}`.slice(0, 500);
+    }
+    if (body?.ok === true && body.clicked) {
+      const quiet = Array.isArray(body.requests) && body.requests.length === 0 ? " 无请求" : "";
+      return `完成 ${body.clicked}${quiet}`;
+    }
+    if (body?.ok === true) return "完成";
     if (Array.isArray(body?.refs)) return `完成 refs=${body.refs.length}`;
     if (body?.image_in_conversation) return "完成 图像";
   } catch {
@@ -32,12 +40,12 @@ function resultLine(result) {
 }
 
 const SKILL_TOOLS = new Set(["write_skill_file", "run_skill_command", "verify_skill"]);
-const MAX_SKILL_CONTINUES = 4;
+const MAX_SKILL_CONTINUES = 8;
 
 export function nextRecordingPrompt({ finished, paused, progressed, continues, verifyErrors }) {
   if (finished || paused || continues >= MAX_SKILL_CONTINUES) return null;
   const errors = Array.isArray(verifyErrors) && verifyErrors.length ? `\n${JSON.stringify(verifyErrors)}` : "";
-  if (progressed) return `已写入文件或跑过命令。读命令没跑完就继续跑，然后调用 verify_skill。页面操作的总结不是结束。${errors}`;
+  if (progressed) return `页面操作的总结不是结束。guide_not_read 的 name 用 read_guide 读完。没有尖括号的读命令，argv 拼起来要和这一行相同。带尖括号或方括号的是说明，同名子命令用真实参数跑过即可。写操作不要为了校验再提交。caller_field_missing 的 field 写进 SKILL.md。然后 verify_skill。${errors}`;
   return `Skill 还没产出。先用 read_guide 读完名单里的文档。再看下面 requests 的方法、路径、证据 id 和正文键，用 network_get 打开要采用的全文。按目标原文的每一段写 SKILL.md、scripts/client.py、references/api.md，跑读命令，调用 verify_skill。${errors}`;
 }
 
@@ -97,12 +105,12 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
     if (type === "tool_execution_start") {
       if (SKILL_TOOLS.has(event.toolName)) progressed = true;
       lastTool = toolLine(event.toolName, event.args);
-      console.log(`[pi] 调用 ${lastTool}`);
+      logLine(`[pi] 调用 ${lastTool}`);
       recording?.emitThought?.({ kind: "tool", phase: "start", text: lastTool });
     }
     if (type === "tool_execution_end") {
       const line = `${lastTool || event.toolName || "tool"} ${resultLine(event.result)}`;
-      console.log(`[pi] ${line}`);
+      logLine(`[pi] ${line}`);
       recording?.emitThought?.({
         kind: "tool",
         phase: "end",

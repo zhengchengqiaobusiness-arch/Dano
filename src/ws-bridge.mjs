@@ -107,6 +107,16 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
         setTimeout(pushFrame, 100);
         return;
       }
+      if (message.type === "viewport") {
+        const page = getPage(recording.id);
+        const width = Math.round(Number(message.width) || 0);
+        const height = Math.round(Number(message.height) || 0);
+        if (page && width >= 320 && height >= 240) {
+          await page.setViewportSize({ width, height }).catch(() => {});
+        }
+        setTimeout(pushFrame, 50);
+        return;
+      }
       if (message.type === "input") {
         const page = getPage(recording.id);
         const event = message.event || {};

@@ -1395,8 +1395,8 @@ export default function PageRecorder({
     const width = Math.round(host?.clientWidth || 0);
     const height = Math.round(host?.clientHeight || 0);
     return {
-      width: Math.max(DESKTOP_VIEWPORT.width, width >= 640 ? width : DESKTOP_VIEWPORT.width),
-      height: Math.max(DESKTOP_VIEWPORT.height, height >= 400 ? height : DESKTOP_VIEWPORT.height),
+      width: width >= 320 ? width : DESKTOP_VIEWPORT.width,
+      height: height >= 240 ? height : DESKTOP_VIEWPORT.height,
       devicePixelRatio: previewDeviceScale(),
     };
   }
@@ -2778,6 +2778,14 @@ export default function PageRecorder({
             </div>
           </div>
         </Card>
+        <Card
+          title="历史录制结果"
+          size="small"
+          style={{ marginTop: 12, flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+          styles={{ body: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", paddingBottom: 8 } }}
+        >
+          {renderHistoryTable()}
+        </Card>
       </div>
     );
   }
@@ -4085,32 +4093,36 @@ export default function PageRecorder({
           onPointerDown={(event) => event.stopPropagation()}
           onKeyDown={(event) => event.stopPropagation()}
         >
-          <Input.TextArea
-            value={piMessage}
-            onChange={(event) => setPiMessage(event.target.value)}
-            placeholder={steerPlaceholder()}
-            autoSize={{ minRows: 2, maxRows: 5 }}
-            disabled={!canSteerPi()}
-            onPressEnter={(event) => {
-              if (event.shiftKey) return;
-              event.preventDefault();
-              sendPiMessage();
-            }}
-          />
-          <div className="studio-session-actions">
-            <Button
-              danger
-              icon={<StopOutlined />}
-              loading={cancelling}
-              disabled={!((pageInteractive(status) && socketLive()) || processing || cancelling)}
-              onClick={terminateAssistantWork}
-            >终止</Button>
-            <Button
-              type="primary"
-              icon={<SendOutlined />}
-              disabled={!canSteerPi() || !piMessage.trim()}
-              onClick={sendPiMessage}
-            >发送</Button>
+          <div className="studio-composer">
+            <Input.TextArea
+              value={piMessage}
+              onChange={(event) => setPiMessage(event.target.value)}
+              placeholder={steerPlaceholder()}
+              autoSize={{ minRows: 3, maxRows: 6 }}
+              disabled={!canSteerPi()}
+              onPressEnter={(event) => {
+                if (event.shiftKey) return;
+                event.preventDefault();
+                sendPiMessage();
+              }}
+            />
+            <div className="studio-composer-actions">
+              <Button
+                size="small"
+                danger
+                icon={<StopOutlined />}
+                loading={cancelling}
+                disabled={!((pageInteractive(status) && socketLive()) || processing || cancelling)}
+                onClick={terminateAssistantWork}
+              >终止</Button>
+              <Button
+                size="small"
+                type="primary"
+                icon={<SendOutlined />}
+                disabled={!canSteerPi() || !piMessage.trim()}
+                onClick={sendPiMessage}
+              >发送</Button>
+            </div>
           </div>
         </div>
       </aside>

@@ -29,10 +29,84 @@ function blocks(body, startKey) {
   return rows;
 }
 
+function subcommand(line) {
+  return (String(line).match(/scripts\/client\.py\s+(\S+)/) || [])[1] || "";
+}
+
+function writesRecordedPath(line, clientText, requests) {
+  const sub = subcommand(line);
+  if (!sub) return false;
+  for (const row of requests || []) {
+    if (!/^(POST|PUT|PATCH|DELETE)$/i.test(row.method || "")) continue;
+    const at = String(clientText || "").indexOf(row.path || "");
+    if (at < 0) continue;
+    const near = String(clientText).slice(Math.max(0, at - 1800), at + String(row.path || "").length);
+    if (near.includes(sub) || near.includes(sub.replaceAll("-", "_"))) return true;
+  }
+  return false;
+}
+
+function commandWrites(line, clientText) {
+  const sub = subcommand(line);
+  if (!sub || sub === "show-config") return false;
+  const needle = sub.replaceAll("-", "_");
+  const at = clientText.indexOf(needle);
+  const alt = clientText.indexOf(sub);
+  const pos = at >= 0 ? at : alt;
+  if (pos < 0) return false;
+  const window = clientText.slice(pos, pos + 2500).split(/\ndef |\nasync def /)[0];
+  return /method\s*=\s*["'](POST|PUT|PATCH|DELETE)["']/i.test(window);
+}
+
+function isTemplate(line) {
+  return /[<>[\]]/.test(line);
+}
+
+function controlName(label) {
+  const quoted = String(label).match(/"([^"]+)"/);
+  let name = (quoted ? quoted[1] : String(label)).trim().replace(/^\*\s*/, "");
+  name = name.replace(/^(?:请输入|请选择|请填写|请搜索)/, "").trim();
+  return name;
+}
+
+function sameCommand(left, right) {
+  const norm = (line) => String(line).trim().replace(/^python3\b/, "python");
+  return norm(left) === norm(right);
+}
+
+function skillCoversPath(skillMd, clientText, optionPath) {
+  if (skillMd.includes(optionPath)) return true;
+  for (const line of readCommands(skillMd)) {
+    const sub = subcommand(line).replaceAll("-", "_");
+    if (!sub) continue;
+    const at = clientText.indexOf(sub);
+    if (at < 0) continue;
+    const window = clientText.slice(at, at + 2500).split(/\ndef |\nasync def /)[0];
+    if (window.includes(optionPath)) return true;
+  }
+  return false;
+}
+
 function readCommands(skillMd) {
   return skillMd.split(/\n/).map((line) => line.trim()).filter((line) => (
     /^python3?\s+scripts\/client\.py\b/.test(line) && !line.includes("--confirm")
   ));
+}
+
+function looksLikeOptions(text) {
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  const list = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : null);
+  if (!Array.isArray(list) || list.length < 2) return false;
+  const row = list.find((item) => item && typeof item === "object");
+  if (!row) return false;
+  const hasId = row.id != null || row.value != null;
+  const hasLabel = row.name != null || row.label != null || row.title != null;
+  return hasId && hasLabel;
 }
 
 function idsOf(value) {
@@ -96,9 +170,21 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     });
   }
   const failed = evidence.filter((row) => row.kind === "verify" && row.ok === false);
-  for (const line of reads) {
+  const requestsForWrites = [];
+  for (const row of evidence.filter((item) => item.kind === "network")) {
+    const blob = await getEvidence(recordingId, row.id).catch(() => null);
+    const body = blob?.body && typeof blob.body === "object" ? blob.body : blob;
+    if (body?.path) requestsForWrites.push({ method: body.method || "", path: body.path });
+  }
+  const clientText = texts["scripts/client.py"] || "";
+  const mustRun = reads.filter((line) => !commandWrites(line, clientText) && !writesRecordedPath(line, clientText, requestsForWrites));
+  const verifyRows = evidence.filter((item) => item.kind === "verify");
+  for (const line of mustRun) {
     let ran = false;
-    for (const row of evidence.filter((item) => item.kind === "verify" && (item.argv || []).join(" ") === line)) {
+    const runs = isTemplate(line)
+      ? verifyRows.filter((item) => subcommand((item.argv || []).join(" ")) === subcommand(line))
+      : verifyRows.filter((item) => sameCommand((item.argv || []).join(" "), line));
+    for (const row of runs) {
       if (row.ok === true) {
         ran = true;
         break;
@@ -115,7 +201,9 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
         code: "command_not_run",
         command: line,
         file: "SKILL.md",
-        hint: "run_skill_command 的 argv 用空格拼起来要等于这一行。没有鉴权而停止可以；其它失败要先改到能跑",
+        hint: isTemplate(line)
+          ? "这一行是说明。用真实参数跑同名子命令即可，不要把尖括号原样当参数"
+          : "run_skill_command 的 argv 用空格拼起来要等于这一行。没有鉴权而停止可以；其它失败要先改到能跑",
       });
     }
   }
@@ -125,6 +213,23 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     const body = blob?.body && typeof blob.body === "object" ? blob.body : blob;
     if (body?.path || body?.post_data) requests.push(requestIndexRow({ ...body, id: row.id }));
   }
+  const adopted = `${texts["scripts/client.py"] || ""}\n${texts["references/api.md"] || ""}`;
+  const seenOptions = new Set();
+  for (const row of evidence.filter((item) => item.kind === "network")) {
+    const blob = await getEvidence(recordingId, row.id).catch(() => null);
+    const body = blob?.body && typeof blob.body === "object" ? blob.body : blob;
+    const text = String(body?.response_body || "");
+    if (!looksLikeOptions(text)) continue;
+    const optionPath = String(body?.path || "");
+    if (!optionPath || seenOptions.has(optionPath) || !adopted.includes(optionPath) || skillCoversPath(skillMd, texts["scripts/client.py"] || "", optionPath)) continue;
+    seenOptions.add(optionPath);
+    errors.push({
+      code: "live_options_missing",
+      path: optionPath,
+      file: "SKILL.md",
+      hint: "脚本或 api.md 引用了这条候选项路径。提问前用打这条路径的命令现查，用 select 或 tree 显示名称，不要把录到的 id 做成文本框",
+    });
+  }
   errors.push(...citationErrors(texts["scripts/client.py"] || "", requests, "scripts/client.py"));
   errors.push(...citationErrors(texts["references/api.md"] || "", requests, "references/api.md"));
   const actionRows = evidence.filter((row) => row.kind === "action");
@@ -132,7 +237,7 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     const summary = String(row.summary || "");
     const named = summary.match(/^(?:fill|fill_fields|select|upload):(.*)$/);
     if (!named) continue;
-    for (const field of named[1].split("|").map((item) => item.trim()).filter((item) => item.length >= 2)) {
+    for (const field of named[1].split("|").map((item) => controlName(item)).filter((item) => item.length >= 2)) {
       if (!skillMd.includes(field)) {
         errors.push({
           code: "caller_field_missing",
@@ -165,6 +270,16 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   } catch {
     headers = {};
   }
+  const unique = [];
+  const seenError = new Set();
+  for (const item of errors) {
+    const key = [item.code, item.field, item.path, item.command, item.name, item.key, item.file].join("|");
+    if (seenError.has(key)) continue;
+    seenError.add(key);
+    unique.push(item);
+  }
+  errors.length = 0;
+  errors.push(...unique);
   let status = "verify_failed";
   if (!errors.length && hasCredentialHeaders(headers)) status = "skill_ready";
   else if (!errors.length) status = "skill_written_needs_auth";

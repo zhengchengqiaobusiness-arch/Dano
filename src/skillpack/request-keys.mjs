@@ -6,6 +6,7 @@ export function bodyKeyPaths(value, prefix = "", out = new Set()) {
   }
   if (!value || typeof value !== "object") return out;
   for (const [key, item] of Object.entries(value)) {
+    if (key.startsWith("_")) continue;
     const next = prefix ? `${prefix}.${key}` : key;
     out.add(next);
     bodyKeyPaths(item, next, out);

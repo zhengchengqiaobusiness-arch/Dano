@@ -250,8 +250,9 @@ body,
 }
 
 .studio-session {
-  width: min(460px, 34vw);
-  min-width: 300px;
+  width: 280px;
+  max-width: 32vw;
+  margin-left: auto;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -294,11 +295,20 @@ body,
   border-top: 1px solid #1a222c;
 }
 
-.studio-session-actions {
+.studio-composer {
+  position: relative;
+}
+
+.studio-composer .ant-input {
+  padding-bottom: 36px;
+}
+
+.studio-composer-actions {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
   display: flex;
-  justify-content: flex-end;
   gap: 8px;
-  margin-top: 8px;
 }
 
 .studio-feed {

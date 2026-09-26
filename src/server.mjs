@@ -1,12 +1,12 @@
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { createReadStream } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { webDir, skillDir } from "./paths.mjs";
 import { attachWebSocket } from "./ws-bridge.mjs";
 import { exportSkill } from "./session.mjs";
-import { listSkillsPage } from "./skillpack/catalog.mjs";
+import { listSkillsPage, removeSkill, setSkillFrozen } from "./skillpack/catalog.mjs";
 import {
   maskHeaders, readExportDirectory, readTokenRecord, writebackExportedPackages, writeExportDirectory, writeTokenRecord,
 } from "./token-store.mjs";
@@ -18,7 +18,7 @@ function send(res, status, body, origin) {
   if (origin && CORS.has(origin)) {
     headers["access-control-allow-origin"] = origin;
     headers["access-control-allow-headers"] = "content-type";
-    headers["access-control-allow-methods"] = "GET,POST,PUT,OPTIONS";
+    headers["access-control-allow-methods"] = "GET,POST,PUT,DELETE,OPTIONS";
   }
   res.writeHead(status, headers);
   res.end(typeof body === "string" ? body : JSON.stringify(body));
@@ -55,6 +55,41 @@ export function createApp({ startRecordingPi } = {}) {
       const page = Number(url.searchParams.get("page") || 1);
       const pageSize = Number(url.searchParams.get("page_size") || 0);
       send(res, 200, await listSkillsPage(page, pageSize), origin);
+      return;
+    }
+    const skillAction = url.pathname.match(/^\/v1\/skills\/([^/]+)\/(freeze|resume)$/);
+    if (req.method === "POST" && skillAction) {
+      const skillId = decodeURIComponent(skillAction[1]);
+      const item = await setSkillFrozen(skillId, skillAction[2] === "freeze");
+      if (!item) {
+        send(res, 404, { error: "not_found" }, origin);
+        return;
+      }
+      const removedFolders = [];
+      if (skillAction[2] === "freeze" && item.export_path) {
+        await rm(item.export_path, { recursive: true, force: true }).catch((error) => {
+          console.log(`[skill] freeze cleanup failed ${item.export_path} ${error.message}`);
+        });
+        removedFolders.push(item.export_path);
+        console.log(`[skill] frozen ${skillId} removed=${item.export_path}`);
+      } else {
+        console.log(`[skill] ${skillAction[2]} ${skillId}`);
+      }
+      send(res, 200, {
+        skill_id: item.skill_id,
+        state: item.frozen ? "suspended" : "published",
+        frozen: item.frozen,
+        removed_folders: removedFolders,
+      }, origin);
+      return;
+    }
+    const oneSkill = url.pathname.match(/^\/v1\/skills\/([^/]+)$/);
+    if (req.method === "DELETE" && oneSkill) {
+      const skillId = decodeURIComponent(oneSkill[1]);
+      const removed = await removeSkill(skillId);
+      if (removed?.export_path) await rm(removed.export_path, { recursive: true, force: true }).catch(() => {});
+      console.log(`[skill] delete ${skillId} ok=${Boolean(removed)}`);
+      send(res, removed ? 200 : 404, { deleted: Boolean(removed), skill_id: skillId, removed_folders: removed?.export_path ? [removed.export_path] : [] }, origin);
       return;
     }
     if (req.method === "GET" && url.pathname.startsWith("/v1/skills/")) {

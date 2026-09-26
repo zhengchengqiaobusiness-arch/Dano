@@ -3,6 +3,13 @@ import path from "node:path";
 import { dataRoot } from "../paths.mjs";
 import { readGoal } from "../evidence/store.mjs";
 
+export function catalogTitle(title, goalText, fallback) {
+  const named = String(title || "").trim();
+  if (named && !/^https?:\/\//.test(named)) return named.slice(0, 40);
+  const line = String(goalText || "").split(/\n/).map((item) => item.trim()).find((item) => item && !/^https?:\/\//.test(item));
+  return (line || fallback || "未命名").slice(0, 40);
+}
+
 function catalogFile() {
   return path.join(dataRoot(), "skill-catalog.json");
 }
@@ -32,7 +39,7 @@ export async function upsertCatalog(recording) {
     tenant: recording.tenant || "",
     subsystem: recording.subsystem || "app",
     action: recording.id,
-    title: goalText.slice(0, 80) || recording.skillId,
+    title: catalogTitle(recording.title, goalText, recording.skillId),
     description: goalText,
     integration: "page",
     risk_level: "L1",
@@ -52,6 +59,24 @@ export async function upsertCatalog(recording) {
   await mkdir(path.dirname(catalogFile()), { recursive: true });
   await writeFile(catalogFile(), `${JSON.stringify(items, null, 2)}\n`, "utf8");
   return item;
+}
+
+export async function setSkillFrozen(skillId, frozen) {
+  const items = await readCatalog();
+  const item = items.find((row) => row.skill_id === skillId || row.name === skillId);
+  if (!item) return null;
+  item.frozen = Boolean(frozen);
+  item.updated_at = new Date().toISOString();
+  await writeFile(catalogFile(), `${JSON.stringify(items, null, 2)}\n`, "utf8");
+  return item;
+}
+
+export async function removeSkill(skillId) {
+  const items = await readCatalog();
+  const next = items.filter((row) => row.skill_id !== skillId && row.name !== skillId);
+  if (next.length === items.length) return null;
+  await writeFile(catalogFile(), `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  return items.find((row) => row.skill_id === skillId || row.name === skillId);
 }
 
 export async function listSkillsPage(page = 1, pageSize = 0) {

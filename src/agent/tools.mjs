@@ -12,6 +12,7 @@ import { getNetwork, listNetwork, requestKeyIndex } from "../browser/network.mjs
 import { readSkillFile, skillIdFor, writeSkillFile } from "../skillpack/files.mjs";
 import { finishSkill } from "../skillpack/verify.mjs";
 import { GUIDE_NAMES } from "./guides.mjs";
+import { logLine } from "../log.mjs";
 
 const GUIDE_FILES = {
   "skill-generator-auth-and-token.md": path.join(docDir(), "skill-generator-auth-and-token.md"),
@@ -23,8 +24,8 @@ const GUIDE_FILES = {
 
 const TOOL_SPECS = [
   { name: "browser_open", description: "打开入口同源的地址。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
-  { name: "browser_snapshot", description: "读取当前页面快照。ref 形如 fN:eN。", parameters: { type: "object", properties: {} } },
-  { name: "browser_act", description: "ref 来自最近一次 snapshot，格式 fN:eN。失败使用返回的新快照。不要用旧 ref。同名不要请求程序挑第一个。下拉分两次 click。", parameters: { type: "object", properties: { action: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, fields: { type: "array" }, key: { type: "string" }, file_path: { type: "string" } }, required: ["action"] } },
+  { name: "browser_snapshot", description: "读取当前页面快照。ref 整段照抄，形如 fN:eN@数字。", parameters: { type: "object", properties: {} } },
+  { name: "browser_act", description: "ref 整段照抄最近一次 snapshot，格式 fN:eN@数字。@ 后数字对不上就是过期，用返回的新快照。同名不要请求程序挑第一个。下拉分两次 click。返回无请求就改点目标原文里的那一列。返回 uploaded 表示文件已经写入，采用 requests，不要再点关闭。返回 needs_upload 时只对同一 ref 调用 upload。填写用 fill。", parameters: { type: "object", properties: { action: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, fields: { type: "array" }, key: { type: "string" }, file_path: { type: "string" } }, required: ["action"] } },
   { name: "browser_screenshot", description: "把当前画面作为图像送回。", parameters: { type: "object", properties: { ref: { type: "string" }, as_image: { type: "boolean" } } } },
   { name: "network_list", description: "列出 xhr/fetch 索引。", parameters: { type: "object", properties: { after_id: { type: "string" }, action_id: { type: "string" } } } },
   { name: "network_get", description: "按 id 读取一条请求的全文。body_missing 表示没有正文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
@@ -238,7 +239,12 @@ export function wrapHostTools(host) {
     parameters: toTypeBox(spec.parameters),
     execute: async (_id, params) => {
       const args = coerceArgs(params || {}, spec.parameters);
+      const started = Date.now();
+      const argText = JSON.stringify(args).replace(/Bearer\s+[A-Za-z0-9._-]{8,}/g, "Bearer [redacted]").slice(0, 1200);
+      logLine(`[cabp] 开始 ${spec.name} ${argText}`);
       const raw = await host[spec.name](spec.name === "browser_screenshot" ? { ...args, as_image: true } : args);
+      const requests = Array.isArray(raw?.requests) ? raw.requests.map((row) => `${row.method || ""} ${row.path || ""} ${row.status || ""}`.trim()).join(" | ") : "";
+      logLine(`[cabp] 结束 ${spec.name} ${Date.now() - started}ms ok=${raw?.ok !== false} error=${raw?.error || ""} clicked=${raw?.clicked || ""} uploaded=${Boolean(raw?.uploaded)} filled=${(raw?.filled || []).join("|")} requests=${requests}`);
       if (raw?.__image && raw.data && (args.as_image === true || raw.as_image === true)) {
         return {
           content: [

@@ -12,7 +12,7 @@ export async function openBrowser({ recordingId, url, storageState, viewport }) 
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({ headless: true });
   const size = viewport?.width && viewport?.height ? viewport : { width: 1440, height: 900 };
-  const scale = Math.min(2, Math.max(1, Number(viewport?.devicePixelRatio) || 2));
+  const scale = 1;
   const contextOptions = { viewport: size, deviceScaleFactor: scale };
   if (storageState) contextOptions.storageState = storageState;
   const context = await browser.newContext(contextOptions);
@@ -27,7 +27,8 @@ export async function openBrowser({ recordingId, url, storageState, viewport }) 
     actionSeq: 0,
   };
   page.on("filechooser", (chooser) => {
-    state.pendingFileChooser = chooser;
+    if (state.agentClick) state.pendingFileChooser = chooser;
+    else state.pendingFileChooser = chooser;
   });
   page.on("framenavigated", (frame) => {
     if (frame !== page.mainFrame()) return;

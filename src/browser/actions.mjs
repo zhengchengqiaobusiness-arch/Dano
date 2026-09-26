@@ -5,6 +5,7 @@ import { originFromUrl } from "../session-store.mjs";
 import { browserSession } from "./session.mjs";
 import { locatorFor, takeSnapshot } from "./snapshot.mjs";
 import { beginAction, endAction, listNetwork, waitForAction } from "./network.mjs";
+import { logLine } from "../log.mjs";
 
 const PROBE_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
@@ -34,8 +35,35 @@ async function stale(recordingId) {
   return { ok: false, error: "stale_ref", snapshot };
 }
 
+function armChooser(page) {
+  let done = false;
+  let timer;
+  const onChooser = (chooser) => finish(chooser);
+  function finish(chooser) {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    page.off("filechooser", onChooser);
+    resolveChooser(chooser);
+  }
+  let resolveChooser = () => {};
+  const promise = new Promise((resolve) => {
+    resolveChooser = resolve;
+  });
+  page.on("filechooser", onChooser);
+  timer = setTimeout(() => finish(null), 8000);
+  return {
+    promise,
+    stop() {
+      finish(null);
+    },
+  };
+}
+
 export async function runAction(recordingId, input) {
-  const action = String(input?.action || "");
+  let action = String(input?.action || "");
+  if (action === "type") action = "fill";
+  if (action === "key") action = "press";
   if (!ACTIONS.has(action)) return { ok: false, error: "unknown_action" };
   const state = browserSession(recordingId);
   if (!state) return { ok: false, error: "no_browser" };
@@ -81,7 +109,7 @@ export async function runAction(recordingId, input) {
         }
         const item = locatorFor(recordingId, field.ref);
         if (!item) return { ...(await stale(recordingId)), ref: field.ref };
-        await item.locator.fill(field.text);
+        await item.locator.fill(field.text, { timeout: 2000 });
         if (!(await readBack(item.locator, field.text))) {
           return { ok: false, error: "value_not_applied", ref: field.ref, snapshot: await takeSnapshot(recordingId) };
         }
@@ -90,39 +118,104 @@ export async function runAction(recordingId, input) {
       return { ok: true, filled, snapshot: await takeSnapshot(recordingId) };
     }
     if (!hit) {
-      console.log(`[browser] ${action} ref=${input.ref || ""} stale`);
+      logLine(`[browser] ${action} ref=${input.ref || ""} stale`);
       return stale(recordingId);
     }
-    console.log(`[browser] ${action} ref=${input.ref || ""}`);
+    logLine(`[browser] ${action} ref=${input.ref || ""}`);
+    if (action === "click" && state.pendingFileChooser) {
+      return {
+        ok: false,
+        error: "needs_upload",
+        ref: input.ref,
+        hint: "文件选择还开着。对打开它的那个 ref 调用 upload。不要点关闭、取消，也不要改去提交。",
+      };
+    }
     if (action === "click") {
-      const chooserWait = state.page.waitForEvent("filechooser", { timeout: 8000 }).catch(() => null);
+      state.agentClick = true;
+      await hit.locator.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {});
+      const chooserArm = armChooser(state.page);
+      let chooser = null;
       try {
         await hit.locator.click({ timeout: 8000 });
       } catch (error) {
-        const chooser = state.pendingFileChooser || await Promise.race([
-          chooserWait,
-          new Promise((resolve) => setTimeout(() => resolve(null), 400)),
+        chooser = state.pendingFileChooser || await Promise.race([
+          chooserArm.promise,
+          new Promise((resolve) => setTimeout(() => resolve(null), 200)),
         ]);
-        if (chooser) {
-          state.pendingFileChooser = chooser;
-          return { ok: false, error: "needs_upload", ref: input.ref, requests: requestsDuring(), snapshot: await takeSnapshot(recordingId) };
+        if (!chooser) {
+          chooserArm.stop();
+          const message = String(error?.message || "click_failed").split("\n")[0];
+          logLine(`[browser] click failed ${message}`);
+          return { ok: false, error: message, requests: requestsDuring(), snapshot: await takeSnapshot(recordingId) };
         }
-        const message = String(error?.message || "click_failed").split("\n")[0];
-        console.log(`[browser] click failed ${message}`);
-        return { ok: false, error: message, requests: requestsDuring(), snapshot: await takeSnapshot(recordingId) };
       }
-      const chooser = state.pendingFileChooser || await Promise.race([
-        chooserWait,
-        new Promise((resolve) => setTimeout(() => resolve(null), 800)),
-      ]);
+      if (!chooser) {
+        chooser = state.pendingFileChooser || await Promise.race([
+          chooserArm.promise,
+          new Promise((resolve) => setTimeout(() => resolve(null), 300)),
+        ]);
+      }
+      chooserArm.stop();
+      if (!chooser) {
+        const dialog = state.page.locator("[role=dialog]").last();
+        const dialogInput = (await dialog.count().catch(() => 0))
+          ? ((await dialog.locator("input[type=file]").count().catch(() => 0))
+            ? dialog.locator("input[type=file]").last()
+            : state.page.locator("input[type=file]").last())
+          : null;
+        if (dialogInput && await dialogInput.count().catch(() => 0)) {
+          const dir = path.join(recordingDir(recordingId), "uploads");
+          await mkdir(dir, { recursive: true });
+          const filePath = path.join(dir, "attachment.png");
+          await writeFile(filePath, PROBE_PNG);
+          await dialogInput.setInputFiles(filePath).catch(() => {});
+          await waitForAction(recordingId, actionId);
+          const requests = requestsDuring();
+          if (requests.length) {
+            return {
+              ok: true,
+              uploaded: true,
+              clicked: hit.label || "",
+              requests,
+              snapshot: await takeSnapshot(recordingId),
+              hint: "对话框里的文件已写入。采用 requests。不要点关闭。",
+            };
+          }
+        }
+      }
       if (chooser) {
-        state.pendingFileChooser = chooser;
-        return { ok: false, error: "needs_upload", ref: input.ref, requests: requestsDuring(), snapshot: await takeSnapshot(recordingId) };
+        state.pendingFileChooser = null;
+        const dir = path.join(recordingDir(recordingId), "uploads");
+        await mkdir(dir, { recursive: true });
+        const filePath = path.join(dir, "attachment.png");
+        await writeFile(filePath, PROBE_PNG);
+        try {
+          await chooser.setFiles(filePath);
+        } catch (error) {
+          state.pendingFileChooser = chooser;
+          return {
+            ok: false,
+            error: "needs_upload",
+            ref: input.ref,
+            hint: `文件没有写入：${String(error?.message || error).split("\n")[0]}。对同一 ref 调用 upload，不要点关闭。`,
+          };
+        }
+        await waitForAction(recordingId, actionId);
+        const requests = requestsDuring();
+        logLine(`[browser] upload accepted ref=${input.ref || ""} requests=${requests.map((row) => row.path).join(",") || "-"}`);
+        return {
+          ok: true,
+          uploaded: true,
+          clicked: hit.label || "",
+          requests,
+          snapshot: await takeSnapshot(recordingId),
+          hint: "文件已写入这次选择。采用 requests 里的上传请求写进附件。不要再点关闭。",
+        };
       }
     }
     if (action === "fill") {
       try {
-        await hit.locator.fill(String(input.text ?? ""));
+        await hit.locator.fill(String(input.text ?? ""), { timeout: 2000 });
       } catch {
         return { ok: false, error: "value_not_applied", snapshot: await takeSnapshot(recordingId) };
       }
@@ -153,9 +246,20 @@ export async function runAction(recordingId, input) {
     const snapshot = await takeSnapshot(recordingId);
     const requests = requestsDuring();
     return action === "click"
-      ? { ok: true, clicked: hit.label || "", requests, snapshot }
+      ? {
+          ok: true,
+          clicked: hit.label || "",
+          requests,
+          snapshot,
+          ...(requests.length ? {} : {
+            hint: String(hit.label || "").startsWith("columnheader")
+              ? "这一下没有请求。这一列的格子在快照里写在单元格后面。"
+              : "这一下没有请求。改点目标原文里写出的那一列，不要停在没有请求的数字上。",
+          }),
+        }
       : { ok: true, filled, requests, snapshot };
   } finally {
+    state.agentClick = false;
     endAction(recordingId);
   }
 }

@@ -70,7 +70,8 @@ export async function takeSnapshot(recordingId) {
   } catch {
     goalText = "";
   }
-  const lines = [`epoch ${state.epoch}`];
+  state.snap = (state.snap || 0) + 1;
+  const lines = [`epoch ${state.epoch} snap ${state.snap}`];
   const exact = [];
   const refs = [];
   for (let index = 0; index < ordered.length; index += 1) {
@@ -84,13 +85,14 @@ export async function takeSnapshot(recordingId) {
       yaml = "";
     }
     for (const node of parseNodes(yaml)) {
-      const ref = `${frameId}:${node.ariaRef}`;
+      const ref = `${frameId}:${node.ariaRef}@${state.snap}`;
       const label = node.name ? `${node.role} "${node.name}"` : node.role;
       const column = node.column ? ` ${node.column}` : "";
       const shown = `${label}${column}`;
       state.refs.set(ref, {
         locator: frame.locator(`aria-ref=${node.ariaRef}`),
         epoch: state.epoch,
+        snap: state.snap,
         frame,
         label: shown,
       });
@@ -107,8 +109,9 @@ export async function takeSnapshot(recordingId) {
 export function locatorFor(recordingId, ref) {
   const state = browserSession(recordingId);
   const raw = String(ref || "").trim();
-  const key = /^e\d+$/i.test(raw) ? `f0:${raw}` : raw;
+  let key = /^e\d+$/i.test(raw) ? `f0:${raw}` : raw;
+  if (/^f\d+:e\d+$/i.test(key)) key = `${key}@${state.snap}`;
   const hit = state?.refs.get(key);
-  if (!hit || hit.epoch !== state.epoch) return null;
+  if (!hit || hit.epoch !== state.epoch || hit.snap !== state.snap) return null;
   return hit;
 }

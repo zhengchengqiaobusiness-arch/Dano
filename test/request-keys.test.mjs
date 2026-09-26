@@ -14,6 +14,9 @@ test("request keys include system fields and nested item keys", () => {
   assert.ok(keys.includes("items[].itemType"));
   assert.ok(keys.includes("items[].content"));
   assert.equal(keys.includes("1"), false);
+  const ui = keysFromPostData(JSON.stringify({ items: [{ content: "1", _X_ROW_KEY: "r1", sort: 0 }] }));
+  assert.equal(ui.includes("items[]._X_ROW_KEY"), false);
+  assert.ok(ui.includes("items[].sort"));
 });
 
 test("a cited path must exist, and every key of that request must be written", () => {
