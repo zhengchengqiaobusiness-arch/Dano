@@ -62,6 +62,24 @@ function keyWritten(text, key) {
   return parts.length > 0 && parts.every((part) => text.includes(part));
 }
 
+export function windowsForPath(text, path) {
+  const source = String(text || "");
+  const windows = [];
+  let from = 0;
+  while (from < source.length) {
+    const at = source.indexOf(path, from);
+    if (at < 0) break;
+    const before = source.slice(0, at);
+    const start = Math.max(before.lastIndexOf("\ndef "), before.lastIndexOf("\nasync def "));
+    const rest = source.slice(at + 1);
+    const endRel = rest.search(/\ndef |\nasync def /);
+    const end = endRel < 0 ? source.length : at + 1 + endRel;
+    windows.push(source.slice(start < 0 ? 0 : start, end));
+    from = at + path.length;
+  }
+  return windows;
+}
+
 export function citationErrors(skillText, requests, file = "") {
   const errors = [];
   const seen = new Set();
@@ -80,8 +98,9 @@ export function citationErrors(skillText, requests, file = "") {
   }
   for (const row of rows) {
     if (!row.path || !text.includes(row.path)) continue;
+    const scope = windowsForPath(text, row.path).join("\n");
     for (const key of row.keys || []) {
-      if (!keyWritten(text, key)) push({ code: "key_not_written", path: row.path, key, id: row.id, file });
+      if (!keyWritten(scope, key)) push({ code: "key_not_written", path: row.path, key, id: row.id, file });
     }
   }
   return errors;

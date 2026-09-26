@@ -62,11 +62,17 @@ function isTemplate(line) {
   return /[<>[\]]/.test(line);
 }
 
-function controlName(label) {
-  const quoted = String(label).match(/"([^"]+)"/);
-  let name = (quoted ? quoted[1] : String(label)).trim().replace(/^\*\s*/, "");
-  name = name.replace(/^(?:请输入|请选择|请填写|请搜索)/, "").trim();
-  return name;
+export function filledLabels(evidence) {
+  const labels = [];
+  for (const row of evidence || []) {
+    if (row.kind !== "action") continue;
+    const named = String(row.summary || "").match(/^(?:fill|fill_fields|select|upload):(.*)$/);
+    if (!named) continue;
+    for (const label of named[1].split("|")) {
+      if (label) labels.push(label);
+    }
+  }
+  return labels;
 }
 
 function sameCommand(left, right) {
@@ -74,39 +80,10 @@ function sameCommand(left, right) {
   return norm(left) === norm(right);
 }
 
-function skillCoversPath(skillMd, clientText, optionPath) {
-  if (skillMd.includes(optionPath)) return true;
-  for (const line of readCommands(skillMd)) {
-    const sub = subcommand(line).replaceAll("-", "_");
-    if (!sub) continue;
-    const at = clientText.indexOf(sub);
-    if (at < 0) continue;
-    const window = clientText.slice(at, at + 2500).split(/\ndef |\nasync def /)[0];
-    if (window.includes(optionPath)) return true;
-  }
-  return false;
-}
-
 function readCommands(skillMd) {
   return skillMd.split(/\n/).map((line) => line.trim()).filter((line) => (
     /^python3?\s+scripts\/client\.py\b/.test(line) && !line.includes("--confirm")
   ));
-}
-
-function looksLikeOptions(text) {
-  let data;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    return false;
-  }
-  const list = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : null);
-  if (!Array.isArray(list) || list.length < 2) return false;
-  const row = list.find((item) => item && typeof item === "object");
-  if (!row) return false;
-  const hasId = row.id != null || row.value != null;
-  const hasLabel = row.name != null || row.label != null || row.title != null;
-  return hasId && hasLabel;
 }
 
 function idsOf(value) {
@@ -170,11 +147,14 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     });
   }
   const failed = evidence.filter((row) => row.kind === "verify" && row.ok === false);
+  const requests = [];
   const requestsForWrites = [];
   for (const row of evidence.filter((item) => item.kind === "network")) {
     const blob = await getEvidence(recordingId, row.id).catch(() => null);
     const body = blob?.body && typeof blob.body === "object" ? blob.body : blob;
-    if (body?.path) requestsForWrites.push({ method: body.method || "", path: body.path });
+    if (!body) continue;
+    if (body.path) requestsForWrites.push({ method: body.method || "", path: body.path });
+    if (body.path || body.post_data) requests.push(requestIndexRow({ ...body, id: row.id }));
   }
   const clientText = texts["scripts/client.py"] || "";
   const mustRun = reads.filter((line) => !commandWrites(line, clientText) && !writesRecordedPath(line, clientText, requestsForWrites));
@@ -207,47 +187,9 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
       });
     }
   }
-  const requests = [];
-  for (const row of evidence.filter((item) => item.kind === "network")) {
-    const blob = await getEvidence(recordingId, row.id).catch(() => null);
-    const body = blob?.body && typeof blob.body === "object" ? blob.body : blob;
-    if (body?.path || body?.post_data) requests.push(requestIndexRow({ ...body, id: row.id }));
-  }
-  const adopted = `${texts["scripts/client.py"] || ""}\n${texts["references/api.md"] || ""}`;
-  const seenOptions = new Set();
-  for (const row of evidence.filter((item) => item.kind === "network")) {
-    const blob = await getEvidence(recordingId, row.id).catch(() => null);
-    const body = blob?.body && typeof blob.body === "object" ? blob.body : blob;
-    const text = String(body?.response_body || "");
-    if (!looksLikeOptions(text)) continue;
-    const optionPath = String(body?.path || "");
-    if (!optionPath || seenOptions.has(optionPath) || !adopted.includes(optionPath) || skillCoversPath(skillMd, texts["scripts/client.py"] || "", optionPath)) continue;
-    seenOptions.add(optionPath);
-    errors.push({
-      code: "live_options_missing",
-      path: optionPath,
-      file: "SKILL.md",
-      hint: "脚本或 api.md 引用了这条候选项路径。提问前用打这条路径的命令现查，用 select 或 tree 显示名称，不要把录到的 id 做成文本框",
-    });
-  }
-  errors.push(...citationErrors(texts["scripts/client.py"] || "", requests, "scripts/client.py"));
+  errors.push(...citationErrors(clientText, requests, "scripts/client.py"));
   errors.push(...citationErrors(texts["references/api.md"] || "", requests, "references/api.md"));
   const actionRows = evidence.filter((row) => row.kind === "action");
-  for (const row of actionRows) {
-    const summary = String(row.summary || "");
-    const named = summary.match(/^(?:fill|fill_fields|select|upload):(.*)$/);
-    if (!named) continue;
-    for (const field of named[1].split("|").map((item) => controlName(item)).filter((item) => item.length >= 2)) {
-      if (!skillMd.includes(field)) {
-        errors.push({
-          code: "caller_field_missing",
-          field,
-          file: "SKILL.md",
-          hint: "这个控件在页面上填过，要在 SKILL.md 里作为调用方必答问题出现，不能只问其中一部分",
-        });
-      }
-    }
-  }
   const uploads = actionRows.filter((row) => String(row.summary || "").startsWith("upload:"));
   if (actionRows.some((row) => row.summary === "needs_upload") && !uploads.length) {
     errors.push({ code: "attachment_unresolved", hint: "文件选择已打开。对同一 ref 调用 upload，并采用这次发出的请求" });
@@ -284,7 +226,7 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   if (!errors.length && hasCredentialHeaders(headers)) status = "skill_ready";
   else if (!errors.length) status = "skill_written_needs_auth";
   if (errors.some((item) => item.code === "auth_expired")) status = "verify_failed";
-  const verify = { ok: status !== "verify_failed", status, errors };
+  const verify = { ok: status !== "verify_failed", status, errors, requests, filled: filledLabels(evidence) };
   if (status === "skill_ready" || status === "skill_written_needs_auth") {
     await upsertCatalog({ ...recording, id: recordingId, skillId: recording.skillId, status, skillDir: dir });
   }

@@ -45,8 +45,8 @@ const MAX_SKILL_CONTINUES = 8;
 export function nextRecordingPrompt({ finished, paused, progressed, continues, verifyErrors }) {
   if (finished || paused || continues >= MAX_SKILL_CONTINUES) return null;
   const errors = Array.isArray(verifyErrors) && verifyErrors.length ? `\n${JSON.stringify(verifyErrors)}` : "";
-  if (progressed) return `页面操作的总结不是结束。guide_not_read 的 name 用 read_guide 读完。没有尖括号的读命令，argv 拼起来要和这一行相同。带尖括号或方括号的是说明，同名子命令用真实参数跑过即可。写操作不要为了校验再提交。caller_field_missing 的 field 写进 SKILL.md。然后 verify_skill。${errors}`;
-  return `Skill 还没产出。先用 read_guide 读完名单里的文档。再看下面 requests 的方法、路径、证据 id 和正文键，用 network_get 打开要采用的全文。按目标原文的每一段写 SKILL.md、scripts/client.py、references/api.md，跑读命令，调用 verify_skill。${errors}`;
+  const lead = progressed ? "页面操作的总结不是结束。" : "Skill 还没产出。";
+  return `${lead}read_guide 读完名单。对照目标原文、requests 里每条的方法、路径、证据 id 和键，以及 filled 里的控件名，写 SKILL.md、scripts/client.py、references/api.md。要采用的请求用 network_get 打开全文。键写在引用这条 path 的函数里。跑读命令，再 verify_skill。${errors}`;
 }
 
 let startOverride = null;
@@ -152,12 +152,12 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
       if (!follow) return;
       continues += 1;
       const current = typeof host.context === "function" ? await host.context() : {};
-      await prompt(`${follow}\n${JSON.stringify({ requests: current.requests || [] })}`);
+      await prompt(`${follow}\n${JSON.stringify({ goal: current.goal || {}, requests: current.requests || [], filled: current.filled || [] })}`);
     }
   }
   const goalText = `${goal.goal_text || ""}\n${goal.page_url || ""}`;
   const context = typeof host.context === "function" ? await host.context() : {};
-  await prompt(`${goalText}\n${JSON.stringify({ snapshot: context.snapshot, index: context.index, requests: context.requests || [] })}`);
+  await prompt(`${goalText}\n${JSON.stringify({ snapshot: context.snapshot, index: context.index, requests: context.requests || [], filled: context.filled || [] })}`);
   return {
     prompt: async (text) => {
       const message = text || "人已继续，从当前页面接着做";

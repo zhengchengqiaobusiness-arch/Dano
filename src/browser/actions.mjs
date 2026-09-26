@@ -3,7 +3,7 @@ import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { originFromUrl } from "../session-store.mjs";
 import { browserSession } from "./session.mjs";
-import { locatorFor, takeSnapshot } from "./snapshot.mjs";
+import { locatorFor, sameColumnRefs, takeSnapshot } from "./snapshot.mjs";
 import { beginAction, endAction, listNetwork, waitForAction } from "./network.mjs";
 import { logLine } from "../log.mjs";
 
@@ -98,6 +98,7 @@ export async function runAction(recordingId, input) {
     id: row.id,
     method: row.method,
     path: row.path,
+    keys: row.keys,
   }));
   try {
     if (action === "fill_fields") {
@@ -245,16 +246,18 @@ export async function runAction(recordingId, input) {
     }
     const snapshot = await takeSnapshot(recordingId);
     const requests = requestsDuring();
+    const sameColumn = requests.length ? [] : sameColumnRefs(snapshot.text, hit.label);
     return action === "click"
       ? {
           ok: true,
           clicked: hit.label || "",
           requests,
           snapshot,
+          ...(sameColumn.length ? { same_column: sameColumn } : {}),
           ...(requests.length ? {} : {
-            hint: String(hit.label || "").startsWith("columnheader")
-              ? "这一下没有请求。这一列的格子在快照里写在单元格后面。"
-              : "这一下没有请求。改点目标原文里写出的那一列，不要停在没有请求的数字上。",
+            hint: sameColumn.length
+              ? `这一下没有请求。同一列的格子是 ${sameColumn.join(" ")}。`
+              : "这一下没有请求。改点目标原文里写出的那一列。",
           }),
         }
       : { ok: true, filled, requests, snapshot };

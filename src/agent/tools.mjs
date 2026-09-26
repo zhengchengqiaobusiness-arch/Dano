@@ -10,8 +10,8 @@ import { persistBrowserSession } from "../browser/session.mjs";
 import { takeSnapshot } from "../browser/snapshot.mjs";
 import { getNetwork, listNetwork, requestKeyIndex } from "../browser/network.mjs";
 import { readSkillFile, skillIdFor, writeSkillFile } from "../skillpack/files.mjs";
-import { finishSkill } from "../skillpack/verify.mjs";
-import { GUIDE_NAMES } from "./guides.mjs";
+import { filledLabels, finishSkill } from "../skillpack/verify.mjs";
+import { GUIDE_NAMES, guideBody } from "./guides.mjs";
 import { logLine } from "../log.mjs";
 
 const GUIDE_FILES = {
@@ -25,7 +25,7 @@ const GUIDE_FILES = {
 const TOOL_SPECS = [
   { name: "browser_open", description: "打开入口同源的地址。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
   { name: "browser_snapshot", description: "读取当前页面快照。ref 整段照抄，形如 fN:eN@数字。", parameters: { type: "object", properties: {} } },
-  { name: "browser_act", description: "ref 整段照抄最近一次 snapshot，格式 fN:eN@数字。@ 后数字对不上就是过期，用返回的新快照。同名不要请求程序挑第一个。下拉分两次 click。返回无请求就改点目标原文里的那一列。返回 uploaded 表示文件已经写入，采用 requests，不要再点关闭。返回 needs_upload 时只对同一 ref 调用 upload。填写用 fill。", parameters: { type: "object", properties: { action: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, fields: { type: "array" }, key: { type: "string" }, file_path: { type: "string" } }, required: ["action"] } },
+  { name: "browser_act", description: "ref 整段照抄最近一次 snapshot，格式 fN:eN@数字。@ 后数字对不上就是过期，用返回的新快照。同名不要请求程序挑第一个。下拉分两次 click。返回无请求就改点目标原文里的那一列。返回 same_column 时点里面的 ref。返回 uploaded 表示文件已经写入，采用 requests。返回 needs_upload 时只对同一 ref 调用 upload。填写用 fill。", parameters: { type: "object", properties: { action: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, fields: { type: "array" }, key: { type: "string" }, file_path: { type: "string" } }, required: ["action"] } },
   { name: "browser_screenshot", description: "把当前画面作为图像送回。", parameters: { type: "object", properties: { ref: { type: "string" }, as_image: { type: "boolean" } } } },
   { name: "network_list", description: "列出 xhr/fetch 索引。", parameters: { type: "object", properties: { after_id: { type: "string" }, action_id: { type: "string" } } } },
   { name: "network_get", description: "按 id 读取一条请求的全文。body_missing 表示没有正文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
@@ -37,7 +37,7 @@ const TOOL_SPECS = [
   { name: "write_skill_file", description: "只写 SKILL.md、scripts/client.py、references/api.md。", parameters: { type: "object", properties: { relative_path: { type: "string" }, contents: { type: "string" } }, required: ["relative_path", "contents"] } },
   { name: "read_skill_file", description: "读取已写的 Skill 文件。", parameters: { type: "object", properties: { relative_path: { type: "string" } }, required: ["relative_path"] } },
   { name: "run_skill_command", description: "在 Skill 目录执行 python scripts/client.py。argv 是字符串数组，例如 [\"python\", \"scripts/client.py\", \"list\"]。", parameters: { type: "object", properties: { argv: { type: "array", items: { type: "string" } } }, required: ["argv"] } },
-  { name: "verify_skill", description: "写入 config 后校验。通过后停止。", parameters: { type: "object", properties: {} } },
+  { name: "verify_skill", description: "校验三份文件是否引用了证据里的 path，以及这些 path 的键是否写在引用它们的函数里。返回 requests 和 filled。", parameters: { type: "object", properties: {} } },
 ];
 
 function parseStructured(value) {
@@ -132,9 +132,9 @@ export function hostTools(recording) {
     async read_guide(args) {
       const name = path.basename(String(args.name || ""));
       if (!GUIDE_FILES[name]) return { ok: false, error: "unknown_guide", names: GUIDE_NAMES };
-      const text = await readFile(GUIDE_FILES[name], "utf8");
+      const text = guideBody(name) || await readFile(GUIDE_FILES[name], "utf8");
       const saved = await appendEvidence(id, { kind: "guide", summary: name, body: name, body_missing: false });
-      const scope = "本场只写 SKILL.md、scripts/client.py、references/api.md。文档里的 CONTRACT.json、flow.py、CAPABILITIES.md、INPUT_FORMS.md、OPTIONS.md 不要创建。鉴权、提问和活选项写进这三份。SKILL.md 用 name 和 description 让调用方启用，不要写 disable-model-invocation。业务读命令要打到证据里的路径，不能只有 show-config。";
+      const scope = "成品只有 SKILL.md、scripts/client.py、references/api.md。鉴权、提问和活选项写进这三份。";
       return { ok: true, name, evidence_id: saved.id, text: `${scope}\n\n${text}` };
     },
     async assist(args) {
@@ -222,10 +222,11 @@ export function hostTools(recording) {
     async context() {
       const goal = await readGoal(id).catch(() => ({}));
       const index = await listEvidence(id, { limit: 30 });
+      const evidence = await listEvidence(id, { limit: 0 });
       const snaps = await listEvidence(id, { kinds: ["snapshot"], limit: 1 });
       let snapshot = null;
       if (snaps[0]) snapshot = await getEvidence(id, snaps[0].id);
-      return { goal, snapshot, index, requests: requestKeyIndex(id) };
+      return { goal, snapshot, index, requests: requestKeyIndex(id), filled: filledLabels(evidence) };
     },
   };
   return tools;

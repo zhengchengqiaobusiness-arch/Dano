@@ -26,6 +26,30 @@ function parseNodes(yaml) {
   return annotateColumns(nodes);
 }
 
+export function goalExactLines(nodes, goalText) {
+  const goal = String(goalText || "");
+  const inGoal = (value) => String(value || "").length >= 2 && goal.includes(value);
+  const hits = (nodes || []).filter((node) => inGoal(node.name) || inGoal(node.column));
+  const covered = new Set(hits.map((node) => node.column).filter(Boolean));
+  return hits.filter((node) => !(node.role === "columnheader" && covered.has(node.name)));
+}
+
+export function sameColumnRefs(snapshotText, headerLabel) {
+  const label = String(headerLabel || "");
+  if (!label.startsWith("columnheader")) return [];
+  const name = (label.match(/"([^"]+)"/) || [])[1] || "";
+  if (name.length < 2) return [];
+  const needle = ` ${name} ref=`;
+  const refs = [];
+  for (const line of String(snapshotText || "").split("\n")) {
+    const at = line.lastIndexOf(needle);
+    if (at < 0) continue;
+    const ref = line.slice(at + needle.length).trim();
+    if (ref) refs.push(ref);
+  }
+  return refs.slice(0, 8);
+}
+
 export function annotateColumns(nodes) {
   const headers = [];
   let column = 0;
@@ -72,7 +96,7 @@ export async function takeSnapshot(recordingId) {
   }
   state.snap = (state.snap || 0) + 1;
   const lines = [`epoch ${state.epoch} snap ${state.snap}`];
-  const exact = [];
+  const exactNodes = [];
   const refs = [];
   for (let index = 0; index < ordered.length; index += 1) {
     const frame = ordered[index];
@@ -97,11 +121,11 @@ export async function takeSnapshot(recordingId) {
         label: shown,
       });
       lines.push(`- ${shown} ref=${ref}`);
-      const inGoal = (value) => value.length >= 2 && goalText.includes(value);
-      if (inGoal(node.name || "") || inGoal(node.column || "")) exact.push(`- ${shown} ref=${ref}`);
+      exactNodes.push({ role: node.role, name: node.name || "", column: node.column || "", shown, ref });
       refs.push(ref);
     }
   }
+  const exact = goalExactLines(exactNodes, goalText).map((node) => `- ${node.shown} ref=${node.ref}`);
   if (exact.length) lines.splice(1, 0, "goal_exact", ...exact);
   return { epoch: state.epoch, text: lines.join("\n"), refs };
 }

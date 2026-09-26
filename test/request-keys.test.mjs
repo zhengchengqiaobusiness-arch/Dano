@@ -36,3 +36,19 @@ test("a cited path must exist, and every key of that request must be written", (
   assert.equal(citationErrors(client, requests).some((item) => item.key === "items[].content"), false);
   assert.ok(citationErrors(client, requests).some((item) => item.key === "creator"));
 });
+
+test("a key in another function does not satisfy the function that sends the path", () => {
+  const requests = [{ id: "req_1", method: "POST", path: "/api/save", keys: ["owner", "state"] }];
+  const client = [
+    "def save():",
+    "    url = \"/api/save\"",
+    "    if args.owner:",
+    "        data[\"owner\"] = args.owner",
+    "",
+    "def show():",
+    "    return row.get(\"state\")",
+  ].join("\n");
+  const cited = citationErrors(client, requests, "scripts/client.py");
+  assert.ok(cited.some((item) => item.code === "key_not_written" && item.key === "state"));
+  assert.equal(cited.some((item) => item.key === "owner"), false);
+});

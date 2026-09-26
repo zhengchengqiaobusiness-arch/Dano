@@ -125,16 +125,19 @@ export function listNetwork(recordingId, { after_id = "", action_id = "" } = {})
     rows = at >= 0 ? rows.slice(at + 1) : rows;
   }
   if (action_id) rows = rows.filter((row) => row.action_id === action_id);
-  return rows.map((row) => ({
-    id: row.id,
-    method: row.method,
-    path: row.path,
-    status: row.status,
-    body_bytes: row.response_body == null ? 0 : Buffer.byteLength(String(row.response_body)),
-    body_missing: row.body_missing,
-    action_id: row.action_id,
-    keys: requestIndexRow(row).keys,
-  }));
+  return rows.map((row) => {
+    const index = requestIndexRow(row);
+    return {
+      id: row.id,
+      method: row.method,
+      path: row.path,
+      status: row.status,
+      body_bytes: row.response_body == null ? 0 : Buffer.byteLength(String(row.response_body)),
+      body_missing: row.body_missing,
+      action_id: row.action_id,
+      keys: index.keys,
+    };
+  });
 }
 
 export function requestKeyIndex(recordingId) {
