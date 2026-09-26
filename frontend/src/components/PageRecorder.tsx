@@ -846,7 +846,7 @@ export default function PageRecorder({
   const renderedFrameRef = useRef(0);
   const decodingFrameRef = useRef(false);
   const frameGenerationRef = useRef(0);
-  const pointerRef = useRef<{ pointerId: number; button: string } | null>(null);
+  const pointerRef = useRef<{ pointerId: number; button: string; point: { nx: number; ny: number } } | null>(null);
   const pointerMoveRef = useRef<Record<string, unknown> | null>(null);
   const pointerTimerRef = useRef<number | null>(null);
   const wheelRef = useRef<Record<string, number> | null>(null);
@@ -2561,7 +2561,7 @@ export default function PageRecorder({
     if (!point) return;
     event.preventDefault();
     const button = pointerButton(event.button);
-    pointerRef.current = { pointerId: event.pointerId, button };
+    pointerRef.current = { pointerId: event.pointerId, button, point };
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* no-op */ }
     send({ type: "input", event: { kind: "pointer_down", ...point, button, buttons: event.buttons } });
     keyboardRef.current?.focus({ preventScroll: true });
@@ -2585,7 +2585,7 @@ export default function PageRecorder({
     const pointer = pointerRef.current;
     if (!connectedRef.current || !pointer || pointer.pointerId !== event.pointerId) return;
     pointerRef.current = null;
-    const point = normalizedPoint(event.clientX, event.clientY);
+    const point = normalizedPoint(event.clientX, event.clientY) || pointer.point;
     if (!point) return;
     event.preventDefault();
     send({

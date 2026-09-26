@@ -205,3 +205,22 @@ test("a key counts only inside the function that cites the path", async () => {
   assert.ok(result.filled.some((label) => label.includes("工作内容")));
   assert.ok(result.requests.some((item) => item.path === "/api/save" && item.keys.includes("state") && item.keys.includes("owner")));
 });
+
+test("a script that imports outside the standard library cannot be called", async () => {
+  await useData();
+  const shape = { id: "rec_verify_stdlib", tenant: "", subsystem: "app", skillId: "app.rec_verify_stdlib", startUrl: "http://127.0.0.1/" };
+  const dir = skillDir(shape.skillId);
+  await mkdir(path.join(dir, "scripts"), { recursive: true });
+  await mkdir(path.join(dir, "references"), { recursive: true });
+  await mkdir(path.join(dir, "config"), { recursive: true });
+  await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\n");
+  await writeFile(path.join(dir, "scripts/client.py"), "import json\nimport urllib.request\ntry:\n    import requests\nexcept ImportError:\n    requests = None\n");
+  await writeFile(path.join(dir, "references/api.md"), "");
+  await writeFile(path.join(dir, "config/runtime.json"), "{}\n");
+  await writeFile(path.join(dir, "config/auth.local.json"), "{\"headers\":{}}\n");
+  const blocked = await verifySkill(dir, shape.id, shape);
+  assert.ok(blocked.errors.some((item) => item.code === "import_not_available" && item.name === "requests"));
+  await writeFile(path.join(dir, "scripts/client.py"), "import json\nimport urllib.request\n");
+  const allowed = await verifySkill(dir, shape.id, shape);
+  assert.equal(allowed.errors.some((item) => item.code === "import_not_available"), false);
+});

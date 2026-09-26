@@ -48,6 +48,15 @@ export function getPage(recordingId) {
   return sessions.get(recordingId)?.page || null;
 }
 
+const pageLocks = new Map();
+
+export function withPage(recordingId, fn) {
+  const prev = pageLocks.get(recordingId) || Promise.resolve();
+  const run = prev.then(() => fn(), () => fn());
+  pageLocks.set(recordingId, run.then(() => {}, () => {}));
+  return run;
+}
+
 export async function persistBrowserSession(recordingId) {
   const state = sessions.get(recordingId);
   if (!state?.context) return null;

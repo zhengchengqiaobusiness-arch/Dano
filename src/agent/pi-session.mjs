@@ -46,7 +46,7 @@ export function nextRecordingPrompt({ finished, paused, progressed, continues, v
   if (finished || paused || continues >= MAX_SKILL_CONTINUES) return null;
   const errors = Array.isArray(verifyErrors) && verifyErrors.length ? `\n${JSON.stringify(verifyErrors)}` : "";
   const lead = progressed ? "页面操作的总结不是结束。" : "Skill 还没产出。";
-  return `${lead}read_guide 读完名单。对照目标原文、requests 里每条的方法、路径、证据 id 和键，以及 filled 里的控件名，写 SKILL.md、scripts/client.py、references/api.md。要采用的请求用 network_get 打开全文。键写在引用这条 path 的函数里。跑读命令，再 verify_skill。${errors}`;
+  return `${lead}read_guide 读完名单。对照目标原文、requests 里每条的方法、路径、证据 id 和键，以及 filled 里的控件名，写 SKILL.md、scripts/client.py、references/api.md。要采用的请求用 network_get 打开全文。键写在引用这条 path 的函数里。scripts/client.py 只用 Python 标准库。跑读命令，再 verify_skill。${errors}`;
 }
 
 let startOverride = null;
@@ -135,12 +135,13 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
       await session.steer(text);
     } finally {
       prompting = null;
-      if (recording?.paused || recording?.finished || session.isStreaming) return;
+      if (recording?.finished) return;
       const next = queued.shift();
       if (next) {
         await prompt(next);
         return;
       }
+      if (recording?.paused || session.isStreaming) return;
       const follow = nextRecordingPrompt({
         finished: recording?.finished,
         paused: recording?.paused,
@@ -155,12 +156,10 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
       await prompt(`${follow}\n${JSON.stringify({ goal: current.goal || {}, requests: current.requests || [], filled: current.filled || [] })}`);
     }
   }
-  const goalText = `${goal.goal_text || ""}\n${goal.page_url || ""}`;
-  const context = typeof host.context === "function" ? await host.context() : {};
-  await prompt(`${goalText}\n${JSON.stringify({ snapshot: context.snapshot, index: context.index, requests: context.requests || [], filled: context.filled || [] })}`);
-  return {
+  const handle = {
     prompt: async (text) => {
       const message = text || "人已继续，从当前页面接着做";
+      logLine(`[pi] 人：${message.slice(0, 200)}`);
       if (recording?.paused) recording.paused = false;
       if (recording?.status === "waiting_operator") recording.status = "recording";
       if (session.isStreaming) {
@@ -171,4 +170,17 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
     },
     dispose: () => session.dispose?.(),
   };
+  const goalText = `${goal.goal_text || ""}\n${goal.page_url || ""}`;
+  const context = typeof host.context === "function" ? await host.context() : {};
+  const early = recording?.earlySteer || [];
+  if (recording) {
+    recording.earlySteer = [];
+    recording.pi = handle;
+  }
+  prompt(`${goalText}\n${JSON.stringify({ snapshot: context.snapshot, index: context.index, requests: context.requests || [], filled: context.filled || [] })}`).catch((error) => {
+    logLine(`[pi] ${error?.message || error}`);
+    recording?.emitThought?.({ kind: "text", text: String(error?.message || error) });
+  });
+  for (const text of early) handle.prompt(text).catch((error) => logLine(`[pi] ${error?.message || error}`));
+  return handle;
 }

@@ -6,6 +6,7 @@ import { handbookChanged, writeRuntimeConfig } from "./files.mjs";
 import { hasCredentialHeaders } from "../auth-vault.mjs";
 import { upsertCatalog } from "./catalog.mjs";
 import { requestIndexRow, citationErrors, citedPaths } from "./request-keys.mjs";
+import { nonStdlibImports } from "./stdlib-imports.mjs";
 import { GUIDE_NAMES } from "../agent/guides.mjs";
 
 function section(text, title) {
@@ -157,6 +158,32 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     if (body.path || body.post_data) requests.push(requestIndexRow({ ...body, id: row.id }));
   }
   const clientText = texts["scripts/client.py"] || "";
+  if (clientText.trim()) {
+    try {
+      const probed = await nonStdlibImports(clientText);
+      if (probed.syntax) {
+        errors.push({
+          code: "not_invocable",
+          file: "scripts/client.py",
+          hint: "scripts/client.py 无法被 Python 解析。调用方会直接执行这个文件。",
+        });
+      }
+      for (const name of probed.imports || []) {
+        errors.push({
+          code: "import_not_available",
+          name,
+          file: "scripts/client.py",
+          hint: "调用这份 Skill 的环境只有 Python 标准库。",
+        });
+      }
+    } catch (error) {
+      errors.push({
+        code: "not_invocable",
+        file: "scripts/client.py",
+        hint: `没能检查脚本能否在只有标准库的环境里启动：${error.message}`,
+      });
+    }
+  }
   const mustRun = reads.filter((line) => !commandWrites(line, clientText) && !writesRecordedPath(line, clientText, requestsForWrites));
   const verifyRows = evidence.filter((item) => item.kind === "verify");
   for (const line of mustRun) {

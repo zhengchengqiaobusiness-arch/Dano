@@ -2,7 +2,7 @@ import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { originFromUrl } from "../session-store.mjs";
-import { browserSession } from "./session.mjs";
+import { browserSession, withPage } from "./session.mjs";
 import { locatorFor, sameColumnRefs, takeSnapshot } from "./snapshot.mjs";
 import { beginAction, endAction, listNetwork, waitForAction } from "./network.mjs";
 import { logLine } from "../log.mjs";
@@ -60,7 +60,11 @@ function armChooser(page) {
   };
 }
 
-export async function runAction(recordingId, input) {
+export function runAction(recordingId, input) {
+  return withPage(recordingId, () => perform(recordingId, input));
+}
+
+async function perform(recordingId, input) {
   let action = String(input?.action || "");
   if (action === "type") action = "fill";
   if (action === "key") action = "press";
@@ -254,11 +258,6 @@ export async function runAction(recordingId, input) {
           requests,
           snapshot,
           ...(sameColumn.length ? { same_column: sameColumn } : {}),
-          ...(requests.length ? {} : {
-            hint: sameColumn.length
-              ? `这一下没有请求。同一列的格子是 ${sameColumn.join(" ")}。`
-              : "这一下没有请求。改点目标原文里写出的那一列。",
-          }),
         }
       : { ok: true, filled, requests, snapshot };
   } finally {
