@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it, vi } from "vitest";
-import { FileStateStore, MemoryGovernanceBarrier, OwnerMemoryClient } from "@josephyoung/pi-openviking/host";
+import { FileStateStore, MemoryGovernanceBarrier, MemoryGovernanceService, OwnerMemoryClient } from "@josephyoung/pi-openviking/host";
+import { LazyMemoryClient } from "../lazy-memory-client.js";
 import { MemoryCredentialStore } from "../memory-credential-store.js";
 import { MemoryRecoveryJournal, RecoveryStateStore } from "../memory-recovery-journal.js";
 import { auditRetention, checkpoint, migrateLegacyRecovery, reconcile } from "../../../runtime/reconcile-memory-recovery.mjs";
@@ -507,14 +508,30 @@ it("rejects a clear followed by a new ready writer before any remote mutation", 
 async function stagedClearWriter(phase: "ready" | "processing" | "commit_unknown" = "ready") {
   const f = await fixture();
   const store = new RecoveryStateStore(f.store, f.journal);
-  await store.transact(state => { state.authorization.enabled = true; });
+  const oldId = "c".repeat(64);
+  await store.transact(state => {
+    state.authorization.enabled = true;
+    state.operations[oldId] = { id: oldId, owner: f.owner, scope: null, kind: "explicit",
+      authorizationEpoch: state.authorization.epoch,
+      source: { sessionId: "old-chat", entryId: "old-entry", branchId: "root", contentVersion: "1" },
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), phase: "ready",
+      remoteSessionId: "old-session", taskId: "old-task", archiveId: "old-archive",
+      memoryUris: ["viking://user/alice/memories/old.md"] };
+  });
   await checkpoint(f.data, f.recovery, f.checkpointFile);
   const statePath = join(f.data, "host-state", "owner-a", "state", "memory", "state.json");
   const oldBytes = await readFile(statePath);
   const clearJob = await new MemoryGovernanceBarrier(store).begin({ kind: "clear", scope: null });
   const clearId = clearJob.id;
+  await f.journal.append({ kind: "removeSource", remoteSessionId: "old-session" });
   await f.journal.append({ kind: "clearMemoryScope" });
-  await store.transact(state => { state.governance!.jobs[clearId]!.phase = "complete"; });
+  await store.transact(state => {
+    state.governance!.jobs[clearId]!.phase = "complete";
+    const operation = state.operations[oldId]!;
+    operation.phase = "blocked";
+    operation.errorCode = "MEMORY_SOURCE_REVOKED";
+    delete operation.memoryUris;
+  });
   const id = "d".repeat(64);
   const memoryUri = "viking://user/alice/memories/current.md";
   await store.transact(state => {
@@ -530,6 +547,8 @@ async function stagedClearWriter(phase: "ready" | "processing" | "commit_unknown
   const oldUri = "viking://user/alice/memories/old.md";
   const documents = new Map([[oldUri, "old deleted body"], [memoryUri, "new retained body"]]);
   vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+  vi.spyOn(OwnerMemoryClient.prototype, "sessionExists").mockResolvedValue(false);
+  vi.spyOn(OwnerMemoryClient.prototype, "removeSource").mockResolvedValue(undefined);
   vi.spyOn(OwnerMemoryClient.prototype, "hasSource").mockResolvedValue(true);
   vi.spyOn(OwnerMemoryClient.prototype, "findCommit").mockResolvedValue({ taskId: "task" });
   vi.spyOn(OwnerMemoryClient.prototype, "writerSettled").mockResolvedValue(true);
@@ -638,6 +657,64 @@ it("rejects foreign or mismatched staged bodies before replay mutation", async (
   expect(f.clear).not.toHaveBeenCalled();
 });
 
+it("rejects an extra same-owner document absent from every staged writer receipt", async () => {
+  const f = await stagedClearWriter();
+  f.replace.mockRejectedValueOnce(new Error("RESTORE_FAILED"));
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile)).rejects.toThrow("RESTORE_FAILED");
+  const staged = JSON.parse(await readFile(f.preservationPath, "utf8"));
+  staged.documents.push({ uri: "viking://user/alice/memories/obsolete.md", content: "obsolete fact" });
+  await writeFile(f.preservationPath, JSON.stringify(staged));
+  f.clear.mockClear();
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_PRESERVATION_MISMATCH");
+  expect(f.clear).not.toHaveBeenCalled();
+});
+
+it("rejects a malformed existing preservation plan instead of recapturing after clear", async () => {
+  const f = await stagedClearWriter();
+  f.replace.mockRejectedValueOnce(new Error("RESTORE_FAILED"));
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile)).rejects.toThrow("RESTORE_FAILED");
+  f.clear.mockClear();
+  for (const invalid of [null, false, []]) {
+    await writeFile(f.preservationPath, JSON.stringify(invalid));
+    await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+      .rejects.toThrow("RECOVERY_PRESERVATION_MISMATCH");
+  }
+  expect(f.clear).not.toHaveBeenCalled();
+});
+
+it("rejects shared writers when only an earlier diff matches the current body", async () => {
+  const f = await stagedClearWriter();
+  const latest = (await MemoryRecoveryJournal.inspect(f.recovery, f.owner)).state;
+  await writeFile(f.statePath, JSON.stringify(latest));
+  const newerId = "f".repeat(64);
+  await new RecoveryStateStore(f.store, f.journal).transact(state => {
+    state.operations[newerId] = { ...state.operations[f.id]!, id: newerId,
+      remoteSessionId: "newer-session", source: { sessionId: "chat", entryId: "later",
+        branchId: "root", contentVersion: "2" } };
+  });
+  await writeFile(f.statePath, f.oldBytes);
+  f.inspect.mockImplementation(async operation => operation.id === newerId
+    ? { status: "processing" } : { status: "ready", archiveId: "archive", memoryUris: [f.memoryUri] });
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  expect(f.clear).not.toHaveBeenCalled();
+});
+
+it("does not delete a newer ready document during targeted deletion replay", async () => {
+  const f = await stagedLaterWriter("ready");
+  await f.journal.append({ kind: "removeMemory", uri: f.memoryUri });
+  vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+  vi.spyOn(OwnerMemoryClient.prototype, "hasSource").mockResolvedValue(true);
+  vi.spyOn(OwnerMemoryClient.prototype, "writerSettled").mockResolvedValue(true);
+  vi.spyOn(OwnerMemoryClient.prototype, "inspect").mockResolvedValue({ status: "ready", archiveId: "archive", memoryUris: [f.memoryUri] });
+  const remove = vi.spyOn(OwnerMemoryClient.prototype, "removeMemory");
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  expect(remove).not.toHaveBeenCalled();
+  expect(await readFile(f.statePath)).toEqual(f.oldBytes);
+});
+
 it("stages every owner before clearing either owner and keeps retry bodies isolated", async () => {
   const f = await fixture();
   const bob = { accountId: "account", userId: "bob" };
@@ -699,6 +776,85 @@ it("stages every owner before clearing either owner and keeps retry bodies isola
   expect(clear).toHaveBeenCalledTimes(2);
 });
 
+it("retries a receipt larger than 4 KiB after overlay with a preservation file still present", async () => {
+  const f = await stagedClearWriter();
+  const latest = (await MemoryRecoveryJournal.inspect(f.recovery, f.owner)).state;
+  await writeFile(f.statePath, JSON.stringify(latest));
+  await new RecoveryStateStore(f.store, f.journal).transact(state => {
+    for (let index = 0; index < 64; index++) {
+      const id = index.toString(16).padStart(64, "0");
+      state.operations[id] = { ...state.operations[f.id]!, id, remoteSessionId: `new-session-${index}`,
+        source: { sessionId: "chat", entryId: `entry-${index}`, branchId: "root", contentVersion: "1" } };
+    }
+  });
+  await writeFile(f.statePath, f.oldBytes);
+  let stagedBytes: Buffer | undefined;
+  f.replace.mockImplementation(async (uri, body) => {
+    stagedBytes = await readFile(f.preservationPath);
+    f.documents.set(uri, body);
+  });
+  await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+  expect((await readFile(`${f.statePath}.replay-receipt.json`)).length).toBeGreaterThan(4096);
+  // Represent a crash after overlay but before the staged body was unlinked.
+  await writeFile(f.preservationPath, stagedBytes!, { mode: 0o600 });
+  await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+  expect([...f.documents]).toEqual([[f.memoryUri, "new retained body"]]);
+  await expect(readFile(f.preservationPath)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+for (const kind of ["forget", "correct"] as const) {
+  it(`replays the actual ${kind} governance mapping after restoring an old ready operation`, async () => {
+    const f = await fixture();
+    const store = new RecoveryStateStore(f.store, f.journal);
+    const id = "e".repeat(64), uri = "viking://user/alice/memories/old.md";
+    await store.transact(state => {
+      state.authorization.enabled = true;
+      state.operations[id] = { id, owner: f.owner, scope: null, kind: "explicit",
+        authorizationEpoch: state.authorization.epoch,
+        source: { sessionId: "chat", entryId: "saved", branchId: "root", contentVersion: "1" },
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), phase: "ready",
+        remoteSessionId: "old-session", taskId: "task", archiveId: "archive", memoryUris: [uri] };
+    });
+    await checkpoint(f.data, f.recovery, f.checkpointFile);
+    const statePath = join(f.data, "host-state", "owner-a", "state", "memory", "state.json");
+    const snapshot = await readFile(statePath);
+    const documents = new Map([[uri, "old fact"]]);
+    let sourceExists = true;
+    vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+    vi.spyOn(OwnerMemoryClient.prototype, "writerSettled").mockResolvedValue(true);
+    vi.spyOn(OwnerMemoryClient.prototype, "sessionExists").mockImplementation(async () => sourceExists);
+    vi.spyOn(OwnerMemoryClient.prototype, "removeSource").mockImplementation(async () => {
+      if (sourceExists) documents.delete(uri);
+      sourceExists = false;
+    });
+    vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments").mockImplementation(async () => [...documents.keys()].sort());
+    vi.spyOn(OwnerMemoryClient.prototype, "readMemory").mockImplementation(async target => documents.get(target)!);
+    vi.spyOn(OwnerMemoryClient.prototype, "replaceMemory").mockImplementation(async (target, body) => { documents.set(target, body); });
+    const remove = vi.spyOn(OwnerMemoryClient.prototype, "removeMemory")
+      .mockImplementation(async target => { documents.delete(target); });
+    const client = new LazyMemoryClient({ owner: f.owner, baseUrl: "http://localhost:1", timeoutMs: 3000,
+      connect: async () => ({ owner: f.owner, apiKey: "synthetic-user-key" }),
+      assertToolIsolation: async () => {}, journal: f.journal });
+    const governance = new MemoryGovernanceService(store, client,
+      { owner: f.owner, advanceGovernance: async () => {} });
+    const receipt = kind === "forget" ? await governance.forget(uri, "old fact")
+      : await governance.correct(uri, "old fact", "current fact");
+    expect(receipt.status).toBe("complete");
+    expect((await store.read()).operations[id]).toMatchObject({ phase: "blocked", errorCode: "MEMORY_SOURCE_REVOKED" });
+    await client.close();
+    // Restore old local/derived content while the source remains absent: replay
+    // must enforce deletion even though repeating removeSource is a no-op.
+    documents.clear(); documents.set(uri, "old fact");
+    await writeFile(statePath, snapshot);
+    await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+    expect(documents.has(uri)).toBe(false);
+    expect([...documents.values()]).toEqual(kind === "forget" ? [] : ["current fact"]);
+    expect(remove).toHaveBeenCalledWith(uri);
+    await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+    expect([...documents.values()]).toEqual(kind === "forget" ? [] : ["current fact"]);
+  });
+}
+
 for (const phase of ["session_unknown", "session_created", "message_unknown", "message_delivered"] as const) {
   it(`preserves a new ${phase} session across a post-checkpoint memory clear only without a commit`, async () => {
     const f = await stagedLaterWriter(phase);
@@ -754,7 +910,7 @@ for (const phase of laterWriterPhases) {
     await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
     expect(source).toHaveBeenCalledOnce();
     expect(settled).toHaveBeenCalledTimes(["commit_unknown", "processing", "ready"].includes(phase) ? 1 : 0);
-    expect(inspect).toHaveBeenCalledTimes(phase === "ready" ? 1 : 0);
+    expect(inspect).toHaveBeenCalledTimes(["commit_unknown", "processing", "ready"].includes(phase) ? 1 : 0);
     expect(remove).toHaveBeenCalledExactlyOnceWith("viking://user/alice/memories/old.md");
     expect((await f.store.read()).operations[f.id]!.phase).toBe(phase);
   });

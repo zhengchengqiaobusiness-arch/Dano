@@ -1517,3 +1517,31 @@ deletion priority and staging both owners before either is cleared. These are
 synthetic transport tests. Real old-volume preservation, extraction through
 ready, multi-user credential rotation and old-binary rollback remain required
 for AC-12/T-13; this candidate does not close that gate.
+
+Review also corrected the old-operation governance transition: completed
+selective forget/correction may remove or relocate its `memoryUris`, and a
+completed clear strips the field. Recovery accepts these mapping changes only
+with a newly completed, matching-scope writer barrier and corresponding final
+deletion/replacement evidence. Live forget can remove its only derivative via
+source deletion alone; replay records and explicitly enforces that old URI's
+absence, including a retry after its source is already absent. Current task,
+archive and source identity remain immutable. Actual published extension
+`MemoryGovernanceService.forget/correct` with the journal-bound host client is
+used in the automated regressions, rather than appending synthetic mutations
+without the governance state transition.
+
+The private replay receipt uses one 64 MiB read/write limit checked before
+remote changes. A 65-writer fixture exceeds the previous 4 KiB limit and
+successfully repeats after overlay with its staging file still present.
+Preservation binds each document to a staged writer/task/archive receipt and
+requires the exact URI union; additional same-owner or foreign documents and
+malformed existing plans are rejected. Targeted deletion replay also rejects
+overlap with a newer verified document before deleting anything.
+
+Multiple settled writers whose historical diffs successively change the same
+merged document remain a recovery limitation: the public client requires each
+recorded writer's current document to match its own diff. An earlier matching
+diff cannot prove that a newer differing result was legitimately superseded.
+These combinations stay fail-closed until a verified update chain or explicit
+reconciliation establishes the final result; they are not counted as passing
+the multi-writer T-13 gate.
