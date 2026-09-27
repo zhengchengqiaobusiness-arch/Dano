@@ -1152,6 +1152,11 @@ sent data. Focused rollback tests confirm that the payload survives and that a
 new `session_unknown` writer or a queued writer missing its payload is rejected
 before remote contact. Later phases still require explicit reconciliation;
 this narrow recovery rule does not close the upgrade-window writer gate.
+The operator-supplied deletion ledger now shares the recovery journal's
+owner-bound document-URI validation. Its preflight rejects path traversal,
+encoded traversal, hidden files and query strings before verifying remote
+identity or replaying any owner's changes. The installed-layout subprocess
+test covers those cases; it does not replace the broader T-11 security matrix.
 Read-only inventory of the configured production host on 2026-09-27 showed
 `dano-app:rel-20260922-143917`; its container mount destinations did not
 include `/var/lib/dano-memory-recovery`, and the Dano-related Docker volume

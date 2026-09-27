@@ -1,7 +1,9 @@
-import { appendFile, chmod, link, mkdtemp, mkdir, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { randomBytes, randomUUID } from "node:crypto";
+import { appendFile, chmod, copyFile, link, mkdtemp, mkdir, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, expect, it, vi } from "vitest";
 import { FileStateStore, MemoryGovernanceBarrier, OwnerMemoryClient } from "@josephyoung/pi-openviking/host";
 import { MemoryCredentialStore } from "../memory-credential-store.js";
@@ -56,6 +58,45 @@ it("rejects linked, exposed and oversized recovery inputs before reading them", 
   await expect(privateFile(secret)).rejects.toThrow("UNPROTECTED_RECOVERY_PATH");
   await symlink(root, join(root, "directory-link"));
   await expect(privateDirectory(join(root, "directory-link"))).rejects.toThrow("UNPROTECTED_RECOVERY_PATH");
+});
+
+it("rejects noncanonical ledger document URIs before any remote replay", async () => {
+  const f = await fixture();
+  const statePath = "host-state/owner-a/state/memory/state.json";
+  const stateBytes = await readFile(join(f.data, statePath));
+  const ledgerFile = join(f.root, "ledger.json");
+  const appRoot = fileURLToPath(new URL("../../../", import.meta.url));
+  const install = join(f.root, "installed");
+  await mkdir(install, { mode: 0o700 });
+  const script = join(install, "replay-memory-deletions.mjs");
+  await copyFile(join(appRoot, "runtime", "replay-memory-deletions.mjs"), script);
+  await copyFile(join(appRoot, "runtime", "private-recovery-path.mjs"), join(install, "private-recovery-path.mjs"));
+  await symlink(join(appRoot, "dist"), join(install, "dist"));
+  await symlink(join(appRoot, "node_modules"), join(install, "node_modules"));
+  const base = { version: 1, owner: f.owner, statePath,
+    postStateSha256: createHash("sha256").update(stateBytes).digest("hex"),
+    deleteUris: [] as string[], sourceSessionIds: [] as string[],
+    expectedDocumentUris: [] as string[], retainedDocuments: {} as Record<string, string> };
+  const run = async (ledger: typeof base) => {
+    await writeFile(ledgerFile, JSON.stringify(ledger), { mode: 0o600 });
+    const result = spawnSync(process.execPath, [script, f.config, f.data, ledgerFile], { encoding: "utf8" });
+    expect(result.status).toBe(1);
+    return JSON.parse(result.stderr.trim()) as { stage: string; code: string };
+  };
+  expect((await run(base)).stage).toBe("replay");
+  for (const uri of [
+    "viking://user/alice/memories/../private.md",
+    "viking://user/alice/memories/%2e%2e/private.md",
+    "viking://user/alice/memories/.hidden.md",
+    "viking://user/alice/memories/valid.md?other=1",
+  ]) {
+    expect(await run({ ...base, deleteUris: [uri] })).toEqual({ result: "failed", stage: "load", code: "INVALID_LEDGER" });
+  }
+  const escaped = "viking://user/alice/memories/../private.md";
+  expect(await run({ ...base, expectedDocumentUris: [escaped] }))
+    .toEqual({ result: "failed", stage: "load", code: "INVALID_LEDGER" });
+  expect(await run({ ...base, expectedDocumentUris: [escaped], retainedDocuments: { [escaped]: "synthetic" } }))
+    .toEqual({ result: "failed", stage: "load", code: "INVALID_LEDGER" });
 });
 
 it("checkpoints a stopped owner and preflights only the post-snapshot deletion intent", async () => {

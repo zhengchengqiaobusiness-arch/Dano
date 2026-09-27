@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { OwnerMemoryClient } from "@josephyoung/pi-openviking/host";
 import { MemoryCredentialStore } from "./dist/server/bridge/memory-credential-store.js";
+import { isRecoveryDocumentUri } from "./dist/server/bridge/memory-recovery-journal.js";
 import { outside, privateDirectory, privateFile, trustedDirectory } from "./private-recovery-path.mjs";
 
 // Run with Dano stopped. The post-snapshot ledger and owner state must come
@@ -40,10 +41,9 @@ try {
       && typeof entry.retainedDocuments === "object" && !Array.isArray(entry.retainedDocuments), "INVALID_LEDGER");
     assert.ok(typeof entry.statePath === "string"
       && entry.statePath.split("/").every(part => part && part !== "." && part !== ".."), "INVALID_LEDGER");
-    const root = `viking://user/${entry.owner.userId}/memories/`;
     const retainedUris = Object.keys(entry.retainedDocuments);
     const uris = [...entry.deleteUris, ...entry.expectedDocumentUris, ...retainedUris];
-    assert.ok(uris.every(uri => typeof uri === "string" && uri.startsWith(root) && uri.endsWith(".md")), "INVALID_LEDGER");
+    assert.ok(uris.every(uri => isRecoveryDocumentUri(entry.owner, uri)), "INVALID_LEDGER");
     assert.ok(entry.sourceSessionIds.every(id => typeof id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(id)), "INVALID_LEDGER");
     assert.ok(Object.values(entry.retainedDocuments).every(value => typeof value === "string" && value.trim()), "INVALID_LEDGER");
     assert.ok(entry.expectedDocumentUris.every(uri => !entry.deleteUris.includes(uri))

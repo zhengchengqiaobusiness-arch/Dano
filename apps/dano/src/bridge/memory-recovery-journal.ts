@@ -27,7 +27,7 @@ export interface RecoveryEvent {
 const unavailable = () => new Error("MEMORY_RECOVERY_JOURNAL_UNAVAILABLE");
 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 const identifier = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
-const documentUri = (owner: Owner, value: unknown): value is string => {
+export const isRecoveryDocumentUri = (owner: Owner, value: unknown): value is string => {
   if (typeof value !== "string" || !value.startsWith(`viking://user/${owner.userId}/memories/`) || !value.endsWith(".md")) return false;
   const relative = value.slice(`viking://user/${owner.userId}/memories/`.length);
   return !/[%?#\\\x00-\x1f]/.test(value)
@@ -40,12 +40,12 @@ function checkedMutation(owner: Owner, value: unknown): asserts value is Recover
   const fields = Object.keys(mutation).sort().join(",");
   switch (mutation.kind) {
     case "removeSource": if (fields === "kind,remoteSessionId" && identifier(mutation.remoteSessionId)) return; break;
-    case "removeMemory": if (fields === "kind,uri" && documentUri(owner, mutation.uri)) return; break;
+    case "removeMemory": if (fields === "kind,uri" && isRecoveryDocumentUri(owner, mutation.uri)) return; break;
     case "replaceMemory":
-      if (fields === "content,kind,uri" && documentUri(owner, mutation.uri)
+      if (fields === "content,kind,uri" && isRecoveryDocumentUri(owner, mutation.uri)
         && typeof mutation.content === "string" && mutation.content.trim()
         && Buffer.byteLength(mutation.content, "utf8") <= 1024 * 1024) return;
-      if (fields === "contentSha256,kind,payloadId,uri" && documentUri(owner, mutation.uri)
+      if (fields === "contentSha256,kind,payloadId,uri" && isRecoveryDocumentUri(owner, mutation.uri)
         && typeof mutation.payloadId === "string" && /^[a-f0-9-]{36}$/.test(mutation.payloadId)
         && typeof mutation.contentSha256 === "string" && /^[a-f0-9]{64}$/.test(mutation.contentSha256)) return;
       break;
