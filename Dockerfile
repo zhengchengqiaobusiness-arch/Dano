@@ -2,7 +2,8 @@ FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
 # fs-ext builds the memory extension's kernel-backed file locking binding.
-RUN apt-get update \
+RUN sed -i 's|https\?://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; s|https\?://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/debian.sources \
+  && apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
 ENV COREPACK_HOME=/tmp/corepack
@@ -31,6 +32,7 @@ COPY pnpm-lock.yaml* ./
 RUN registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-$DANO_DEFAULT_NPM_REGISTRY}}" \
   && npm_config_registry="$registry" \
   npm_config_fetch_timeout=600000 \
+  npm_config_nodedir=/usr/local \
   pnpm install --frozen-lockfile --store-dir="$PNPM_STORE_DIR" --package-import-method=copy
 
 COPY . .
@@ -62,7 +64,7 @@ RUN sed -i 's|https\?://deb.debian.org/debian-security|http://mirrors.aliyun.com
 COPY deploy/python-requirements.txt /app/deploy/python-requirements.txt
 # /usr is readable in the tool sandbox; /opt is restricted to runtime skills.
 RUN python3 -m venv /usr/local/lib/dano-python \
-  && /usr/local/lib/dano-python/bin/pip install --no-cache-dir -r /app/deploy/python-requirements.txt \
+  && /usr/local/lib/dano-python/bin/pip install --no-cache-dir --timeout 120 --retries 3 -r /app/deploy/python-requirements.txt \
   && /usr/local/lib/dano-python/bin/python -c 'import httpx'
 ENV PATH="/usr/local/lib/dano-python/bin:${PATH}"
 ENV NODE_ENV=production

@@ -1062,7 +1062,7 @@ establish Dano model answers.
 | T-06/07 | Actual old `session_unknown` recovery and credential-store replay; one restored-volume queue resumed to `message_delivered` without duplicate operation | All crash windows, ready completion, rotation, user switch and anonymous transfer on fixed service |
 | T-08 | Real Browser new-chat recall, including one correct post-restart answer; bounded reranker selection | Short-session extraction, no-result/timeout and model-answer repetitions |
 | T-09/10 | Real-service correction/deletion/replay; Browser targeted forget with unrelated recall preserved, defaults-off and cross-tab pause; runtime and authenticated HTTP paused-management tests | Complete correction/forget/pause/restore state matrix ×3 |
-| T-11 | Protected file access denied; real USER-key 403 probes | Full unauthenticated/401/403/native-tool/symlink/env/HTTP matrix |
+| T-11 | Protected file access denied; real USER-key 403 probes; `0.2.52` image passed synthetic unauthenticated/invalid-token/cross-user HTTP probes and Pi native-tool credential isolation | Repeat complete HTTP matrix with real USER keys and independently authenticated Browser users |
 | T-12 | Final-image Browser form, generic Skill, image, bash and Pi compression; generated leave Skill choice/form rendered in a disposable layer | Working business options/authentication and complete final-image repetition |
 | T-13 | Clean deploy, candidate upgrade, matched old-data rollback, two-owner supplied-ledger replay; automatic-journal old-volume two-owner deletion replay and current-service two-owner deletion/retry; one restored-volume old queue resumed through source append; focused new-queued-writer overlay | Old queue through ready, multi-user queue, credential/new writer past send boundary and old-version multi-user reconciliation |
 | T-14 | Five-user, 100-complete-request MiMo candidate-7 run passed semantic recall, injection, wait and token limits in an instrumented disposable container; full-source image repeated 100 complete requests with 70/70 recall answers; byte-identical prompt-layer image passed matched on/off cost; final fixed Browser save-ready p95 35 s with 10/10 source readbacks | Complete other fixed categories, integration and causal interpretation |
@@ -1177,6 +1177,17 @@ owner-bound document-URI validation. Its preflight rejects path traversal,
 encoded traversal, hidden files and query strings before verifying remote
 identity or replaying any owner's changes. The installed-layout subprocess
 test covers those cases; it does not replace the broader T-11 security matrix.
+The `0.2.52` protected-runtime image (`e6e07445891b`) passed
+`protected-supervisor-http.mjs --cli --memory` in a disposable,
+network-disabled container. The fixture asserted 401 for missing and invalid
+JWTs and 403 for Bob accessing Alice's memory settings, operation list,
+operation content, export, and settings mutation. In the same image,
+`isolated-memory-tool-worker.mjs` denied Pi read/write/edit through both
+absolute and symlink paths, denied Bash file and environment access, and
+returned 401 to a tool worker lacking its parent process's synthetic key.
+Both containers were removed after their checks. These synthetic checks do
+not establish real OA authentication, real OpenViking USER-key authorization,
+model behavior, or Browser acceptance.
 Read-only inventory of the configured production host on 2026-09-27 showed
 `dano-app:rel-20260922-143917`; its container mount destinations did not
 include `/var/lib/dano-memory-recovery`, and the Dano-related Docker volume

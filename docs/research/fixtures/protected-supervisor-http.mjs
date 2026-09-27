@@ -162,6 +162,26 @@ try {
     }
   }
   if (withMemory) {
+    const aliceId = clients[0].client.id;
+    for (const path of [
+      `/api/clients/${aliceId}/memory/settings`,
+      `/api/clients/${aliceId}/memory/operations`,
+      `/api/clients/${aliceId}/memory/operations/nonexistent/content/0`,
+      `/api/clients/${aliceId}/memory/export`,
+    ]) {
+      assert.equal((await fetch(`${origin}${path}`)).status, 401);
+      assert.equal((await fetch(`${origin}${path}`, {
+        headers: { authorization: 'Bearer invalid-token' } })).status, 401);
+      assert.equal((await fetch(`${origin}${path}`, {
+        headers: { authorization: `Bearer ${token(clients[1].id)}` } })).status, 403);
+    }
+    const mutation = { method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: true }) };
+    assert.equal((await fetch(`${origin}/api/clients/${aliceId}/memory/settings`, mutation)).status, 401);
+    assert.equal((await fetch(`${origin}/api/clients/${aliceId}/memory/settings`, {
+      ...mutation, headers: { ...mutation.headers, authorization: 'Bearer invalid-token' } })).status, 401);
+    assert.equal((await fetch(`${origin}/api/clients/${aliceId}/memory/settings`, {
+      ...mutation, headers: { ...mutation.headers, authorization: `Bearer ${token(clients[1].id)}` } })).status, 403);
     const settings = async (entry, enabled) => {
       const response = await fetch(`${origin}/api/clients/${entry.client.id}/memory/settings`, {
         method: enabled === undefined ? 'GET' : 'PUT',
@@ -221,7 +241,8 @@ try {
   } while (Date.now() < cleanupDeadline);
   assert.deepEqual(remaining, []);
   console.log(JSON.stringify({ actualHttpHost: true, cliEntrypoint: useCli, hostNonRoot: true, twoWorkerIdentities: true,
-    exclusiveSupervisor: true, searchNonRoot: true, memorySettingsVerified: withMemory, memoryFailureVerified: memoryFailure,
+    exclusiveSupervisor: true, searchNonRoot: true, memorySettingsVerified: withMemory,
+    memoryHttpBoundaryVerified: withMemory, memoryFailureVerified: memoryFailure,
     sequentialCapacityVerified: capacityMode,
     shutdownMode: crashHost ? 'host-killed' : crashSearch ? 'search-killed' : 'graceful',
     shutdownReclaimsChildren: true, browserVerified: false, modelVerified: realService }));
