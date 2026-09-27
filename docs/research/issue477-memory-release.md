@@ -744,6 +744,19 @@ account was deleted through the official admin API. The
 assertions. This is one ordinary CLI functional path; it does not establish
 the complete pair audit or the Dano multi-user/browser and quality matrices.
 
+The later `0.1.17` package now has a separate
+[publication and pair audit](evidence/issue477-0117-package-pair-audit.json).
+The npm registry tarball SHA-512 matches the Dano lockfile; its package
+manifest carries `pi-package`, `pi-extension`, the standard entry and the host
+factory export. The version-triggered GitHub Actions run for source commit
+`2a120e7e9d5ae27159948ef5e2a045db786c4a96` completed type check,
+build/test and npm publish. The `0.2.60` image contains that package and one
+Pi `0.85.1` instance. The actual Pi loader loaded each entry twice locally and
+inside the offline image without errors, duplicate registration or network
+requests. This is package and loader evidence; the ordinary Pi CLI model
+save/new-session recall above ran on `0.1.13`, so the current `0.1.17` pair
+still needs its own functional repetition.
+
 The updated `0.2.41-receipt` image contains product `0.2.41`, published
 pi-openviking `0.1.13` and the checkpoint receipt code. The fixed HTTPS
 Compose stack started with this image, all five services reached healthy or
@@ -1043,7 +1056,7 @@ establish Dano model answers.
 
 | PRD | Current evidence | Missing acceptance |
 |---|---|---|
-| AC-01/02 | Published independent package `0.1.17`, fixed lockfile, two Pi keywords, rebuilt image, dual-entry loader check and one real-service protected Pi CLI save/new-session recall | Complete pair audit and Dano integration repetition |
+| AC-01/02 | Published independent package `0.1.17`, registry tarball integrity matching the exact Dano lockfile, two Pi keywords, successful version-triggered npm publish, rebuilt image with one Pi and one memory package, and real Pi loader double-reload of both entries in local and image environments; an earlier real-service ordinary Pi CLI save/new-session recall used `0.1.13` | Ordinary Pi CLI functional save/recall using the current `0.1.17` pair and Dano integration repetition |
 | AC-03 | Browser explicit save, ready status/source and new-chat recall, including one correct model answer after host restart | Repeat fixed cases with model-answer review |
 | AC-04 | Collection filters and consent have automated coverage; one Browser collection reached ready and was recalled after separate consent; two synthetic-key chats produced no visible save | Sensitive-data/inference exclusions with observed selector decisions, revocation race and fixed repetitions |
 | AC-05/06 | Frozen 20 cross-USER cases ×3 passed against real OpenViking with forged headers, including isolated Session-ID replay; protected file boundary | Two independent authenticated Browser users, Dano routing and project scope |
@@ -1056,7 +1069,7 @@ establish Dano model answers.
 
 | Spec test | Current evidence | Missing acceptance |
 |---|---|---|
-| T-01 | Published `0.1.17`, exact Dano lockfile, rebuilt protected image, dual-entry loading twice per entry, and one real-service ordinary Pi CLI save/new-session recall | Full pair audit and repeated functional checks |
+| T-01 | Published `0.1.17`, exact registry/lockfile integrity and image package identity, real Pi loader double-reload of both entries; earlier one real-service ordinary Pi CLI save/new-session recall used `0.1.13` | Current-pair ordinary Pi CLI functional save/recall, no duplicate runtime instance during real use, and repeated functional checks |
 | T-02/03 | Real USER-key isolation matrix 20×3, including header forgery and Session-ID collision | Dano/Peer/project scope and independent Bob Browser across fixed repetitions |
 | T-04/05 | Automated lifecycle/collection tests; one real Browser automatic collection/recall/revocation path | Full multi-viewer/rebind/branch/dispose and collection exclusions |
 | T-06/07 | Actual old `session_unknown` recovery and credential-store replay; one restored-volume queue resumed to `message_delivered` without duplicate operation; after real USER-key rotation the protected Dano process restarted against its retained state and owner-only exports succeeded | All crash windows, ready completion, restored multi-volume deployment with rotation, user switch and anonymous transfer on fixed service |

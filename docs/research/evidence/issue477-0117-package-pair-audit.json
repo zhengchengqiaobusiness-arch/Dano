@@ -1,0 +1,48 @@
+{
+  "observedAt": "2026-09-28",
+  "package": "@josephyoung/pi-openviking@0.1.17",
+  "npm": {
+    "latestDistTag": "0.1.17",
+    "integrity": "sha512-cWadaw8WOLA5wmDEgIpZPBX4GNE7bSbbiLRXqJ8fgG+Nwxl7QTg/xzp6V0h6KGTkXACEjNyOaZKko5+wAaeLug==",
+    "tarballIntegrityMatchesRegistry": true,
+    "tarballIntegrityMatchesDanoLockfile": true,
+    "tarballBytes": 87117,
+    "tarballEntries": 63,
+    "keywords": ["pi-package", "pi-extension"],
+    "standardPiEntry": "./dist/standard.js",
+    "hostFactoryEntry": "./dist/host.js",
+    "noDanoInternalImportsInPackagedJavaScriptOrTypes": true
+  },
+  "publisher": {
+    "repository": "josephyoung/pi-openviking",
+    "sourceCommit": "2a120e7e9d5ae27159948ef5e2a045db786c4a96",
+    "workflow": ".github/workflows/publish.yml",
+    "trigger": "push to main when package.json changes; workflow_dispatch also available",
+    "publishRunId": 35972168702,
+    "typeCheckBuildTestAndNpmPublishSteps": "success"
+  },
+  "dano": {
+    "packageVersion": "0.1.17",
+    "piVersion": "0.85.1",
+    "extensionPeerPiVersion": "0.85.1",
+    "protectedImage": "localhost/dano465-protected:0.2.60",
+    "protectedImageId": "e46b14e635fedf75cd1fe13149a16fc636de2be909b6fa83e86c96ddbac32b83",
+    "imagePackageJsonSha256": "9046b49cb5504bdca5b4b2f9e7b31495de975c6ab0123b49348efc599a345021",
+    "registryTarballPackageJsonSha256": "9046b49cb5504bdca5b4b2f9e7b31495de975c6ab0123b49348efc599a345021",
+    "imagePackageJsonMatchesTarball": true,
+    "installedPiPackageInstances": 1,
+    "installedMemoryPackageInstances": 1
+  },
+  "loader": {
+    "surfaces": ["local installed tree", "0.2.60 protected image without network"],
+    "standardEntry": "one extension and eight tools including memory_save, plus memory command, after each of two reloads",
+    "hostFactory": "one extension and one memory_save tool after each of two reloads",
+    "loaderErrors": 0,
+    "networkRequestsDuringRegistration": 0
+  },
+  "limits": [
+    "The previous ordinary Pi CLI save and new-session recall receipt used 0.1.13, not 0.1.17",
+    "This audit proves publication, package identity and loader registration, not a 0.1.17 ordinary Pi CLI model save/recall or Dano Browser flow",
+    "No current MiMo key was used"
+  ]
+}
