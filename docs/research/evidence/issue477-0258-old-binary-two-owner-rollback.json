@@ -1,0 +1,133 @@
+{
+  "observedAt": "2026-09-28",
+  "scope": "Isolated synthetic two-owner old-volume restoration and old-binary rollback; no public ports or real account credentials",
+  "project": "dano465rbtbu92i",
+  "images": {
+    "oldBinary": {
+      "version": "0.2.55",
+      "id": "751e69d1fa607991b1e7a6d4454b1211fb8d63e3f22bf7dd64444b6e1321574b"
+    },
+    "candidate": {
+      "version": "0.2.58",
+      "id": "3a37886eefa609c2903b808ce21fbeaa72a1e300cb40c06a5334699689687264"
+    }
+  },
+  "candidateSourceCommit": "21f0aabeb63cb62165dfd696a76f9662b44957e1",
+  "sequence": [
+    "Started real OpenViking and Dano 0.2.55 with separate synthetic owner identities and one target plus one retained document per owner.",
+    "Stopped services, ran the old recovery checkpoint, and archived seven named volumes plus deployment control configuration.",
+    "Started 0.2.58 against original volumes, verified old documents, and completed two owner-scoped HTTP governance forget jobs.",
+    "Restored old volumes into fresh volumes while retaining the newer recovery journal; verified that target documents reappeared before replay.",
+    "Ran candidate preflight, replay, and a second idempotent replay; verified target 404 and retained 200 for both owners.",
+    "Started the real 0.2.55 binary on reconciled volumes and checked health, owner settings, governance state, exports, and document reads."
+  ],
+  "aggregateChecks": {
+    "baseline": {
+      "owners": 2,
+      "documents": 4,
+      "ownExports": 2,
+      "foreignReadsDenied": 2,
+      "oldBinary": true
+    },
+    "candidate": {
+      "owners": 2,
+      "governanceComplete": 2,
+      "targets404": 2,
+      "retained200": 2,
+      "candidateBinary": true
+    },
+    "rollback": {
+      "owners": 2,
+      "oldBinaryHealthy": true,
+      "settingsRetained": 2,
+      "governanceSettled": 2,
+      "ownExports": 2,
+      "foreignMarkersAbsent": 2,
+      "targets404": 2,
+      "retained200": 2
+    },
+    "upgrade": {
+      "owners": 2,
+      "oldDocumentsRead": 4,
+      "ownExports": 2,
+      "foreignMarkersAbsent": 2,
+      "candidateBinary": true
+    }
+  },
+  "recovery": {
+    "checkpoint": {
+      "result": "passed",
+      "owners": 2,
+      "journalBytes": 0
+    },
+    "preReplay": {
+      "target200": 2,
+      "retained200": 2
+    },
+    "preflight": {
+      "result": "passed",
+      "owners": 2,
+      "events": 2
+    },
+    "replay": {
+      "result": "passed",
+      "owners": 2,
+      "events": 2
+    },
+    "secondReplay": {
+      "result": "passed",
+      "owners": 2,
+      "events": 2
+    },
+    "postReplay": {
+      "target404": 2,
+      "retained200": 2
+    }
+  },
+  "snapshotArchives": {
+    "agent-config": {
+      "bytes": 1024,
+      "sha256": "5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"
+    },
+    "checkpoint": {
+      "bytes": 2560,
+      "sha256": "e9373dcd9b047582531866d6be8f2d2b299445daeb590dc7d51ae3fa467672b9"
+    },
+    "deploy-control": {
+      "bytes": 7168,
+      "sha256": "ce18e8d49c97dede48d1b2044474a35c0adc53419bf094d846d6733c162d5a4a"
+    },
+    "openviking-data": {
+      "bytes": 6099968,
+      "sha256": "3005a4603100e9aed2c4123e4cb5c073096feb5157a39b41ee553713e6199f43"
+    },
+    "protected-config": {
+      "bytes": 19456,
+      "sha256": "a8410be9689e29a3e321a1e874dfd771978e28a18d0fbd45133e489841c7d1e4"
+    },
+    "protected-data": {
+      "bytes": 20992,
+      "sha256": "443e716b7a7d8c283cf7daec253624f1b843df940782ce4ee8ddddeaa83591a5"
+    },
+    "runtime": {
+      "bytes": 25088,
+      "sha256": "0dfb42f71d450901cef3a424d3a84e70ec31d82e2d00b4994abdf77330bcb186"
+    },
+    "workspaces": {
+      "bytes": 2048,
+      "sha256": "f4466c1fb5c7092b14f9e2aa0923ce92afc4ceb4f00c6d19d12ed9a389ed1b14"
+    }
+  },
+  "cleanup": {
+    "testContainersRemoved": true,
+    "testNetworksRemoved": true,
+    "testVolumesRemoved": 15,
+    "unrelatedFixedOAStackPreserved": true,
+    "privateLocalArchives": "removed after SHA-256 receipt; no synthetic credentials retained"
+  },
+  "limits": [
+    "Synthetic JWT authentication; no real OA Browser login",
+    "Deletion-only reconciliation; no in-flight old queue or new writer through commit and ready",
+    "No credential rotation, MiMo extraction, full evaluation, production deployment or complete release acceptance"
+  ]
+}
