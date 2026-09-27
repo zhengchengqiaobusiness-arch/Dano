@@ -1398,3 +1398,7 @@ writing and reading, without a separate 256-owner cap at replay. A targeted
 257-owner fixture completed checkpoint and read-only replay preflight. This
 closes the self-incompatible checkpoint found in review; the remaining T-13
 multi-user remote replay and old-version rollback gates above remain open.
+The formal `0.2.58` protected image reports the matching product version and
+contains byte-identical recovery and USER-key replacement scripts; the build
+receipt is `docs/research/evidence/issue477-0258-protected-build.json`. Image
+construction alone does not satisfy deployed rollback or Browser acceptance.
