@@ -1,0 +1,34 @@
+{
+  "suite": "issue477-frozen-save-ready",
+  "fixture": "docs/research/fixtures/issue477-save-ready.json",
+  "candidate": {
+    "dano": "0.2.46",
+    "piOpenViking": "0.1.17",
+    "openViking": "v0.4.20",
+    "model": "mimo-v2.5",
+    "imageId": "f397313bd15f00f66927e925d5729ff526957d2e1fe532140b51e2204786e5d9"
+  },
+  "browser": "Codex in-app Browser at https://localhost:18711/ with authenticated OA account",
+  "method": "Frozen S-01 through S-10 in order, one new chat per case; elapsed from operation creation to ready at UI second precision; inspect each ready document in Browser",
+  "cases": [
+    { "id": "S-01", "createdAt": "2026-09-24 16:12:55", "readyAt": "2026-09-24 16:13:26", "elapsedSeconds": 31, "readbackMarker": "云汀201", "phase": "ready" },
+    { "id": "S-02", "createdAt": "2026-09-24 16:15:19", "readyAt": "2026-09-24 16:15:54", "elapsedSeconds": 35, "readbackMarker": "澄浦202", "phase": "ready" },
+    { "id": "S-03", "createdAt": "2026-09-24 16:17:17", "readyAt": "2026-09-24 16:17:43", "elapsedSeconds": 26, "readbackMarker": "松屿203", "phase": "ready" },
+    { "id": "S-04", "createdAt": "2026-09-24 16:18:11", "readyAt": "2026-09-24 16:18:36", "elapsedSeconds": 25, "readbackMarker": "望溪204", "phase": "ready" },
+    { "id": "S-05", "createdAt": "2026-09-24 16:19:05", "readyAt": "2026-09-24 16:19:35", "elapsedSeconds": 30, "readbackMarker": "临川205", "phase": "ready" },
+    { "id": "S-06", "createdAt": "2026-09-24 16:20:04", "readyAt": "2026-09-24 16:20:39", "elapsedSeconds": 35, "readbackMarker": "青浦206", "phase": "ready" },
+    { "id": "S-07", "createdAt": "2026-09-24 16:21:08", "readyAt": "2026-09-24 16:21:38", "elapsedSeconds": 30, "readbackMarker": "雨澜207", "phase": "ready" },
+    { "id": "S-08", "createdAt": "2026-09-24 16:22:13", "readyAt": "2026-09-24 16:22:42", "elapsedSeconds": 29, "readbackMarker": "星汀208", "phase": "ready" },
+    { "id": "S-09", "createdAt": "2026-09-24 16:23:05", "readyAt": "2026-09-24 16:23:36", "elapsedSeconds": 31, "readbackMarker": "石湾209", "phase": "ready" },
+    { "id": "S-10", "createdAt": "2026-09-24 16:23:58", "readyAt": "2026-09-24 16:24:22", "elapsedSeconds": 24, "readbackMarker": "岚渡210", "phase": "ready" }
+  ],
+  "result": {
+    "readyCount": 10,
+    "sourceMarkerReadbackCount": 10,
+    "sortedElapsedSeconds": [24, 25, 26, 29, 30, 30, 31, 31, 35, 35],
+    "p95NearestRankSeconds": 35,
+    "thresholdSeconds": 60,
+    "pass": true
+  },
+  "scope": "Healthy save-to-ready p95 only; this does not complete the other fixed categories or two-user browser gates"
+}

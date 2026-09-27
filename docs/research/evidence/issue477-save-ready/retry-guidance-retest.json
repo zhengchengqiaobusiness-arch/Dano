@@ -1,0 +1,18 @@
+{
+  "suite": "issue477-frozen-save-ready",
+  "fixture": "docs/research/fixtures/issue477-save-ready.json",
+  "candidate": {
+    "dano": "0.2.44",
+    "piOpenViking": "0.1.15",
+    "openViking": "v0.4.20",
+    "model": "mimo-v2.5",
+    "imageId": "c27d8e9b3409fed9c73d23053e5ffdda8d6718d0f243d63737b902c3a9b42332"
+  },
+  "caseId": "S-01",
+  "browser": "Codex in-app Browser at https://localhost:18711/ with authenticated OA account",
+  "startedAt": "2026-09-24T07:07:16.607Z",
+  "sourceFact": "验收专用灯塔代号是云汀201。",
+  "observation": "MiMo repeatedly interpreted the source code as 云汀202, retried the mismatched tool argument and did not converge; the response was cancelled to stop repeated calls",
+  "saveOperationCreated": false,
+  "assessment": "Fail-closed behavior persisted, but retry guidance alone did not make S-01 save successfully; no ready-latency result exists"
+}
