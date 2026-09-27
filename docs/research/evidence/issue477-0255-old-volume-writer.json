@@ -1,0 +1,33 @@
+{
+  "observedAt": "2026-09-28",
+  "sourceCommit": "6b46350db2da6d2df1154105b60a7bf3bcd78bd9",
+  "productVersion": "0.2.55",
+  "protectedImageId": "912ea68476ed15f03dec19e4e2dcc213a224526c2237bd1cb25551999e48284d",
+  "service": "Pinned OpenViking v0.4.20 and local Embedding in an isolated Podman network, synthetic USER keys",
+  "oldVolumeSnapshot": {
+    "takenWithOpenVikingStopped": true,
+    "exportedAndImportedIntoSeparateNamedVolume": true,
+    "tarBytes": 5436416,
+    "tarSha256": "1da9ae30ef858f5dc0d6ed418d93c37140efeae84831acaf088fad49072437d6"
+  },
+  "scenario": {
+    "checkpointOwners": 2,
+    "postCheckpointWriterPhase": "message_delivered",
+    "postCheckpointWriterChecks": 1,
+    "otherOwnerDeletionIntents": 1,
+    "checkpointedOwnerStateRestored": true,
+    "oldVolumeNewSessionAbsent": true,
+    "oldVolumeReplayRejectedBeforeDeletion": true,
+    "oldVolumeDocumentStillReadable": true,
+    "ownerStateUnchangedAfterRejection": true,
+    "newerVolumeSourceVerified": true,
+    "newerVolumeDeletionReplayed": true,
+    "newerVolumeWriterPreserved": true,
+    "immediateRetryIdempotent": true
+  },
+  "limits": [
+    "This tested message-phase reconciliation; commit, extraction and ready remain unverified",
+    "No old-version Dano binary, credential rotation, pending old queue or governance transition",
+    "No OA, MiMo or Browser acceptance; all identities were synthetic"
+  ]
+}
