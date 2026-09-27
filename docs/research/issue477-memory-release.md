@@ -1443,3 +1443,8 @@ still fails closed because replaying the whole-tree clear could remove its new
 documents. Targeted recovery tests cover each pre-commit phase and the hidden
 commit rejection. Real OpenViking volume replay, later-phase preservation and
 the complete T-13 gate remain open.
+The formal protected image reports `0.2.60` and contains the byte-identical
+recovery script. Its [build receipt](evidence/issue477-0260-protected-build.json)
+records 41 targeted recovery tests, 1718 passing full-suite tests, checks,
+build, and release-manifest validation. This image has not yet passed deployed
+Compose, real OpenViking recovery, MiMo or OA Browser acceptance.

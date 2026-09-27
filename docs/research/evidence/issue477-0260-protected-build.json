@@ -1,0 +1,24 @@
+{
+  "observedAt": "2026-09-28",
+  "sourceCommit": "2af07b40daf5b94fa42a08dc8766c1a5c0fcb6e2",
+  "productVersion": "0.2.60",
+  "image": "localhost/dano465-protected:0.2.60",
+  "imageId": "e46b14e635fedf75cd1fe13149a16fc636de2be909b6fa83e86c96ddbac32b83",
+  "build": "podman build --target protected-runtime -f Dockerfile",
+  "verification": {
+    "releaseManifest": "passed: Dano 0.2.60, pi-openviking 0.1.17, OpenViking v0.4.20",
+    "imageProductVersion": "0.2.60",
+    "imageRecoveryScriptSha256": "37a1fc070c73b7e9c8ccf43594a405b2ca9df82a3ef0ce18556fab82d1338b4d",
+    "sourceRecoveryScriptSha256": "37a1fc070c73b7e9c8ccf43594a405b2ca9df82a3ef0ce18556fab82d1338b4d",
+    "targetedRecoveryTests": "41/41",
+    "fullVitest": "146 files, 1718 passed, 1 skipped with 4 workers and 10-second timeout",
+    "typeAndSvelteCheck": "passed",
+    "fullBuild": "passed"
+  },
+  "cleanup": "No-network inspection container removed; existing fixed-port OA stack preserved.",
+  "limits": [
+    "No deployed 0.2.60 Compose or real OpenViking recovery acceptance",
+    "Clear plus post-commit or ready writer remains fail-closed, not reconciled",
+    "No MiMo, OA or Browser acceptance for this image"
+  ]
+}
