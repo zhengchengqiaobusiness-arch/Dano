@@ -1,0 +1,22 @@
+{
+  "scope": "protected Dano HTTP identity matrix with real OpenViking USER keys",
+  "date": "2026-09-28",
+  "danoImage": "localhost/dano465-protected:0.2.55-default",
+  "danoImageId": "751e69d1fa607991b1e7a6d4454b1211fb8d63e3f22bf7dd64444b6e1321574b",
+  "openVikingImage": "ghcr.io/volcengine/openviking@sha256:b9827753d035f4157b5b318865907fd18f738924ad6398c86feb1182f209825b",
+  "embeddingImage": "ghcr.io/ggml-org/llama.cpp@sha256:f5a2ce21182f96c1aba91a967ecc1b21d60cd182191d0cc09672c386bae3dd8c",
+  "fixture": "docs/research/fixtures/protected-supervisor-http.mjs --cli --memory --real-memory-service",
+  "network": "isolated internal Podman network; no host ports; random test-only root key; unavailable dummy VLM",
+  "results": {
+    "serviceHealth": ["OpenViking healthy", "Embedding healthy"],
+    "distinctDanoUsersWithRealUserKeys": 2,
+    "danoMemoryHttpBoundaryProbes": 36,
+    "danoMemoryHttpBoundaryPassed": 36,
+    "ownerContentWriteAndReadback": "passed",
+    "foreignUserReadWithForgedAccountAndUserHeaders": "denied without content leak",
+    "danoOwnerOnlyExports": "passed for both users",
+    "protectedHostShutdownAndWorkerReclamation": "passed"
+  },
+  "cleanup": "temporary OpenViking, Embedding, network and synthetic data volume removed; existing OA stack remained healthy",
+  "limitations": ["synthetic JWT identities, not real OA users", "no model extraction or ready transition", "no actual operation-content route readback", "no authenticated in-app Browser acceptance", "full T-11 and #465 release gates remain open"]
+}
