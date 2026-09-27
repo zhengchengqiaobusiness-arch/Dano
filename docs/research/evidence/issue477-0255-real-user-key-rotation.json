@@ -1,0 +1,20 @@
+{
+  "scope": "real OpenViking USER key rotation with Dano encrypted credential store",
+  "date": "2026-09-28",
+  "danoImage": "localhost/dano465-protected:0.2.55-default",
+  "danoImageId": "751e69d1fa607991b1e7a6d4454b1211fb8d63e3f22bf7dd64444b6e1321574b",
+  "openVikingImage": "ghcr.io/volcengine/openviking@sha256:b9827753d035f4157b5b318865907fd18f738924ad6398c86feb1182f209825b",
+  "fixture": "docs/research/fixtures/issue477-real-key-rotation.mjs",
+  "environment": "isolated internal network, two synthetic USERs, random root and USER keys, unavailable dummy VLM, no published ports",
+  "results": {
+    "aliceSessionAndSourceCreatedBeforeRotation": true,
+    "oldAliceKeyRevokedByRemoteRotation": true,
+    "staleEncryptedCredentialRejectedByRealService": true,
+    "bobKeyRejectedForAliceOwner": true,
+    "foreignKeyDidNotChangeAliceStoredCredential": true,
+    "newKeyWrittenAndReopenedFromEncryptedStore": true,
+    "sameAliceSessionAndMessageReadWithNewKey": true
+  },
+  "cleanup": "temporary containers, network, synthetic data volume, config, logs and random keys removed; existing OA stack remained healthy",
+  "limitations": ["complete Dano identity service was not restarted after rotation", "no model extraction or ready transition", "no restored old OpenViking volume or multi-user rollback", "no real OA or Browser acceptance"]
+}
