@@ -116,6 +116,15 @@ node /app/runtime/reconcile-memory-recovery.mjs checkpoint \
 
 Keep that checkpoint with the old volume archives. It binds each owner's old
 state hash to the byte position and SHA-256 prefix of the independent journal.
+New correction intents keep their body in a private `payloads/` file and put
+only its ID and SHA-256 in the append-only journal. A later correction, forget,
+scope clear or owner clear removes superseded payload files after the new
+intent is durable, without changing the checkpoint-bound journal prefix. Keep
+the entire recovery volume, including active payload files, for rollback;
+replay refuses a missing or changed active payload. Older candidate journals
+with inline correction bodies remain readable, but this format does not prune
+those bodies. Retire their associated backups and perform a separately
+validated migration before claiming bounded retention for an upgraded volume.
 On rollback, retain the **newer** recovery volume, restore the old data/config
 and OpenViking volumes, then start only the internal OpenViking dependencies.
 Run `preflight` and `replay` with the protected config root, restored data

@@ -1053,17 +1053,18 @@ the 60/60 and 30/30 figures above measure selection, not model answers.
 | T-13 | Clean deploy, candidate upgrade, matched old-data rollback, two-owner supplied-ledger replay; automatic-journal old-volume one-owner replay and current-service two-owner deletion/retry | General old queue, credential/new writer and old-version multi-user reconciliation |
 | T-14 | Five-user, 100-complete-request MiMo candidate-7 run passed semantic recall, injection, wait and token limits in an instrumented disposable container; full-source image repeated 100 complete requests with 70/70 recall answers; byte-identical prompt-layer image passed matched on/off cost; final fixed Browser save-ready p95 35 s with 10/10 source readbacks | Complete other fixed categories, integration and causal interpretation |
 
-Review of the current branch found a further release blocker: correction
-replay stores replacement document bodies in the append-only recovery journal.
-A later targeted forget, clear or owner retirement does not prune those earlier
-bodies, so deleted text can remain on the separate recovery volume without a
-retention bound. Simply deleting the journal would also discard deletion
-intents needed to prevent an older backup from restoring forgotten content.
-The design and tests must prove both bounded sensitive-content retention and
-safe replay across retained backup generations before AC-07/12 and T-09/13
-can close. The legacy supplied-ledger replay now rejects linked or exposed
-ledger, config and owner-state files before remote mutation; this hardening
-does not resolve the journal-retention blocker.
+Review found that older correction intents keep document bodies inline in the
+append-only recovery journal after later forget, clear or owner retirement.
+New intents now keep a private, hash-checked payload outside the immutable
+journal bytes; a later replacement, removal, scope clear or owner clear prunes
+obsolete payloads. Targeted tests cover active correction replay, older
+checkpoint deletion replay after payload pruning, missing-payload fail-closed
+behavior and restart orphan cleanup. This is a forward fix, not a migration of
+existing inline events or a retained-backup policy. Those old bodies and their
+backup generations still need a validated retirement/migration procedure
+before AC-07/12 and T-09/13 can close. The supplied-ledger replay separately
+rejects linked or exposed ledger, config and owner-state files before remote
+mutation.
 
 The fixed §11.1 minima are 20 recall, 10 correction, 20 isolation, 10 deletion,
 10 irrelevant and 10 authorization cases, each independently repeated three

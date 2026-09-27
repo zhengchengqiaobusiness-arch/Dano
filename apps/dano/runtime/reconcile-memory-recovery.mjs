@@ -155,7 +155,11 @@ function expectedEffects(events) {
     switch (mutation.kind) {
       case "removeSource": sources.add(mutation.remoteSessionId); break;
       case "removeMemory": documents.set(mutation.uri, null); break;
-      case "replaceMemory": documents.set(mutation.uri, mutation.content); break;
+      case "replaceMemory":
+        // A later replacement, removal or clear makes an earlier payload
+        // unnecessary. Its private file may already have been pruned.
+        if (mutation.content !== undefined) documents.set(mutation.uri, mutation.content);
+        break;
       case "clearMemoryScope": documents.clear(); cleared = true; break;
       case "clearOwnerData": documents.clear(); sources.clear(); cleared = true; retired = true; break;
     }
@@ -244,7 +248,9 @@ export async function reconcile(configDirectory, dataRoot, recoveryRoot, checkpo
             remoteSessionId: mutation.remoteSessionId });
           break;
         case "removeMemory": await plan.client.removeMemory(mutation.uri); break;
-        case "replaceMemory": await plan.client.replaceMemory(mutation.uri, mutation.content); break;
+        case "replaceMemory":
+          if (mutation.content !== undefined) await plan.client.replaceMemory(mutation.uri, mutation.content);
+          break;
         case "clearMemoryScope": await plan.client.clearMemoryScope(); break;
         case "clearOwnerData": await plan.client.clearOwnerData(); break;
       }

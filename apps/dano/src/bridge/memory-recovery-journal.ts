@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
-import { open, lstat, mkdir, realpath, rename, rm } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { open, lstat, mkdir, readdir, realpath, rename, rm } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import { join, resolve, sep } from "node:path";
 import type { GovernanceStateStore, Owner, StateStore } from "@josephyoung/pi-openviking/host";
 
@@ -13,15 +13,19 @@ export type RecoveryMutation =
   | { kind: "clearMemoryScope" }
   | { kind: "clearOwnerData" };
 
+type RecordedCorrection = { kind: "replaceMemory"; uri: string;
+  payloadId: string; contentSha256: string; content?: string };
+
 export interface RecoveryEvent {
   version: 1;
   id: string;
   owner: Owner;
   occurredAt: string;
-  mutation: RecoveryMutation;
+  mutation: RecoveryMutation | RecordedCorrection;
 }
 
 const unavailable = () => new Error("MEMORY_RECOVERY_JOURNAL_UNAVAILABLE");
+const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 const identifier = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 const documentUri = (owner: Owner, value: unknown): value is string => {
   if (typeof value !== "string" || !value.startsWith(`viking://user/${owner.userId}/memories/`) || !value.endsWith(".md")) return false;
@@ -30,7 +34,7 @@ const documentUri = (owner: Owner, value: unknown): value is string => {
     && relative.split("/").every(part => part.length > 0 && !part.startsWith("."));
 };
 
-function checkedMutation(owner: Owner, value: unknown): asserts value is RecoveryMutation {
+function checkedMutation(owner: Owner, value: unknown): asserts value is RecoveryMutation | RecordedCorrection {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw unavailable();
   const mutation = value as Record<string, unknown>;
   const fields = Object.keys(mutation).sort().join(",");
@@ -41,6 +45,9 @@ function checkedMutation(owner: Owner, value: unknown): asserts value is Recover
       if (fields === "content,kind,uri" && documentUri(owner, mutation.uri)
         && typeof mutation.content === "string" && mutation.content.trim()
         && Buffer.byteLength(mutation.content, "utf8") <= 1024 * 1024) return;
+      if (fields === "contentSha256,kind,payloadId,uri" && documentUri(owner, mutation.uri)
+        && typeof mutation.payloadId === "string" && /^[a-f0-9-]{36}$/.test(mutation.payloadId)
+        && typeof mutation.contentSha256 === "string" && /^[a-f0-9]{64}$/.test(mutation.contentSha256)) return;
       break;
     case "clearMemoryScope":
     case "clearOwnerData": if (fields === "kind") return; break;
@@ -76,6 +83,7 @@ export class MemoryRecoveryJournal {
   readonly #directory: string;
   #appends: Promise<void> = Promise.resolve();
   #mirrors: Promise<void> = Promise.resolve();
+  #livePayloads = new Map<string, string>();
   #poisoned = false;
 
   private constructor(owner: Owner, directory: string) {
@@ -126,7 +134,9 @@ export class MemoryRecoveryJournal {
       || current.revision > 0 && JSON.stringify(saved) !== JSON.stringify(current)) {
       throw new Error("MEMORY_RECOVERY_STATE_MISMATCH");
     }
-    await journal.#validateEvents();
+    const { events } = await journal.#validateEvents();
+    journal.#livePayloads = journal.#livePayloadMap(events);
+    await journal.#prunePayloads();
     return journal;
   }
 
@@ -172,11 +182,61 @@ export class MemoryRecoveryJournal {
           || typeof entry.occurredAt !== "string" || !Number.isFinite(Date.parse(entry.occurredAt))
           || new Date(entry.occurredAt).toISOString() !== entry.occurredAt) throw unavailable();
         checkedMutation(this.owner, entry.mutation);
+        const mutation = entry.mutation as RecoveryEvent["mutation"];
+        if (mutation.kind === "replaceMemory" && "payloadId" in mutation
+          && mutation.payloadId !== entry.id) throw unavailable();
         ids.add(entry.id);
         events.push(entry as unknown as RecoveryEvent);
       } catch { throw unavailable(); }
     }
+    const live = new Set(this.#livePayloadMap(events).values());
+    for (const event of events) {
+      const mutation = event.mutation;
+      if (mutation.kind !== "replaceMemory" || !("payloadId" in mutation) || !live.has(mutation.payloadId)) continue;
+      const content = await privateFile(join(this.#directory, "payloads", `${mutation.payloadId}.txt`));
+      if (!content || content.length > 1024 * 1024 || digest(content) !== mutation.contentSha256
+        || !content.toString("utf8").trim()) throw unavailable();
+      event.mutation = { ...mutation, content: content.toString("utf8") };
+    }
     return { bytes, events };
+  }
+
+  #livePayloadMap(events: RecoveryEvent[]): Map<string, string> {
+    const live = new Map<string, string>(), superseded = new Set<string>();
+    let cleared = false;
+    for (let index = events.length - 1; index >= 0; index--) {
+      const mutation = events[index].mutation;
+      if (mutation.kind === "clearMemoryScope" || mutation.kind === "clearOwnerData") {
+        cleared = true;
+      } else if (mutation.kind === "removeMemory") {
+        superseded.add(mutation.uri);
+      } else if (mutation.kind === "replaceMemory") {
+        if (!cleared && !superseded.has(mutation.uri) && "payloadId" in mutation) live.set(mutation.uri, mutation.payloadId);
+        superseded.add(mutation.uri);
+      }
+    }
+    return live;
+  }
+
+  async #prunePayloads(): Promise<void> {
+    const directory = join(this.#directory, "payloads");
+    let files;
+    try { files = await readdir(directory, { withFileTypes: true }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw unavailable();
+    }
+    await privateDirectory(directory);
+    const live = new Set(this.#livePayloads.values());
+    for (const entry of files) {
+      if (!entry.isFile() || !/^[a-f0-9-]{36}\.txt$/.test(entry.name)) throw unavailable();
+      const path = join(directory, entry.name);
+      const stat = await lstat(path);
+      if (stat.nlink !== 1 || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) throw unavailable();
+      if (!live.has(entry.name.slice(0, -4))) await rm(path);
+    }
+    const handle = await open(directory, constants.O_RDONLY);
+    try { await handle.sync(); } finally { await handle.close(); }
   }
 
   mirror(state: OwnerState): Promise<void> {
@@ -207,13 +267,33 @@ export class MemoryRecoveryJournal {
     } finally { await rm(temporary, { force: true }); }
   }
 
+  async #writePayload(id: string, content: string): Promise<void> {
+    const directory = join(this.#directory, "payloads");
+    await mkdir(directory, { mode: 0o700 }).catch(error => {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    });
+    await privateDirectory(directory);
+    const file = await open(join(directory, `${id}.txt`), "wx", 0o600);
+    try { await file.writeFile(content); await file.sync(); }
+    finally { await file.close(); }
+    const parent = await open(directory, constants.O_RDONLY);
+    try { await parent.sync(); } finally { await parent.close(); }
+  }
+
   async append(mutation: RecoveryMutation): Promise<void> {
     this.assertHealthy();
     const pending = this.#appends.then(async () => {
       this.assertHealthy();
       checkedMutation(this.owner, mutation);
-      const line = JSON.stringify({ version: 1, id: randomUUID(), owner: this.owner,
-        occurredAt: new Date().toISOString(), mutation }) + "\n";
+      const id = randomUUID();
+      let recorded: RecoveryEvent["mutation"] = mutation;
+      if (mutation.kind === "replaceMemory") {
+        await this.#writePayload(id, mutation.content);
+        recorded = { kind: "replaceMemory", uri: mutation.uri, payloadId: id,
+          contentSha256: digest(Buffer.from(mutation.content, "utf8")) };
+      }
+      const line = JSON.stringify({ version: 1, id, owner: this.owner,
+        occurredAt: new Date().toISOString(), mutation: recorded }) + "\n";
       if (Buffer.byteLength(line) > 1024 * 1024) throw unavailable();
       const path = join(this.#directory, "events.jsonl");
       const file = await open(path, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
@@ -226,6 +306,13 @@ export class MemoryRecoveryJournal {
       const directory = await open(this.#directory, constants.O_RDONLY);
       try { await directory.sync(); }
       finally { await directory.close(); }
+      switch (recorded.kind) {
+        case "replaceMemory": this.#livePayloads.set(recorded.uri, id); break;
+        case "removeMemory": this.#livePayloads.delete(recorded.uri); break;
+        case "clearMemoryScope":
+        case "clearOwnerData": this.#livePayloads.clear(); break;
+      }
+      await this.#prunePayloads();
     });
     const guarded = pending.catch(() => { this.poison(); throw unavailable(); });
     this.#appends = guarded.catch(() => {});

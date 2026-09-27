@@ -1,4 +1,4 @@
-import { chmod, link, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdtemp, mkdir, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -73,6 +73,44 @@ it("checkpoints a stopped owner and preflights only the post-snapshot deletion i
   await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
     .resolves.toEqual({ owners: 1, events: 1 });
   expect(removed).toHaveBeenCalledExactlyOnceWith(uri);
+});
+
+it("replays a deletion after pruning an obsolete correction body from an older checkpoint", async () => {
+  const f = await fixture();
+  await checkpoint(f.data, f.recovery, f.checkpointFile);
+  const uri = "viking://user/alice/memories/forgotten.md";
+  await f.journal.append({ kind: "replaceMemory", uri, content: "forgotten private fact" });
+  await f.journal.append({ kind: "removeMemory", uri });
+  const payloads = join(f.recovery, "account", "alice", "payloads");
+  expect(await readFile(join(f.recovery, "account", "alice", "events.jsonl"), "utf8"))
+    .not.toContain("forgotten private fact");
+  expect(await readdir(payloads)).toEqual([]);
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile, true))
+    .resolves.toEqual({ owners: 1, events: 2 });
+  vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+  const replace = vi.spyOn(OwnerMemoryClient.prototype, "replaceMemory");
+  const remove = vi.spyOn(OwnerMemoryClient.prototype, "removeMemory").mockResolvedValue(undefined);
+  vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments").mockResolvedValue([]);
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .resolves.toEqual({ owners: 1, events: 2 });
+  expect(replace).not.toHaveBeenCalled();
+  expect(remove).toHaveBeenCalledExactlyOnceWith(uri);
+});
+
+it("replays the current correction from its private payload after an older checkpoint", async () => {
+  const f = await fixture();
+  await checkpoint(f.data, f.recovery, f.checkpointFile);
+  const uri = "viking://user/alice/memories/current.md";
+  await f.journal.append({ kind: "replaceMemory", uri, content: "current private fact" });
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile, true))
+    .resolves.toEqual({ owners: 1, events: 1 });
+  vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+  const replace = vi.spyOn(OwnerMemoryClient.prototype, "replaceMemory").mockResolvedValue(undefined);
+  vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments").mockResolvedValue([uri]);
+  vi.spyOn(OwnerMemoryClient.prototype, "readMemory").mockResolvedValue("current private fact");
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .resolves.toEqual({ owners: 1, events: 1 });
+  expect(replace).toHaveBeenCalledExactlyOnceWith(uri, "current private fact");
 });
 
 it("rejects a changed checkpoint prefix before contacting the remote service", async () => {
