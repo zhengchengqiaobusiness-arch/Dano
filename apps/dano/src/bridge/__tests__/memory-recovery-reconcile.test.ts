@@ -504,6 +504,201 @@ it("rejects a clear followed by a new ready writer before any remote mutation", 
   expect(await readFile(statePath)).toEqual(snapshot);
 });
 
+async function stagedClearWriter(phase: "ready" | "processing" | "commit_unknown" = "ready") {
+  const f = await fixture();
+  const store = new RecoveryStateStore(f.store, f.journal);
+  await store.transact(state => { state.authorization.enabled = true; });
+  await checkpoint(f.data, f.recovery, f.checkpointFile);
+  const statePath = join(f.data, "host-state", "owner-a", "state", "memory", "state.json");
+  const oldBytes = await readFile(statePath);
+  const clearJob = await new MemoryGovernanceBarrier(store).begin({ kind: "clear", scope: null });
+  const clearId = clearJob.id;
+  await f.journal.append({ kind: "clearMemoryScope" });
+  await store.transact(state => { state.governance!.jobs[clearId]!.phase = "complete"; });
+  const id = "d".repeat(64);
+  const memoryUri = "viking://user/alice/memories/current.md";
+  await store.transact(state => {
+    state.operations[id] = { id, owner: f.owner, scope: null, kind: "explicit",
+      authorizationEpoch: state.authorization.epoch,
+      source: { sessionId: "chat", entryId: "after-clear", branchId: "root", contentVersion: "1" },
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      phase, remoteSessionId: "new-remote-session",
+      ...(phase === "ready" ? { taskId: "task", archiveId: "archive", memoryUris: [memoryUri] }
+        : { payload: "new synthetic fact", ...(phase === "processing" ? { taskId: "task" } : {}) }) };
+  });
+  await writeFile(statePath, oldBytes);
+  const oldUri = "viking://user/alice/memories/old.md";
+  const documents = new Map([[oldUri, "old deleted body"], [memoryUri, "new retained body"]]);
+  vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+  vi.spyOn(OwnerMemoryClient.prototype, "hasSource").mockResolvedValue(true);
+  vi.spyOn(OwnerMemoryClient.prototype, "findCommit").mockResolvedValue({ taskId: "task" });
+  vi.spyOn(OwnerMemoryClient.prototype, "writerSettled").mockResolvedValue(true);
+  const inspect = vi.spyOn(OwnerMemoryClient.prototype, "inspect").mockImplementation(async () =>
+    documents.has(memoryUri) ? { status: "ready", archiveId: "archive", memoryUris: [memoryUri] }
+      : { status: "processing" });
+  const read = vi.spyOn(OwnerMemoryClient.prototype, "readMemoryLimited")
+    .mockImplementation(async uri => {
+      const body = documents.get(uri);
+      if (body === undefined) throw new Error("MISSING_DOCUMENT");
+      return body;
+    });
+  vi.spyOn(OwnerMemoryClient.prototype, "readMemory").mockImplementation(async uri => documents.get(uri)!);
+  vi.spyOn(OwnerMemoryClient.prototype, "removeMemory").mockImplementation(async uri => { documents.delete(uri); });
+  const clear = vi.spyOn(OwnerMemoryClient.prototype, "clearMemoryScope").mockImplementation(async () => { documents.clear(); });
+  const replace = vi.spyOn(OwnerMemoryClient.prototype, "replaceMemory")
+    .mockImplementation(async (uri, body) => { documents.set(uri, body); });
+  vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments").mockImplementation(async () => [...documents.keys()].sort());
+  return { ...f, id, statePath, oldBytes, memoryUri, clearId, documents, clear, replace, read, inspect,
+    preservationPath: join(f.recovery, "account", "alice", "replay-preservation.json") };
+}
+
+for (const phase of ["ready", "processing", "commit_unknown"] as const) {
+  it(`preserves settled ${phase} documents across clear and a repeated overlay`, async () => {
+    const f = await stagedClearWriter(phase);
+    await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+    expect([...f.documents]).toEqual([[f.memoryUri, "new retained body"]]);
+    expect((await f.store.read()).operations[f.id]?.phase).toBe(phase);
+    await expect(readFile(f.preservationPath)).rejects.toMatchObject({ code: "ENOENT" });
+    // Replaying after the local overlay must still verify/stage this writer.
+    await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+    expect([...f.documents]).toEqual([[f.memoryUri, "new retained body"]]);
+    expect(f.read).toHaveBeenCalledTimes(2);
+    expect(f.clear).toHaveBeenCalledTimes(2);
+    if (phase === "commit_unknown") expect(f.inspect).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task" }));
+  });
+}
+
+it("recovers the staged body after clear succeeds but its reply is lost", async () => {
+  const f = await stagedClearWriter();
+  f.clear.mockImplementationOnce(async () => { f.documents.clear(); throw new Error("LOST_REPLY"); });
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile)).rejects.toThrow("LOST_REPLY");
+  expect(f.documents.size).toBe(0);
+  expect(await readFile(f.preservationPath, "utf8")).toContain("new retained body");
+  expect(await readFile(f.statePath)).toEqual(f.oldBytes);
+  await expect(MemoryRecoveryJournal.open(f.recovery, f.owner,
+    (await MemoryRecoveryJournal.inspect(f.recovery, f.owner)).state))
+    .rejects.toThrow("MEMORY_RECOVERY_REPLAY_PENDING");
+  await expect(checkpoint(f.data, f.recovery, join(f.root, "unsafe-new-checkpoint.json")))
+    .rejects.toThrow("MEMORY_RECOVERY_REPLAY_PENDING");
+  await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+  expect([...f.documents]).toEqual([[f.memoryUri, "new retained body"]]);
+  expect(f.read).toHaveBeenCalledOnce();
+  expect(f.inspect).toHaveBeenCalledOnce();
+  await expect(readFile(f.preservationPath)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("fails before clear when a newer writer belongs to the pre-clear barrier", async () => {
+  const f = await stagedClearWriter();
+  const mirror = (await MemoryRecoveryJournal.inspect(f.recovery, f.owner)).state;
+  mirror.governance!.jobs[f.clearId]!.writerOperationIds = [f.id];
+  mirror.revision++;
+  await f.journal.mirror(mirror);
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile)).rejects.toThrow();
+  expect(f.clear).not.toHaveBeenCalled();
+});
+
+it("refuses to preserve a newer writer covered by a current deletion intent", async () => {
+  const f = await stagedClearWriter();
+  await f.journal.append({ kind: "removeMemory", uri: f.memoryUri });
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  expect(f.clear).not.toHaveBeenCalled();
+  await expect(readFile(f.preservationPath)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("refuses to replay source deletion for a newer writer", async () => {
+  const f = await stagedClearWriter();
+  await f.journal.append({ kind: "removeSource", remoteSessionId: "new-remote-session" });
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  expect(f.clear).not.toHaveBeenCalled();
+});
+
+it("does not resurrect a staged document after a later deletion or journal change", async () => {
+  const f = await stagedClearWriter();
+  f.replace.mockRejectedValueOnce(new Error("RESTORE_FAILED"));
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile)).rejects.toThrow("RESTORE_FAILED");
+  await f.journal.append({ kind: "removeMemory", uri: f.memoryUri });
+  f.clear.mockClear();
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_PRESERVATION_MISMATCH");
+  expect(f.clear).not.toHaveBeenCalled();
+});
+
+it("rejects foreign or mismatched staged bodies before replay mutation", async () => {
+  const f = await stagedClearWriter();
+  f.replace.mockRejectedValueOnce(new Error("RESTORE_FAILED"));
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile)).rejects.toThrow("RESTORE_FAILED");
+  const staged = JSON.parse(await readFile(f.preservationPath, "utf8"));
+  staged.documents[0].uri = "viking://user/bob/memories/foreign.md";
+  await writeFile(f.preservationPath, JSON.stringify(staged));
+  f.clear.mockClear();
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_PRESERVATION_MISMATCH");
+  expect(f.clear).not.toHaveBeenCalled();
+});
+
+it("stages every owner before clearing either owner and keeps retry bodies isolated", async () => {
+  const f = await fixture();
+  const bob = { accountId: "account", userId: "bob" };
+  const bobStore = new FileStateStore({ owner: bob,
+    directory: join(f.data, "host-state", "owner-b", "state", "memory"), policyVersion: "v1" });
+  await bobStore.transact(state => { state.authorization.enabled = true; });
+  await MemoryRecoveryJournal.bootstrap(f.recovery, bob, await bobStore.read());
+  const bobJournal = await MemoryRecoveryJournal.open(f.recovery, bob, await bobStore.read());
+  await f.credentialStore.write(bob, "synthetic-bob-key");
+  await checkpoint(f.data, f.recovery, f.checkpointFile);
+  const documents = new Map<string, string>();
+  for (const [store, journal, userRoot, character] of [
+    [f.store, f.journal, "owner-a", "a"], [bobStore, bobJournal, "owner-b", "b"],
+  ] as const) {
+    const statePath = join(f.data, "host-state", userRoot, "state", "memory", "state.json");
+    const snapshot = await readFile(statePath);
+    const recoveryStore = new RecoveryStateStore(store, journal);
+    const job = await new MemoryGovernanceBarrier(recoveryStore).begin({ kind: "clear", scope: null });
+    await journal.append({ kind: "clearMemoryScope" });
+    const uri = `viking://user/${store.owner.userId}/memories/new.md`;
+    await recoveryStore.transact(state => {
+      state.governance!.jobs[job.id]!.phase = "complete";
+      const id = character.repeat(64);
+      state.operations[id] = { id, owner: state.owner, scope: null, kind: "explicit",
+        authorizationEpoch: state.authorization.epoch,
+        source: { sessionId: "chat", entryId: "after-clear", branchId: "root", contentVersion: "1" },
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), phase: "ready",
+        remoteSessionId: `${state.owner.userId}-session`, taskId: "task", archiveId: "archive", memoryUris: [uri] };
+    });
+    await writeFile(statePath, snapshot);
+    documents.set(uri, `${store.owner.userId} retained body`);
+    documents.set(`viking://user/${store.owner.userId}/memories/old.md`, "deleted body");
+  }
+  vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+  vi.spyOn(OwnerMemoryClient.prototype, "hasSource").mockResolvedValue(true);
+  vi.spyOn(OwnerMemoryClient.prototype, "writerSettled").mockResolvedValue(true);
+  vi.spyOn(OwnerMemoryClient.prototype, "inspect").mockImplementation(async operation =>
+    ({ status: "ready", archiveId: "archive", memoryUris: operation.memoryUris! }));
+  let rejectBob = true;
+  vi.spyOn(OwnerMemoryClient.prototype, "readMemoryLimited").mockImplementation(async uri => {
+    if (uri.includes("/bob/") && rejectBob) throw new Error("BOB_READ_FAILED");
+    return documents.get(uri)!;
+  });
+  const clear = vi.spyOn(OwnerMemoryClient.prototype, "clearMemoryScope")
+    .mockImplementation(async function (this: OwnerMemoryClient) {
+      for (const uri of documents.keys()) if (uri.startsWith(`viking://user/${this.owner.userId}/`)) documents.delete(uri);
+    });
+  vi.spyOn(OwnerMemoryClient.prototype, "replaceMemory").mockImplementation(async (uri, body) => { documents.set(uri, body); });
+  vi.spyOn(OwnerMemoryClient.prototype, "readMemory").mockImplementation(async uri => documents.get(uri)!);
+  vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments")
+    .mockImplementation(async function (this: OwnerMemoryClient) {
+      return [...documents.keys()].filter(uri => uri.startsWith(`viking://user/${this.owner.userId}/`)).sort();
+    });
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile)).rejects.toThrow("BOB_READ_FAILED");
+  expect(clear).not.toHaveBeenCalled();
+  rejectBob = false;
+  await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+  expect([...documents.values()].sort()).toEqual(["alice retained body", "bob retained body"]);
+  expect(clear).toHaveBeenCalledTimes(2);
+});
+
 for (const phase of ["session_unknown", "session_created", "message_unknown", "message_delivered"] as const) {
   it(`preserves a new ${phase} session across a post-checkpoint memory clear only without a commit`, async () => {
     const f = await stagedLaterWriter(phase);

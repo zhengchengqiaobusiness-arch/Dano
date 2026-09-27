@@ -7,7 +7,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { FileStateStore, OwnerMemoryClient } from "@josephyoung/pi-openviking/host";
 import { MemoryCredentialStore } from "../dist/server/bridge/memory-credential-store.js";
-import { MemoryRecoveryJournal } from "../dist/server/bridge/memory-recovery-journal.js";
+import { MemoryRecoveryJournal, isRecoveryDocumentUri } from "../dist/server/bridge/memory-recovery-journal.js";
 import { outside, privateDirectory, privateFile, trustedDirectory } from "./private-recovery-path.mjs";
 
 const digest = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -225,6 +225,10 @@ export async function checkpoint(dataRoot, recoveryRoot, outputFile) {
   assert.deepEqual(remoteOwners, localOwners, "RECOVERY_OWNER_SET_MISMATCH");
   const owners = [];
   for (const item of states) {
+    try {
+      await privateFile(join(recoveryRoot, item.owner.accountId, item.owner.userId, "replay-preservation.json"));
+      fail("MEMORY_RECOVERY_REPLAY_PENDING");
+    } catch (error) { if (error?.code !== "ENOENT") throw error; }
     const journal = await MemoryRecoveryJournal.inspect(recoveryRoot, item.owner);
     assert.deepEqual(journal.state, item.state, "MEMORY_RECOVERY_STATE_MISMATCH");
     owners.push({ owner: item.owner, statePath: item.statePath,
@@ -302,7 +306,7 @@ function noUnreconciledWrites(oldState, latest) {
 /** Read-only proofs must cover every post-checkpoint writer before deletion
  * replay. Unknown or live remote work stays fail-closed; neither append nor
  * commit is retried by this recovery command. */
-async function verifyNewWriter(client, operation) {
+async function verifyNewWriter(client, operation, preserved = false) {
   const failCode = "RECOVERY_WRITER_RECONCILIATION_REQUIRED";
   switch (operation.phase) {
     case "session_unknown":
@@ -321,23 +325,86 @@ async function verifyNewWriter(client, operation) {
       const receipt = await client.findCommit(operation.remoteSessionId);
       assert.ok(receipt && (!operation.taskId || receipt.taskId === operation.taskId), failCode);
       assert.equal(await client.writerSettled(operation), true, failCode);
-      return;
+      return receipt;
     }
     case "processing":
     case "ready": {
       assert.equal(await client.hasSource(operation), true, failCode);
       assert.equal(await client.writerSettled(operation), true, failCode);
-      if (operation.phase === "ready") {
+      if (operation.phase === "ready" && !preserved) {
         const result = await client.inspect(operation);
         assert.ok(result.status === "ready" && result.archiveId === operation.archiveId
           && new Set(operation.memoryUris).size === operation.memoryUris.length
           && new Set(result.memoryUris).size === result.memoryUris.length, failCode);
         assert.deepEqual([...result.memoryUris].sort(), [...operation.memoryUris].sort(), failCode);
+        return result;
       }
       return;
     }
     default: fail(failCode);
   }
+}
+
+// The same write-ahead preservation pattern used by selective governance:
+// bind an atomic private plan to the exact checkpoint and latest journal before
+// clearing anything, then restore it after replay. A retry may find the remote
+// documents already gone; it must use the durable plan rather than recapture.
+async function preserveWriters(plan) {
+  const writers = plan.remoteWriters.filter(operation =>
+    ["commit_unknown", "processing", "ready"].includes(operation.phase));
+  if (!plan.memoryCleared || !writers.length) {
+    assert.ok(!plan.preserved, "RECOVERY_PRESERVATION_MISMATCH");
+    return;
+  }
+  const binding = { ...plan.receipt, eventSha256: plan.eventSha256 };
+  let saved;
+  try { saved = JSON.parse((await privateFile(plan.preservationPath)).toString("utf8")); }
+  catch (error) { if (error?.code !== "ENOENT") throw error; }
+  if (saved) {
+    assert.deepEqual(Object.keys(saved).sort(), ["binding", "documents", "version"], "RECOVERY_PRESERVATION_MISMATCH");
+    assert.equal(saved.version, 1, "RECOVERY_PRESERVATION_MISMATCH");
+    assert.deepEqual(saved.binding, binding, "RECOVERY_PRESERVATION_MISMATCH");
+    assert.ok(Array.isArray(saved.documents) && saved.documents.length > 0, "RECOVERY_PRESERVATION_MISMATCH");
+  } else {
+    const documents = new Map();
+    for (const operation of writers) {
+      const proof = plan.writerResults.get(operation.id);
+      const result = proof?.status === "ready" ? proof
+        : await plan.client.inspect(proof?.taskId ? { ...operation, taskId: proof.taskId } : operation);
+      assert.ok(result.status === "ready" && typeof result.archiveId === "string"
+        && (!operation.archiveId || operation.archiveId === result.archiveId)
+        && Array.isArray(result.memoryUris) && result.memoryUris.length > 0
+        && new Set(result.memoryUris).size === result.memoryUris.length,
+      "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+      for (const uri of result.memoryUris) {
+        assert.ok(isRecoveryDocumentUri(plan.owner, uri), "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+        if (!documents.has(uri)) documents.set(uri, await plan.client.readMemoryLimited(uri, 1024 * 1024));
+      }
+    }
+    saved = { version: 1, binding, documents: [...documents].map(([uri, content]) => ({ uri, content })) };
+  }
+  const seen = new Set();
+  for (const document of saved.documents) {
+    assert.ok(document && Object.keys(document).sort().join(",") === "content,uri"
+      && isRecoveryDocumentUri(plan.owner, document.uri) && !seen.has(document.uri)
+      && typeof document.content === "string" && document.content.trim()
+      && Buffer.byteLength(document.content) <= 1024 * 1024,
+    "RECOVERY_PRESERVATION_MISMATCH");
+    seen.add(document.uri);
+    // A current deletion intent always wins; never resurrect a newer writer
+    // merely because its older receipt still names the deleted document.
+    assert.ok(!plan.effects.documents.has(document.uri)
+      || plan.effects.documents.get(document.uri) === document.content,
+    "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+    plan.effects.documents.set(document.uri, document.content);
+  }
+  for (const operation of writers.filter(operation => operation.phase === "ready")) {
+    assert.ok(operation.memoryUris.every(uri => seen.has(uri)), "RECOVERY_PRESERVATION_MISMATCH");
+  }
+  const bytes = JSON.stringify(saved);
+  assert.ok(Buffer.byteLength(bytes) <= 64 * 1024 * 1024, "RECOVERY_PRESERVATION_TOO_LARGE");
+  if (!plan.preserved) await replacePrivate(plan.preservationPath, bytes);
+  plan.preserved = saved.documents;
 }
 
 function expectedEffects(events) {
@@ -436,6 +503,7 @@ async function prepare(configDirectory, dataRoot, recoveryRoot, checkpointFile) 
     if (snapshot) {
       assert.equal(restored.state.revision, entry.stateRevision, "POST_SNAPSHOT_STATE_MISMATCH");
       remoteWriters = noUnreconciledWrites(restored.state, journal.state);
+      receipt.remoteWriterIds = remoteWriters.map(operation => operation.id).sort();
     } else {
       let savedReceipt;
       try { savedReceipt = JSON.parse((await privateFile(receiptPath, 4096)).toString("utf8")); }
@@ -443,7 +511,15 @@ async function prepare(configDirectory, dataRoot, recoveryRoot, checkpointFile) 
         if (error?.code !== "ENOENT") throw error;
         fail("POST_SNAPSHOT_STATE_MISMATCH");
       }
+      assert.ok(Array.isArray(savedReceipt.remoteWriterIds)
+        && savedReceipt.remoteWriterIds.every(id => typeof id === "string" && /^[a-f0-9]{64}$/.test(id))
+        && new Set(savedReceipt.remoteWriterIds).size === savedReceipt.remoteWriterIds.length,
+      "POST_SNAPSHOT_STATE_MISMATCH");
+      receipt.remoteWriterIds = savedReceipt.remoteWriterIds;
       assert.deepEqual(savedReceipt, receipt, "POST_SNAPSHOT_STATE_MISMATCH");
+      remoteWriters = receipt.remoteWriterIds.map(id => journal.state.operations[id]);
+      assert.ok(remoteWriters.every(operation => operation && operation.id
+        && operation.scope === null), "POST_SNAPSHOT_STATE_MISMATCH");
     }
     assert.ok(entry.eventBytes <= journal.eventBytes.length
       && digest(journal.eventBytes.subarray(0, entry.eventBytes)) === entry.eventSha256
@@ -456,13 +532,28 @@ async function prepare(configDirectory, dataRoot, recoveryRoot, checkpointFile) 
     // was accepted for it. A settled writer may already own new documents.
     const ownerCleared = events.some(event => event.mutation.kind === "clearOwnerData");
     const memoryCleared = events.some(event => event.mutation.kind === "clearMemoryScope");
-    assert.ok(!remoteWriters.length || (!ownerCleared && (!memoryCleared || remoteWriters.every(
-      operation => ["session_unknown", "session_created", "message_unknown", "message_delivered"]
-        .includes(operation.phase)))), "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+    assert.ok(!remoteWriters.length || !ownerCleared, "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+    const settledWriters = remoteWriters.filter(operation =>
+      ["commit_unknown", "processing", "ready"].includes(operation.phase));
+    if (memoryCleared && settledWriters.length) {
+      // Governance captured all pre-barrier writers under its lock. Absence
+      // from the final clear's writer set proves these belong after the clear;
+      // wall-clock timestamps do not establish that ordering.
+      const clear = Object.values(journal.state.governance?.jobs ?? {})
+        .filter(job => job.kind === "clear" && job.scope === null && job.phase === "complete")
+        .sort((a, b) => b.revision - a.revision)[0];
+      assert.ok(clear && (!snapshot || restored.state.governance?.jobs?.[clear.id]?.phase !== "complete")
+        && settledWriters.every(operation => !clear.writerOperationIds.includes(operation.id)),
+      "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+    }
     const effects = expectedEffects(events);
+    assert.ok(remoteWriters.every(operation => !effects.sources.has(operation.remoteSessionId)),
+      "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
     const key = await credentials.read(entry.owner);
     assert.ok(key, "CREDENTIAL_MISSING");
     plans.push({ owner: entry.owner, events, effects, remoteWriters, memoryCleared, statePath, receiptPath, receipt,
+      preservationPath: join(recoveryRoot, entry.owner.accountId, entry.owner.userId, "replay-preservation.json"),
+      eventSha256: digest(journal.eventBytes), writerResults: new Map(),
       latestBytes, client: new OwnerMemoryClient({ owner: entry.owner, baseUrl: config.baseUrl,
         apiKey: key, scope: null, timeoutMs: config.requestTimeoutMs }) });
   }
@@ -476,16 +567,25 @@ export async function reconcile(configDirectory, dataRoot, recoveryRoot, checkpo
   if (remoteWriterChecks) summary.remoteWriterChecks = remoteWriterChecks;
   if (preflightOnly) return summary;
   for (const plan of plans) await plan.client.verifyIdentity();
+  for (const plan of plans) {
+    try {
+      await privateFile(plan.preservationPath);
+      plan.preserved = true;
+    } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  }
   // No replay mutation may run until every new writer is checked against the
   // restored service. Every check is read-only; an incomplete or mismatched
   // remote receipt cannot be followed by a deletion replay or state overlay.
   for (const plan of plans) for (const operation of plan.remoteWriters) {
-    await verifyNewWriter(plan.client, operation);
-    if (plan.memoryCleared && operation.phase !== "session_unknown") {
+    const result = await verifyNewWriter(plan.client, operation, Boolean(plan.preserved));
+    if (result) plan.writerResults.set(operation.id, result);
+    if (plan.memoryCleared && ["session_created", "message_unknown", "message_delivered"].includes(operation.phase)) {
       assert.equal(await plan.client.findCommit(operation.remoteSessionId), null,
         "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
     }
   }
+  // Every owner is verified and staged before the first destructive request.
+  for (const plan of plans) await preserveWriters(plan);
   for (const plan of plans) {
     const corrections = replayableCorrections(plan.events);
     for (const [index, event] of plan.events.entries()) {
@@ -503,6 +603,9 @@ export async function reconcile(configDirectory, dataRoot, recoveryRoot, checkpo
         case "clearOwnerData": await plan.client.clearOwnerData(); break;
       }
     }
+    if (Array.isArray(plan.preserved)) for (const { uri, content } of plan.preserved) {
+      await plan.client.replaceMemory(uri, content);
+    }
   }
   for (const plan of plans) {
     await verifyEffects(plan.client, plan.effects);
@@ -512,6 +615,11 @@ export async function reconcile(configDirectory, dataRoot, recoveryRoot, checkpo
     // may skip the old snapshot hash only when this exact replay wrote it.
     await replacePrivate(plan.receiptPath, JSON.stringify(plan.receipt) + "\n");
     await replacePrivate(plan.statePath, plan.latestBytes);
+  }
+  for (const plan of plans) if (plan.preserved) {
+    await rm(plan.preservationPath);
+    const directory = await open(dirname(plan.preservationPath), constants.O_RDONLY);
+    try { await directory.sync(); } finally { await directory.close(); }
   }
   return summary;
 }

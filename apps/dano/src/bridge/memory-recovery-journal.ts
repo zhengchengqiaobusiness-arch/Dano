@@ -123,6 +123,9 @@ export class MemoryRecoveryJournal {
 
   static async open(root: string, owner: Owner, current: OwnerState): Promise<MemoryRecoveryJournal> {
     const journal = await this.#prepare(root, owner);
+    if (await privateFile(join(journal.#directory, "replay-preservation.json"))) {
+      throw new Error("MEMORY_RECOVERY_REPLAY_PENDING");
+    }
     const saved = await journal.#state();
     if (!saved) {
       if (await privateFile(join(journal.#directory, "events.jsonl"))) throw new Error("MEMORY_RECOVERY_STATE_MISMATCH");

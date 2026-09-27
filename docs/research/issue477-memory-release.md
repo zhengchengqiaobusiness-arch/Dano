@@ -1483,3 +1483,37 @@ Submitting the filled login showed the provider's slider CAPTCHA. The
 [sanitized stage receipt](evidence/issue477-local-tls-oauth-stage-20260928.json)
 records that callback and authenticated identity remain unverified and that
 this older retained stack cannot count as final `0.2.60` Browser acceptance.
+
+### Clear followed by settled writers, candidate 0.2.61
+
+The recovery command now preserves post-clear writers whose remote commit is
+settled, including local `commit_unknown`, `processing` and `ready` states.
+The final completed clear job's pre-barrier writer set proves the ordering;
+wall-clock timestamps do not. Owner retirement, missing clear provenance,
+unsettled tasks, removed sources and a conflicting current document deletion
+continue to reject replay before destructive requests.
+
+After checking every owner's identity and source/commit receipts, replay reads
+the current verified documents through the bounded USER client and atomically
+fsyncs a private `replay-preservation.json` in that owner's separate recovery
+directory. The plan is bound to the checkpoint, latest state and full event
+stream. Every owner is staged before any clear runs. Whole-tree clear still
+removes old documents and derived indexes; replay then restores the staged new
+documents and verifies the final document set before overlaying local state.
+The local replay receipt retains the new writer IDs, so a repeated replay after
+the overlay still verifies and preserves those writers.
+
+If clear or restoration fails, retain the preservation file and the same
+checkpoint/recovery generation, keep Dano stopped, and repeat the same replay
+command after resolving the remote failure. A pending plan blocks opening the
+owner runtime and taking a new checkpoint. Do not delete the file to bypass
+`MEMORY_RECOVERY_REPLAY_PENDING`. A changed journal or checkpoint rejects a
+stale plan. Successful readback and local overlay remove and fsync the staged
+body file; the durable receipt contains metadata only.
+
+Automated tests cover three settled phases, a lost clear reply, replays after
+overlay, pending-runtime/checkpoint fences, stale/foreign staged documents,
+deletion priority and staging both owners before either is cleared. These are
+synthetic transport tests. Real old-volume preservation, extraction through
+ready, multi-user credential rotation and old-binary rollback remain required
+for AC-12/T-13; this candidate does not close that gate.
