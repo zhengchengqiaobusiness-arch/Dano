@@ -181,6 +181,53 @@ it("rejects owners created after the backup checkpoint", async () => {
     .rejects.toThrow("RECOVERY_OWNER_SET_MISMATCH");
 });
 
+it("rejects a changed old writer source before contacting the remote service", async () => {
+  const f = await fixture();
+  const id = "a".repeat(64);
+  await new RecoveryStateStore(f.store, f.journal).transact(state => {
+    state.operations[id] = { id, owner: f.owner, scope: null, kind: "explicit",
+      authorizationEpoch: state.authorization.epoch,
+      source: { sessionId: "chat", entryId: "original", branchId: "root", contentVersion: "1" },
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      phase: "queued", remoteSessionId: "remote-session", payload: "synthetic fact" };
+  });
+  await checkpoint(f.data, f.recovery, f.checkpointFile);
+  const statePath = join(f.data, "host-state", "owner-a", "state", "memory", "state.json");
+  const oldBytes = await readFile(statePath);
+  await new RecoveryStateStore(f.store, f.journal).transact(state => {
+    state.operations[id]!.source.entryId = "different";
+  });
+  await writeFile(statePath, oldBytes);
+  const contacted = vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity");
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  expect(contacted).not.toHaveBeenCalled();
+});
+
+it("accepts an old queued writer that was explicitly blocked after the checkpoint", async () => {
+  const f = await fixture();
+  const id = "b".repeat(64);
+  await new RecoveryStateStore(f.store, f.journal).transact(state => {
+    state.operations[id] = { id, owner: f.owner, scope: null, kind: "explicit",
+      authorizationEpoch: state.authorization.epoch,
+      source: { sessionId: "chat", entryId: "original", branchId: "root", contentVersion: "1" },
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      phase: "queued", remoteSessionId: "remote-session", payload: "synthetic fact" };
+  });
+  await checkpoint(f.data, f.recovery, f.checkpointFile);
+  const statePath = join(f.data, "host-state", "owner-a", "state", "memory", "state.json");
+  const oldBytes = await readFile(statePath);
+  await new RecoveryStateStore(f.store, f.journal).transact(state => {
+    state.operations[id]!.phase = "blocked";
+    state.operations[id]!.errorCode = "MEMORY_DISABLED";
+    state.operations[id]!.updatedAt = new Date().toISOString();
+    delete state.operations[id]!.payload;
+  });
+  await writeFile(statePath, oldBytes);
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile, true))
+    .resolves.toEqual({ owners: 1, events: 0 });
+});
+
 it("preflights both owners before replaying either owner's deletion", async () => {
   const f = await fixture();
   const bob = { accountId: "account", userId: "bob" };

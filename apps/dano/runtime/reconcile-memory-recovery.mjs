@@ -152,13 +152,14 @@ function noUnreconciledWrites(oldState, latest) {
   const oldIds = Object.keys(oldState.operations ?? {}).sort();
   assert.deepEqual(Object.keys(latest.operations ?? {}).sort(), oldIds,
     "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  const stableOperation = operation => Object.fromEntries(Object.entries(operation)
+    .filter(([field]) => !["phase", "payload", "updatedAt", "errorCode",
+      "reconciliationPhase", "deliveryAttempts", "nextAttemptAt"].includes(field)));
   for (const id of oldIds) {
     const before = oldState.operations[id], after = latest.operations[id];
-    assert.ok(before.remoteSessionId === after.remoteSessionId
-      && before.scope === after.scope
-      && JSON.stringify(before.memoryUris ?? []) === JSON.stringify(after.memoryUris ?? [])
-      && before.taskId === after.taskId
-      && (before.phase === after.phase || after.phase === "blocked")
+    assert.deepEqual(stableOperation(after), stableOperation(before),
+      "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+    assert.ok((before.phase === after.phase || after.phase === "blocked")
       && (after.payload === before.payload || after.phase === "blocked" && after.payload === undefined),
     "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
   }

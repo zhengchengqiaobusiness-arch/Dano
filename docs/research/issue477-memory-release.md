@@ -1104,6 +1104,13 @@ and an immediate replay passed. The
 [sanitized two-owner evidence](evidence/issue477-two-owner-old-volume-replay.json)
 does not claim old-version binary rollback, pending-queue reconciliation or
 source-session revocation.
+The rollback preflight now compares every stable field of an operation present
+at the checkpoint, including its source and collection provenance. It permits
+the existing blocked-state transition and transient retry metadata, but rejects
+changed source identity before any remote request. The focused tests cover both
+the rejection and a legitimate queued-to-blocked transition. New operations
+created after the checkpoint still require explicit reconciliation, so this
+hardening does not close the upgrade-window writer gate.
 Read-only inventory of the configured production host on 2026-09-27 showed
 `dano-app:rel-20260922-143917`; its container mount destinations did not
 include `/var/lib/dano-memory-recovery`, and the Dano-related Docker volume
