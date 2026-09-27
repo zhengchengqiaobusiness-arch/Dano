@@ -1,0 +1,40 @@
+{
+  "observedAt": "2026-09-28",
+  "scope": "One-owner synthetic old-memory restoration with a newer uncommitted source Session on real OpenViking; no public service ports or provider credentials",
+  "candidateImage": "localhost/dano465-protected:0.2.60",
+  "candidateImageId": "e46b14e635fedf75cd1fe13149a16fc636de2be909b6fa83e86c96ddbac32b83",
+  "openVikingVersion": "v0.4.20",
+  "model": "Pinned local bge-small-zh-v1.5-f16 Embedding; VLM endpoint deliberately unavailable",
+  "sequence": [
+    "Created an isolated account and USER key; wrote one old memory document through OwnerMemoryClient and checkpointed the local owner state and empty recovery journal.",
+    "Appended a scope-clear intent, cleared the real remote memory tree, then created a new Session and appended a source-tagged message without committing it.",
+    "Restored the old local state bytes and reinserted the old document to represent an asymmetric old-memory snapshot while retaining the newer remote Session.",
+    "Ran 0.2.60 read-only preflight, replay and a second replay against the real service."
+  ],
+  "result": {
+    "preflight": { "owners": 1, "events": 1, "remoteWriterChecks": 1 },
+    "replay": "passed",
+    "oldDocumentRemoved": true,
+    "newSourceStillPresent": true,
+    "localOperationPhasePreserved": "message_delivered",
+    "secondReplay": "passed",
+    "oldDocumentStillAbsent": true,
+    "newSourceStillPresentAfterRetry": true
+  },
+  "setupCorrections": [
+    "Initial synthetic run timed out because the Embedding network alias did not match the config; the container-to-container health endpoint was then verified at HTTP 200.",
+    "The next run reached checkpoint and rejected a nonprivate volume root; the dedicated root was set to mode 0700 before the passing run."
+  ],
+  "cleanup": {
+    "testContainersRemoved": true,
+    "testVolumesRemoved": 2,
+    "testNetworkRemoved": true,
+    "syntheticConfigAndKeyRemoved": true,
+    "fixedPortOAStackPreservedHealthy": true
+  },
+  "limits": [
+    "Old memory content was reinserted synthetically; no stopped old OpenViking volume was cloned or restored",
+    "Only a pre-commit source was tested; no extraction, committed task, ready document or post-clear replacement preservation",
+    "No MiMo, OA, Browser or complete T-13 acceptance"
+  ]
+}
