@@ -1069,6 +1069,13 @@ The protected recovery command now has a read-only `audit-retention` mode that
 reports aggregate legacy-inline and current-payload counts without owner IDs,
 URIs or body text. Its synthetic test covers both formats; the actual recovery
 volume has not yet been audited.
+Read-only inventory of the configured production host on 2026-09-27 showed
+`dano-app:rel-20260922-143917`; its container mount destinations did not
+include `/var/lib/dano-memory-recovery`, and the Dano-related Docker volume
+list contained only `dano_agent-config` and `dano_workspaces`. Therefore that
+current production container has no mounted old-format recovery journal to
+migrate. This does not prove the candidate volumes elsewhere are empty, nor
+replace first-deployment and rollback acceptance for the new format.
 
 The fixed §11.1 minima are 20 recall, 10 correction, 20 isolation, 10 deletion,
 10 irrelevant and 10 authorization cases, each independently repeated three
