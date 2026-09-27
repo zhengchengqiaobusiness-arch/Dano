@@ -1,0 +1,20 @@
+{
+  "scope": "isolated protected-memory Compose startup on the default-apt 0.2.55 image",
+  "date": "2026-09-28",
+  "project": "dano465candidate0255",
+  "image": "localhost/dano465-protected:0.2.55-default",
+  "imageId": "751e69d1fa607991b1e7a6d4454b1211fb8d63e3f22bf7dd64444b6e1321574b",
+  "composeFiles": ["docker-compose.yml (derived without public ports or unrelated external network)", "deploy/compose/protected.yml", "deploy/compose/memory.yml"],
+  "services": {
+    "app": "healthy",
+    "embedding": "healthy",
+    "reranker": "healthy",
+    "openviking": "healthy"
+  },
+  "apiHealth": {"path": "/api/health", "status": 200, "probe": "inside candidate app container"},
+  "network": "no candidate ports published; existing localhost:18710/18711 OA stack remained running",
+  "recoveryVolume": "fresh mount retained uid 1000, gid 1000, mode 0700 after Podman volume create --uid/--gid",
+  "credentials": "production OA configuration was supplied privately; no MiMo model key was available; synthetic OpenViking root key was used",
+  "limitations": ["no live model answer or image/tool flow", "no authenticated OA Browser callback", "no two-user Browser isolation", "no recovery replay or full T-11 matrix in this Compose run"],
+  "result": "startup subgate passed; issue #465 acceptance remains open"
+}

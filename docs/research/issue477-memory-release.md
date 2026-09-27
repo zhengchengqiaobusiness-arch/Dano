@@ -1219,6 +1219,15 @@ source, retains CA and no apt mirror runtime variable, and embeds release and
 recovery script hashes matching the checkout. The build still supplied a PyPI
 mirror and GitHub proxy for unrelated dependencies; it is not a Compose,
 rollback, OA, model or Browser acceptance result.
+The same default-apt `0.2.55` image subsequently started via the actual
+base + protected + memory Compose configuration in an isolated project with
+no published ports. Dano, OpenViking, Embedding and Reranker all became healthy;
+Dano's container-local `/api/health` returned 200. The candidate recovery
+volume required Podman's `volume create --uid 1000 --gid 1000` for ownership to
+persist across mounts. The [sanitized Compose receipt](evidence/issue477-0255-compose-startup.json)
+records this startup subgate. The existing OA stack at 18710/18711 remained
+running. This did not exercise MiMo, OA callback, Browser acceptance or recovery
+replay.
 In a separate `0.2.55` rehearsal, OpenViking was stopped and its named volume
 exported into a second volume before a two-owner post-checkpoint writer ran.
 After Bob's message source reached the newer volume, checkpointed Dano owner
