@@ -1,0 +1,30 @@
+{
+  "observedAt": "2026-09-28",
+  "sourceCommit": "3552e85dafadab34ff5b90ac353d3381b80a3922",
+  "productVersion": "0.2.53",
+  "protectedImageId": "950263cc2c48f8a19d0a34ee05021923886acb0f79ca561a599fb1e071929630",
+  "environment": "Disposable rootless Podman container, no network or published ports, synthetic identities only",
+  "protectedSupervisorHttp": {
+    "cliEntrypoint": true,
+    "hostNonRoot": true,
+    "twoWorkerIdentities": true,
+    "exclusiveSupervisor": true,
+    "searchNonRoot": true,
+    "memorySettingsVerified": true,
+    "memoryHttpBoundaryVerified": true,
+    "shutdownReclaimsChildren": true
+  },
+  "isolatedPiToolWorker": {
+    "workspaceReadWriteAllowed": true,
+    "absoluteReadWriteEditDenied": true,
+    "symlinkReadWriteEditDenied": true,
+    "bashFileAndEnvironmentDenied": true,
+    "httpWithoutCredentialDenied": true,
+    "credentialUnchanged": true
+  },
+  "limits": [
+    "Synthetic credentials and users; no real OA login or independent Browser users",
+    "No real OpenViking USER-key request, model call, or memory answer",
+    "No protected Compose or Browser acceptance in this receipt"
+  ]
+}
