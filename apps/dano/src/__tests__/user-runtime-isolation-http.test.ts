@@ -911,6 +911,8 @@ it("authenticates memory settings, isolates owners and projects only safe status
   expect(await revoked.json()).toMatchObject({ enabled: true, automaticCollection: false });
   const peer = await fetch(url(bob), { headers: headers(bobToken) });
   expect(await peer.json()).toMatchObject({ enabled: false });
+  expect((await fetch(url(alice), { method: "PUT", headers: headers(aliceToken),
+    body: JSON.stringify({ enabled: false }) })).status).toBe(200);
   const governanceUrl = (client: TestClient) => `${origin}/api/clients/${client.client.id}/memory/governance`;
   const exportUrl = (client: TestClient) => `${origin}/api/clients/${client.client.id}/memory/export`;
   expect((await fetch(exportUrl(alice))).status).toBe(401);
@@ -928,7 +930,6 @@ it("authenticates memory settings, isolates owners and projects only safe status
     body: JSON.stringify({ action: "clear", confirmed: true }) })).status).toBe(403);
   expect((await fetch(governanceUrl(alice), { method: "POST", headers: headers(aliceToken),
     body: JSON.stringify({ action: "clear", confirmed: true }) })).status).toBe(200);
-  expect((await fetch(url(alice), { method: "PUT", headers: headers(aliceToken), body: JSON.stringify({ enabled: false }) })).status).toBe(200);
   expect([...states.values()].every(state => !state.enabled)).toBe(true);
   const operationUrl = (client: TestClient, id: string) => `${origin}/api/clients/${client.client.id}/memory/operations/${id}`;
   const listUrl = (client: TestClient) => `${origin}/api/clients/${client.client.id}/memory/operations`;

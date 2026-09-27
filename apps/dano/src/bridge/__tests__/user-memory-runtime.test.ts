@@ -150,6 +150,36 @@ it("shares authorization between sessions and preserves ordinary context when th
   expect(h.services.provisioner.provision).toHaveBeenCalledTimes(1);
 });
 
+it("keeps export, targeted deletion and clear available while long-term memory is paused", async () => {
+  const h = await harness();
+  const profile = await h.start();
+  const uri = "viking://user/alice/memories/fact.md";
+  const documents = new Map([[uri, "fact"]]);
+  vi.spyOn(LazyMemoryClient.prototype, "listMemoryDocuments")
+    .mockImplementation(async () => [...documents.keys()].sort());
+  vi.spyOn(LazyMemoryClient.prototype, "readMemory")
+    .mockImplementation(async value => documents.get(value)!);
+  vi.spyOn(LazyMemoryClient.prototype, "memoryDocumentSize").mockResolvedValue(4);
+  vi.spyOn(LazyMemoryClient.prototype, "readMemoryLimited").mockResolvedValue("fact");
+  const remove = vi.spyOn(LazyMemoryClient.prototype, "removeMemory")
+    .mockImplementation(async value => { documents.delete(value); });
+  const clear = vi.spyOn(LazyMemoryClient.prototype, "clearMemoryScope").mockResolvedValue(undefined);
+
+  await profile.memory!.setEnabled(true);
+  await profile.memory!.setEnabled(false);
+  expect(await profile.memory!.status()).toMatchObject({ enabled: false, automaticCollection: false });
+  expect(await profile.memory!.governance().exportPage(10)).toMatchObject({
+    items: [{ uri, content: "fact" }],
+  });
+  expect((await profile.memory!.governance().forget(uri, "fact")).status).toBe("complete");
+  expect(remove).toHaveBeenCalledOnce();
+  expect(documents.size).toBe(0);
+  const receipt = await profile.memory!.governance().clear();
+  expect(receipt.status).toBe("complete");
+  expect(clear).toHaveBeenCalledOnce();
+  expect(await profile.memory!.status()).toMatchObject({ enabled: false, automaticCollection: false });
+});
+
 it("restores local authorization without needing management access", async () => {
   const h = await harness();
   const first = await h.start();
