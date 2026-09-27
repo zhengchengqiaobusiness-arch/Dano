@@ -1472,3 +1472,14 @@ readable, and the local operation remained `message_delivered`. The
 [sanitized receipt](evidence/issue477-0260-real-precommit-clear.json) records
 the setup corrections, cleanup and limits. This did not clone an actual old
 volume or reach commit/`ready`; the full T-13 gate remains open.
+
+On 2026-09-28 the retained `0.2.53` OA stack still owned the fixed loopback
+ports 18710/18711 and was healthy. The served localhost leaf matched the
+persistent certificate, had valid localhost/loopback SANs through 2027-09-11,
+and passed macOS system trust plus curl and Node validation with the existing
+CA. The in-app Browser entered Dano without a security interstitial, connected,
+opened the login menu, and reached the real OA login using a fresh redirect.
+Submitting the filled login showed the provider's slider CAPTCHA. The
+[sanitized stage receipt](evidence/issue477-local-tls-oauth-stage-20260928.json)
+records that callback and authenticated identity remain unverified and that
+this older retained stack cannot count as final `0.2.60` Browser acceptance.
