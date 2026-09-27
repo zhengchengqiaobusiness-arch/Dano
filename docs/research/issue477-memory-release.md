@@ -1059,7 +1059,7 @@ establish Dano model answers.
 | T-01 | Published `0.1.17`, exact Dano lockfile, rebuilt protected image, dual-entry loading twice per entry, and one real-service ordinary Pi CLI save/new-session recall | Full pair audit and repeated functional checks |
 | T-02/03 | Real USER-key isolation matrix 20×3, including header forgery and Session-ID collision | Dano/Peer/project scope and independent Bob Browser across fixed repetitions |
 | T-04/05 | Automated lifecycle/collection tests; one real Browser automatic collection/recall/revocation path | Full multi-viewer/rebind/branch/dispose and collection exclusions |
-| T-06/07 | Actual old `session_unknown` recovery and credential-store replay; one restored-volume queue resumed to `message_delivered` without duplicate operation; real OpenViking rotation revoked an old USER key and the reopened Dano encrypted store used the new key to read the same Session | All crash windows, ready completion, full Dano host restart after rotation, user switch and anonymous transfer on fixed service |
+| T-06/07 | Actual old `session_unknown` recovery and credential-store replay; one restored-volume queue resumed to `message_delivered` without duplicate operation; after real USER-key rotation the protected Dano process restarted against its retained state and owner-only exports succeeded | All crash windows, ready completion, restored multi-volume deployment with rotation, user switch and anonymous transfer on fixed service |
 | T-08 | Real Browser new-chat recall, including one correct post-restart answer; bounded reranker selection | Short-session extraction, no-result/timeout and model-answer repetitions |
 | T-09/10 | Real-service correction/deletion/replay; Browser targeted forget with unrelated recall preserved, defaults-off and cross-tab pause; runtime and authenticated HTTP paused-management tests | Complete correction/forget/pause/restore state matrix ×3 |
 | T-11 | Protected file access denied; real USER-key 403 probes; `0.2.52` and `0.2.53` protected images passed synthetic HTTP/tool isolation; `0.2.55` protected image with real OpenViking passed two real USER-key bindings, 36 Dano memory HTTP identity probes, one forged-header cross-user content read denial and own-only Dano exports | Complete operation-content and cross-route readback with real USER keys, then repeat with independently authenticated OA Browser users |
@@ -1193,6 +1193,16 @@ Alice's encrypted Dano credential and reopened the store. The new key read the
 same Session and message. The [sanitized receipt](evidence/issue477-0255-real-user-key-rotation.json)
 records this T-07 subgate. It does not exercise a complete Dano host restart,
 post-commit `ready`, old-volume rollback or concurrent governance.
+The follow-up [protected host restart receipt](evidence/issue477-0255-real-rotation-host-restart.json)
+uses the same fixed service and image with a disposable persistent state root.
+The complete `protected-main` process stopped, Alice's real USER key was rotated,
+and a host-UID helper verified and durably replaced the encrypted credential.
+The old key could not read Alice's protected content URI, while the new key
+could. After the process restarted with the same state root, Alice's Dano export
+still contained that content and Bob's did not; 36 HTTP identity probes passed.
+Generic `/health` status alone was not treated as revocation proof. This is
+real-service process restart evidence, not a restored multi-volume/old-version
+rollback, model-`ready` or independently authenticated OA Browser result.
 The protected `0.2.54` image built successfully from commit `ca9c12f41`.
 Its embedded product version and recovery script SHA-256 match the checkout;
 the release manifest check passed. The [build receipt](evidence/issue477-0254-protected-build.json)

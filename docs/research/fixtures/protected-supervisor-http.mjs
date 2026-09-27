@@ -36,6 +36,7 @@ const useCli = process.argv.includes('--cli');
 const withMemory = process.argv.includes('--memory');
 const realService = process.argv.includes('--real-service');
 const realMemoryService = process.argv.includes('--real-memory-service');
+const rotateUserKey = process.argv.includes('--rotate-user-key');
 const actualMemoryService = realService || realMemoryService;
 // The remote service outlives disposable containers. Use new authenticated
 // test identities so a prior run's extracted facts cannot satisfy or suppress
@@ -45,10 +46,11 @@ const primaryUsers = actualMemoryService
   ? [`alice-fixture-${runIdentity}`, `bob-fixture-${runIdentity}`]
   : ['alice-fixture', 'bob-fixture'];
 const memoryFailure = process.argv.includes('--memory-failure');
-let memoryAccountId, corruptOwnerPath, realModel;
+let memoryAccountId, corruptOwnerPath, realModel, rotation;
 let memoryHttpBoundaryProbes = 0;
 if (memoryFailure) assert(realService, 'Memory failure check requires the real model/service configuration');
 if (realMemoryService) assert(withMemory && useCli, 'Real memory service mode requires --cli --memory');
+if (rotateUserKey) assert(realMemoryService, 'USER key rotation requires --real-memory-service');
 if (realService) {
   assert(withMemory && useCli, 'Real service mode requires --cli --memory');
   realModel = { provider: process.env.DANO_FIXTURE_PROVIDER, modelId: process.env.DANO_FIXTURE_MODEL };
@@ -292,6 +294,8 @@ try {
         const containsAlice = JSON.stringify(await response.json()).includes(marker);
         assert.equal(containsAlice, index === 0, 'Dano export crossed owner boundary');
       }
+      if (rotateUserKey) rotation = { userId: boundUsers[0].userId,
+        oldKey: boundUsers[0].key, marker, uri };
     }
     if (realService) {
       const { verifyMemoryHttpFlow } = await import('./protected-memory-http-flow.mjs');
@@ -333,6 +337,66 @@ try {
     await delay(50);
   } while (Date.now() < cleanupDeadline);
   assert.deepEqual(remaining, []);
+  if (rotateUserKey) {
+    assert(rotation, 'REAL_USER_KEY_BINDING_MISSING');
+    const response = await fetch(`${process.env.DANO_FIXTURE_MEMORY_BASE_URL}/api/v1/admin/accounts/${memoryAccountId}/users/${rotation.userId}/key`, {
+      method: 'POST', headers: { 'X-API-Key': process.env.DANO_FIXTURE_MEMORY_MANAGEMENT_KEY },
+    });
+    assert.equal(response.status, 200, 'REAL_USER_KEY_ROTATION_FAILED');
+    const newKey = (await response.json()).result?.user_key;
+    assert(newKey && newKey !== rotation.oldKey, 'REAL_USER_KEY_UNCHANGED');
+    const readUrl = `${process.env.DANO_FIXTURE_MEMORY_BASE_URL}/api/v1/content/read?uri=${encodeURIComponent(rotation.uri)}&raw=true`;
+    const oldRead = await fetch(readUrl, {
+      headers: { 'X-API-Key': rotation.oldKey },
+    });
+    assert([401, 403].includes(oldRead.status), `OLD_USER_KEY_STILL_ACTIVE_${oldRead.status}`);
+    const rotatedRead = await fetch(readUrl, { headers: { 'X-API-Key': newKey } });
+    assert.equal(rotatedRead.status, 200, 'NEW_USER_KEY_CONTENT_READ_FAILED');
+    assert((await rotatedRead.text()).includes(rotation.marker), 'NEW_USER_KEY_CONTENT_MISSING');
+    const helper = spawn('/usr/bin/setpriv', ['--reuid', String(hostUid), '--regid', String(hostGid),
+      '--clear-groups', process.execPath, process.env.DANO_FIXTURE_ROTATE_HELPER ?? '/replace-key.mjs',
+      options.memoryConfigDirectory, options.hostStateRoot, memoryAccountId, rotation.userId],
+    { env: { PATH: process.env.PATH, DANO_FIXTURE_SERVER: serverDir }, stdio: ['pipe', 'ignore', 'ignore'] });
+    const replaced = new Promise((resolve, reject) => {
+      helper.once('error', reject); helper.once('close', code => resolve(code));
+    });
+    helper.stdin.end(`${newKey}\n`);
+    assert.equal(await replaced, 0, 'PROTECTED_USER_KEY_REPLACEMENT_FAILED');
+
+    const restarted = spawn(process.execPath, [join(serverDir, 'protected-main.js'), profilePath],
+      { env: environment, stdio: ['ignore', 'inherit', 'inherit'] });
+    let restartStopped = false;
+    const restartServing = new Promise((resolve, reject) => {
+      restarted.once('error', reject);
+      restarted.once('close', code => { restartStopped = true; resolve(code ?? 1); });
+    });
+    try {
+      const restartDeadline = Date.now() + 40000;
+      let restartHealthy = false;
+      while (Date.now() < restartDeadline && !restartStopped) {
+        restartHealthy = await fetch(`${origin}/api/health`).then(r => r.ok).catch(() => false);
+        if (restartHealthy) break;
+        await delay(100);
+      }
+      assert(restartHealthy, 'PROTECTED_HOST_RESTART_FAILED');
+      for (let index = 0; index < primaryUsers.length; index++) {
+        const id = primaryUsers[index];
+        const created = await fetch(`${origin}/api/clients`, { method: 'POST',
+          headers: { authorization: `Bearer ${token(id)}`, 'content-type': 'application/json' }, body: '{}' });
+        assert.equal(created.status, 201, 'RESTORED_USER_CLIENT_FAILED');
+        const client = (await created.json()).client;
+        const exported = await fetch(`${origin}/api/clients/${client.id}/memory/export`, {
+          headers: { authorization: `Bearer ${token(id)}` },
+        });
+        assert.equal(exported.status, 200, 'RESTORED_USER_MEMORY_EXPORT_FAILED');
+        assert.equal(JSON.stringify(await exported.json()).includes(rotation.marker), index === 0,
+          'RESTORED_USER_MEMORY_ISOLATION_FAILED');
+      }
+    } finally {
+      restarted.kill('SIGTERM');
+      assert.equal(await restartServing, 0, 'PROTECTED_HOST_RESTART_SHUTDOWN_FAILED');
+    }
+  }
   console.log(JSON.stringify({ actualHttpHost: true, cliEntrypoint: useCli, hostNonRoot: true, twoWorkerIdentities: true,
     exclusiveSupervisor: true, searchNonRoot: true, memorySettingsVerified: withMemory,
     memoryHttpBoundaryVerified: withMemory, memoryHttpBoundaryProbes,
@@ -340,7 +404,8 @@ try {
     sequentialCapacityVerified: capacityMode,
     shutdownMode: crashHost ? 'host-killed' : crashSearch ? 'search-killed' : 'graceful',
     shutdownReclaimsChildren: true, browserVerified: false, modelVerified: realService,
-    realMemoryServiceVerified: realMemoryService, realMemoryContentIsolationVerified: realMemoryService }));
+    realMemoryServiceVerified: realMemoryService, realMemoryContentIsolationVerified: realMemoryService,
+    danoHostRestartAfterRotationVerified: rotateUserKey }));
 } finally {
   stop.abort();
   await serving.catch(() => {});
