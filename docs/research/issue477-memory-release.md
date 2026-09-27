@@ -1209,6 +1209,16 @@ accepted a private empty recovery root while rejecting a world-readable one.
 All 145 Vitest files passed (1705 tests, one skipped), as did type/Svelte
 checks, local build and release manifest check. The [sanitized build receipt](evidence/issue477-0255-protected-build.json)
 does not establish real-volume replay or OA/model/Browser acceptance for 0.2.55.
+The default apt/CA branch of the same bootstrap script was subsequently run
+without `DANO_APT_MIRROR` in the exact Node 22 Debian base image. Debian CA
+installation, switching to Tencent HTTPS apt sources, a second apt update and
+curl installation all succeeded; the CA bundle was present. The [default apt receipt](evidence/issue477-0255-default-apt-bootstrap.json)
+also records a subsequent complete `protected-runtime` Dockerfile build with
+`DANO_APT_MIRROR` omitted. The resulting `0.2.55` image uses the Tencent HTTPS
+source, retains CA and no apt mirror runtime variable, and embeds release and
+recovery script hashes matching the checkout. The build still supplied a PyPI
+mirror and GitHub proxy for unrelated dependencies; it is not a Compose,
+rollback, OA, model or Browser acceptance result.
 In a separate `0.2.55` rehearsal, OpenViking was stopped and its named volume
 exported into a second volume before a two-owner post-checkpoint writer ran.
 After Bob's message source reached the newer volume, checkpointed Dano owner

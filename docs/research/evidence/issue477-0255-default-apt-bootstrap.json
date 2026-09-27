@@ -1,0 +1,29 @@
+{
+  "observedAt": "2026-09-28",
+  "sourceCommit": "6ef3e20a6bafa185419d3091de2c82919331c116",
+  "scriptSha256": "8871ca901bdbb7ced6f15f74a982b2fa4f04b4f556327f31438a122cc51f1148",
+  "baseImageId": "78175922b1739c305f3832562c569a07cbc0005b39db6b97a4a3ac328b9fae94",
+  "isolatedRun": {
+    "mirrorOverride": false,
+    "defaultDebianCaInstallSucceeded": true,
+    "tencentHttpsAptSourceSelected": true,
+    "subsequentAptUpdateAndCurlInstallSucceeded": true,
+    "caBundlePresent": true,
+    "containerRemoved": true
+  },
+  "fullProtectedBuild": {
+    "target": "protected-runtime",
+    "aptMirrorBuildArgSupplied": false,
+    "imageId": "751e69d1fa607991b1e7a6d4454b1211fb8d63e3f22bf7dd64444b6e1321574b",
+    "buildSucceeded": true,
+    "embeddedProductVersion": "0.2.55",
+    "tencentHttpsAptSourceSelected": true,
+    "caBundlePresent": true,
+    "aptMirrorRuntimeEnvironmentAbsent": true,
+    "aptAndRecoveryScriptHashesMatchCheckout": true
+  },
+  "limits": [
+    "The full image build still used explicit public PyPI mirror and GitHub proxy arguments; only DANO_APT_MIRROR used its default",
+    "No Compose deployment, old-version rollback, OA, model or Browser acceptance in this build check"
+  ]
+}
