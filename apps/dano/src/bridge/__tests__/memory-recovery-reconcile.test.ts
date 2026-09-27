@@ -455,7 +455,7 @@ const laterWriterPhases = ["session_created", "message_unknown", "message_delive
   "commit_unknown", "processing", "ready"] as const;
 type LaterWriterPhase = typeof laterWriterPhases[number];
 
-async function stagedLaterWriter(phase: LaterWriterPhase) {
+async function stagedLaterWriter(phase: LaterWriterPhase | "session_unknown") {
   const f = await fixture();
   await checkpoint(f.data, f.recovery, f.checkpointFile);
   const statePath = join(f.data, "host-state", "owner-a", "state", "memory", "state.json");
@@ -502,6 +502,42 @@ it("rejects a clear followed by a new ready writer before any remote mutation", 
   expect(verify).not.toHaveBeenCalled();
   expect(clear).not.toHaveBeenCalled();
   expect(await readFile(statePath)).toEqual(snapshot);
+});
+
+for (const phase of ["session_unknown", "session_created", "message_unknown", "message_delivered"] as const) {
+  it(`preserves a new ${phase} session across a post-checkpoint memory clear only without a commit`, async () => {
+    const f = await stagedLaterWriter(phase);
+    await f.journal.append({ kind: "clearMemoryScope" });
+    vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+    vi.spyOn(OwnerMemoryClient.prototype, "sessionExists").mockResolvedValue(phase !== "session_unknown");
+    vi.spyOn(OwnerMemoryClient.prototype, "hasSource")
+      .mockResolvedValue(phase !== "session_created");
+    const commit = vi.spyOn(OwnerMemoryClient.prototype, "findCommit").mockResolvedValue(null);
+    vi.spyOn(OwnerMemoryClient.prototype, "removeMemory").mockResolvedValue(undefined);
+    const clear = vi.spyOn(OwnerMemoryClient.prototype, "clearMemoryScope").mockResolvedValue(undefined);
+    vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments").mockResolvedValue([]);
+    await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+      .resolves.toEqual({ owners: 1, events: 2, remoteWriterChecks: 1 });
+    expect(commit).toHaveBeenCalledTimes(phase === "session_unknown" ? 0 : 1);
+    if (phase !== "session_unknown") expect(commit).toHaveBeenCalledWith("new-remote-session");
+    expect(clear).toHaveBeenCalledOnce();
+    expect((await f.store.read()).operations[f.id]?.phase).toBe(phase);
+  });
+}
+
+it("does not clear a new message writer if an unrecorded remote commit exists", async () => {
+  const f = await stagedLaterWriter("message_delivered");
+  await f.journal.append({ kind: "clearMemoryScope" });
+  vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+  vi.spyOn(OwnerMemoryClient.prototype, "hasSource").mockResolvedValue(true);
+  vi.spyOn(OwnerMemoryClient.prototype, "findCommit").mockResolvedValue({ taskId: "remote-task" });
+  const remove = vi.spyOn(OwnerMemoryClient.prototype, "removeMemory");
+  const clear = vi.spyOn(OwnerMemoryClient.prototype, "clearMemoryScope");
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  expect(remove).not.toHaveBeenCalled();
+  expect(clear).not.toHaveBeenCalled();
+  expect(await readFile(f.statePath)).toEqual(f.oldBytes);
 });
 
 for (const phase of laterWriterPhases) {

@@ -1,5 +1,5 @@
 {
-  "danoVersion": "0.2.59",
+  "danoVersion": "0.2.60",
   "piOpenVikingVersion": "0.1.17",
   "openVikingVersion": "v0.4.20",
   "openVikingImage": "ghcr.io/volcengine/openviking:v0.4.20@sha256:b9827753d035f4157b5b318865907fd18f738924ad6398c86feb1182f209825b",

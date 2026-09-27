@@ -451,16 +451,18 @@ async function prepare(configDirectory, dataRoot, recoveryRoot, checkpointFile) 
     "RECOVERY_JOURNAL_CHECKPOINT_MISMATCH");
     const prefixCount = journal.eventBytes.subarray(0, entry.eventBytes).toString("utf8").split("\n").length - 1;
     const events = journal.events.slice(prefixCount);
-    // A scope/owner clear removes the entire remote tree. A newer writer may
-    // already have produced documents there, so verifying its receipt alone
-    // cannot make replay safe: the clear would delete those documents again.
-    assert.ok(!remoteWriters.length || !events.some(event =>
-      event.mutation.kind === "clearMemoryScope" || event.mutation.kind === "clearOwnerData"),
-    "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+    // An owner clear also removes sessions. A memory-scope clear can preserve
+    // a newer pre-commit session, but only after read-only proof that no commit
+    // was accepted for it. A settled writer may already own new documents.
+    const ownerCleared = events.some(event => event.mutation.kind === "clearOwnerData");
+    const memoryCleared = events.some(event => event.mutation.kind === "clearMemoryScope");
+    assert.ok(!remoteWriters.length || (!ownerCleared && (!memoryCleared || remoteWriters.every(
+      operation => ["session_unknown", "session_created", "message_unknown", "message_delivered"]
+        .includes(operation.phase)))), "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
     const effects = expectedEffects(events);
     const key = await credentials.read(entry.owner);
     assert.ok(key, "CREDENTIAL_MISSING");
-    plans.push({ owner: entry.owner, events, effects, remoteWriters, statePath, receiptPath, receipt,
+    plans.push({ owner: entry.owner, events, effects, remoteWriters, memoryCleared, statePath, receiptPath, receipt,
       latestBytes, client: new OwnerMemoryClient({ owner: entry.owner, baseUrl: config.baseUrl,
         apiKey: key, scope: null, timeoutMs: config.requestTimeoutMs }) });
   }
@@ -479,6 +481,10 @@ export async function reconcile(configDirectory, dataRoot, recoveryRoot, checkpo
   // remote receipt cannot be followed by a deletion replay or state overlay.
   for (const plan of plans) for (const operation of plan.remoteWriters) {
     await verifyNewWriter(plan.client, operation);
+    if (plan.memoryCleared && operation.phase !== "session_unknown") {
+      assert.equal(await plan.client.findCommit(operation.remoteSessionId), null,
+        "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+    }
   }
   for (const plan of plans) {
     const corrections = replayableCorrections(plan.events);
