@@ -63,6 +63,28 @@ reranker is configured. Dano therefore applies the bounded reranker to the
 USER-scoped results before injection, under the existing two-second memory
 wait fuse.
 
+When OpenViking rotates an existing owner's USER key, stop Dano but keep the
+internal OpenViking service running. After the remote rotation has revoked the
+old key, run `/app/runtime/replace-memory-user-key.mjs` from the matching
+protected image as a one-off container on `memory-backend`. Mount the existing
+protected config volume read-only and protected data volume writable; run as
+the protected host UID/GID, not as the image's root supervisor. Pass the
+canonical config root, data root and owner USER ID as arguments, and supply
+the new key through stdin from a private secret source:
+
+```sh
+node /app/runtime/replace-memory-user-key.mjs \
+  /etc/dano-protected /var/lib/dano-protected OWNER_USER_ID < PRIVATE_NEW_KEY_FILE
+```
+
+The command replaces only an existing encrypted credential. It verifies the
+new key's account and USER identity, proves the saved old key no longer has
+USER access, then reads the replacement back. It prints only a pass/fail code.
+Keep Dano stopped if the command fails; resolve the remote identity or private
+volume problem before retrying. Do not put either key in process arguments,
+environment variables, shell history or logs. This local step does not rotate
+the key on OpenViking.
+
 Before restoring any volume snapshot, stop Dano and OpenViking together and
 retain a newer deletion/revocation record outside the snapshot. An older
 OpenViking image or data snapshot can contain forgotten facts; do not resume
