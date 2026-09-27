@@ -1545,3 +1545,13 @@ diff cannot prove that a newer differing result was legitimately superseded.
 These combinations stay fail-closed until a verified update chain or explicit
 reconciliation establishes the final result; they are not counted as passing
 the multi-writer T-13 gate.
+
+The final `0.2.61` source passed checks, the full build and Vitest (146 files,
+1735 passing tests and one skip). The formal protected image reports the same
+product version and byte-identical recovery script. A disposable no-network
+container exercised its compiled pending-runtime and pending-checkpoint fences;
+both rejected an incomplete preservation plan. The container and its synthetic
+runtime were removed, while the existing fixed-port OA stack stayed healthy.
+The [build/review receipt](evidence/issue477-0261-protected-build.json) records
+the image, commit, checks and explicit limits. The image is retained for the
+remaining acceptance; it is not a deployed or real old-volume T-13 pass.
