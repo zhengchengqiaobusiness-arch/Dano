@@ -1062,7 +1062,7 @@ establish Dano model answers.
 | T-06/07 | Actual old `session_unknown` recovery and credential-store replay; one restored-volume queue resumed to `message_delivered` without duplicate operation | All crash windows, ready completion, rotation, user switch and anonymous transfer on fixed service |
 | T-08 | Real Browser new-chat recall, including one correct post-restart answer; bounded reranker selection | Short-session extraction, no-result/timeout and model-answer repetitions |
 | T-09/10 | Real-service correction/deletion/replay; Browser targeted forget with unrelated recall preserved, defaults-off and cross-tab pause; runtime and authenticated HTTP paused-management tests | Complete correction/forget/pause/restore state matrix ×3 |
-| T-11 | Protected file access denied; real USER-key 403 probes; `0.2.52` and `0.2.53` protected images passed synthetic HTTP/tool isolation; `0.2.55` protected image passed real OpenViking USER-key provisioning and bound-key health checks for two synthetic-JWT Dano owners plus memory HTTP 401/403 probes | Complete content cross-read and HTTP matrix with real USER keys, then repeat with independently authenticated OA Browser users |
+| T-11 | Protected file access denied; real USER-key 403 probes; `0.2.52` and `0.2.53` protected images passed synthetic HTTP/tool isolation; `0.2.55` protected image passed two real USER-key bindings, memory HTTP 401/403 probes, one forged-header cross-user content read denial and own-only Dano exports | Complete multi-route content/HTTP matrix with real USER keys, then repeat with independently authenticated OA Browser users |
 | T-12 | Final-image Browser form, generic Skill, image, bash and Pi compression; generated leave Skill choice/form rendered in a disposable layer | Working business options/authentication and complete final-image repetition |
 | T-13 | Clean deploy, candidate upgrade, matched old-data rollback, two-owner supplied-ledger replay; automatic-journal old-volume two-owner deletion replay and current-service two-owner deletion/retry; one restored-volume old queue resumed through source append; focused synthetic new queued, `session_unknown` and later-phase writer overlay; real-service message-phase and cross-owner guard across old/new OpenViking volume generations | Old queue through ready, multi-user queue, real credential/new writer through commit and ready, old-version multi-user reconciliation |
 | T-14 | Five-user, 100-complete-request MiMo candidate-7 run passed semantic recall, injection, wait and token limits in an instrumented disposable container; full-source image repeated 100 complete requests with 70/70 recall answers; byte-identical prompt-layer image passed matched on/off cost; final fixed Browser save-ready p95 35 s with 10/10 source readbacks | Complete other fixed categories, integration and causal interpretation |
@@ -1254,7 +1254,12 @@ identity confirmed the expected account and derived user binding. Four Dano
 memory read routes rejected missing/invalid JWTs with 401 and a foreign JWT
 with 403; settings mutation did likewise. The [sanitized receipt](evidence/issue477-0255-real-user-key-http.json)
 records this narrower T-11 result. It does not prove OA login, Browser identity,
-content cross-read, model behavior or the full HTTP matrix.
+model behavior or the full HTTP matrix. A follow-up on the same protected image
+wrote Alice's synthetic content to the real service and read it with Alice's
+USER key. Bob's USER key could not read that content even with forged identity
+headers, and each user's Dano export contained only that user's content. The
+same [receipt](evidence/issue477-0255-real-user-key-http.json) records this
+single cross-user content check, not the full T-11 matrix.
 
 Read-only inventory of the configured production host on 2026-09-27 showed
 `dano-app:rel-20260922-143917`; its container mount destinations did not

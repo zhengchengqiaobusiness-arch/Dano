@@ -227,6 +227,7 @@ try {
         assert.equal(exported.headers.get('cache-control'), 'no-store');
         assert(!JSON.stringify(await exported.json()).includes(process.env.DANO_FIXTURE_MEMORY_MANAGEMENT_KEY));
       }
+      const boundUsers = [];
       for (const entry of clients) {
         const boundUserId = `u_${createHash('sha256').update(JSON.stringify([memoryAccountId, entry.id])).digest('hex')}`;
         const response = await fetch(`${process.env.DANO_FIXTURE_MEMORY_BASE_URL}/api/v1/admin/accounts/${memoryAccountId}/users?name=${encodeURIComponent(boundUserId)}`, {
@@ -244,6 +245,34 @@ try {
         assert.equal(identity.role, 'user');
         assert.equal(identity.user_id, boundUserId);
         assert.equal(identity.account_id, memoryAccountId);
+        boundUsers.push({ userId: boundUserId, key: users[0].api_key });
+      }
+      const marker = `T11_${runIdentity.replaceAll('-', '')}`;
+      const uri = `viking://user/${boundUsers[0].userId}/memories/isolated-fact.md`;
+      const memoryBase = `${process.env.DANO_FIXTURE_MEMORY_BASE_URL}/api/v1`;
+      const write = await fetch(`${memoryBase}/content/write`, { method: 'POST',
+        headers: { 'X-API-Key': boundUsers[0].key, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uri, content: `# Synthetic isolation fact\n${marker}\n`, mode: 'create', wait: true, timeout: 120 }) });
+      assert.equal(write.status, 200, 'Alice memory write failed');
+      const readUrl = `${memoryBase}/content/read?uri=${encodeURIComponent(uri)}&raw=true`;
+      const ownRead = await fetch(readUrl, { headers: { 'X-API-Key': boundUsers[0].key } });
+      assert.equal(ownRead.status, 200, 'Alice memory readback failed');
+      assert((await ownRead.text()).includes(marker));
+      const foreignRead = await fetch(readUrl, { headers: {
+        'X-API-Key': boundUsers[1].key,
+        'X-OpenViking-Account': memoryAccountId,
+        'X-OpenViking-User': boundUsers[0].userId,
+      } });
+      assert.notEqual(foreignRead.status, 200, 'Bob read Alice memory with forged headers');
+      assert(!(await foreignRead.text()).includes(marker));
+      for (let index = 0; index < clients.length; index++) {
+        const entry = clients[index];
+        const response = await fetch(`${origin}/api/clients/${entry.client.id}/memory/export`, {
+          headers: { authorization: `Bearer ${token(entry.id)}` },
+        });
+        assert.equal(response.status, 200);
+        const containsAlice = JSON.stringify(await response.json()).includes(marker);
+        assert.equal(containsAlice, index === 0, 'Dano export crossed owner boundary');
       }
     }
     if (realService) {
@@ -292,7 +321,7 @@ try {
     sequentialCapacityVerified: capacityMode,
     shutdownMode: crashHost ? 'host-killed' : crashSearch ? 'search-killed' : 'graceful',
     shutdownReclaimsChildren: true, browserVerified: false, modelVerified: realService,
-    realMemoryServiceVerified: realMemoryService }));
+    realMemoryServiceVerified: realMemoryService, realMemoryContentIsolationVerified: realMemoryService }));
 } finally {
   stop.abort();
   await serving.catch(() => {});
