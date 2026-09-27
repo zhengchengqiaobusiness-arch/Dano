@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { citationErrors, keysFromPostData, requestIndexRow } from "../src/skillpack/request-keys.mjs";
+import { citationErrors, collapseRequestIndex, keysFromPostData, requestIndexRow } from "../src/skillpack/request-keys.mjs";
 
 const body = {
   creator: "1",
@@ -55,6 +55,19 @@ test("empty values and a credential-issuing response stay facts on the request",
   const plain = requestIndexRow({ id: "req_1", method: "GET", path: "/list", response_body: JSON.stringify({ data: { id: 1 } }) });
   assert.equal(plain.issues_credential, undefined);
   assert.equal(plain.empty, undefined);
+});
+
+test("repeated requests collapse to one row per method and path", () => {
+  const rows = collapseRequestIndex([
+    { id: "req_1", method: "GET", path: "/poll", keys: ["a"], empty: ["a"] },
+    { id: "req_2", method: "GET", path: "/poll", keys: ["b"], issues_credential: true },
+    { id: "req_3", method: "POST", path: "/poll", keys: ["c"] },
+  ]);
+  assert.equal(rows.length, 2);
+  const get = rows.find((row) => row.method === "GET");
+  assert.deepEqual(get.keys, ["a", "b"]);
+  assert.deepEqual(get.empty, ["a"]);
+  assert.equal(get.issues_credential, true);
 });
 
 test("a key in another function does not satisfy the function that sends the path", () => {

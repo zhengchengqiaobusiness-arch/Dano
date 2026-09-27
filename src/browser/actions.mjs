@@ -151,7 +151,13 @@ async function perform(recordingId, input) {
           chooserArm.stop();
           const message = String(error?.message || "click_failed").split("\n")[0];
           logLine(`[browser] click failed ${message}`);
-          return { ok: false, error: message, requests: requestsDuring(), snapshot: await takeSnapshot(recordingId) };
+          return {
+            ok: false,
+            error: "click_timeout",
+            hint: "这一下没有点中。只用返回的 snapshot 里的 ref。",
+            requests: requestsDuring(),
+            snapshot: await takeSnapshot(recordingId),
+          };
         }
       }
       if (!chooser) {
@@ -161,33 +167,6 @@ async function perform(recordingId, input) {
         ]);
       }
       chooserArm.stop();
-      if (!chooser) {
-        const dialog = state.page.locator("[role=dialog]").last();
-        const dialogInput = (await dialog.count().catch(() => 0))
-          ? ((await dialog.locator("input[type=file]").count().catch(() => 0))
-            ? dialog.locator("input[type=file]").last()
-            : state.page.locator("input[type=file]").last())
-          : null;
-        if (dialogInput && await dialogInput.count().catch(() => 0)) {
-          const dir = path.join(recordingDir(recordingId), "uploads");
-          await mkdir(dir, { recursive: true });
-          const filePath = path.join(dir, "attachment.png");
-          await writeFile(filePath, PROBE_PNG);
-          await dialogInput.setInputFiles(filePath).catch(() => {});
-          await waitForAction(recordingId, actionId);
-          const requests = requestsDuring();
-          if (requests.length) {
-            return {
-              ok: true,
-              uploaded: true,
-              clicked: hit.label || "",
-              requests,
-              snapshot: await takeSnapshot(recordingId),
-              hint: "对话框里的文件已写入。采用 requests。不要点关闭。",
-            };
-          }
-        }
-      }
       if (chooser) {
         state.pendingFileChooser = null;
         const dir = path.join(recordingDir(recordingId), "uploads");

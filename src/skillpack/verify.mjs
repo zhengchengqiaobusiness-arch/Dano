@@ -5,7 +5,7 @@ import { listEvidence, getEvidence } from "../evidence/store.mjs";
 import { handbookChanged, writeRuntimeConfig } from "./files.mjs";
 import { hasCredentialHeaders } from "../auth-vault.mjs";
 import { upsertCatalog } from "./catalog.mjs";
-import { requestIndexRow, citationErrors, citedPaths } from "./request-keys.mjs";
+import { requestIndexRow, citationErrors, citedPaths, collapseRequestIndex } from "./request-keys.mjs";
 import { nonStdlibImports } from "./stdlib-imports.mjs";
 import { GUIDE_NAMES } from "../agent/guides.mjs";
 
@@ -57,10 +57,6 @@ function commandWrites(line, clientText) {
   if (pos < 0) return false;
   const window = clientText.slice(pos, pos + 2500).split(/\ndef |\nasync def /)[0];
   return /method\s*=\s*["'](POST|PUT|PATCH|DELETE)["']/i.test(window);
-}
-
-function isTemplate(line) {
-  return /[<>[\]]/.test(line);
 }
 
 export function actionEvidenceSummary(action, result) {
@@ -133,8 +129,13 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     if (!readGuides.has(name)) errors.push({ code: "guide_not_read", name });
   }
   const skillMd = texts["SKILL.md"] || "";
-  if (skillMd && !/^---\n[\s\S]*?\bname:\s*\S+/m.test(skillMd)) {
-    errors.push({ code: "not_invocable", file: "SKILL.md", hint: "开头写 name 和 description，调用方靠 description 启用" });
+  const front = skillMd.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (skillMd && (!front || !/^name:\s*\S/m.test(front[1]) || !/^description:\s*\S/m.test(front[1]))) {
+    errors.push({
+      code: "not_invocable",
+      file: "SKILL.md",
+      hint: "文件从 --- 开始，写 name 和 description，再写一行 ---。调用方靠 description 启用",
+    });
   }
   if (/disable-model-invocation:\s*true/.test(skillMd)) {
     errors.push({ code: "not_invocable", file: "SKILL.md", hint: "不要写 disable-model-invocation，否则调用方的智能体不会启用" });
@@ -196,8 +197,9 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   const verifyRows = evidence.filter((item) => item.kind === "verify");
   for (const line of mustRun) {
     let ran = false;
-    const runs = isTemplate(line)
-      ? verifyRows.filter((item) => subcommand((item.argv || []).join(" ")) === subcommand(line))
+    const sub = subcommand(line);
+    const runs = sub
+      ? verifyRows.filter((item) => subcommand((item.argv || []).join(" ")) === sub)
       : verifyRows.filter((item) => sameCommand((item.argv || []).join(" "), line));
     for (const row of runs) {
       if (row.ok === true) {
@@ -216,8 +218,8 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
         code: "command_not_run",
         command: line,
         file: "SKILL.md",
-        hint: isTemplate(line)
-          ? "这一行是说明。用真实参数跑同名子命令即可，不要把尖括号原样当参数"
+        hint: sub
+          ? "这个子命令跑过一次即可。会变的参数写成 <参数名>，跑的时候用证据里的值"
           : "run_skill_command 的 argv 用空格拼起来要等于这一行。没有鉴权而停止可以；其它失败要先改到能跑",
       });
     }
@@ -268,7 +270,7 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   if (!errors.length && hasCredentialHeaders(headers)) status = "skill_ready";
   else if (!errors.length) status = "skill_written_needs_auth";
   if (errors.some((item) => item.code === "auth_expired")) status = "verify_failed";
-  const verify = { ok: status !== "verify_failed", status, errors, requests, filled: filledLabels(evidence) };
+  const verify = { ok: status !== "verify_failed", status, errors, requests: collapseRequestIndex(requests), filled: filledLabels(evidence) };
   if (status === "skill_ready" || status === "skill_written_needs_auth") {
     await upsertCatalog({ ...recording, id: recordingId, skillId: recording.skillId, status, skillDir: dir });
   }

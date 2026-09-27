@@ -206,6 +206,27 @@ test("a key counts only inside the function that cites the path", async () => {
   assert.ok(result.requests.some((item) => item.path === "/api/save" && item.keys.includes("state") && item.keys.includes("owner")));
 });
 
+test("one run of a subcommand covers extra sample arguments, and the handbook needs a frontmatter block", async () => {
+  await useData();
+  const shape = { id: "rec_verify_cmd", tenant: "", subsystem: "app", skillId: "app.rec_verify_cmd", startUrl: "http://127.0.0.1/" };
+  const dir = skillDir(shape.skillId);
+  await mkdir(path.join(dir, "scripts"), { recursive: true });
+  await mkdir(path.join(dir, "references"), { recursive: true });
+  await mkdir(path.join(dir, "config"), { recursive: true });
+  await writeFile(path.join(dir, "SKILL.md"), "name: sample\ndescription: sample\npython scripts/client.py --list\npython scripts/client.py --list --category 示例\n");
+  await writeFile(path.join(dir, "scripts/client.py"), "import json\n");
+  await writeFile(path.join(dir, "references/api.md"), "");
+  await writeFile(path.join(dir, "config/runtime.json"), "{}\n");
+  await writeFile(path.join(dir, "config/auth.local.json"), "{\"headers\":{}}\n");
+  await appendEvidence(shape.id, { kind: "verify", ok: true, argv: ["python", "scripts/client.py", "--list"], summary: "python scripts/client.py --list" });
+  const open = await verifySkill(dir, shape.id, shape);
+  assert.ok(open.errors.some((item) => item.code === "not_invocable" && item.hint.includes("---")));
+  assert.equal(open.errors.some((item) => item.command && item.command.includes("--category")), false);
+  await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\npython scripts/client.py --list\npython scripts/client.py --list --category 示例\n");
+  const closed = await verifySkill(dir, shape.id, shape);
+  assert.equal(closed.errors.some((item) => item.code === "not_invocable"), false);
+});
+
 test("a click that writes a file is recorded as an upload, and a credential request must be replayed", async () => {
   assert.equal(actionEvidenceSummary("click", { uploaded: true, clicked: "button \"上传\"" }), "upload:button \"上传\"");
   assert.equal(actionEvidenceSummary("fill", { filled: ["textbox \"标题\""] }), "fill:textbox \"标题\"");

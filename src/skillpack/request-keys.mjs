@@ -106,6 +106,28 @@ export function windowsForPath(text, path) {
   return windows;
 }
 
+export function collapseRequestIndex(rows) {
+  const grouped = new Map();
+  for (const row of rows || []) {
+    const id = `${row.method || ""}\n${row.path || ""}`;
+    const prev = grouped.get(id);
+    if (!prev) {
+      grouped.set(id, {
+        ...row,
+        keys: [...(row.keys || [])],
+        ...(row.empty ? { empty: [...row.empty] } : {}),
+      });
+      continue;
+    }
+    prev.keys = [...new Set([...(prev.keys || []), ...(row.keys || [])])];
+    const empty = new Set([...(prev.empty || []), ...(row.empty || [])]);
+    if (empty.size) prev.empty = [...empty];
+    else delete prev.empty;
+    if (row.issues_credential) prev.issues_credential = true;
+  }
+  return [...grouped.values()];
+}
+
 export function citationErrors(skillText, requests, file = "") {
   const errors = [];
   const seen = new Set();

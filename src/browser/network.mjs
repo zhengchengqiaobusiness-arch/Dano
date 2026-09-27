@@ -2,7 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { appendEvidence } from "../evidence/store.mjs";
-import { requestIndexRow } from "../skillpack/request-keys.mjs";
+import { collapseRequestIndex, requestIndexRow } from "../skillpack/request-keys.mjs";
 import { noteLoginBody, noteRequestHeaders } from "../auth-vault.mjs";
 
 const NOISE = /sockjs|websocket|favicon\.ico/i;
@@ -143,7 +143,7 @@ export function listNetwork(recordingId, { after_id = "", action_id = "" } = {})
 }
 
 export function requestKeyIndex(recordingId) {
-  return bag(recordingId).items.map((row) => requestIndexRow(row));
+  return collapseRequestIndex(bag(recordingId).items.map((row) => requestIndexRow(row)));
 }
 
 export function getNetwork(recordingId, id) {
