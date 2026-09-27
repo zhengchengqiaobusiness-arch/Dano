@@ -46,6 +46,7 @@ const primaryUsers = actualMemoryService
   : ['alice-fixture', 'bob-fixture'];
 const memoryFailure = process.argv.includes('--memory-failure');
 let memoryAccountId, corruptOwnerPath, realModel;
+let memoryHttpBoundaryProbes = 0;
 if (memoryFailure) assert(realService, 'Memory failure check requires the real model/service configuration');
 if (realMemoryService) assert(withMemory && useCli, 'Real memory service mode requires --cli --memory');
 if (realService) {
@@ -181,25 +182,42 @@ try {
   }
   if (withMemory) {
     const aliceId = clients[0].client.id;
-    for (const path of [
-      `/api/clients/${aliceId}/memory/settings`,
-      `/api/clients/${aliceId}/memory/operations`,
-      `/api/clients/${aliceId}/memory/operations/nonexistent/content/0`,
-      `/api/clients/${aliceId}/memory/export`,
-    ]) {
-      assert.equal((await fetch(`${origin}${path}`)).status, 401);
-      assert.equal((await fetch(`${origin}${path}`, {
-        headers: { authorization: 'Bearer invalid-token' } })).status, 401);
-      assert.equal((await fetch(`${origin}${path}`, {
-        headers: { authorization: `Bearer ${token(clients[1].id)}` } })).status, 403);
+    const memoryPath = `/api/clients/${aliceId}/memory`;
+    const jobId = '00000000-0000-4000-8000-000000000001';
+    const boundaryRoutes = [
+      ['GET', '/settings'],
+      ['PUT', '/settings', { enabled: false }],
+      ['PUT', '/settings', { automaticCollection: false }],
+      ['GET', '/operations'],
+      ['GET', '/operations/nonexistent'],
+      ['GET', '/operations/nonexistent/content/0'],
+      ['GET', '/export'],
+      ['GET', '/governance'],
+      ['POST', '/governance', { action: 'invalid' }],
+      ['GET', `/governance/${jobId}`],
+      ['GET', `/governance/${jobId}/review`],
+      ['POST', `/governance/${jobId}/review`, {}],
+    ];
+    for (const [method, suffix, body] of boundaryRoutes) {
+      for (const [identity, authorization, expected] of [
+        ['missing', undefined, 401],
+        ['invalid', 'Bearer invalid-token', 401],
+        ['foreign', `Bearer ${token(clients[1].id)}`, 403],
+      ]) {
+        const response = await fetch(`${origin}${memoryPath}${suffix}`, {
+          method,
+          headers: { ...(authorization ? { authorization } : {}),
+            ...(body ? { 'content-type': 'application/json' } : {}),
+            ...(identity === 'foreign' ? {
+              'X-OpenViking-Account': memoryAccountId ?? 'forged-account',
+              'X-OpenViking-User': clients[0].id,
+            } : {}) },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+        });
+        assert.equal(response.status, expected, `${identity} ${method} ${suffix} crossed Dano memory boundary`);
+        memoryHttpBoundaryProbes++;
+      }
     }
-    const mutation = { method: 'PUT', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ enabled: true }) };
-    assert.equal((await fetch(`${origin}/api/clients/${aliceId}/memory/settings`, mutation)).status, 401);
-    assert.equal((await fetch(`${origin}/api/clients/${aliceId}/memory/settings`, {
-      ...mutation, headers: { ...mutation.headers, authorization: 'Bearer invalid-token' } })).status, 401);
-    assert.equal((await fetch(`${origin}/api/clients/${aliceId}/memory/settings`, {
-      ...mutation, headers: { ...mutation.headers, authorization: `Bearer ${token(clients[1].id)}` } })).status, 403);
     const settings = async (entry, enabled) => {
       const response = await fetch(`${origin}/api/clients/${entry.client.id}/memory/settings`, {
         method: enabled === undefined ? 'GET' : 'PUT',
@@ -317,7 +335,8 @@ try {
   assert.deepEqual(remaining, []);
   console.log(JSON.stringify({ actualHttpHost: true, cliEntrypoint: useCli, hostNonRoot: true, twoWorkerIdentities: true,
     exclusiveSupervisor: true, searchNonRoot: true, memorySettingsVerified: withMemory,
-    memoryHttpBoundaryVerified: withMemory, memoryFailureVerified: memoryFailure,
+    memoryHttpBoundaryVerified: withMemory, memoryHttpBoundaryProbes,
+    memoryFailureVerified: memoryFailure,
     sequentialCapacityVerified: capacityMode,
     shutdownMode: crashHost ? 'host-killed' : crashSearch ? 'search-killed' : 'graceful',
     shutdownReclaimsChildren: true, browserVerified: false, modelVerified: realService,

@@ -1062,7 +1062,7 @@ establish Dano model answers.
 | T-06/07 | Actual old `session_unknown` recovery and credential-store replay; one restored-volume queue resumed to `message_delivered` without duplicate operation | All crash windows, ready completion, rotation, user switch and anonymous transfer on fixed service |
 | T-08 | Real Browser new-chat recall, including one correct post-restart answer; bounded reranker selection | Short-session extraction, no-result/timeout and model-answer repetitions |
 | T-09/10 | Real-service correction/deletion/replay; Browser targeted forget with unrelated recall preserved, defaults-off and cross-tab pause; runtime and authenticated HTTP paused-management tests | Complete correction/forget/pause/restore state matrix ×3 |
-| T-11 | Protected file access denied; real USER-key 403 probes; `0.2.52` and `0.2.53` protected images passed synthetic HTTP/tool isolation; `0.2.55` protected image passed two real USER-key bindings, memory HTTP 401/403 probes, one forged-header cross-user content read denial and own-only Dano exports | Complete multi-route content/HTTP matrix with real USER keys, then repeat with independently authenticated OA Browser users |
+| T-11 | Protected file access denied; real USER-key 403 probes; `0.2.52` and `0.2.53` protected images passed synthetic HTTP/tool isolation; `0.2.55` protected image passed two real USER-key bindings, 36 Dano memory HTTP identity probes, one forged-header cross-user content read denial and own-only Dano exports | Complete multi-route content/HTTP matrix with real USER keys, then repeat with independently authenticated OA Browser users |
 | T-12 | Final-image Browser form, generic Skill, image, bash and Pi compression; generated leave Skill choice/form rendered in a disposable layer | Working business options/authentication and complete final-image repetition |
 | T-13 | Clean deploy, candidate upgrade, matched old-data rollback, two-owner supplied-ledger replay; automatic-journal old-volume two-owner deletion replay and current-service two-owner deletion/retry; one restored-volume old queue resumed through source append; focused synthetic new queued, `session_unknown` and later-phase writer overlay; real-service message-phase and cross-owner guard across old/new OpenViking volume generations | Old queue through ready, multi-user queue, real credential/new writer through commit and ready, old-version multi-user reconciliation |
 | T-14 | Five-user, 100-complete-request MiMo candidate-7 run passed semantic recall, injection, wait and token limits in an instrumented disposable container; full-source image repeated 100 complete requests with 70/70 recall answers; byte-identical prompt-layer image passed matched on/off cost; final fixed Browser save-ready p95 35 s with 10/10 source readbacks | Complete other fixed categories, integration and causal interpretation |
@@ -1279,6 +1279,16 @@ USER key. Bob's USER key could not read that content even with forged identity
 headers, and each user's Dano export contained only that user's content. The
 same [receipt](evidence/issue477-0255-real-user-key-http.json) records this
 single cross-user content check, not the full T-11 matrix.
+The default-apt `0.2.55` protected image subsequently executed the updated
+HTTP fixture with no network or credentials. Twelve Dano memory route/method
+combinations each rejected missing and invalid JWTs with 401 and a foreign JWT
+with forged OpenViking account/user headers with 403: 36/36 assertions passed.
+Settings, operation list/detail/content, export, and governance status/review
+routes were included. Graceful shutdown reclaimed the host, search daemon and
+workers. The [sanitized boundary receipt](evidence/issue477-0255-memory-http-boundary.json)
+is Dano-entry synthetic-JWT evidence; it does not establish real OA identity,
+OpenViking-backed content for every route, model behavior or full T-11 release
+acceptance.
 
 Read-only inventory of the configured production host on 2026-09-27 showed
 `dano-app:rel-20260922-143917`; its container mount destinations did not

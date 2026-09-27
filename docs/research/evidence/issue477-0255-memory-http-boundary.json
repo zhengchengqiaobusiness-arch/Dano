@@ -1,0 +1,13 @@
+{
+  "scope": "protected Dano memory HTTP identity boundary",
+  "date": "2026-09-28",
+  "image": "localhost/dano465-protected:0.2.55-default",
+  "imageId": "751e69d1fa607991b1e7a6d4454b1211fb8d63e3f22bf7dd64444b6e1321574b",
+  "fixture": "docs/research/fixtures/protected-supervisor-http.mjs --cli --memory",
+  "container": "disposable, network disabled, no published ports or credentials",
+  "identityCases": ["missing bearer -> 401", "invalid bearer -> 401", "foreign bearer with forged OpenViking account/user headers -> 403"],
+  "routes": ["GET /settings", "PUT /settings enabled", "PUT /settings automaticCollection", "GET /operations", "GET /operations/{id}", "GET /operations/{id}/content/0", "GET /export", "GET /governance", "POST /governance", "GET /governance/{jobId}", "GET /governance/{jobId}/review", "POST /governance/{jobId}/review"],
+  "probeCount": 36,
+  "result": "all 36 HTTP identity assertions passed; graceful shutdown reclaimed host, search daemon and workers",
+  "limitations": ["synthetic JWT users", "no OpenViking connection in this run", "no OA Browser login", "no model call", "no actual memory operation content readback or full T-11 release acceptance"]
+}
