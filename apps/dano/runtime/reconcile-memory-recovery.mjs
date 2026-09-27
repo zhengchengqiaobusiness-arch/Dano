@@ -150,8 +150,17 @@ function noUnreconciledWrites(oldState, latest) {
     assert.deepEqual(latest, oldState, "RECOVERY_STATE_ROLLBACK");
   }
   const oldIds = Object.keys(oldState.operations ?? {}).sort();
-  assert.deepEqual(Object.keys(latest.operations ?? {}).sort(), oldIds,
-    "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  const newIds = Object.keys(latest.operations ?? {}).filter(id => !oldState.operations?.[id]);
+  // Delivery persists session_unknown before its first remote request. A new
+  // queued operation still has its payload and has made no remote write, so
+  // overlaying the recovery state can resume it safely after rollback.
+  for (const id of newIds) {
+    const operation = latest.operations[id];
+    assert.ok(operation.id === id && operation.phase === "queued"
+      && typeof operation.payload === "string" && operation.payload.trim(),
+      "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  }
+  assert.ok(oldIds.every(id => latest.operations?.[id]), "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
   const stableOperation = operation => Object.fromEntries(Object.entries(operation)
     .filter(([field]) => !["phase", "payload", "updatedAt", "errorCode",
       "reconciliationPhase", "deliveryAttempts", "nextAttemptAt"].includes(field)));

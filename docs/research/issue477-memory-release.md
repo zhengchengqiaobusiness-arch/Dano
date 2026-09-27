@@ -1037,7 +1037,7 @@ the 60/60 and 30/30 figures above measure selection, not model answers.
 | AC-08 | Browser defaults-off, separate collection consent/revocation, management and one same-owner cross-tab pause/recall/resume flow; runtime tests cover export, targeted forget and clear while paused, and authenticated HTTP tests cover export and clear while paused | All governance transitions, independent two-Session pause, real Browser export and blocked-write recovery ×3 |
 | AC-09/10 | Old ambiguous queue recovered on real service; a stopped-volume restore kept one `session_unknown` operation and resumed its source through `message_delivered`; ordinary chat survived selected memory failures | Full lifecycle/fault matrix, ready completion, truthful explicit failure and no duplicate/cross-owner replay |
 | AC-11 | Final-image Browser form, generic Skill, image, bash and Pi compression; an isolated production-generated leave Skill was discovered and rendered its operation choice and six-field form | Business options/authentication failed; complete OA and final-image regression matrix |
-| AC-12 | Clean stack, old-snapshot replay, two-owner supplied-ledger replay, candidate upgrade and matched rollback; automatic-journal matched old-volume two-owner deletion replay and current-service two-owner deletion/retry | Real multi-owner source/revocation and old-version rollback, arbitrary upgrade-window reconciliation |
+| AC-12 | Clean stack, old-snapshot replay, two-owner supplied-ledger replay, candidate upgrade and matched rollback; automatic-journal matched old-volume two-owner deletion replay and current-service two-owner deletion/retry; focused recovery of a new unsent writer | Real multi-owner source/revocation and old-version rollback, later-phase upgrade-window writer reconciliation |
 | AC-13 | Frozen 80-case dataset; 20 isolation cases ×3 passed against real OpenViking; candidate-7 traced workload had 70/70 semantic recall answers and 30/30 irrelevant omissions; full-source image repeated 100 complete requests with 70/70 recall answers; byte-identical prompt-layer image has matched on/off cost evidence; final 0.2.46 Browser save-ready run reached `ready` with correct readback in all 10 cases, p95 35 s | Other five categories ×3, Dano/Browser isolation and causal latency interpretation |
 
 | Spec test | Current evidence | Missing acceptance |
@@ -1050,7 +1050,7 @@ the 60/60 and 30/30 figures above measure selection, not model answers.
 | T-09/10 | Real-service correction/deletion/replay; Browser targeted forget with unrelated recall preserved, defaults-off and cross-tab pause; runtime and authenticated HTTP paused-management tests | Complete correction/forget/pause/restore state matrix ×3 |
 | T-11 | Protected file access denied; real USER-key 403 probes | Full unauthenticated/401/403/native-tool/symlink/env/HTTP matrix |
 | T-12 | Final-image Browser form, generic Skill, image, bash and Pi compression; generated leave Skill choice/form rendered in a disposable layer | Working business options/authentication and complete final-image repetition |
-| T-13 | Clean deploy, candidate upgrade, matched old-data rollback, two-owner supplied-ledger replay; automatic-journal old-volume two-owner deletion replay and current-service two-owner deletion/retry; one restored-volume old queue resumed through source append | Old queue through ready, multi-user queue, credential/new writer and old-version multi-user reconciliation |
+| T-13 | Clean deploy, candidate upgrade, matched old-data rollback, two-owner supplied-ledger replay; automatic-journal old-volume two-owner deletion replay and current-service two-owner deletion/retry; one restored-volume old queue resumed through source append; focused new-queued-writer overlay | Old queue through ready, multi-user queue, credential/new writer past send boundary and old-version multi-user reconciliation |
 | T-14 | Five-user, 100-complete-request MiMo candidate-7 run passed semantic recall, injection, wait and token limits in an instrumented disposable container; full-source image repeated 100 complete requests with 70/70 recall answers; byte-identical prompt-layer image passed matched on/off cost; final fixed Browser save-ready p95 35 s with 10/10 source readbacks | Complete other fixed categories, integration and causal interpretation |
 
 Review found that older correction intents keep document bodies inline in the
@@ -1131,8 +1131,13 @@ at the checkpoint, including its source and collection provenance. It permits
 the existing blocked-state transition and transient retry metadata, but rejects
 changed source identity before any remote request. The focused tests cover both
 the rejection and a legitimate queued-to-blocked transition. New operations
-created after the checkpoint still require explicit reconciliation, so this
-hardening does not close the upgrade-window writer gate.
+created after the checkpoint in the `queued` phase with their payload intact
+can now be overlaid: the published delivery state machine persists
+`session_unknown` before its first remote request, so these writers have not
+sent data. Focused rollback tests confirm that the payload survives and that a
+new `session_unknown` writer or a queued writer missing its payload is rejected
+before remote contact. Later phases still require explicit reconciliation;
+this narrow recovery rule does not close the upgrade-window writer gate.
 Read-only inventory of the configured production host on 2026-09-27 showed
 `dano-app:rel-20260922-143917`; its container mount destinations did not
 include `/var/lib/dano-memory-recovery`, and the Dano-related Docker volume

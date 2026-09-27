@@ -247,6 +247,55 @@ it("accepts an old queued writer that was explicitly blocked after the checkpoin
     .resolves.toEqual({ owners: 1, events: 0 });
 });
 
+it("restores a new unsent writer after the checkpoint and rejects one past the send boundary", async () => {
+  const f = await fixture();
+  await checkpoint(f.data, f.recovery, f.checkpointFile);
+  const statePath = join(f.data, "host-state", "owner-a", "state", "memory", "state.json");
+  const oldBytes = await readFile(statePath);
+  const id = "c".repeat(64);
+  await new RecoveryStateStore(f.store, f.journal).transact(state => {
+    state.operations[id] = { id, owner: f.owner, scope: null, kind: "explicit",
+      authorizationEpoch: state.authorization.epoch,
+      source: { sessionId: "chat", entryId: "new", branchId: "root", contentVersion: "1" },
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      phase: "queued", remoteSessionId: "new-remote-session", payload: "new synthetic fact" };
+  });
+  await writeFile(statePath, oldBytes);
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile, true))
+    .resolves.toEqual({ owners: 1, events: 0 });
+  vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+  vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments").mockResolvedValue([]);
+  await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+  expect((await f.store.read()).operations[id]).toMatchObject({ phase: "queued", payload: "new synthetic fact" });
+
+  vi.restoreAllMocks();
+  const second = await fixture();
+  await checkpoint(second.data, second.recovery, second.checkpointFile);
+  const secondPath = join(second.data, "host-state", "owner-a", "state", "memory", "state.json");
+  const secondOldBytes = await readFile(secondPath);
+  await new RecoveryStateStore(second.store, second.journal).transact(state => {
+    state.operations[id] = { id, owner: second.owner, scope: null, kind: "explicit",
+      authorizationEpoch: state.authorization.epoch,
+      source: { sessionId: "chat", entryId: "new", branchId: "root", contentVersion: "1" },
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      phase: "session_unknown", remoteSessionId: "new-remote-session", payload: "new synthetic fact" };
+  });
+  await writeFile(secondPath, secondOldBytes);
+  const contacted = vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity");
+  await expect(reconcile(second.config, second.data, second.recovery, second.checkpointFile))
+    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  expect(contacted).not.toHaveBeenCalled();
+  await writeFile(secondPath, await readFile(join(second.recovery, "account", "alice", "state.json")));
+  await new RecoveryStateStore(second.store, second.journal).transact(state => {
+    state.operations[id]!.phase = "queued";
+    delete state.operations[id]!.payload;
+  });
+  await writeFile(secondPath, secondOldBytes);
+  await expect(reconcile(second.config, second.data, second.recovery, second.checkpointFile, true))
+    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  expect(contacted).not.toHaveBeenCalled();
+});
+
 it("preflights both owners before replaying either owner's deletion", async () => {
   const f = await fixture();
   const bob = { accountId: "account", userId: "bob" };
