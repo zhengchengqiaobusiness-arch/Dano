@@ -25,8 +25,21 @@ async function keyIdentity(baseUrl, key, timeoutMs) {
   } catch { fail("MEMORY_IDENTITY_CHECK_FAILED"); }
 }
 
-/** Dano and OpenViking must be quiesced by the operator before this offline
- * update. Only an existing encrypted USER record may be replaced. */
+async function requireOldKeyRevoked(baseUrl, key, timeoutMs) {
+  let response;
+  try {
+    response = await fetch(`${baseUrl}/api/v1/sessions`, {
+      redirect: "error", signal: AbortSignal.timeout(timeoutMs),
+      headers: { "X-API-Key": key },
+    });
+  } catch { fail("MEMORY_OLD_USER_KEY_REVOCATION_UNPROVEN"); }
+  if (response.status === 401 || response.status === 403) return;
+  if (response.status === 200) fail("MEMORY_OLD_USER_KEY_STILL_ACTIVE");
+  fail("MEMORY_OLD_USER_KEY_REVOCATION_UNPROVEN");
+}
+
+/** Dano must be stopped while OpenViking remains available for identity checks.
+ * Only an existing encrypted USER record may be replaced. */
 export async function replaceMemoryUserKey(configRoot, dataRoot, userId, newKey) {
   assert.ok([configRoot, dataRoot].every(path => isAbsolute(path) && resolve(path) === path)
     && validId(userId), "INVALID_ARGUMENTS");
@@ -59,12 +72,7 @@ export async function replaceMemoryUserKey(configRoot, dataRoot, userId, newKey)
     || next.account_id !== owner.accountId || next.user_id !== owner.userId) {
     fail("MEMORY_NEW_USER_KEY_OWNER_MISMATCH");
   }
-  const previous = await keyIdentity(url.origin, oldKey, config.requestTimeoutMs);
-  if (previous?.auth_mode === "api_key") {
-    fail(previous.account_id === owner.accountId && previous.user_id === owner.userId
-      ? "MEMORY_OLD_USER_KEY_STILL_ACTIVE" : "MEMORY_OLD_USER_KEY_IDENTITY_CHANGED");
-  }
-  if (previous !== null && previous?.auth_mode !== "none") fail("MEMORY_OLD_USER_KEY_REVOCATION_UNPROVEN");
+  await requireOldKeyRevoked(url.origin, oldKey, config.requestTimeoutMs);
   await store.write(owner, newKey);
   assert.equal(await store.read(owner), newKey, "MEMORY_CREDENTIAL_REPLACEMENT_FAILED");
   return { replaced: 1 };

@@ -38,6 +38,12 @@ const realService = process.argv.includes('--real-service');
 const realMemoryService = process.argv.includes('--real-memory-service');
 const rotateUserKey = process.argv.includes('--rotate-user-key');
 const actualMemoryService = realService || realMemoryService;
+if (rotateUserKey) {
+  const dataRoot = join(root, 'protected-data');
+  options.hostStateRoot = join(dataRoot, 'host-state');
+  await mkdir(dataRoot, { mode: 0o700 }); await chown(dataRoot, hostUid, hostGid);
+  await mkdir(options.hostStateRoot, { mode: 0o700 }); await chown(options.hostStateRoot, hostUid, hostGid);
+}
 // The remote service outlives disposable containers. Use new authenticated
 // test identities so a prior run's extracted facts cannot satisfy or suppress
 // this run's save/recall assertions.
@@ -75,7 +81,12 @@ if (realService) {
   environment.NODE_EXTRA_CA_CERTS = process.env.NODE_EXTRA_CA_CERTS;
 }
 if (withMemory) {
-  options.memoryConfigDirectory = join(root, 'private-config');
+  if (rotateUserKey) {
+    const configRoot = join(root, 'protected-config');
+    await mkdir(configRoot, { mode: 0o700 }); await chown(configRoot, hostUid, hostGid);
+  }
+  options.memoryConfigDirectory = rotateUserKey
+    ? join(root, 'protected-config', 'memory') : join(root, 'private-config');
   await mkdir(options.memoryConfigDirectory, { mode: 0o700 });
   await chown(options.memoryConfigDirectory, hostUid, hostGid);
   options.memoryRecoveryDirectory = join(root, 'memory-recovery');
@@ -354,14 +365,17 @@ try {
     assert.equal(rotatedRead.status, 200, 'NEW_USER_KEY_CONTENT_READ_FAILED');
     assert((await rotatedRead.text()).includes(rotation.marker), 'NEW_USER_KEY_CONTENT_MISSING');
     const helper = spawn('/usr/bin/setpriv', ['--reuid', String(hostUid), '--regid', String(hostGid),
-      '--clear-groups', process.execPath, process.env.DANO_FIXTURE_ROTATE_HELPER ?? '/replace-key.mjs',
-      options.memoryConfigDirectory, options.hostStateRoot, memoryAccountId, rotation.userId],
-    { env: { PATH: process.env.PATH, DANO_FIXTURE_SERVER: serverDir }, stdio: ['pipe', 'ignore', 'ignore'] });
+      '--clear-groups', process.execPath, '/app/runtime/replace-memory-user-key.mjs',
+      join(root, 'protected-config'), join(root, 'protected-data'), rotation.userId],
+    { env: { PATH: process.env.PATH }, stdio: ['pipe', 'ignore', 'pipe'] });
+    let replacementError = '';
+    helper.stderr.on('data', chunk => { replacementError = (replacementError + chunk).slice(0, 1024); });
     const replaced = new Promise((resolve, reject) => {
       helper.once('error', reject); helper.once('close', code => resolve(code));
     });
     helper.stdin.end(`${newKey}\n`);
-    assert.equal(await replaced, 0, 'PROTECTED_USER_KEY_REPLACEMENT_FAILED');
+    assert.equal(await replaced, 0,
+      `PROTECTED_USER_KEY_REPLACEMENT_FAILED_${/"code":"([A-Z0-9_]+)"/.exec(replacementError)?.[1] ?? 'UNKNOWN'}`);
 
     const restarted = spawn(process.execPath, [join(serverDir, 'protected-main.js'), profilePath],
       { env: environment, stdio: ['ignore', 'inherit', 'inherit'] });

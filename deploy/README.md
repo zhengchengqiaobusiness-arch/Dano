@@ -78,8 +78,9 @@ node /app/runtime/replace-memory-user-key.mjs \
 ```
 
 The command replaces only an existing encrypted credential. It verifies the
-new key's account and USER identity, proves the saved old key no longer has
-USER access, then reads the replacement back. It prints only a pass/fail code.
+new key's account and USER identity through `/health`, proves the saved old
+key is denied by the protected Sessions API, then reads the replacement back.
+It prints only a pass/fail code.
 Keep Dano stopped if the command fails; resolve the remote identity or private
 volume problem before retrying. Do not put either key in process arguments,
 environment variables, shell history or logs. This local step does not rotate

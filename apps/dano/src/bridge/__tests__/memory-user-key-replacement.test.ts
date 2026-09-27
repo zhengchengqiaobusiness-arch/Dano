@@ -43,8 +43,9 @@ function identity(key: string) {
 
 it("replaces only an existing credential after new owner and old revocation are verified", async () => {
   const f = await fixture();
-  const fetcher = vi.fn(async (_url: string, init: RequestInit) =>
-    Response.json(identity((init.headers as Record<string, string>)["X-API-Key"]!)));
+  const fetcher = vi.fn(async (url: string, init: RequestInit) =>
+    url.endsWith("/api/v1/sessions") ? new Response(null, { status: 403 })
+      : Response.json(identity((init.headers as Record<string, string>)["X-API-Key"]!)));
   vi.stubGlobal("fetch", fetcher);
   await expect(replaceMemoryUserKey(f.configRoot, f.dataRoot, f.owner.userId, "new-user-key"))
     .resolves.toEqual({ replaced: 1 });
@@ -62,12 +63,9 @@ it("preserves the old credential when the replacement belongs to another user", 
 
 it("refuses to replace an old key that still has owner access", async () => {
   const f = await fixture();
-  vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
-    const key = (init.headers as Record<string, string>)["X-API-Key"];
-    return Response.json(key === "old-user-key"
-      ? { auth_mode: "api_key", role: "user", account_id: "company", user_id: "alice" }
-      : identity("new-user-key"));
-  }));
+  vi.stubGlobal("fetch", vi.fn(async (url: string) =>
+    url.endsWith("/api/v1/sessions") ? Response.json({ status: "ok" })
+      : Response.json(identity("new-user-key"))));
   await expect(replaceMemoryUserKey(f.configRoot, f.dataRoot, f.owner.userId, "new-user-key"))
     .rejects.toThrow("MEMORY_OLD_USER_KEY_STILL_ACTIVE");
   expect(await f.store.read(f.owner)).toBe("old-user-key");
@@ -75,9 +73,9 @@ it("refuses to replace an old key that still has owner access", async () => {
 
 it("requires positive proof that the saved key lost USER access", async () => {
   const f = await fixture();
-  vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) =>
-    Response.json((init.headers as Record<string, string>)["X-API-Key"] === "old-user-key"
-      ? { status: "ok" } : identity("new-user-key"))));
+  vi.stubGlobal("fetch", vi.fn(async (url: string) =>
+    url.endsWith("/api/v1/sessions") ? new Response(null, { status: 503 })
+      : Response.json(identity("new-user-key"))));
   await expect(replaceMemoryUserKey(f.configRoot, f.dataRoot, f.owner.userId, "new-user-key"))
     .rejects.toThrow("MEMORY_OLD_USER_KEY_REVOCATION_UNPROVEN");
   expect(await f.store.read(f.owner)).toBe("old-user-key");
