@@ -1427,5 +1427,8 @@ restored owner with both a post-checkpoint whole-scope/owner clear and a new
 remote writer: merely proving that writer existed before replay is insufficient,
 because the clear would remove its documents. Targeted tests reproduce both
 windows. This fail-closed rule prevents silent loss; it does not yet reconcile
-such a clear plus new writer or close the upgrade-window T-13 gate. The
-`0.2.59` image and real-volume regression remain to be built and exercised.
+such a clear plus new writer or close the upgrade-window T-13 gate. The formal
+`0.2.59` protected image contains the matching product version and byte-identical
+recovery script; the build receipt is
+`docs/research/evidence/issue477-0259-protected-build.json`. A real-volume
+clear/new-writer regression and model/OA Browser acceptance remain open.
