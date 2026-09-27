@@ -1036,8 +1036,10 @@ Compared with the live [Issue #465 PRD](https://github.com/zhengchengqiaobusines
 and [Spec](https://github.com/zhengchengqiaobusiness-arch/Dano/issues/465#issuecomment-5674833976).
 "Partial" identifies evidence already collected; it is **not** acceptance.
 All thirteen ACs and fourteen T cases remain open until their complete
-requirement and required real-service/browser method pass. In particular,
-the 60/60 and 30/30 figures above measure selection, not model answers.
+requirement and required real-service/browser method pass. Historical
+retrieval and selection counts measure source hits, while the new 30/30
+correction and deletion counts measure direct public API effects; none
+establish Dano model answers.
 
 | PRD | Current evidence | Missing acceptance |
 |---|---|---|
