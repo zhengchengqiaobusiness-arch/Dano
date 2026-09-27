@@ -1,0 +1,25 @@
+{
+  "observedAt": "2026-09-28",
+  "sourceCommit": "8e4eb842972de85324670314f13f675c755a944b",
+  "fixtureSha256": "d9889f6fd1f24d53ecf1e8cfbdc83049ace334431fce138ef69803e9c66856e4",
+  "productVersion": "0.2.55",
+  "protectedImageId": "912ea68476ed15f03dec19e4e2dcc213a224526c2237bd1cb25551999e48284d",
+  "memoryService": "official OpenViking v0.4.20 with local pinned Embedding in an isolated Podman network",
+  "identitySource": "two synthetic Dano JWT identities; no OAuth or browser sign-in",
+  "observed": {
+    "protectedHttpHostStarted": true,
+    "separateWorkerIdentities": 2,
+    "memoryReadRoutesProbedForMissingInvalidAndForeignJwt": 4,
+    "memorySettingsMutationProbedForMissingInvalidAndForeignJwt": true,
+    "ownSettingsAndExportSucceeded": true,
+    "realOpenVikingUserKeysProvisioned": 2,
+    "eachUserKeyHealthBoundToExpectedAccountAndUser": true,
+    "noPublishedHostPort": true,
+    "cleanSupervisorShutdown": true
+  },
+  "limits": [
+    "Synthetic JWTs do not prove production OA authentication or two independently authenticated Browser users",
+    "No model calls, memory content cross-read, credential rotation or complete T-11 HTTP matrix",
+    "The official image ran a mounted acceptance fixture; this was not a complete Compose release run"
+  ]
+}

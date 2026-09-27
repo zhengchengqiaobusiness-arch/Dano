@@ -35,16 +35,19 @@ const crashSearch = process.argv.includes('--crash-search');
 const useCli = process.argv.includes('--cli');
 const withMemory = process.argv.includes('--memory');
 const realService = process.argv.includes('--real-service');
+const realMemoryService = process.argv.includes('--real-memory-service');
+const actualMemoryService = realService || realMemoryService;
 // The remote service outlives disposable containers. Use new authenticated
 // test identities so a prior run's extracted facts cannot satisfy or suppress
 // this run's save/recall assertions.
 const runIdentity = randomUUID();
-const primaryUsers = realService
+const primaryUsers = actualMemoryService
   ? [`alice-fixture-${runIdentity}`, `bob-fixture-${runIdentity}`]
   : ['alice-fixture', 'bob-fixture'];
 const memoryFailure = process.argv.includes('--memory-failure');
 let memoryAccountId, corruptOwnerPath, realModel;
 if (memoryFailure) assert(realService, 'Memory failure check requires the real model/service configuration');
+if (realMemoryService) assert(withMemory && useCli, 'Real memory service mode requires --cli --memory');
 if (realService) {
   assert(withMemory && useCli, 'Real service mode requires --cli --memory');
   realModel = { provider: process.env.DANO_FIXTURE_PROVIDER, modelId: process.env.DANO_FIXTURE_MODEL };
@@ -89,9 +92,24 @@ if (withMemory) {
         pre_tokenizer: { type: 'Whitespace' }, post_processor: null, decoder: null,
         model: { type: 'WordLevel', vocab: { '[UNK]': 0, hello: 1 }, unk_token: '[UNK]' } }),
       config: await asset('tokenizer_config.json', { tokenizer_class: 'PreTrainedTokenizerFast', unk_token: '[UNK]' }) }] };
+  if (realMemoryService) {
+    assert(process.env.DANO_FIXTURE_MEMORY_BASE_URL && process.env.DANO_FIXTURE_MEMORY_ACCOUNT_ID
+      && process.env.DANO_FIXTURE_MEMORY_MANAGEMENT_KEY, 'Set real memory service connection');
+    config.baseUrl = process.env.DANO_FIXTURE_MEMORY_BASE_URL;
+    config.accountId = `${process.env.DANO_FIXTURE_MEMORY_ACCOUNT_ID}_${runIdentity.replaceAll('-', '')}`;
+    config.managementKey = process.env.DANO_FIXTURE_MEMORY_MANAGEMENT_KEY;
+    config.requestTimeoutMs = 5000;
+  }
   const path = join(options.memoryConfigDirectory, 'memory-service.json');
   memoryAccountId = config.accountId;
   await writeFile(path, JSON.stringify(config), { mode: 0o600 }); await chown(path, hostUid, hostGid);
+  if (realMemoryService) {
+    const response = await fetch(`${config.baseUrl}/api/v1/admin/accounts`, {
+      method: 'POST', headers: { 'X-API-Key': config.managementKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account_id: config.accountId, admin_user_id: 'admin' }),
+    });
+    assert(response.ok, 'real OpenViking account setup failed');
+  }
 }
 const profilePath = '/etc/dano-supervisor-fixture.json';
 if (useCli) await writeFile(profilePath, JSON.stringify(options), { mode: 0o600, flag: 'wx' });
@@ -200,6 +218,34 @@ try {
     }
     if (!memoryFailure) assert.equal((await settings(clients[0], true)).enabled, true);
     assert.equal((await settings(clients[1])).enabled, false);
+    if (realMemoryService) {
+      for (const entry of clients) {
+        const exported = await fetch(`${origin}/api/clients/${entry.client.id}/memory/export`, {
+          headers: { authorization: `Bearer ${token(entry.id)}` },
+        });
+        assert.equal(exported.status, 200, 'real memory export did not reach OpenViking');
+        assert.equal(exported.headers.get('cache-control'), 'no-store');
+        assert(!JSON.stringify(await exported.json()).includes(process.env.DANO_FIXTURE_MEMORY_MANAGEMENT_KEY));
+      }
+      for (const entry of clients) {
+        const boundUserId = `u_${createHash('sha256').update(JSON.stringify([memoryAccountId, entry.id])).digest('hex')}`;
+        const response = await fetch(`${process.env.DANO_FIXTURE_MEMORY_BASE_URL}/api/v1/admin/accounts/${memoryAccountId}/users?name=${encodeURIComponent(boundUserId)}`, {
+          headers: { 'X-API-Key': process.env.DANO_FIXTURE_MEMORY_MANAGEMENT_KEY },
+        });
+        assert.equal(response.status, 200);
+        const payload = await response.json();
+        const users = payload.result.filter(user => user.user_id === boundUserId && user.role === 'user');
+        assert.equal(users.length, 1, 'Dano did not provision one real USER key per owner');
+        const bound = await fetch(`${process.env.DANO_FIXTURE_MEMORY_BASE_URL}/health`, {
+          headers: { 'X-API-Key': users[0].api_key },
+        });
+        assert.equal(bound.status, 200);
+        const identity = await bound.json();
+        assert.equal(identity.role, 'user');
+        assert.equal(identity.user_id, boundUserId);
+        assert.equal(identity.account_id, memoryAccountId);
+      }
+    }
     if (realService) {
       const { verifyMemoryHttpFlow } = await import('./protected-memory-http-flow.mjs');
       await verifyMemoryHttpFlow({ origin, clients, token, model: realModel, memoryUnavailable: memoryFailure });
@@ -245,7 +291,8 @@ try {
     memoryHttpBoundaryVerified: withMemory, memoryFailureVerified: memoryFailure,
     sequentialCapacityVerified: capacityMode,
     shutdownMode: crashHost ? 'host-killed' : crashSearch ? 'search-killed' : 'graceful',
-    shutdownReclaimsChildren: true, browserVerified: false, modelVerified: realService }));
+    shutdownReclaimsChildren: true, browserVerified: false, modelVerified: realService,
+    realMemoryServiceVerified: realMemoryService }));
 } finally {
   stop.abort();
   await serving.catch(() => {});
