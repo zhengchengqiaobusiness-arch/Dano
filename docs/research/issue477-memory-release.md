@@ -1082,7 +1082,16 @@ also passed preflight, replay, immediate idempotent retry and retention audit;
 real USER-key readback returned 404 for the deletion and 200 for the corrected
 document. This build changed only the build-stage Debian mirror in a temporary
 Dockerfile to avoid a slow download. Bit-exact release-image, multi-owner,
-OAuth, MiMo and Browser acceptance remain open.
+memory-enabled OAuth, MiMo and Browser acceptance remain open.
+The same isolated protected image and nginx passed the repository HTTPS smoke
+check with production OA client settings and the fixed localhost callback.
+In the in-app Browser, two real OA authorization round trips returned to a
+clean Dano URL and showed the authenticated account in the menu. Logout
+restored a usable anonymous session; a subsequent login succeeded. The
+[sanitized OAuth evidence](evidence/issue477-oauth-browser-summary.json)
+contains no provider address, account name, credential or token. This run
+intentionally omitted memory and model credentials, so it does not close
+memory-enabled Browser, transcript, image or bash acceptance.
 Read-only inventory of the configured production host on 2026-09-27 showed
 `dano-app:rel-20260922-143917`; its container mount destinations did not
 include `/var/lib/dano-memory-recovery`, and the Dano-related Docker volume

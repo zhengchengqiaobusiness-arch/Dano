@@ -1,0 +1,30 @@
+{
+  "date": "2026-09-27",
+  "imageId": "ce4f0d13d5785ca9bebde4237c6ead1d719c63ef68c3ce287aebcf0c4b48f25d",
+  "deployment": "protected Dano image and nginx through repository Compose on a dedicated Podman VM",
+  "origin": "https://localhost:18711",
+  "tls": "persistent localhost certificate validated without a browser warning",
+  "oauth": "production OA client settings with isolated localhost callback",
+  "smoke": {
+    "health": true,
+    "anonymousCookie": true,
+    "clientCreated": true,
+    "sseConnected": true,
+    "messageAccepted": true,
+    "sseResponse": true,
+    "disconnect": true
+  },
+  "browser": {
+    "oaAuthorizationRoundTrips": 2,
+    "cleanLocalReturnUrl": true,
+    "authenticatedUserMenuVisible": true,
+    "logout": true,
+    "freshAnonymousSession": true,
+    "relogin": true
+  },
+  "limitations": [
+    "The OAuth-only protected deployment did not enable memory or configure a model credential.",
+    "The protected image used a temporary build-stage Debian mirror substitution.",
+    "Transcript preservation, model chat, image reading and bash tool acceptance remain unverified."
+  ]
+}
