@@ -1,0 +1,25 @@
+{
+  "date": "2026-09-27",
+  "danoCommit": "3795e2389",
+  "danoMode": "current host build with real HTTP client",
+  "openViking": "v0.4.20 pinned Compose service in dedicated Podman VM",
+  "embedding": "pinned llama.cpp Compose service, healthy",
+  "scope": "one synthetic USER, model-free old-snapshot deletion and correction replay",
+  "checkpoint": { "owners": 1, "journalBytes": 0 },
+  "preflight": { "owners": 1, "events": 2 },
+  "replay": { "owners": 1, "events": 2 },
+  "idempotentRetry": { "owners": 1, "events": 2 },
+  "deletedDocumentReadStatus": 404,
+  "correctedDocumentReadback": true,
+  "retention": {
+    "owners": 1,
+    "legacyInlineBodies": 0,
+    "activePayloads": 1,
+    "prunedPayloadReferences": 0,
+    "needsMigration": false
+  },
+  "limitations": [
+    "Does not cover multiple owners, credential rotation, old queue, or arbitrary upgrade windows.",
+    "Does not cover the final Dano container, production OAuth, MiMo, or Browser acceptance."
+  ]
+}

@@ -1069,6 +1069,16 @@ The protected recovery command now has a read-only `audit-retention` mode that
 reports aggregate legacy-inline and current-payload counts without owner IDs,
 URIs or body text. Its synthetic test covers both formats; the actual recovery
 volume has not yet been audited.
+On 2026-09-27, the current host build replayed one synthetic USER's
+post-checkpoint deletion and correction through the real HTTP client against
+the pinned OpenViking and embedding Compose services in a dedicated Podman VM.
+Preflight and replay each counted two events; the deleted document read returned
+404, the corrected body was read back, and an immediate replay succeeded.
+The new-format recovery volume had one active payload and no legacy inline
+bodies. The [aggregate evidence](evidence/issue477-current-recovery-summary.json)
+contains no credentials, owner IDs, URIs or document text. This is one
+model-free recovery subgate, not final-container, multi-owner, OAuth, MiMo or
+Browser acceptance.
 Read-only inventory of the configured production host on 2026-09-27 showed
 `dano-app:rel-20260922-143917`; its container mount destinations did not
 include `/var/lib/dano-memory-recovery`, and the Dano-related Docker volume
