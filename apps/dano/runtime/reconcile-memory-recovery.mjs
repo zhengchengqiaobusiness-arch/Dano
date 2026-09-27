@@ -2,50 +2,17 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, readdir, readFile, realpath, rename, rm } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { open, readdir, readFile, rename, rm } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { FileStateStore, OwnerMemoryClient } from "@josephyoung/pi-openviking/host";
 import { MemoryCredentialStore } from "../dist/server/bridge/memory-credential-store.js";
 import { MemoryRecoveryJournal } from "../dist/server/bridge/memory-recovery-journal.js";
+import { outside, privateDirectory, privateFile, trustedDirectory } from "./private-recovery-path.mjs";
 
 const digest = bytes => createHash("sha256").update(bytes).digest("hex");
 const validId = value => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 const fail = code => { throw new Error(code); };
-
-async function privateDirectory(path) {
-  assert.ok(isAbsolute(path) && resolve(path) === path && await realpath(path) === path,
-    "UNPROTECTED_RECOVERY_PATH");
-  const stat = await lstat(path);
-  assert.ok(stat.isDirectory() && !stat.isSymbolicLink() && stat.uid === process.getuid?.()
-    && (stat.mode & 0o077) === 0, "UNPROTECTED_RECOVERY_PATH");
-}
-
-async function trustedDirectory(path) {
-  assert.ok(isAbsolute(path) && resolve(path) === path && await realpath(path) === path,
-    "UNPROTECTED_RECOVERY_PATH");
-  const stat = await lstat(path);
-  assert.ok(stat.isDirectory() && !stat.isSymbolicLink()
-    && (stat.uid === 0 || stat.uid === process.getuid?.())
-    && (stat.mode & 0o022) === 0, "UNPROTECTED_RECOVERY_PATH");
-}
-
-async function privateFile(path, maxBytes = 64 * 1024 * 1024) {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const stat = await handle.stat();
-    assert.ok(stat.isFile() && stat.nlink === 1 && stat.uid === process.getuid?.()
-      && (stat.mode & 0o077) === 0 && stat.size <= maxBytes, "UNPROTECTED_RECOVERY_PATH");
-    return await handle.readFile();
-  } finally { await handle.close(); }
-}
-
-function outside(path, roots) {
-  for (const root of roots) {
-    assert.ok(path !== root && !path.startsWith(`${root}${sep}`) && !root.startsWith(`${path}${sep}`),
-      "UNPROTECTED_RECOVERY_PATH");
-  }
-}
 
 async function ownerStates(dataRoot) {
   const hostRoot = join(dataRoot, "host-state");

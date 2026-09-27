@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, link, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,7 @@ import { FileStateStore, MemoryGovernanceBarrier, OwnerMemoryClient } from "@jos
 import { MemoryCredentialStore } from "../memory-credential-store.js";
 import { MemoryRecoveryJournal, RecoveryStateStore } from "../memory-recovery-journal.js";
 import { checkpoint, reconcile } from "../../../runtime/reconcile-memory-recovery.mjs";
+import { privateDirectory, privateFile } from "../../../runtime/private-recovery-path.mjs";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -39,6 +40,23 @@ async function fixture() {
   return { root, data, recovery, config, owner, store, journal, credentialStore,
     checkpointFile: join(root, "checkpoint.json") };
 }
+
+it("rejects linked, exposed and oversized recovery inputs before reading them", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "dano-private-recovery-"))); roots.push(root);
+  const secret = join(root, "secret.json");
+  await writeFile(secret, "synthetic", { mode: 0o600 });
+  await expect(privateFile(secret, 9)).resolves.toEqual(Buffer.from("synthetic"));
+  await expect(privateFile(secret, 2)).rejects.toThrow("UNPROTECTED_RECOVERY_PATH");
+  await symlink(secret, join(root, "symlink.json"));
+  await expect(privateFile(join(root, "symlink.json"))).rejects.toThrow();
+  await link(secret, join(root, "hardlink.json"));
+  await expect(privateFile(secret)).rejects.toThrow("UNPROTECTED_RECOVERY_PATH");
+  await rm(join(root, "hardlink.json"));
+  await chmod(secret, 0o644);
+  await expect(privateFile(secret)).rejects.toThrow("UNPROTECTED_RECOVERY_PATH");
+  await symlink(root, join(root, "directory-link"));
+  await expect(privateDirectory(join(root, "directory-link"))).rejects.toThrow("UNPROTECTED_RECOVERY_PATH");
+});
 
 it("checkpoints a stopped owner and preflights only the post-snapshot deletion intent", async () => {
   const f = await fixture();

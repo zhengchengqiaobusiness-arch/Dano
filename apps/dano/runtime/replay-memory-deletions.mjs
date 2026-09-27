@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, readFile, realpath } from "node:fs/promises";
-import { resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { OwnerMemoryClient } from "@josephyoung/pi-openviking/host";
 import { MemoryCredentialStore } from "./dist/server/bridge/memory-credential-store.js";
+import { outside, privateDirectory, privateFile, trustedDirectory } from "./private-recovery-path.mjs";
 
 // Run with Dano stopped. The post-snapshot ledger and owner state must come
 // from outside the older backup being restored. Never print either secret.
@@ -13,8 +13,13 @@ try {
   const [configDirectory, dataDirectory, ledgerFile, ...extra] = process.argv.slice(2);
   assert.ok(configDirectory && dataDirectory && ledgerFile && extra.length === 0, "INVALID_ARGUMENTS");
   stage = "load";
-  const ledger = JSON.parse(await readFile(ledgerFile, "utf8"));
-  const config = JSON.parse(await readFile(resolve(configDirectory, "memory", "memory-service.json"), "utf8"));
+  assert.ok([configDirectory, dataDirectory, ledgerFile].every(path => isAbsolute(path) && resolve(path) === path),
+    "INVALID_ARGUMENTS");
+  outside(ledgerFile, [configDirectory, dataDirectory]);
+  await Promise.all([trustedDirectory(configDirectory), trustedDirectory(dataDirectory),
+    privateDirectory(join(configDirectory, "memory")), privateDirectory(dirname(ledgerFile))]);
+  const ledger = JSON.parse((await privateFile(ledgerFile, 16 * 1024 * 1024)).toString("utf8"));
+  const config = JSON.parse((await privateFile(join(configDirectory, "memory", "memory-service.json"), 65536)).toString("utf8"));
   assert.ok(typeof config.accountId === "string"
     && /^[A-Za-z0-9_-]{1,128}$/.test(config.accountId), "INVALID_CONFIG");
   const entries = ledger.version === 1 ? [ledger] : ledger.version === 2 ? ledger.owners : undefined;
@@ -50,11 +55,11 @@ try {
     assert.ok(statePath.startsWith(`${resolve(dataDirectory)}${sep}`)
       && !seenStatePaths.has(statePath), "INVALID_LEDGER");
     seenStatePaths.add(statePath);
-    const stat = await lstat(statePath);
-    assert.ok(stat.isFile() && stat.uid === process.getuid?.()
-      && (stat.mode & 0o077) === 0
-      && (await realpath(statePath)).startsWith(`${await realpath(dataDirectory)}${sep}`), "INVALID_LEDGER");
-    const stateBytes = await readFile(statePath);
+    for (let path = dirname(statePath); path !== dataDirectory; path = dirname(path)) {
+      assert.ok(path.startsWith(`${dataDirectory}${sep}`), "INVALID_LEDGER");
+      await privateDirectory(path);
+    }
+    const stateBytes = await privateFile(statePath);
     assert.equal(createHash("sha256").update(stateBytes).digest("hex"), entry.postStateSha256,
       "POST_SNAPSHOT_STATE_MISMATCH");
     const state = JSON.parse(stateBytes);

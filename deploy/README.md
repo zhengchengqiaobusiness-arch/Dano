@@ -82,9 +82,13 @@ The protected image contains `replay-memory-deletions.mjs`. Run it as a
 one-off container on the internal memory network with the restored protected
 config and data volumes mounted read-only and a post-snapshot ledger mounted
 read-only. The command takes the config directory, data directory and ledger
-path as positional arguments. It verifies **all** restored owner-state hashes
-and owner bindings, decrypts each owner-bound USER credential locally and
-checks every OpenViking identity before any remote mutation. It then removes
+path as positional arguments. It reads the ledger, config and owner states only
+from canonical private paths (no symlink or hard link, with owner-only file
+permissions) before contacting
+OpenViking. The ledger must live outside the config and data directories. It
+verifies **all** restored owner-state hashes and owner bindings, decrypts each
+owner-bound USER credential locally and checks every OpenViking identity before
+any remote mutation. It then removes
 the listed sources and document URIs, restores retained documents and reads
 back each complete public document set. It prints aggregate counts only. A
 changed state hash, duplicate owner, missing credential or owner mismatch
