@@ -123,7 +123,9 @@ intent is durable, without changing the checkpoint-bound journal prefix. Keep
 the entire recovery volume, including active payload files, for rollback;
 replay refuses a missing or changed active payload. Older candidate journals
 with inline correction bodies remain readable, but this format does not prune
-those bodies. Retire their associated backups and perform a separately
+those bodies. Replay skips correction events superseded by a later correction,
+deletion or clear, so an obsolete inline body is not written to OpenViking even
+briefly during recovery. Retire their associated backups and perform a separately
 validated migration before claiming bounded retention for an upgraded volume.
 With Dano stopped, inventory the current recovery volume before planning that
 migration:

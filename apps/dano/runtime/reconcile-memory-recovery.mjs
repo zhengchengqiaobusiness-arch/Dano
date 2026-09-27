@@ -186,6 +186,23 @@ function expectedEffects(events) {
   return { documents, sources, cleared };
 }
 
+function replayableCorrections(events) {
+  const keep = new Set(), superseded = new Set();
+  let cleared = false;
+  for (let index = events.length - 1; index >= 0; index--) {
+    const mutation = events[index].mutation;
+    if (mutation.kind === "clearMemoryScope" || mutation.kind === "clearOwnerData") {
+      cleared = true;
+    } else if (mutation.kind === "removeMemory") {
+      superseded.add(mutation.uri);
+    } else if (mutation.kind === "replaceMemory") {
+      if (!cleared && !superseded.has(mutation.uri) && mutation.content !== undefined) keep.add(index);
+      superseded.add(mutation.uri);
+    }
+  }
+  return keep;
+}
+
 async function prepare(configDirectory, dataRoot, recoveryRoot, checkpointFile) {
   assert.ok([configDirectory, dataRoot, recoveryRoot, checkpointFile]
     .every(path => isAbsolute(path) && resolve(path) === path), "INVALID_ARGUMENTS");
@@ -259,7 +276,8 @@ export async function reconcile(configDirectory, dataRoot, recoveryRoot, checkpo
   if (preflightOnly) return summary;
   for (const plan of plans) await plan.client.verifyIdentity();
   for (const plan of plans) {
-    for (const event of plan.events) {
+    const corrections = replayableCorrections(plan.events);
+    for (const [index, event] of plan.events.entries()) {
       const mutation = event.mutation;
       switch (mutation.kind) {
         case "removeSource":
@@ -268,7 +286,7 @@ export async function reconcile(configDirectory, dataRoot, recoveryRoot, checkpo
           break;
         case "removeMemory": await plan.client.removeMemory(mutation.uri); break;
         case "replaceMemory":
-          if (mutation.content !== undefined) await plan.client.replaceMemory(mutation.uri, mutation.content);
+          if (corrections.has(index)) await plan.client.replaceMemory(mutation.uri, mutation.content);
           break;
         case "clearMemoryScope": await plan.client.clearMemoryScope(); break;
         case "clearOwnerData": await plan.client.clearOwnerData(); break;

@@ -1065,6 +1065,10 @@ backup generations still need a validated retirement/migration procedure
 before AC-07/12 and T-09/13 can close. The supplied-ledger replay separately
 rejects linked or exposed ledger, config and owner-state files before remote
 mutation.
+The current replay skips any legacy inline correction superseded by a later
+correction, deletion or clear; a stopped-service regression proves the old body
+is never sent to OpenViking on a post-checkpoint deletion replay. This prevents
+transient resurrection during replay but does not remove retained legacy bytes.
 The protected recovery command now has a read-only `audit-retention` mode that
 reports aggregate legacy-inline and current-payload counts without owner IDs,
 URIs or body text. Its synthetic test covers both formats; the actual recovery

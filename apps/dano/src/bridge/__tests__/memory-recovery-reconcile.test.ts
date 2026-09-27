@@ -97,6 +97,25 @@ it("replays a deletion after pruning an obsolete correction body from an older c
   expect(remove).toHaveBeenCalledExactlyOnceWith(uri);
 });
 
+it("does not briefly restore a legacy inline correction before its later deletion", async () => {
+  const f = await fixture();
+  await checkpoint(f.data, f.recovery, f.checkpointFile);
+  const uri = "viking://user/alice/memories/forgotten.md";
+  const entry = { version: 1, id: randomUUID(), owner: f.owner,
+    occurredAt: new Date().toISOString(),
+    mutation: { kind: "replaceMemory", uri, content: "legacy forgotten fact" } };
+  await writeFile(join(f.recovery, "account", "alice", "events.jsonl"), JSON.stringify(entry) + "\n", { mode: 0o600 });
+  await f.journal.append({ kind: "removeMemory", uri });
+  const replace = vi.spyOn(OwnerMemoryClient.prototype, "replaceMemory");
+  const remove = vi.spyOn(OwnerMemoryClient.prototype, "removeMemory").mockResolvedValue(undefined);
+  vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+  vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments").mockResolvedValue([]);
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .resolves.toEqual({ owners: 1, events: 2 });
+  expect(replace).not.toHaveBeenCalled();
+  expect(remove).toHaveBeenCalledExactlyOnceWith(uri);
+});
+
 it("replays the current correction from its private payload after an older checkpoint", async () => {
   const f = await fixture();
   await checkpoint(f.data, f.recovery, f.checkpointFile);
