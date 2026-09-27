@@ -1,0 +1,44 @@
+{
+  "observedAt": "2026-09-28",
+  "sourceCommit": "763b9b59b0d8680cf2c40f5f39a1ccf53c8f5470",
+  "image": "localhost/dano465-protected:0.2.57",
+  "imageId": "d63032f018e4bd3bca0ea1df2d6633274a4a980a5e2c471a57db6bf6107e4daa",
+  "operatorScriptSha256": "d30a58fede5286e6643749a706747efd86b9866646e80fd12195087451a476ac",
+  "scriptHashMatchesSource": true,
+  "services": {
+    "openViking": "v0.4.20, release-manifest-pinned image",
+    "embedding": "release-manifest-pinned llama.cpp and local bge-small-zh-v1.5-f16 model",
+    "publishedHostPorts": 0,
+    "syntheticJwtOwners": 2
+  },
+  "verified": {
+    "newUserKeyOwnerIdentity": true,
+    "oldKeyProtectedContentDenied": true,
+    "oldKeyProtectedSessionsDeniedBeforeLocalReplacement": true,
+    "newKeyProtectedContentRead": true,
+    "imageNativeOperatorCommandReplacedEncryptedCredential": true,
+    "protectedDanoHostRestartedWithSameStateRoot": true,
+    "aliceExportRetainedContent": true,
+    "bobExportExcludedAliceContent": true,
+    "danoMemoryHttpIdentityProbes": "36/36",
+    "protectedHostNonRoot": true,
+    "workerChildrenReclaimed": true
+  },
+  "validation": {
+    "targetedReplacementTests": "5/5",
+    "typeAndSvelteCheck": "passed",
+    "localBuild": "passed",
+    "releaseManifestCheck": "passed",
+    "fullVitestWithIsolatedPythonHttpxAndFourWorkers": "146/146 files, 1710 passed, 1 skipped"
+  },
+  "cleanup": {
+    "isolatedTestContainersVolumesNetworkAndRandomSecretsRemoved": true,
+    "fixedOaAcceptanceStackPreservedHealthy": true,
+    "candidateImageRetainedForNextAcceptance": true
+  },
+  "limits": [
+    "Synthetic JWT owners rather than independently authenticated OA Browser users",
+    "No model extraction or ready transition; the VLM was intentionally unavailable",
+    "No restored multi-volume deployment, old Dano binary, or concurrent governance rollback"
+  ]
+}

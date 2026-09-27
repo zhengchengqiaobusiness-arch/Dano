@@ -1203,6 +1203,19 @@ still contained that content and Bob's did not; 36 HTTP identity probes passed.
 Generic `/health` status alone was not treated as revocation proof. This is
 real-service process restart evidence, not a restored multi-volume/old-version
 rollback, model-`ready` or independently authenticated OA Browser result.
+The first `0.2.56` operator command incorrectly treated OpenViking `/health`'s
+service-wide `auth_mode=api_key` as proof that a revoked USER key was still
+active. The `0.2.57` command now verifies the new key's owner through `/health`
+and requires the saved old key to receive 401/403 from the protected Sessions
+API before replacing the encrypted record. In the final `0.2.57` protected
+image, the real OpenViking and Embedding rehearsal rotated Alice's USER key,
+denied old-key content and Sessions access, ran the image-native command as
+host UID, and restarted the full Dano host against the same state root. Alice's
+export retained the content; Bob's did not; 36 HTTP identity probes passed.
+The [sanitized operator-command receipt](evidence/issue477-0257-real-operator-key-rotation.json)
+also records image/script hashes, 1710 passing Vitest tests and cleanup. It
+does not establish OA Browser identity, model extraction/`ready`, restored
+multi-volume or old-binary rollback.
 The protected `0.2.54` image built successfully from commit `ca9c12f41`.
 Its embedded product version and recovery script SHA-256 match the checkout;
 the release manifest check passed. The [build receipt](evidence/issue477-0254-protected-build.json)
