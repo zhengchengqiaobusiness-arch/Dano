@@ -1198,6 +1198,17 @@ post-checkpoint writer also stops Alice's deletion globally, then permits it
 after Bob's source is read back. The [sanitized real-service receipt](evidence/issue477-0254-real-writer-replay.json)
 records both results. This did not clone an older OpenViking volume or exercise
 commit, extraction, `ready`, credential rotation or OA.
+Code review of the release branch found that the container's fixed Aliyun apt
+rewrite disagreed with the repository's CA bootstrap ADR and that bootstrap
+duplicated private-path checks. Dano `0.2.55` now shares those path checks;
+the default image build installs CA from the base Debian source before using
+Tencent HTTPS, while isolated builders can supply a build-only HTTP mirror.
+The protected image built with that override, retained no apt-mirror build
+argument at runtime, matched the committed recovery script hashes, and
+accepted a private empty recovery root while rejecting a world-readable one.
+All 145 Vitest files passed (1705 tests, one skipped), as did type/Svelte
+checks, local build and release manifest check. The [sanitized build receipt](evidence/issue477-0255-protected-build.json)
+does not establish real-volume replay or OA/model/Browser acceptance for 0.2.55.
 The operator-supplied deletion ledger now shares the recovery journal's
 owner-bound document-URI validation. Its preflight rejects path traversal,
 encoded traversal, hidden files and query strings before verifying remote

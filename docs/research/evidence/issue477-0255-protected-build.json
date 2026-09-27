@@ -1,0 +1,32 @@
+{
+  "observedAt": "2026-09-28",
+  "sourceCommit": "6b46350db2da6d2df1154105b60a7bf3bcd78bd9",
+  "productVersion": "0.2.55",
+  "protectedImageId": "912ea68476ed15f03dec19e4e2dcc213a224526c2237bd1cb25551999e48284d",
+  "build": {
+    "aptMirrorPassedAsBuildArgument": true,
+    "buildArgumentAbsentAtRuntime": true,
+    "caBundlePresent": true,
+    "pinnedSkillPresent": true,
+    "embeddedProductVersionMatchesSource": true,
+    "embeddedRecoveryScriptsMatchSource": true
+  },
+  "bootstrap": {
+    "privateEmptyRecoveryRootAccepted": true,
+    "worldReadableRecoveryRootRejected": true,
+    "rejectionCode": "UNPROTECTED_RECOVERY_PATH"
+  },
+  "validation": {
+    "typeAndSvelteCheck": "passed",
+    "vitestFilesPassed": 145,
+    "vitestTestsPassed": 1705,
+    "vitestTestsSkipped": 1,
+    "localBuild": "passed",
+    "releaseManifestCheck": "passed"
+  },
+  "limits": [
+    "No real restored-volume replay has run with this image",
+    "No OA, MiMo, or Browser acceptance has run with this image",
+    "Default Debian-source bootstrap path was code-reviewed but not built in this isolated environment"
+  ]
+}
