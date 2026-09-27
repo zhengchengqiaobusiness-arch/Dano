@@ -153,13 +153,17 @@ node /app/runtime/reconcile-memory-recovery.mjs replay \
   /etc/dano-protected /var/lib/dano-protected /var/lib/dano-memory-recovery /checkpoint/snapshot.json
 ```
 
-For a writer created after the checkpoint in `session_unknown`, local
-`preflight` reports `remoteWriterChecks` but cannot establish remote absence.
-`replay` verifies every owner's USER identity and confirms those Sessions are
-absent from the restored OpenViking service before any deletion or correction
-is replayed. An existing Session, missing payload, or later delivery phase
-still requires separate reconciliation; do not start Dano after a failed
-`replay`.
+For a writer created after the checkpoint, local `preflight` reports
+`remoteWriterChecks` but cannot establish remote state. `replay` verifies every
+owner's USER identity, then checks all new writers before any deletion or
+correction. `session_unknown` requires an absent Session; `session_created`
+requires an existing Session without this source; `message_unknown` and
+`message_delivered` require their source in that Session. `commit_unknown` and
+`processing` additionally require a terminal, owner-bound commit task;
+`ready` must read back the same archive and memory URI set. A missing payload,
+unsettled task, mismatched receipt, failed or paused writer, or unavailable
+remote check still requires separate reconciliation. Do not start Dano after
+a failed `replay`.
 
 The command checks every owner, state hash, journal prefix and credential before the first
 remote mutation; it replays later deletion intents, reads back their effects,
@@ -171,7 +175,7 @@ missing checkpoint. It prints only aggregate counts and can be rerun after a
 partial remote failure. Do not start Dano or
 expose nginx until replay succeeds.
 
-This command fails closed when a new owner or completed writer appears after
+This command fails closed when a new owner or unproven writer appears after
 the checkpoint, a governance job remains in progress, a credential is missing
 or invalid, or the snapshot and journal diverge. Those cases require a separate
 upgrade-window reconciliation; neither command may silently discard newer

@@ -373,7 +373,7 @@ it("accepts an old queued writer that was explicitly blocked after the checkpoin
 });
 
 it("restores a new queued writer and an absent session_unknown writer after the checkpoint", async () => {
-  const stage = async (phase: "queued" | "session_unknown" | "message_unknown", payload?: string) => {
+  const stage = async (phase: "queued" | "session_unknown" | "blocked", payload?: string) => {
     const f = await fixture();
     await checkpoint(f.data, f.recovery, f.checkpointFile);
     const statePath = join(f.data, "host-state", "owner-a", "state", "memory", "state.json");
@@ -429,10 +429,120 @@ it("restores a new queued writer and an absent session_unknown writer after the 
   await expect(reconcile(missingPayload.config, missingPayload.data, missingPayload.recovery,
     missingPayload.checkpointFile, true)).rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
   expect(contacted).not.toHaveBeenCalled();
-  const laterPhase = await stage("message_unknown", "new synthetic fact");
-  await expect(reconcile(laterPhase.config, laterPhase.data, laterPhase.recovery,
-    laterPhase.checkpointFile, true)).rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  const unsupportedPhase = await stage("blocked", "new synthetic fact");
+  await expect(reconcile(unsupportedPhase.config, unsupportedPhase.data, unsupportedPhase.recovery,
+    unsupportedPhase.checkpointFile, true)).rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
   expect(contacted).not.toHaveBeenCalled();
+});
+
+const laterWriterPhases = ["session_created", "message_unknown", "message_delivered",
+  "commit_unknown", "processing", "ready"] as const;
+type LaterWriterPhase = typeof laterWriterPhases[number];
+
+async function stagedLaterWriter(phase: LaterWriterPhase) {
+  const f = await fixture();
+  await checkpoint(f.data, f.recovery, f.checkpointFile);
+  const statePath = join(f.data, "host-state", "owner-a", "state", "memory", "state.json");
+  const oldBytes = await readFile(statePath);
+  const id = "d".repeat(64);
+  const memoryUri = "viking://user/alice/memories/current.md";
+  await new RecoveryStateStore(f.store, f.journal).transact(state => {
+    state.operations[id] = { id, owner: f.owner, scope: null, kind: "explicit",
+      authorizationEpoch: state.authorization.epoch,
+      source: { sessionId: "chat", entryId: "new", branchId: "root", contentVersion: "1" },
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      phase, remoteSessionId: "new-remote-session",
+      ...(phase === "ready" ? { taskId: "task", archiveId: "archive", memoryUris: [memoryUri] }
+        : { payload: "new synthetic fact", ...(phase === "processing" ? { taskId: "task" } : {}) }) };
+  });
+  await writeFile(statePath, oldBytes);
+  await f.journal.append({ kind: "removeMemory", uri: "viking://user/alice/memories/old.md" });
+  return { ...f, id, statePath, oldBytes, memoryUri };
+}
+
+for (const phase of laterWriterPhases) {
+  it(`overlays a new ${phase} writer only after its remote receipt is verified`, async () => {
+    const f = await stagedLaterWriter(phase);
+    const contacted = vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+    await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile, true))
+      .resolves.toEqual({ owners: 1, events: 1, remoteWriterChecks: 1 });
+    expect(contacted).not.toHaveBeenCalled();
+    vi.spyOn(OwnerMemoryClient.prototype, "sessionExists").mockResolvedValue(true);
+    const source = vi.spyOn(OwnerMemoryClient.prototype, "hasSource")
+      .mockResolvedValue(phase !== "session_created");
+    vi.spyOn(OwnerMemoryClient.prototype, "findCommit").mockResolvedValue({ taskId: "task" });
+    const settled = vi.spyOn(OwnerMemoryClient.prototype, "writerSettled").mockResolvedValue(true);
+    const inspect = vi.spyOn(OwnerMemoryClient.prototype, "inspect")
+      .mockResolvedValue({ status: "ready", archiveId: "archive", memoryUris: [f.memoryUri] });
+    const remove = vi.spyOn(OwnerMemoryClient.prototype, "removeMemory").mockResolvedValue(undefined);
+    vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments").mockResolvedValue([]);
+    await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+    expect(source).toHaveBeenCalledOnce();
+    expect(settled).toHaveBeenCalledTimes(["commit_unknown", "processing", "ready"].includes(phase) ? 1 : 0);
+    expect(inspect).toHaveBeenCalledTimes(phase === "ready" ? 1 : 0);
+    expect(remove).toHaveBeenCalledExactlyOnceWith("viking://user/alice/memories/old.md");
+    expect((await f.store.read()).operations[f.id]!.phase).toBe(phase);
+  });
+
+  it(`rejects a new ${phase} writer without its remote proof before deletion replay`, async () => {
+    const f = await stagedLaterWriter(phase);
+    vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+    vi.spyOn(OwnerMemoryClient.prototype, "sessionExists").mockResolvedValue(phase !== "session_created");
+    vi.spyOn(OwnerMemoryClient.prototype, "hasSource")
+      .mockResolvedValue(!["message_unknown", "message_delivered"].includes(phase));
+    const receipt = vi.spyOn(OwnerMemoryClient.prototype, "findCommit").mockResolvedValue(null);
+    const settled = vi.spyOn(OwnerMemoryClient.prototype, "writerSettled")
+      .mockResolvedValue(phase === "ready");
+    const inspect = vi.spyOn(OwnerMemoryClient.prototype, "inspect")
+      .mockResolvedValue({ status: "ready", archiveId: "archive", memoryUris: [] });
+    const remove = vi.spyOn(OwnerMemoryClient.prototype, "removeMemory");
+    await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+      .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+    expect(receipt).toHaveBeenCalledTimes(phase === "commit_unknown" ? 1 : 0);
+    expect(settled).toHaveBeenCalledTimes(["processing", "ready"].includes(phase) ? 1 : 0);
+    expect(inspect).toHaveBeenCalledTimes(phase === "ready" ? 1 : 0);
+    expect(remove).not.toHaveBeenCalled();
+    expect(await readFile(f.statePath)).toEqual(f.oldBytes);
+  });
+}
+
+it("checks Bob's post-checkpoint source before replaying Alice's deletion", async () => {
+  const f = await fixture();
+  const bob = { accountId: "account", userId: "bob" };
+  const bobStore = new FileStateStore({ owner: bob,
+    directory: join(f.data, "host-state", "owner-b", "state", "memory"), policyVersion: "v1" });
+  await bobStore.transact(state => { state.authorization.enabled = false; });
+  await MemoryRecoveryJournal.bootstrap(f.recovery, bob, await bobStore.read());
+  const bobJournal = await MemoryRecoveryJournal.open(f.recovery, bob, await bobStore.read());
+  await f.credentialStore.write(bob, "synthetic-bob-key");
+  await checkpoint(f.data, f.recovery, f.checkpointFile);
+  const bobStatePath = join(f.data, "host-state", "owner-b", "state", "memory", "state.json");
+  const oldBob = await readFile(bobStatePath);
+  const id = "e".repeat(64);
+  await new RecoveryStateStore(bobStore, bobJournal).transact(state => {
+    state.operations[id] = { id, owner: bob, scope: null, kind: "explicit",
+      authorizationEpoch: state.authorization.epoch,
+      source: { sessionId: "chat", entryId: "new", branchId: "root", contentVersion: "1" },
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      phase: "message_unknown", remoteSessionId: "bob-session", payload: "Bob fact" };
+  });
+  await writeFile(bobStatePath, oldBob);
+  const aliceUri = "viking://user/alice/memories/forgotten.md";
+  await f.journal.append({ kind: "removeMemory", uri: aliceUri });
+  vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+  const source = vi.spyOn(OwnerMemoryClient.prototype, "hasSource").mockResolvedValue(false);
+  const remove = vi.spyOn(OwnerMemoryClient.prototype, "removeMemory").mockResolvedValue(undefined);
+  vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments").mockResolvedValue([]);
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  expect(source).toHaveBeenCalledOnce();
+  expect(remove).not.toHaveBeenCalled();
+  expect(await readFile(bobStatePath)).toEqual(oldBob);
+  source.mockResolvedValue(true);
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .resolves.toEqual({ owners: 2, events: 1, remoteWriterChecks: 1 });
+  expect(remove).toHaveBeenCalledExactlyOnceWith(aliceUri);
+  expect((await bobStore.read()).operations[id]?.phase).toBe("message_unknown");
 });
 
 it("preflights both owners before replaying either owner's deletion", async () => {

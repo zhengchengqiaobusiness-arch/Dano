@@ -261,20 +261,25 @@ function noUnreconciledWrites(oldState, latest) {
   }
   const oldIds = Object.keys(oldState.operations ?? {}).sort();
   const newIds = Object.keys(latest.operations ?? {}).filter(id => !oldState.operations?.[id]);
-  const unknownSessions = [];
+  const remoteWriters = [];
   // Delivery persists session_unknown before its first remote request. A new
   // queued operation still has its payload and has made no remote write, so
   // overlaying the recovery state can resume it safely after rollback. A new
-  // session_unknown operation needs an owner-bound remote absence check first.
+  // later phase needs a matching owner-bound remote receipt before any replay.
   for (const id of newIds) {
     const operation = latest.operations[id];
-    assert.ok(operation.id === id && ["queued", "session_unknown"].includes(operation.phase)
+    assert.ok(operation.id === id && ["queued", "session_unknown", "session_created",
+      "message_unknown", "message_delivered", "commit_unknown", "processing", "ready"].includes(operation.phase)
       && (operation.phase === "queued" || operation.scope === null)
       && typeof operation.remoteSessionId === "string"
       && operation.remoteSessionId.length > 0
-      && typeof operation.payload === "string" && operation.payload.trim(),
+      && (operation.phase === "ready" ? operation.payload === undefined
+        && typeof operation.taskId === "string" && typeof operation.archiveId === "string"
+        && Array.isArray(operation.memoryUris) && operation.memoryUris.length > 0
+        : typeof operation.payload === "string" && operation.payload.trim())
+      && (operation.phase !== "processing" || typeof operation.taskId === "string"),
       "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
-    if (operation.phase === "session_unknown") unknownSessions.push(operation.remoteSessionId);
+    if (operation.phase !== "queued") remoteWriters.push(operation);
   }
   assert.ok(oldIds.every(id => latest.operations?.[id]), "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
   const stableOperation = operation => Object.fromEntries(Object.entries(operation)
@@ -288,7 +293,48 @@ function noUnreconciledWrites(oldState, latest) {
       && (after.payload === before.payload || after.phase === "blocked" && after.payload === undefined),
     "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
   }
-  return unknownSessions;
+  return remoteWriters;
+}
+
+/** Read-only proofs must cover every post-checkpoint writer before deletion
+ * replay. Unknown or live remote work stays fail-closed; neither append nor
+ * commit is retried by this recovery command. */
+async function verifyNewWriter(client, operation) {
+  const failCode = "RECOVERY_WRITER_RECONCILIATION_REQUIRED";
+  switch (operation.phase) {
+    case "session_unknown":
+      assert.equal(await client.sessionExists(operation.remoteSessionId), false, failCode);
+      return;
+    case "session_created":
+      assert.equal(await client.sessionExists(operation.remoteSessionId), true, failCode);
+      assert.equal(await client.hasSource(operation), false, failCode);
+      return;
+    case "message_unknown":
+    case "message_delivered":
+      assert.equal(await client.hasSource(operation), true, failCode);
+      return;
+    case "commit_unknown": {
+      assert.equal(await client.hasSource(operation), true, failCode);
+      const receipt = await client.findCommit(operation.remoteSessionId);
+      assert.ok(receipt && (!operation.taskId || receipt.taskId === operation.taskId), failCode);
+      assert.equal(await client.writerSettled(operation), true, failCode);
+      return;
+    }
+    case "processing":
+    case "ready": {
+      assert.equal(await client.hasSource(operation), true, failCode);
+      assert.equal(await client.writerSettled(operation), true, failCode);
+      if (operation.phase === "ready") {
+        const result = await client.inspect(operation);
+        assert.ok(result.status === "ready" && result.archiveId === operation.archiveId
+          && new Set(operation.memoryUris).size === operation.memoryUris.length
+          && new Set(result.memoryUris).size === result.memoryUris.length, failCode);
+        assert.deepEqual([...result.memoryUris].sort(), [...operation.memoryUris].sort(), failCode);
+      }
+      return;
+    }
+    default: fail(failCode);
+  }
 }
 
 function expectedEffects(events) {
@@ -383,10 +429,10 @@ async function prepare(configDirectory, dataRoot, recoveryRoot, checkpointFile) 
     const receiptPath = `${statePath}.replay-receipt.json`;
     const receipt = { version: 1, checkpointSha256, owner: entry.owner,
       statePath: entry.statePath, latestStateSha256: digest(latestBytes) };
-    let unknownSessions = [];
+    let remoteWriters = [];
     if (snapshot) {
       assert.equal(restored.state.revision, entry.stateRevision, "POST_SNAPSHOT_STATE_MISMATCH");
-      unknownSessions = noUnreconciledWrites(restored.state, journal.state);
+      remoteWriters = noUnreconciledWrites(restored.state, journal.state);
     } else {
       let savedReceipt;
       try { savedReceipt = JSON.parse((await privateFile(receiptPath, 4096)).toString("utf8")); }
@@ -405,7 +451,7 @@ async function prepare(configDirectory, dataRoot, recoveryRoot, checkpointFile) 
     const effects = expectedEffects(events);
     const key = await credentials.read(entry.owner);
     assert.ok(key, "CREDENTIAL_MISSING");
-    plans.push({ owner: entry.owner, events, effects, unknownSessions, statePath, receiptPath, receipt,
+    plans.push({ owner: entry.owner, events, effects, remoteWriters, statePath, receiptPath, receipt,
       latestBytes, client: new OwnerMemoryClient({ owner: entry.owner, baseUrl: config.baseUrl,
         apiKey: key, scope: null, timeoutMs: config.requestTimeoutMs }) });
   }
@@ -415,16 +461,15 @@ async function prepare(configDirectory, dataRoot, recoveryRoot, checkpointFile) 
 export async function reconcile(configDirectory, dataRoot, recoveryRoot, checkpointFile, preflightOnly = false) {
   const plans = await prepare(configDirectory, dataRoot, recoveryRoot, checkpointFile);
   const summary = { owners: plans.length, events: plans.reduce((sum, plan) => sum + plan.events.length, 0) };
-  const remoteWriterChecks = plans.reduce((sum, plan) => sum + plan.unknownSessions.length, 0);
+  const remoteWriterChecks = plans.reduce((sum, plan) => sum + plan.remoteWriters.length, 0);
   if (remoteWriterChecks) summary.remoteWriterChecks = remoteWriterChecks;
   if (preflightOnly) return summary;
   for (const plan of plans) await plan.client.verifyIdentity();
   // No replay mutation may run until every new writer is checked against the
-  // restored service. An absent Session can be recreated by the stable ID;
-  // an existing one could hold post-snapshot data and must be reconciled apart.
-  for (const plan of plans) for (const id of plan.unknownSessions) {
-    assert.equal(await plan.client.sessionExists(id), false,
-      "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  // restored service. Every check is read-only; an incomplete or mismatched
+  // remote receipt cannot be followed by a deletion replay or state overlay.
+  for (const plan of plans) for (const operation of plan.remoteWriters) {
+    await verifyNewWriter(plan.client, operation);
   }
   for (const plan of plans) {
     const corrections = replayableCorrections(plan.events);

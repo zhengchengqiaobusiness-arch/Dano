@@ -1051,7 +1051,7 @@ establish Dano model answers.
 | AC-08 | Browser defaults-off, separate collection consent/revocation, management and one same-owner cross-tab pause/recall/resume flow; runtime tests cover export, targeted forget and clear while paused, and authenticated HTTP tests cover export and clear while paused | All governance transitions, independent two-Session pause, real Browser export and blocked-write recovery ×3 |
 | AC-09/10 | Old ambiguous queue recovered on real service; a stopped-volume restore kept one `session_unknown` operation and resumed its source through `message_delivered`; ordinary chat survived selected memory failures | Full lifecycle/fault matrix, ready completion, truthful explicit failure and no duplicate/cross-owner replay |
 | AC-11 | Final-image Browser form, generic Skill, image, bash and Pi compression; an isolated production-generated leave Skill was discovered and rendered its operation choice and six-field form | Business options/authentication failed; complete OA and final-image regression matrix |
-| AC-12 | Clean stack, old-snapshot replay, two-owner supplied-ledger replay, candidate upgrade and matched rollback; automatic-journal matched old-volume two-owner deletion replay and current-service two-owner deletion/retry; focused recovery of new queued and remote-absent `session_unknown` writers | Real multi-owner source/revocation and old-version rollback, later-phase upgrade-window writer reconciliation |
+| AC-12 | Clean stack, old-snapshot replay, two-owner supplied-ledger replay, candidate upgrade and matched rollback; automatic-journal matched old-volume two-owner deletion replay and current-service two-owner deletion/retry; focused synthetic recovery of new queued, `session_unknown` and later-phase writers | Real multi-owner source/revocation and old-version rollback, later-phase upgrade-window writer reconciliation on restored service |
 | AC-13 | Frozen 80-case dataset; 20 isolation cases ×3 passed against real OpenViking; candidate-7 traced workload had 70/70 semantic recall answers and 30/30 irrelevant omissions; full-source image repeated 100 complete requests with 70/70 recall answers; byte-identical prompt-layer image has matched on/off cost evidence; final 0.2.46 Browser save-ready run reached `ready` with correct readback in all 10 cases, p95 35 s | Other five categories ×3, Dano/Browser isolation and causal latency interpretation |
 
 | Spec test | Current evidence | Missing acceptance |
@@ -1062,9 +1062,9 @@ establish Dano model answers.
 | T-06/07 | Actual old `session_unknown` recovery and credential-store replay; one restored-volume queue resumed to `message_delivered` without duplicate operation | All crash windows, ready completion, rotation, user switch and anonymous transfer on fixed service |
 | T-08 | Real Browser new-chat recall, including one correct post-restart answer; bounded reranker selection | Short-session extraction, no-result/timeout and model-answer repetitions |
 | T-09/10 | Real-service correction/deletion/replay; Browser targeted forget with unrelated recall preserved, defaults-off and cross-tab pause; runtime and authenticated HTTP paused-management tests | Complete correction/forget/pause/restore state matrix ×3 |
-| T-11 | Protected file access denied; real USER-key 403 probes; `0.2.52` image passed synthetic unauthenticated/invalid-token/cross-user HTTP probes; current `0.2.53` protected image repeated synthetic memory HTTP and Pi native-tool isolation | Repeat complete HTTP matrix with real USER keys and independently authenticated Browser users |
+| T-11 | Protected file access denied; real USER-key 403 probes; `0.2.52` image passed synthetic unauthenticated/invalid-token/cross-user HTTP probes; `0.2.53` protected image repeated synthetic memory HTTP and Pi native-tool isolation | Repeat complete HTTP matrix with real USER keys and independently authenticated Browser users |
 | T-12 | Final-image Browser form, generic Skill, image, bash and Pi compression; generated leave Skill choice/form rendered in a disposable layer | Working business options/authentication and complete final-image repetition |
-| T-13 | Clean deploy, candidate upgrade, matched old-data rollback, two-owner supplied-ledger replay; automatic-journal old-volume two-owner deletion replay and current-service two-owner deletion/retry; one restored-volume old queue resumed through source append; focused new queued and remote-absent `session_unknown` writer overlay | Old queue through ready, multi-user queue, real credential/new writer past send boundary and old-version multi-user reconciliation |
+| T-13 | Clean deploy, candidate upgrade, matched old-data rollback, two-owner supplied-ledger replay; automatic-journal old-volume two-owner deletion replay and current-service two-owner deletion/retry; one restored-volume old queue resumed through source append; focused synthetic new queued, `session_unknown` and later-phase writer overlay | Old queue through ready, multi-user queue, real credential/new writer past send boundary and old-version multi-user reconciliation |
 | T-14 | Five-user, 100-complete-request MiMo candidate-7 run passed semantic recall, injection, wait and token limits in an instrumented disposable container; full-source image repeated 100 complete requests with 70/70 recall answers; byte-identical prompt-layer image passed matched on/off cost; final fixed Browser save-ready p95 35 s with 10/10 source readbacks | Complete other fixed categories, integration and causal interpretation |
 
 Review found that older correction intents keep document bodies inline in the
@@ -1172,11 +1172,19 @@ sent data. A new `session_unknown` writer can also be overlaid only when its
 payload remains and the restored OpenViking service reports its fixed Session
 ID absent under the same USER key. `preflight` reports the number of required
 remote writer checks without contacting the service; `replay` verifies every
-owner and every such absence before replaying any deletion or correction. A
-present Session, missing payload or later delivery phase still fails closed.
+owner and every such absence before replaying any deletion or correction. In
+that `0.2.53` path, a present Session or missing payload fails closed.
 Focused rollback tests cover these boundaries, but the new
 `session_unknown` path has not yet run against a real restored volume and does
 not close the broader upgrade-window writer gate.
+The `0.2.54` recovery candidate additionally permits a new later-phase
+writer only when the restored service provides the phase-specific read-only
+proof: Session existence with no source, source presence, a terminal bound
+commit task, or for `ready` the same archive and retrievable memory URI set.
+Every owner and writer is checked before any deletion or correction replay.
+Synthetic phase and cross-owner regressions cover missing receipts and
+unfinished tasks; a real old-volume run and concurrent governance/credential
+rotation remain required before the upgrade-window gate can close.
 The operator-supplied deletion ledger now shares the recovery journal's
 owner-bound document-URI validation. Its preflight rejects path traversal,
 encoded traversal, hidden files and query strings before verifying remote
@@ -1193,7 +1201,7 @@ returned 401 to a tool worker lacking its parent process's synthetic key.
 Both containers were removed after their checks. These synthetic checks do
 not establish real OA authentication, real OpenViking USER-key authorization,
 model behavior, or Browser acceptance.
-The current `0.2.53` protected-runtime image (`950263cc2c48`) repeated the
+The `0.2.53` protected-runtime image (`950263cc2c48`) repeated the
 synthetic protected supervisor HTTP and Pi native-tool isolation checks in
 disposable network-disabled containers. The [sanitized receipt](evidence/issue477-0253-protected-contract.json)
 records the image and source commit, the two worker identities, memory HTTP
