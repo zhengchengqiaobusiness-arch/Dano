@@ -67,6 +67,24 @@ async function recoveryOwners(recoveryRoot) {
   return owners.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 }
 
+/** Aggregate only: never expose owner IDs, document URIs or retained bodies. */
+export async function auditRetention(recoveryRoot) {
+  assert.ok(isAbsolute(recoveryRoot) && resolve(recoveryRoot) === recoveryRoot, "INVALID_ARGUMENTS");
+  const owners = await recoveryOwners(recoveryRoot);
+  let legacyInlineBodies = 0, activePayloads = 0, prunedPayloadReferences = 0;
+  for (const owner of owners) {
+    const { events } = await MemoryRecoveryJournal.inspect(recoveryRoot, owner);
+    for (const { mutation } of events) {
+      if (mutation.kind !== "replaceMemory") continue;
+      if (!("payloadId" in mutation)) legacyInlineBodies++;
+      else if (mutation.content !== undefined) activePayloads++;
+      else prunedPayloadReferences++;
+    }
+  }
+  return { owners: owners.length, legacyInlineBodies, activePayloads, prunedPayloadReferences,
+    needsMigration: legacyInlineBodies > 0 };
+}
+
 async function writePrivateNew(path, bytes) {
   await privateDirectory(dirname(path));
   const handle = await open(path, "wx", 0o600);
@@ -284,7 +302,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     const [command, ...args] = process.argv.slice(2);
     let result;
-    if (command === "checkpoint" && args.length === 3) {
+    if (command === "audit-retention" && args.length === 1) {
+      stage = "audit-retention";
+      result = await auditRetention(...args);
+    } else if (command === "checkpoint" && args.length === 3) {
       stage = "checkpoint";
       result = await checkpoint(...args);
     } else if ((command === "preflight" || command === "replay") && args.length === 4) {

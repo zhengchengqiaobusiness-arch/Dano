@@ -1,12 +1,12 @@
-import { chmod, link, mkdtemp, mkdir, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
+import { appendFile, chmod, link, mkdtemp, mkdir, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { randomBytes, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { FileStateStore, MemoryGovernanceBarrier, OwnerMemoryClient } from "@josephyoung/pi-openviking/host";
 import { MemoryCredentialStore } from "../memory-credential-store.js";
 import { MemoryRecoveryJournal, RecoveryStateStore } from "../memory-recovery-journal.js";
-import { checkpoint, reconcile } from "../../../runtime/reconcile-memory-recovery.mjs";
+import { auditRetention, checkpoint, reconcile } from "../../../runtime/reconcile-memory-recovery.mjs";
 import { privateDirectory, privateFile } from "../../../runtime/private-recovery-path.mjs";
 
 const roots: string[] = [];
@@ -111,6 +111,22 @@ it("replays the current correction from its private payload after an older check
   await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
     .resolves.toEqual({ owners: 1, events: 1 });
   expect(replace).toHaveBeenCalledExactlyOnceWith(uri, "current private fact");
+});
+
+it("audits legacy inline bodies and live payloads without returning private content", async () => {
+  const f = await fixture();
+  const uri = "viking://user/alice/memories/retention.md";
+  await f.journal.append({ kind: "replaceMemory", uri, content: "synthetic private fact" });
+  expect(await auditRetention(f.recovery)).toEqual({ owners: 1, legacyInlineBodies: 0,
+    activePayloads: 1, prunedPayloadReferences: 0, needsMigration: false });
+  await f.journal.append({ kind: "removeMemory", uri });
+  const entry = { version: 1, id: randomUUID(), owner: f.owner,
+    occurredAt: new Date().toISOString(), mutation: { kind: "replaceMemory", uri, content: "legacy private fact" } };
+  await appendFile(join(f.recovery, "account", "alice", "events.jsonl"), JSON.stringify(entry) + "\n");
+  const result = await auditRetention(f.recovery);
+  expect(result).toEqual({ owners: 1, legacyInlineBodies: 1,
+    activePayloads: 0, prunedPayloadReferences: 1, needsMigration: true });
+  expect(JSON.stringify(result)).not.toMatch(/alice|legacy private fact|retention\.md/);
 });
 
 it("rejects a changed checkpoint prefix before contacting the remote service", async () => {

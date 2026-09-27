@@ -1065,6 +1065,10 @@ backup generations still need a validated retirement/migration procedure
 before AC-07/12 and T-09/13 can close. The supplied-ledger replay separately
 rejects linked or exposed ledger, config and owner-state files before remote
 mutation.
+The protected recovery command now has a read-only `audit-retention` mode that
+reports aggregate legacy-inline and current-payload counts without owner IDs,
+URIs or body text. Its synthetic test covers both formats; the actual recovery
+volume has not yet been audited.
 
 The fixed §11.1 minima are 20 recall, 10 correction, 20 isolation, 10 deletion,
 10 irrelevant and 10 authorization cases, each independently repeated three

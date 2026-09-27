@@ -125,6 +125,18 @@ replay refuses a missing or changed active payload. Older candidate journals
 with inline correction bodies remain readable, but this format does not prune
 those bodies. Retire their associated backups and perform a separately
 validated migration before claiming bounded retention for an upgraded volume.
+With Dano stopped, inventory the current recovery volume before planning that
+migration:
+
+```sh
+node /app/runtime/reconcile-memory-recovery.mjs audit-retention \
+  /var/lib/dano-memory-recovery
+```
+
+This read-only command reports only aggregate counts of legacy inline bodies,
+active payload files and pruned payload references. `needsMigration=true`
+means the old inline format is still present; the command neither edits the
+volume nor proves that archived backups have expired.
 On rollback, retain the **newer** recovery volume, restore the old data/config
 and OpenViking volumes, then start only the internal OpenViking dependencies.
 Run `preflight` and `replay` with the protected config root, restored data
