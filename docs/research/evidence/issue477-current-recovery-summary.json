@@ -18,8 +18,26 @@
     "prunedPayloadReferences": 0,
     "needsMigration": false
   },
+  "protectedContainer": {
+    "imageId": "ce4f0d13d5785ca9bebde4237c6ead1d719c63ef68c3ce287aebcf0c4b48f25d",
+    "buildDifference": "Temporary Dockerfile replaces only the build-stage Debian mirror with mirrors.aliyun.com; repository Dockerfile and runtime code are unchanged.",
+    "service": "same pinned OpenViking and embedding Compose services",
+    "preflight": { "owners": 1, "events": 2 },
+    "replay": { "owners": 1, "events": 2 },
+    "idempotentRetry": { "owners": 1, "events": 2 },
+    "deletedDocumentReadStatus": 404,
+    "correctedDocumentReadStatus": 200,
+    "retention": {
+      "owners": 1,
+      "legacyInlineBodies": 0,
+      "activePayloads": 1,
+      "prunedPayloadReferences": 0,
+      "needsMigration": false
+    }
+  },
   "limitations": [
     "Does not cover multiple owners, credential rotation, old queue, or arbitrary upgrade windows.",
-    "Does not cover the final Dano container, production OAuth, MiMo, or Browser acceptance."
+    "The protected container build used a temporary Debian mirror substitution; it does not replace bit-exact release-image validation.",
+    "Does not cover production OAuth, MiMo, or Browser acceptance."
   ]
 }

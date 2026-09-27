@@ -1077,8 +1077,12 @@ Preflight and replay each counted two events; the deleted document read returned
 The new-format recovery volume had one active payload and no legacy inline
 bodies. The [aggregate evidence](evidence/issue477-current-recovery-summary.json)
 contains no credentials, owner IDs, URIs or document text. This is one
-model-free recovery subgate, not final-container, multi-owner, OAuth, MiMo or
-Browser acceptance.
+model-free recovery subgate. A protected container built from the same tree
+also passed preflight, replay, immediate idempotent retry and retention audit;
+real USER-key readback returned 404 for the deletion and 200 for the corrected
+document. This build changed only the build-stage Debian mirror in a temporary
+Dockerfile to avoid a slow download. Bit-exact release-image, multi-owner,
+OAuth, MiMo and Browser acceptance remain open.
 Read-only inventory of the configured production host on 2026-09-27 showed
 `dano-app:rel-20260922-143917`; its container mount destinations did not
 include `/var/lib/dano-memory-recovery`, and the Dano-related Docker volume
