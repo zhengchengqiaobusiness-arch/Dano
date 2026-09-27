@@ -1,0 +1,33 @@
+{
+  "suite": "issue477-restart-cross-chat-recall",
+  "date": "2026-09-27",
+  "candidate": {
+    "dano": "0.2.46",
+    "piOpenViking": "0.1.17",
+    "openViking": "v0.4.20",
+    "imageId": "f397313bd15f00f66927e925d5729ff526957d2e1fe532140b51e2204786e5d9"
+  },
+  "restoration": {
+    "samePersistentVolumes": true,
+    "embeddingSha256Verified": true,
+    "rerankerSha256Verified": true,
+    "memoryReleaseDeploymentCheck": "passed",
+    "embeddingHealth": "healthy",
+    "rerankerHealth": "healthy",
+    "openVikingHealth": "healthy",
+    "danoHealth": "healthy",
+    "httpsHealthStatus": 200
+  },
+  "browser": {
+    "surface": "Codex in-app Browser",
+    "entry": "https://localhost:18711/",
+    "authentication": "existing isolated OA acceptance account reauthenticated after browser restart",
+    "managementSourceReadback": "岚渡210",
+    "newChatQuestion": "验收专用驿站的代号是什么？请只回答代号。",
+    "modelAnswer": "岚渡210",
+    "expectedAnswer": "岚渡210",
+    "screenshot": "restart-recall-browser.jpg",
+    "pass": true
+  },
+  "scope": "One post-restart cross-chat answer; this is not the frozen 20-case recall matrix or two-user Browser gate."
+}

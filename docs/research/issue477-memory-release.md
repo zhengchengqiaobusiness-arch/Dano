@@ -989,6 +989,23 @@ the nearest-rank p95 was 35 seconds, below the 60-second threshold. This
 closes the healthy save-ready latency subgate, while the other fixed categories,
 two-user Browser proof and release/rollback gates remain open.
 
+After a host restart, the original isolated Podman VM and five stopped
+`dano477-finalqueue` containers were recovered with the same persistent data
+volumes. The `/private/tmp` model mounts had been cleared, so both GGUF files
+were restored outside the checkout and verified against the pinned SHA-256
+values before the original containers started. The private OpenViking config
+was regenerated from the retained acceptance credentials without changing the
+stored index or user data. `check-memory-release.mjs --deployment` passed, the
+Embedding, reranker, OpenViking and Dano health checks were healthy, and the
+trusted fixed HTTPS entry returned 200. In a fresh Codex in-app Browser tab,
+the same isolated OA test account reauthenticated; management still showed
+the ten ready operations and the `岚渡210` source content. A new chat asked
+for the saved acceptance station code and MiMo answered `岚渡210`. The
+[sanitized receipt](evidence/issue477-save-ready/restart-recall-browser.json)
+and [Browser screenshot](evidence/issue477-save-ready/restart-recall-browser.jpg)
+prove this single cross-chat recall after restart. They do not replace the
+frozen recall matrix or independent Bob Browser acceptance.
+
 The frozen 20 cross-USER isolation cases ran three times each against the
 real OpenViking public API in the protected local stack. The
 [executable matrix](fixtures/issue477-isolation-matrix.py) and
@@ -1013,7 +1030,7 @@ the 60/60 and 30/30 figures above measure selection, not model answers.
 | PRD | Current evidence | Missing acceptance |
 |---|---|---|
 | AC-01/02 | Published independent package `0.1.17`, fixed lockfile, two Pi keywords, rebuilt image, dual-entry loader check and one real-service protected Pi CLI save/new-session recall | Complete pair audit and Dano integration repetition |
-| AC-03 | Browser explicit save, ready status/source and new-chat recall | Repeat fixed cases with model-answer review |
+| AC-03 | Browser explicit save, ready status/source and new-chat recall, including one correct model answer after host restart | Repeat fixed cases with model-answer review |
 | AC-04 | Collection filters and consent have automated coverage; one Browser collection reached ready and was recalled after separate consent; two synthetic-key chats produced no visible save | Sensitive-data/inference exclusions with observed selector decisions, revocation race and fixed repetitions |
 | AC-05/06 | Frozen 20 cross-USER cases ×3 passed against real OpenViking with forged headers, including isolated Session-ID replay; protected file boundary | Two independent authenticated Browser users, Dano routing and project scope |
 | AC-07 | Browser merged correction with model answer on `0.2.41`, package isolated real-service correction, one targeted collected-fact forget and one post-snapshot deletion replay | Ten correction and ten deletion cases ×3, old queue/cache/inflight/backup non-resurrection |
@@ -1029,7 +1046,7 @@ the 60/60 and 30/30 figures above measure selection, not model answers.
 | T-02/03 | Real USER-key isolation matrix 20×3, including header forgery and Session-ID collision | Dano/Peer/project scope and independent Bob Browser across fixed repetitions |
 | T-04/05 | Automated lifecycle/collection tests; one real Browser automatic collection/recall/revocation path | Full multi-viewer/rebind/branch/dispose and collection exclusions |
 | T-06/07 | Actual old `session_unknown` recovery and credential-store replay | All crash windows, rotation, user switch and anonymous transfer on fixed service |
-| T-08 | Real Browser new-chat recall; bounded reranker selection | Short-session extraction, no-result/timeout and model-answer repetitions |
+| T-08 | Real Browser new-chat recall, including one correct post-restart answer; bounded reranker selection | Short-session extraction, no-result/timeout and model-answer repetitions |
 | T-09/10 | Real-service correction/deletion/replay; Browser targeted forget with unrelated recall preserved, defaults-off and cross-tab pause | Complete correction/forget/pause/restore state matrix ×3 |
 | T-11 | Protected file access denied; real USER-key 403 probes | Full unauthenticated/401/403/native-tool/symlink/env/HTTP matrix |
 | T-12 | Final-image Browser form, generic Skill, image, bash and Pi compression; generated leave Skill choice/form rendered in a disposable layer | Working business options/authentication and complete final-image repetition |
