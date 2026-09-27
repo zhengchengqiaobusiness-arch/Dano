@@ -1035,7 +1035,7 @@ the 60/60 and 30/30 figures above measure selection, not model answers.
 | AC-05/06 | Frozen 20 cross-USER cases ×3 passed against real OpenViking with forged headers, including isolated Session-ID replay; protected file boundary | Two independent authenticated Browser users, Dano routing and project scope |
 | AC-07 | Browser merged correction with model answer on `0.2.41`, package isolated real-service correction, one targeted collected-fact forget and one post-snapshot deletion replay | Ten correction and ten deletion cases ×3, old queue/cache/inflight/backup non-resurrection |
 | AC-08 | Browser defaults-off, separate collection consent/revocation, management and one same-owner cross-tab pause/recall/resume flow; runtime tests cover export, targeted forget and clear while paused, and authenticated HTTP tests cover export and clear while paused | All governance transitions, independent two-Session pause, real Browser export and blocked-write recovery ×3 |
-| AC-09/10 | Old ambiguous queue recovered on real service; ordinary chat survived selected memory failures | Full lifecycle/fault matrix, truthful explicit failure and no duplicate/cross-owner replay |
+| AC-09/10 | Old ambiguous queue recovered on real service; a stopped-volume restore kept one `session_unknown` operation and resumed its source through `message_delivered`; ordinary chat survived selected memory failures | Full lifecycle/fault matrix, ready completion, truthful explicit failure and no duplicate/cross-owner replay |
 | AC-11 | Final-image Browser form, generic Skill, image, bash and Pi compression; an isolated production-generated leave Skill was discovered and rendered its operation choice and six-field form | Business options/authentication failed; complete OA and final-image regression matrix |
 | AC-12 | Clean stack, old-snapshot replay, two-owner supplied-ledger replay, candidate upgrade and matched rollback; automatic-journal matched old-volume two-owner deletion replay and current-service two-owner deletion/retry | Real multi-owner source/revocation and old-version rollback, arbitrary upgrade-window reconciliation |
 | AC-13 | Frozen 80-case dataset; 20 isolation cases ×3 passed against real OpenViking; candidate-7 traced workload had 70/70 semantic recall answers and 30/30 irrelevant omissions; full-source image repeated 100 complete requests with 70/70 recall answers; byte-identical prompt-layer image has matched on/off cost evidence; final 0.2.46 Browser save-ready run reached `ready` with correct readback in all 10 cases, p95 35 s | Other five categories ×3, Dano/Browser isolation and causal latency interpretation |
@@ -1045,12 +1045,12 @@ the 60/60 and 30/30 figures above measure selection, not model answers.
 | T-01 | Published `0.1.17`, exact Dano lockfile, rebuilt protected image, dual-entry loading twice per entry, and one real-service ordinary Pi CLI save/new-session recall | Full pair audit and repeated functional checks |
 | T-02/03 | Real USER-key isolation matrix 20×3, including header forgery and Session-ID collision | Dano/Peer/project scope and independent Bob Browser across fixed repetitions |
 | T-04/05 | Automated lifecycle/collection tests; one real Browser automatic collection/recall/revocation path | Full multi-viewer/rebind/branch/dispose and collection exclusions |
-| T-06/07 | Actual old `session_unknown` recovery and credential-store replay | All crash windows, rotation, user switch and anonymous transfer on fixed service |
+| T-06/07 | Actual old `session_unknown` recovery and credential-store replay; one restored-volume queue resumed to `message_delivered` without duplicate operation | All crash windows, ready completion, rotation, user switch and anonymous transfer on fixed service |
 | T-08 | Real Browser new-chat recall, including one correct post-restart answer; bounded reranker selection | Short-session extraction, no-result/timeout and model-answer repetitions |
 | T-09/10 | Real-service correction/deletion/replay; Browser targeted forget with unrelated recall preserved, defaults-off and cross-tab pause; runtime and authenticated HTTP paused-management tests | Complete correction/forget/pause/restore state matrix ×3 |
 | T-11 | Protected file access denied; real USER-key 403 probes | Full unauthenticated/401/403/native-tool/symlink/env/HTTP matrix |
 | T-12 | Final-image Browser form, generic Skill, image, bash and Pi compression; generated leave Skill choice/form rendered in a disposable layer | Working business options/authentication and complete final-image repetition |
-| T-13 | Clean deploy, candidate upgrade, matched old-data rollback, two-owner supplied-ledger replay; automatic-journal old-volume two-owner deletion replay and current-service two-owner deletion/retry | General old queue, credential/new writer and old-version multi-user reconciliation |
+| T-13 | Clean deploy, candidate upgrade, matched old-data rollback, two-owner supplied-ledger replay; automatic-journal old-volume two-owner deletion replay and current-service two-owner deletion/retry; one restored-volume old queue resumed through source append | Old queue through ready, multi-user queue, credential/new writer and old-version multi-user reconciliation |
 | T-14 | Five-user, 100-complete-request MiMo candidate-7 run passed semantic recall, injection, wait and token limits in an instrumented disposable container; full-source image repeated 100 complete requests with 70/70 recall answers; byte-identical prompt-layer image passed matched on/off cost; final fixed Browser save-ready p95 35 s with 10/10 source readbacks | Complete other fixed categories, integration and causal interpretation |
 
 Review found that older correction intents keep document bodies inline in the
@@ -1104,6 +1104,18 @@ and an immediate replay passed. The
 [sanitized two-owner evidence](evidence/issue477-two-owner-old-volume-replay.json)
 does not claim old-version binary rollback, pending-queue reconciliation or
 source-session revocation.
+In a separate real-service old-queue rehearsal, a synthetic lost
+`createSession` response left the local operation at `session_unknown` while
+its USER-bound remote Session existed. OpenViking was stopped, its data volume
+exported and imported into a new volume, and the checkpointed Dano owner state
+restored while the recovery journal remained separate. Preflight and replay
+both returned one owner and zero newer events. The restored service retained
+the Session; two delivery advances reconciled it and appended the source,
+ending at `message_delivered`. The real service confirmed the source, and
+repeating the save reused the same operation ID. The
+[sanitized old-queue evidence](evidence/issue477-old-queue-volume-restore.json)
+does not cover commit, extraction, `ready`, newer recovery events, or a second
+USER. These remain required before the queue and rollback gates close.
 The rollback preflight now compares every stable field of an operation present
 at the checkpoint, including its source and collection provenance. It permits
 the existing blocked-state transition and transient retry metadata, but rejects

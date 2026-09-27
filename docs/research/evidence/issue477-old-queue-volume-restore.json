@@ -1,0 +1,39 @@
+{
+  "date": "2026-09-27",
+  "danoCommit": "8ea02ad38",
+  "danoVersion": "0.2.47",
+  "extensionVersion": "0.1.17",
+  "service": "pinned OpenViking v0.4.20 and embedding images in an isolated Podman VM",
+  "scope": "one synthetic USER, no model extraction",
+  "failureWindow": {
+    "localPhase": "session_unknown",
+    "remoteSessionCreated": true,
+    "createResponseLost": true
+  },
+  "stoppedBackup": {
+    "openVikingDataVolumeExported": true,
+    "openVikingArchiveBytes": 4669952,
+    "protectedOwnerStateCopied": true,
+    "separateRecoveryJournalRetained": true,
+    "checkpointOwners": 1
+  },
+  "restore": {
+    "openVikingArchiveImportedIntoNewVolume": true,
+    "restartedServiceMountedImportedVolume": true,
+    "oldProtectedStateRestored": true,
+    "preflight": { "owners": 1, "events": 0 },
+    "replay": { "owners": 1, "events": 0 }
+  },
+  "resumedDelivery": {
+    "oldPhase": "session_unknown",
+    "remoteSessionPreserved": true,
+    "finalPhase": "message_delivered",
+    "sourcePresentOnRealService": true,
+    "duplicateOperations": 0
+  },
+  "limitations": [
+    "The checkpoint had no post-backup recovery events, so replay did not overlay a newer state.",
+    "Delivery stopped before commit, extraction and ready because this run had no valid MiMo credential.",
+    "This does not establish new-writer reconciliation, multi-user old-queue behavior, different-version rollback, full Dano image or Browser acceptance."
+  ]
+}
