@@ -261,14 +261,20 @@ function noUnreconciledWrites(oldState, latest) {
   }
   const oldIds = Object.keys(oldState.operations ?? {}).sort();
   const newIds = Object.keys(latest.operations ?? {}).filter(id => !oldState.operations?.[id]);
+  const unknownSessions = [];
   // Delivery persists session_unknown before its first remote request. A new
   // queued operation still has its payload and has made no remote write, so
-  // overlaying the recovery state can resume it safely after rollback.
+  // overlaying the recovery state can resume it safely after rollback. A new
+  // session_unknown operation needs an owner-bound remote absence check first.
   for (const id of newIds) {
     const operation = latest.operations[id];
-    assert.ok(operation.id === id && operation.phase === "queued"
+    assert.ok(operation.id === id && ["queued", "session_unknown"].includes(operation.phase)
+      && (operation.phase === "queued" || operation.scope === null)
+      && typeof operation.remoteSessionId === "string"
+      && operation.remoteSessionId.length > 0
       && typeof operation.payload === "string" && operation.payload.trim(),
       "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+    if (operation.phase === "session_unknown") unknownSessions.push(operation.remoteSessionId);
   }
   assert.ok(oldIds.every(id => latest.operations?.[id]), "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
   const stableOperation = operation => Object.fromEntries(Object.entries(operation)
@@ -282,6 +288,7 @@ function noUnreconciledWrites(oldState, latest) {
       && (after.payload === before.payload || after.phase === "blocked" && after.payload === undefined),
     "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
   }
+  return unknownSessions;
 }
 
 function expectedEffects(events) {
@@ -376,9 +383,10 @@ async function prepare(configDirectory, dataRoot, recoveryRoot, checkpointFile) 
     const receiptPath = `${statePath}.replay-receipt.json`;
     const receipt = { version: 1, checkpointSha256, owner: entry.owner,
       statePath: entry.statePath, latestStateSha256: digest(latestBytes) };
+    let unknownSessions = [];
     if (snapshot) {
       assert.equal(restored.state.revision, entry.stateRevision, "POST_SNAPSHOT_STATE_MISMATCH");
-      noUnreconciledWrites(restored.state, journal.state);
+      unknownSessions = noUnreconciledWrites(restored.state, journal.state);
     } else {
       let savedReceipt;
       try { savedReceipt = JSON.parse((await privateFile(receiptPath, 4096)).toString("utf8")); }
@@ -397,7 +405,7 @@ async function prepare(configDirectory, dataRoot, recoveryRoot, checkpointFile) 
     const effects = expectedEffects(events);
     const key = await credentials.read(entry.owner);
     assert.ok(key, "CREDENTIAL_MISSING");
-    plans.push({ owner: entry.owner, events, effects, statePath, receiptPath, receipt,
+    plans.push({ owner: entry.owner, events, effects, unknownSessions, statePath, receiptPath, receipt,
       latestBytes, client: new OwnerMemoryClient({ owner: entry.owner, baseUrl: config.baseUrl,
         apiKey: key, scope: null, timeoutMs: config.requestTimeoutMs }) });
   }
@@ -407,8 +415,17 @@ async function prepare(configDirectory, dataRoot, recoveryRoot, checkpointFile) 
 export async function reconcile(configDirectory, dataRoot, recoveryRoot, checkpointFile, preflightOnly = false) {
   const plans = await prepare(configDirectory, dataRoot, recoveryRoot, checkpointFile);
   const summary = { owners: plans.length, events: plans.reduce((sum, plan) => sum + plan.events.length, 0) };
+  const remoteWriterChecks = plans.reduce((sum, plan) => sum + plan.unknownSessions.length, 0);
+  if (remoteWriterChecks) summary.remoteWriterChecks = remoteWriterChecks;
   if (preflightOnly) return summary;
   for (const plan of plans) await plan.client.verifyIdentity();
+  // No replay mutation may run until every new writer is checked against the
+  // restored service. An absent Session can be recreated by the stable ID;
+  // an existing one could hold post-snapshot data and must be reconciled apart.
+  for (const plan of plans) for (const id of plan.unknownSessions) {
+    assert.equal(await plan.client.sessionExists(id), false,
+      "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  }
   for (const plan of plans) {
     const corrections = replayableCorrections(plan.events);
     for (const [index, event] of plan.events.entries()) {

@@ -13,4 +13,6 @@ export declare function migrateLegacyRecovery(configDirectory: string, dataRoot:
   }>;
 
 export declare function reconcile(configDirectory: string, dataRoot: string, recoveryRoot: string,
-  checkpointFile: string, preflightOnly?: boolean): Promise<{ owners: number; events: number }>;
+  checkpointFile: string, preflightOnly?: boolean): Promise<{
+    owners: number; events: number; remoteWriterChecks?: number;
+  }>;

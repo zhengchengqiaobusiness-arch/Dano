@@ -1051,7 +1051,7 @@ establish Dano model answers.
 | AC-08 | Browser defaults-off, separate collection consent/revocation, management and one same-owner cross-tab pause/recall/resume flow; runtime tests cover export, targeted forget and clear while paused, and authenticated HTTP tests cover export and clear while paused | All governance transitions, independent two-Session pause, real Browser export and blocked-write recovery ×3 |
 | AC-09/10 | Old ambiguous queue recovered on real service; a stopped-volume restore kept one `session_unknown` operation and resumed its source through `message_delivered`; ordinary chat survived selected memory failures | Full lifecycle/fault matrix, ready completion, truthful explicit failure and no duplicate/cross-owner replay |
 | AC-11 | Final-image Browser form, generic Skill, image, bash and Pi compression; an isolated production-generated leave Skill was discovered and rendered its operation choice and six-field form | Business options/authentication failed; complete OA and final-image regression matrix |
-| AC-12 | Clean stack, old-snapshot replay, two-owner supplied-ledger replay, candidate upgrade and matched rollback; automatic-journal matched old-volume two-owner deletion replay and current-service two-owner deletion/retry; focused recovery of a new unsent writer | Real multi-owner source/revocation and old-version rollback, later-phase upgrade-window writer reconciliation |
+| AC-12 | Clean stack, old-snapshot replay, two-owner supplied-ledger replay, candidate upgrade and matched rollback; automatic-journal matched old-volume two-owner deletion replay and current-service two-owner deletion/retry; focused recovery of new queued and remote-absent `session_unknown` writers | Real multi-owner source/revocation and old-version rollback, later-phase upgrade-window writer reconciliation |
 | AC-13 | Frozen 80-case dataset; 20 isolation cases ×3 passed against real OpenViking; candidate-7 traced workload had 70/70 semantic recall answers and 30/30 irrelevant omissions; full-source image repeated 100 complete requests with 70/70 recall answers; byte-identical prompt-layer image has matched on/off cost evidence; final 0.2.46 Browser save-ready run reached `ready` with correct readback in all 10 cases, p95 35 s | Other five categories ×3, Dano/Browser isolation and causal latency interpretation |
 
 | Spec test | Current evidence | Missing acceptance |
@@ -1064,7 +1064,7 @@ establish Dano model answers.
 | T-09/10 | Real-service correction/deletion/replay; Browser targeted forget with unrelated recall preserved, defaults-off and cross-tab pause; runtime and authenticated HTTP paused-management tests | Complete correction/forget/pause/restore state matrix ×3 |
 | T-11 | Protected file access denied; real USER-key 403 probes; `0.2.52` image passed synthetic unauthenticated/invalid-token/cross-user HTTP probes and Pi native-tool credential isolation | Repeat complete HTTP matrix with real USER keys and independently authenticated Browser users |
 | T-12 | Final-image Browser form, generic Skill, image, bash and Pi compression; generated leave Skill choice/form rendered in a disposable layer | Working business options/authentication and complete final-image repetition |
-| T-13 | Clean deploy, candidate upgrade, matched old-data rollback, two-owner supplied-ledger replay; automatic-journal old-volume two-owner deletion replay and current-service two-owner deletion/retry; one restored-volume old queue resumed through source append; focused new-queued-writer overlay | Old queue through ready, multi-user queue, credential/new writer past send boundary and old-version multi-user reconciliation |
+| T-13 | Clean deploy, candidate upgrade, matched old-data rollback, two-owner supplied-ledger replay; automatic-journal old-volume two-owner deletion replay and current-service two-owner deletion/retry; one restored-volume old queue resumed through source append; focused new queued and remote-absent `session_unknown` writer overlay | Old queue through ready, multi-user queue, real credential/new writer past send boundary and old-version multi-user reconciliation |
 | T-14 | Five-user, 100-complete-request MiMo candidate-7 run passed semantic recall, injection, wait and token limits in an instrumented disposable container; full-source image repeated 100 complete requests with 70/70 recall answers; byte-identical prompt-layer image passed matched on/off cost; final fixed Browser save-ready p95 35 s with 10/10 source readbacks | Complete other fixed categories, integration and causal interpretation |
 
 Review found that older correction intents keep document bodies inline in the
@@ -1166,12 +1166,17 @@ the existing blocked-state transition and transient retry metadata, but rejects
 changed source identity before any remote request. The focused tests cover both
 the rejection and a legitimate queued-to-blocked transition. New operations
 created after the checkpoint in the `queued` phase with their payload intact
-can now be overlaid: the published delivery state machine persists
+can be overlaid: the published delivery state machine persists
 `session_unknown` before its first remote request, so these writers have not
-sent data. Focused rollback tests confirm that the payload survives and that a
-new `session_unknown` writer or a queued writer missing its payload is rejected
-before remote contact. Later phases still require explicit reconciliation;
-this narrow recovery rule does not close the upgrade-window writer gate.
+sent data. A new `session_unknown` writer can also be overlaid only when its
+payload remains and the restored OpenViking service reports its fixed Session
+ID absent under the same USER key. `preflight` reports the number of required
+remote writer checks without contacting the service; `replay` verifies every
+owner and every such absence before replaying any deletion or correction. A
+present Session, missing payload or later delivery phase still fails closed.
+Focused rollback tests cover these boundaries, but the new
+`session_unknown` path has not yet run against a real restored volume and does
+not close the broader upgrade-window writer gate.
 The operator-supplied deletion ledger now shares the recovery journal's
 owner-bound document-URI validation. Its preflight rejects path traversal,
 encoded traversal, hidden files and query strings before verifying remote

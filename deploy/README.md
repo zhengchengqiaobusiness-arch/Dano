@@ -153,6 +153,14 @@ node /app/runtime/reconcile-memory-recovery.mjs replay \
   /etc/dano-protected /var/lib/dano-protected /var/lib/dano-memory-recovery /checkpoint/snapshot.json
 ```
 
+For a writer created after the checkpoint in `session_unknown`, local
+`preflight` reports `remoteWriterChecks` but cannot establish remote absence.
+`replay` verifies every owner's USER identity and confirms those Sessions are
+absent from the restored OpenViking service before any deletion or correction
+is replayed. An existing Session, missing payload, or later delivery phase
+still requires separate reconciliation; do not start Dano after a failed
+`replay`.
+
 The command checks every owner, state hash, journal prefix and credential before the first
 remote mutation; it replays later deletion intents, reads back their effects,
 then records a private checkpoint-bound replay receipt beside each owner state

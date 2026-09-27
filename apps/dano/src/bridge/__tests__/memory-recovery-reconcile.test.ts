@@ -372,20 +372,24 @@ it("accepts an old queued writer that was explicitly blocked after the checkpoin
     .resolves.toEqual({ owners: 1, events: 0 });
 });
 
-it("restores a new unsent writer after the checkpoint and rejects one past the send boundary", async () => {
-  const f = await fixture();
-  await checkpoint(f.data, f.recovery, f.checkpointFile);
-  const statePath = join(f.data, "host-state", "owner-a", "state", "memory", "state.json");
-  const oldBytes = await readFile(statePath);
+it("restores a new queued writer and an absent session_unknown writer after the checkpoint", async () => {
+  const stage = async (phase: "queued" | "session_unknown" | "message_unknown", payload?: string) => {
+    const f = await fixture();
+    await checkpoint(f.data, f.recovery, f.checkpointFile);
+    const statePath = join(f.data, "host-state", "owner-a", "state", "memory", "state.json");
+    const oldBytes = await readFile(statePath);
+    await new RecoveryStateStore(f.store, f.journal).transact(state => {
+      state.operations[id] = { id, owner: f.owner, scope: null, kind: "explicit",
+        authorizationEpoch: state.authorization.epoch,
+        source: { sessionId: "chat", entryId: "new", branchId: "root", contentVersion: "1" },
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        phase, remoteSessionId: "new-remote-session", payload };
+    });
+    await writeFile(statePath, oldBytes);
+    return { ...f, statePath, oldBytes };
+  };
   const id = "c".repeat(64);
-  await new RecoveryStateStore(f.store, f.journal).transact(state => {
-    state.operations[id] = { id, owner: f.owner, scope: null, kind: "explicit",
-      authorizationEpoch: state.authorization.epoch,
-      source: { sessionId: "chat", entryId: "new", branchId: "root", contentVersion: "1" },
-      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-      phase: "queued", remoteSessionId: "new-remote-session", payload: "new synthetic fact" };
-  });
-  await writeFile(statePath, oldBytes);
+  const f = await stage("queued", "new synthetic fact");
   await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile, true))
     .resolves.toEqual({ owners: 1, events: 0 });
   vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
@@ -394,30 +398,40 @@ it("restores a new unsent writer after the checkpoint and rejects one past the s
   expect((await f.store.read()).operations[id]).toMatchObject({ phase: "queued", payload: "new synthetic fact" });
 
   vi.restoreAllMocks();
-  const second = await fixture();
-  await checkpoint(second.data, second.recovery, second.checkpointFile);
-  const secondPath = join(second.data, "host-state", "owner-a", "state", "memory", "state.json");
-  const secondOldBytes = await readFile(secondPath);
-  await new RecoveryStateStore(second.store, second.journal).transact(state => {
-    state.operations[id] = { id, owner: second.owner, scope: null, kind: "explicit",
-      authorizationEpoch: state.authorization.epoch,
-      source: { sessionId: "chat", entryId: "new", branchId: "root", contentVersion: "1" },
-      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-      phase: "session_unknown", remoteSessionId: "new-remote-session", payload: "new synthetic fact" };
-  });
-  await writeFile(secondPath, secondOldBytes);
-  const contacted = vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity");
-  await expect(reconcile(second.config, second.data, second.recovery, second.checkpointFile))
-    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
-  expect(contacted).not.toHaveBeenCalled();
-  await writeFile(secondPath, await readFile(join(second.recovery, "account", "alice", "state.json")));
-  await new RecoveryStateStore(second.store, second.journal).transact(state => {
-    state.operations[id]!.phase = "queued";
-    delete state.operations[id]!.payload;
-  });
-  await writeFile(secondPath, secondOldBytes);
+  const second = await stage("session_unknown", "new synthetic fact");
   await expect(reconcile(second.config, second.data, second.recovery, second.checkpointFile, true))
+    .resolves.toEqual({ owners: 1, events: 0, remoteWriterChecks: 1 });
+  vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+  const absent = vi.spyOn(OwnerMemoryClient.prototype, "sessionExists").mockResolvedValue(false);
+  vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments").mockResolvedValue([]);
+  await reconcile(second.config, second.data, second.recovery, second.checkpointFile);
+  expect(absent).toHaveBeenCalledExactlyOnceWith("new-remote-session");
+  expect((await second.store.read()).operations[id]).toMatchObject({
+    phase: "session_unknown", payload: "new synthetic fact" });
+
+  vi.restoreAllMocks();
+  const present = await stage("session_unknown", "new synthetic fact");
+  await present.journal.append({ kind: "removeMemory", uri: "viking://user/alice/memories/old.md" });
+  vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+  const exists = vi.spyOn(OwnerMemoryClient.prototype, "sessionExists").mockResolvedValue(true);
+  const remove = vi.spyOn(OwnerMemoryClient.prototype, "removeMemory");
+  const readback = vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments");
+  await expect(reconcile(present.config, present.data, present.recovery, present.checkpointFile))
     .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  expect(exists).toHaveBeenCalledExactlyOnceWith("new-remote-session");
+  expect(remove).not.toHaveBeenCalled();
+  expect(readback).not.toHaveBeenCalled();
+  expect(await readFile(present.statePath)).toEqual(present.oldBytes);
+
+  vi.restoreAllMocks();
+  const missingPayload = await stage("queued");
+  const contacted = vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity");
+  await expect(reconcile(missingPayload.config, missingPayload.data, missingPayload.recovery,
+    missingPayload.checkpointFile, true)).rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  expect(contacted).not.toHaveBeenCalled();
+  const laterPhase = await stage("message_unknown", "new synthetic fact");
+  await expect(reconcile(laterPhase.config, laterPhase.data, laterPhase.recovery,
+    laterPhase.checkpointFile, true)).rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
   expect(contacted).not.toHaveBeenCalled();
 });
 
