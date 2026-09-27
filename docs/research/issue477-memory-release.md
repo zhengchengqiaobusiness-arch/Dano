@@ -1195,6 +1195,16 @@ list contained only `dano_agent-config` and `dano_workspaces`. Therefore that
 current production container has no mounted old-format recovery journal to
 migrate. This does not prove the candidate volumes elsewhere are empty, nor
 replace first-deployment and rollback acceptance for the new format.
+The default local Podman VM was also inventoried read-only on 2026-09-27.
+Its volume directory contained the older `dano465-browser-nibutlhc` config,
+data, runtime and workspace volumes, plus unrelated `dano478` and base Dano
+volumes; it contained no `dano477-finalqueue` or memory-recovery volume.
+The retained Browser runtime volume contained `.pi` and `workspaces` but no
+recovery journal. The separate `dano-465-acceptance-cachetest` VM had no
+volumes after its disposable security checks. Thus the historical retained
+`finalqueue` recovery generation is not currently available in the accessible
+local VMs for a real-volume `migrate-legacy` run. This is an inventory result,
+not evidence that old backups have expired or that migration is unnecessary.
 
 The fixed §11.1 minima are 20 recall, 10 correction, 20 isolation, 10 deletion,
 10 irrelevant and 10 authorization cases, each independently repeated three
