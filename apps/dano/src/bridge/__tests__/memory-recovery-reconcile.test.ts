@@ -116,6 +116,22 @@ it("checkpoints a stopped owner and preflights only the post-snapshot deletion i
   expect(removed).toHaveBeenCalledExactlyOnceWith(uri);
 });
 
+it("preflights a checkpoint containing more than 256 owners", async () => {
+  const f = await fixture();
+  for (let index = 0; index < 256; index++) {
+    const owner = { accountId: "account", userId: `user${index}` };
+    const directory = join(f.data, "host-state", `owner-${index}`, "state", "memory");
+    const store = new FileStateStore({ owner, directory, policyVersion: "v1" });
+    await store.transact(state => { state.authorization.enabled = false; });
+    await MemoryRecoveryJournal.bootstrap(f.recovery, owner, await store.read());
+    await f.credentialStore.write(owner, "synthetic-user-key");
+  }
+  await expect(checkpoint(f.data, f.recovery, f.checkpointFile))
+    .resolves.toEqual({ owners: 257, journalBytes: 0 });
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile, true))
+    .resolves.toEqual({ owners: 257, events: 0 });
+}, 30_000);
+
 it("replays a deletion after pruning an obsolete correction body from an older checkpoint", async () => {
   const f = await fixture();
   await checkpoint(f.data, f.recovery, f.checkpointFile);

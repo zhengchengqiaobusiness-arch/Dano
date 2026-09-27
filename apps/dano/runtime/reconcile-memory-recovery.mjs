@@ -13,6 +13,7 @@ import { outside, privateDirectory, privateFile, trustedDirectory } from "./priv
 const digest = bytes => createHash("sha256").update(bytes).digest("hex");
 const validId = value => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 const fail = code => { throw new Error(code); };
+const maxCheckpointBytes = 1024 * 1024;
 
 async function ownerStates(dataRoot) {
   const hostRoot = join(dataRoot, "host-state");
@@ -100,7 +101,7 @@ export async function migrateLegacyRecovery(configDirectory, dataRoot, sourceRoo
     privateDirectory(join(configDirectory, "memory")), privateDirectory(sourceRoot),
     privateDirectory(targetRoot), privateDirectory(dirname(outputCheckpoint))]);
   assert.equal((await readdir(targetRoot)).length, 0, "RECOVERY_MIGRATION_TARGET_NOT_EMPTY");
-  try { await privateFile(outputCheckpoint, 1024 * 1024); fail("RECOVERY_CHECKPOINT_EXISTS"); }
+  try { await privateFile(outputCheckpoint, maxCheckpointBytes); fail("RECOVERY_CHECKPOINT_EXISTS"); }
   catch (error) { if (error?.code !== "ENOENT") throw error; }
   const [states, owners] = await Promise.all([ownerStates(dataRoot), recoveryOwners(sourceRoot)]);
   assert.deepEqual(owners, states.map(item => item.owner)
@@ -231,12 +232,14 @@ export async function checkpoint(dataRoot, recoveryRoot, outputFile) {
       eventBytes: journal.eventBytes.length, eventSha256: digest(journal.eventBytes) });
   }
   const manifest = { version: 1, owners };
-  await writePrivateNew(outputFile, JSON.stringify(manifest) + "\n");
+  const bytes = JSON.stringify(manifest) + "\n";
+  assert.ok(Buffer.byteLength(bytes) <= maxCheckpointBytes, "RECOVERY_CHECKPOINT_TOO_LARGE");
+  await writePrivateNew(outputFile, bytes);
   return { owners: owners.length, journalBytes: owners.reduce((sum, owner) => sum + owner.eventBytes, 0) };
 }
 
 function checkedManifest(value) {
-  assert.ok(value?.version === 1 && Array.isArray(value.owners) && value.owners.length <= 256,
+  assert.ok(value?.version === 1 && Array.isArray(value.owners),
     "INVALID_RECOVERY_CHECKPOINT");
   const seen = new Set();
   for (const item of value.owners) {
@@ -398,7 +401,7 @@ async function prepare(configDirectory, dataRoot, recoveryRoot, checkpointFile) 
   await Promise.all([trustedDirectory(configDirectory), trustedDirectory(dataRoot),
     privateDirectory(join(configDirectory, "memory")), privateDirectory(recoveryRoot),
     privateDirectory(dirname(checkpointFile))]);
-  const checkpointBytes = await privateFile(checkpointFile, 1024 * 1024);
+  const checkpointBytes = await privateFile(checkpointFile, maxCheckpointBytes);
   const manifest = JSON.parse(checkpointBytes.toString("utf8"));
   const checkpointSha256 = digest(checkpointBytes);
   const entries = checkedManifest(manifest);

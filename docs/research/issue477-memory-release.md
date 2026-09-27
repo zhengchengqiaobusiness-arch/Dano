@@ -1392,3 +1392,9 @@ or issue closure follows from this partial evidence.
   resources.
 
 No production deployment or release conclusion is implied by this record.
+
+The `0.2.58` recovery checkpoint now uses the same 1 MiB manifest limit when
+writing and reading, without a separate 256-owner cap at replay. A targeted
+257-owner fixture completed checkpoint and read-only replay preflight. This
+closes the self-incompatible checkpoint found in review; the remaining T-13
+multi-user remote replay and old-version rollback gates above remain open.
