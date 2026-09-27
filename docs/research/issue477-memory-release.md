@@ -1020,6 +1020,18 @@ This proves the upstream USER-key boundary for these frozen cases. It does
 not establish Dano routing, project scope, or two independent OA Browser
 sessions, which remain separate acceptance gates.
 
+The frozen correction and deletion source mappings also ran through a
+disposable OpenViking `v0.4.20` service with the pinned local Embedding model.
+The [public API probe](fixtures/issue477-public-api-correction-delete.py) and
+[sanitized receipt](evidence/issue477-public-api-correction-delete.json) record
+30/30 replacement readbacks and 30/30 deletions with 404 readback and no
+search hit, across three fresh synthetic accounts. The MiMo model key was
+deliberately disabled. This establishes only the upstream direct-write and
+direct-delete primitives. It does not exercise Dano correction/forget flows,
+new-chat model answers, old queues, asynchronous extraction, restored backups
+or Browser, and does not count as passing the frozen correction/deletion
+evaluation cases.
+
 Compared with the live [Issue #465 PRD](https://github.com/zhengchengqiaobusiness-arch/Dano/issues/465)
 and [Spec](https://github.com/zhengchengqiaobusiness-arch/Dano/issues/465#issuecomment-5674833976).
 "Partial" identifies evidence already collected; it is **not** acceptance.

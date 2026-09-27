@@ -1,0 +1,453 @@
+{
+  "summary": {
+    "suite": "issue477-public-api-correction-delete-primitives",
+    "scope": "upstream OpenViking only; not frozen Dano/Browser/model acceptance",
+    "server": "real OpenViking v0.4.20",
+    "attempts": 60,
+    "passed": 60,
+    "repetitions": 3
+  },
+  "records": [
+    {
+      "caseId": "C-01-01",
+      "repetition": 1,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 1864
+    },
+    {
+      "caseId": "C-01-02",
+      "repetition": 1,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 433
+    },
+    {
+      "caseId": "C-02-01",
+      "repetition": 1,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 385
+    },
+    {
+      "caseId": "C-02-02",
+      "repetition": 1,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 440
+    },
+    {
+      "caseId": "C-03-01",
+      "repetition": 1,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 393
+    },
+    {
+      "caseId": "C-03-02",
+      "repetition": 1,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 393
+    },
+    {
+      "caseId": "C-04-01",
+      "repetition": 1,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 444
+    },
+    {
+      "caseId": "C-04-02",
+      "repetition": 1,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 391
+    },
+    {
+      "caseId": "C-05-01",
+      "repetition": 1,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 429
+    },
+    {
+      "caseId": "C-05-02",
+      "repetition": 1,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 394
+    },
+    {
+      "caseId": "D-01-01",
+      "repetition": 1,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 223
+    },
+    {
+      "caseId": "D-01-02",
+      "repetition": 1,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 212
+    },
+    {
+      "caseId": "D-02-01",
+      "repetition": 1,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 212
+    },
+    {
+      "caseId": "D-02-02",
+      "repetition": 1,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 150
+    },
+    {
+      "caseId": "D-03-01",
+      "repetition": 1,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 261
+    },
+    {
+      "caseId": "D-03-02",
+      "repetition": 1,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 452
+    },
+    {
+      "caseId": "D-04-01",
+      "repetition": 1,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 155
+    },
+    {
+      "caseId": "D-04-02",
+      "repetition": 1,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 209
+    },
+    {
+      "caseId": "D-05-01",
+      "repetition": 1,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 209
+    },
+    {
+      "caseId": "D-05-02",
+      "repetition": 1,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 209
+    },
+    {
+      "caseId": "C-01-01",
+      "repetition": 2,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 2032
+    },
+    {
+      "caseId": "C-01-02",
+      "repetition": 2,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 428
+    },
+    {
+      "caseId": "C-02-01",
+      "repetition": 2,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 382
+    },
+    {
+      "caseId": "C-02-02",
+      "repetition": 2,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 432
+    },
+    {
+      "caseId": "C-03-01",
+      "repetition": 2,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 387
+    },
+    {
+      "caseId": "C-03-02",
+      "repetition": 2,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 434
+    },
+    {
+      "caseId": "C-04-01",
+      "repetition": 2,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 390
+    },
+    {
+      "caseId": "C-04-02",
+      "repetition": 2,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 389
+    },
+    {
+      "caseId": "C-05-01",
+      "repetition": 2,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 445
+    },
+    {
+      "caseId": "C-05-02",
+      "repetition": 2,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 383
+    },
+    {
+      "caseId": "D-01-01",
+      "repetition": 2,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 215
+    },
+    {
+      "caseId": "D-01-02",
+      "repetition": 2,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 209
+    },
+    {
+      "caseId": "D-02-01",
+      "repetition": 2,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 209
+    },
+    {
+      "caseId": "D-02-02",
+      "repetition": 2,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 205
+    },
+    {
+      "caseId": "D-03-01",
+      "repetition": 2,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 204
+    },
+    {
+      "caseId": "D-03-02",
+      "repetition": 2,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 210
+    },
+    {
+      "caseId": "D-04-01",
+      "repetition": 2,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 223
+    },
+    {
+      "caseId": "D-04-02",
+      "repetition": 2,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 217
+    },
+    {
+      "caseId": "D-05-01",
+      "repetition": 2,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 210
+    },
+    {
+      "caseId": "D-05-02",
+      "repetition": 2,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 148
+    },
+    {
+      "caseId": "C-01-01",
+      "repetition": 3,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 2023
+    },
+    {
+      "caseId": "C-01-02",
+      "repetition": 3,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 435
+    },
+    {
+      "caseId": "C-02-01",
+      "repetition": 3,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 385
+    },
+    {
+      "caseId": "C-02-02",
+      "repetition": 3,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 433
+    },
+    {
+      "caseId": "C-03-01",
+      "repetition": 3,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 388
+    },
+    {
+      "caseId": "C-03-02",
+      "repetition": 3,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 386
+    },
+    {
+      "caseId": "C-04-01",
+      "repetition": 3,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 440
+    },
+    {
+      "caseId": "C-04-02",
+      "repetition": 3,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 389
+    },
+    {
+      "caseId": "C-05-01",
+      "repetition": 3,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 386
+    },
+    {
+      "caseId": "C-05-02",
+      "repetition": 3,
+      "primitive": "correction",
+      "passed": true,
+      "elapsedMs": 441
+    },
+    {
+      "caseId": "D-01-01",
+      "repetition": 3,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 214
+    },
+    {
+      "caseId": "D-01-02",
+      "repetition": 3,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 205
+    },
+    {
+      "caseId": "D-02-01",
+      "repetition": 3,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 207
+    },
+    {
+      "caseId": "D-02-02",
+      "repetition": 3,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 205
+    },
+    {
+      "caseId": "D-03-01",
+      "repetition": 3,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 211
+    },
+    {
+      "caseId": "D-03-02",
+      "repetition": 3,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 215
+    },
+    {
+      "caseId": "D-04-01",
+      "repetition": 3,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 211
+    },
+    {
+      "caseId": "D-04-02",
+      "repetition": 3,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 150
+    },
+    {
+      "caseId": "D-05-01",
+      "repetition": 3,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 207
+    },
+    {
+      "caseId": "D-05-02",
+      "repetition": 3,
+      "primitive": "deletion",
+      "passed": true,
+      "elapsedMs": 276
+    }
+  ],
+  "setup": {
+    "openVikingImage": "ghcr.io/volcengine/openviking:v0.4.20@sha256:b9827753d035f4157b5b318865907fd18f738924ad6398c86feb1182f209825b",
+    "embeddingImage": "ghcr.io/ggml-org/llama.cpp:server@sha256:fb8f521cdfee1b763a6ef0d6633922e780c1393c03b49945526550cf55010343",
+    "embeddingModelSha256": "ab9b81d9cd329c712eee379cf0068eabe6a5e2a01d0def61535eba9384085e2c",
+    "frozenFixtureSha256": "8c1ad95d69ab6f58e601d48b353aeea60b63365a65a507de917ed5bc9bca250c",
+    "scriptSha256": "2ed1a7c6101eb8d984b68626e796c82f9ce838a2a014f122224d4316530b188c",
+    "credentialClass": "synthetic account keys; model key disabled"
+  },
+  "limits": [
+    "Direct public API primitives only; no Dano or authenticated Browser path",
+    "No MiMo extraction or answer review",
+    "Deletion scenarios involving old queues, async extraction or restored backups are not exercised"
+  ],
+  "cleanup": {
+    "composeProject": "dano477contract",
+    "containersRemoved": true,
+    "projectVolumeRemoved": true,
+    "projectNetworksRemoved": true,
+    "dedicatedMachineStopped": true,
+    "temporaryHostRunRemoved": true
+  }
+}
