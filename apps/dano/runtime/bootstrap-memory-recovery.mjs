@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { constants } from "node:fs";
-import { lstat, open, readdir, realpath } from "node:fs/promises";
-import { join, resolve, sep } from "node:path";
+import { open, readdir } from "node:fs/promises";
+import { join, sep } from "node:path";
 import { FileStateStore } from "@josephyoung/pi-openviking/host";
 import { MemoryRecoveryJournal } from "./dist/server/bridge/memory-recovery-journal.js";
+import { privateDirectory, privateFileHandle } from "./private-recovery-path.mjs";
 
 // Run only with Dano stopped. The recovery volume is deliberately outside
 // every older protected-data and OpenViking snapshot restored during rollback.
@@ -12,15 +13,9 @@ let stage = "arguments";
 try {
   const [hostStateRoot, recoveryRoot, ...extra] = process.argv.slice(2);
   assert.ok(hostStateRoot && recoveryRoot && extra.length === 0, "INVALID_ARGUMENTS");
-  const checkDirectory = async path => {
-    assert.ok(resolve(path) === path && (await realpath(path)) === path, "UNPROTECTED_RECOVERY_PATH");
-    const stat = await lstat(path);
-    assert.ok(stat.isDirectory() && !stat.isSymbolicLink() && stat.uid === process.getuid?.()
-      && (stat.mode & 0o077) === 0, "UNPROTECTED_RECOVERY_PATH");
-  };
   stage = "inspect";
-  await checkDirectory(hostStateRoot);
-  await checkDirectory(recoveryRoot);
+  await privateDirectory(hostStateRoot);
+  await privateDirectory(recoveryRoot);
   assert.ok(!hostStateRoot.startsWith(`${recoveryRoot}${sep}`)
     && !recoveryRoot.startsWith(`${hostStateRoot}${sep}`), "UNPROTECTED_RECOVERY_PATH");
   const owners = [];
@@ -39,11 +34,8 @@ try {
       throw error;
     }
     try {
-      await Promise.all([checkDirectory(userRoot), checkDirectory(stateRoot), checkDirectory(memoryRoot)]);
-      const stat = await file.stat();
-      assert.ok(stat.isFile() && stat.nlink === 1 && stat.uid === process.getuid?.()
-        && (stat.mode & 0o077) === 0 && stat.size <= 64 * 1024 * 1024, "UNPROTECTED_RECOVERY_PATH");
-      const raw = JSON.parse(await file.readFile("utf8"));
+      await Promise.all([privateDirectory(userRoot), privateDirectory(stateRoot), privateDirectory(memoryRoot)]);
+      const raw = JSON.parse((await privateFileHandle(file)).toString("utf8"));
       const owner = raw.owner;
       assert.ok([owner?.accountId, owner?.userId].every(id => typeof id === "string"
         && /^[A-Za-z0-9_-]{1,128}$/.test(id)), "INVALID_OWNER_STATE");

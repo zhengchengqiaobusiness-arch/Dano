@@ -1257,14 +1257,14 @@ on the final image; the other five fixed categories and full cross-category
 matrix remain open.
 
 The executable attempt-coverage audit is
-`node scripts/audit-memory-evaluation-coverage.mjs docs/research/evidence/issue477-isolation-matrix.json`.
-On the frozen 80 cases ×3 it finds 60 reported OpenViking-only isolation attempts
-and 180 missing attempts (recall 60; correction, deletion, irrelevant and
-authorization 30 each). This checks IDs, repetition bounds and duplicate
-attempts and exits nonzero while any attempts are missing or reported failed,
-but does not validate the reported outcomes or count those
-OpenViking-only attempts as Dano/Browser acceptance. Model answers, source hits,
-latency and cost retain their separate gates above.
+`node scripts/audit-memory-evaluation-coverage.mjs docs/research/evidence/issue477-isolation-matrix.json docs/research/evidence/issue477-public-api-correction-delete.json`.
+On the frozen 80 cases ×3 it finds 120 reported attempts: 60 OpenViking-only
+isolation and 30 each for public-API correction and deletion. Another 120
+attempts remain missing (recall 60; irrelevant and authorization 30 each).
+This checks IDs, repetition bounds and duplicate attempts and exits nonzero
+while any attempts are missing or reported failed. It does not independently
+validate outcomes or count these API-only attempts as Dano/Browser acceptance.
+Model answers, source hits, latency and cost retain their separate gates above.
 
 The §11.2 Browser flow also requires a separately authenticated Bob context;
 a second tab sharing Alice's cookie cannot supply it. The current local stack

@@ -43,6 +43,7 @@ const npmRegistry =
   process.env.NPM_REGISTRY ||
   process.env.NPM_CONFIG_REGISTRY ||
   defaultNpmRegistry;
+const aptMirror = process.env.DANO_APT_MIRROR;
 
 let buildDir;
 let unlock;
@@ -158,6 +159,7 @@ try {
     "build",
     "--build-arg",
     `NPM_REGISTRY=${npmRegistry}`,
+    ...(aptMirror ? ["--build-arg", `DANO_APT_MIRROR=${aptMirror}`] : []),
     "-t",
     image,
     buildDir,

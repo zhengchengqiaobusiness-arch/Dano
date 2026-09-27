@@ -1215,6 +1215,9 @@ pnpm run deploy:release
 
 Dependency installs use `https://mirrors.cloud.tencent.com/npm/` by default.
 Set `NPM_REGISTRY` to use npmjs.org or a private registry for a release build.
+If the builder cannot reach the base Debian apt source, set `DANO_APT_MIRROR`
+to an approved HTTP mirror origin for that build. The default installs CA
+certificates from Debian first, then uses the Tencent HTTPS apt mirror.
 
 To start from an already-built local or pulled image in `/opt/dano/deploy`:
 

@@ -23,11 +23,15 @@ export async function trustedDirectory(path) {
 export async function privateFile(path, maxBytes = 64 * 1024 * 1024) {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
-    const stat = await handle.stat();
-    assert.ok(stat.isFile() && stat.nlink === 1 && stat.uid === process.getuid?.()
-      && (stat.mode & 0o077) === 0 && stat.size <= maxBytes, "UNPROTECTED_RECOVERY_PATH");
-    return await handle.readFile();
+    return await privateFileHandle(handle, maxBytes);
   } finally { await handle.close(); }
+}
+
+export async function privateFileHandle(handle, maxBytes = 64 * 1024 * 1024) {
+  const stat = await handle.stat();
+  assert.ok(stat.isFile() && stat.nlink === 1 && stat.uid === process.getuid?.()
+    && (stat.mode & 0o077) === 0 && stat.size <= maxBytes, "UNPROTECTED_RECOVERY_PATH");
+  return await handle.readFile();
 }
 
 export function outside(path, roots) {

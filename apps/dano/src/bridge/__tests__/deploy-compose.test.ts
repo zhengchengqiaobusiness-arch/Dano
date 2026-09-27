@@ -643,18 +643,17 @@ writeFileSync(process.env.DANO_LOCAL_CONTAINER_LOG, JSON.stringify({
     expect(bothNoRedirectNginx).toContain("tls-server.conf");
   });
 
-  it("rewrites Debian apt sources to Aliyun HTTP mirrors", () => {
+  it("bootstraps apt from the base source with an optional HTTP mirror override", () => {
     const dockerfileText = readFileSync(dockerfile, "utf8");
+    const bootstrapText = readFileSync(join(deployRoot, "apt-bootstrap.sh"), "utf8");
 
-    expect(dockerfileText).toContain("https\\?://deb.debian.org/debian");
-    expect(dockerfileText).toContain(
-      "http://mirrors.aliyun.com/debian-security",
-    );
-    expect(dockerfileText).toContain("http://mirrors.aliyun.com/debian");
-    expect(dockerfileText).not.toContain(
-      "https://mirrors.aliyun.com/debian-security",
-    );
-    expect(dockerfileText).not.toContain("https://mirrors.aliyun.com/debian");
+    expect(dockerfileText.match(/ARG DANO_APT_MIRROR=/g)).toHaveLength(2);
+    expect(dockerfileText.match(/RUN sh \.\/deploy\/apt-bootstrap\.sh/g)).toHaveLength(2);
+    expect(bootstrapText).toContain("apt-get install -y --no-install-recommends ca-certificates");
+    expect(bootstrapText).toContain("mirror='https://mirrors.cloud.tencent.com'");
+    expect(bootstrapText).toContain("https\\?://deb.debian.org/debian-security");
+    expect(bootstrapText).toContain("grep -Eq '^http://");
+    expect(dockerfileText).not.toContain("mirrors.aliyun.com");
   });
 
   it("preinstalls Pi search tools on the system PATH", () => {
@@ -704,7 +703,7 @@ writeFileSync(process.env.DANO_LOCAL_CONTAINER_LOG, JSON.stringify({
     expect(dockerfileText).not.toContain("/tmp/dano");
     expect(dockerfileText).toContain("USER node");
     expect(dockerfileText.indexOf("USER node")).toBeGreaterThan(
-      dockerfileText.indexOf("apt-get install"),
+      dockerfileText.indexOf("RUN sh ./deploy/apt-bootstrap.sh"),
     );
   });
 
