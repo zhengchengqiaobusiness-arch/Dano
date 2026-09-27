@@ -1037,7 +1037,7 @@ the 60/60 and 30/30 figures above measure selection, not model answers.
 | AC-08 | Browser defaults-off, separate collection consent/revocation, management and one same-owner cross-tab pause/recall/resume flow; runtime tests cover export, targeted forget and clear while paused, and authenticated HTTP tests cover export and clear while paused | All governance transitions, independent two-Session pause, real Browser export and blocked-write recovery ×3 |
 | AC-09/10 | Old ambiguous queue recovered on real service; ordinary chat survived selected memory failures | Full lifecycle/fault matrix, truthful explicit failure and no duplicate/cross-owner replay |
 | AC-11 | Final-image Browser form, generic Skill, image, bash and Pi compression; an isolated production-generated leave Skill was discovered and rendered its operation choice and six-field form | Business options/authentication failed; complete OA and final-image regression matrix |
-| AC-12 | Clean stack, old-snapshot replay, two-owner supplied-ledger replay, candidate upgrade and matched rollback; automatic-journal matched old-volume one-owner replay plus current-service two-owner deletion/retry | Real multi-owner source/revocation and old-version rollback, arbitrary upgrade-window reconciliation |
+| AC-12 | Clean stack, old-snapshot replay, two-owner supplied-ledger replay, candidate upgrade and matched rollback; automatic-journal matched old-volume two-owner deletion replay and current-service two-owner deletion/retry | Real multi-owner source/revocation and old-version rollback, arbitrary upgrade-window reconciliation |
 | AC-13 | Frozen 80-case dataset; 20 isolation cases ×3 passed against real OpenViking; candidate-7 traced workload had 70/70 semantic recall answers and 30/30 irrelevant omissions; full-source image repeated 100 complete requests with 70/70 recall answers; byte-identical prompt-layer image has matched on/off cost evidence; final 0.2.46 Browser save-ready run reached `ready` with correct readback in all 10 cases, p95 35 s | Other five categories ×3, Dano/Browser isolation and causal latency interpretation |
 
 | Spec test | Current evidence | Missing acceptance |
@@ -1050,7 +1050,7 @@ the 60/60 and 30/30 figures above measure selection, not model answers.
 | T-09/10 | Real-service correction/deletion/replay; Browser targeted forget with unrelated recall preserved, defaults-off and cross-tab pause; runtime and authenticated HTTP paused-management tests | Complete correction/forget/pause/restore state matrix ×3 |
 | T-11 | Protected file access denied; real USER-key 403 probes | Full unauthenticated/401/403/native-tool/symlink/env/HTTP matrix |
 | T-12 | Final-image Browser form, generic Skill, image, bash and Pi compression; generated leave Skill choice/form rendered in a disposable layer | Working business options/authentication and complete final-image repetition |
-| T-13 | Clean deploy, candidate upgrade, matched old-data rollback, two-owner supplied-ledger replay; automatic-journal old-volume one-owner replay and current-service two-owner deletion/retry | General old queue, credential/new writer and old-version multi-user reconciliation |
+| T-13 | Clean deploy, candidate upgrade, matched old-data rollback, two-owner supplied-ledger replay; automatic-journal old-volume two-owner deletion replay and current-service two-owner deletion/retry | General old queue, credential/new writer and old-version multi-user reconciliation |
 | T-14 | Five-user, 100-complete-request MiMo candidate-7 run passed semantic recall, injection, wait and token limits in an instrumented disposable container; full-source image repeated 100 complete requests with 70/70 recall answers; byte-identical prompt-layer image passed matched on/off cost; final fixed Browser save-ready p95 35 s with 10/10 source readbacks | Complete other fixed categories, integration and causal interpretation |
 
 Review found that older correction intents keep document bodies inline in the
@@ -1092,6 +1092,18 @@ restored a usable anonymous session; a subsequent login succeeded. The
 contains no provider address, account name, credential or token. This run
 intentionally omitted memory and model credentials, so it does not close
 memory-enabled Browser, transcript, image or bash acceptance.
+Another stopped-stack rehearsal used two synthetic USERs. It backed up the
+OpenViking named data volume, protected owner state and private configuration,
+then recorded and applied one new deletion per USER in the separate recovery
+journal. Restoring the older OpenViking and protected volumes made both deleted
+documents readable again (HTTP 200). With the newer recovery journal retained,
+preflight and replay each counted two owners and two events; both deleted
+documents then returned 404 while each USER's unrelated document still
+returned 200. The owner states advanced from the restored revision 1 to 2,
+and an immediate replay passed. The
+[sanitized two-owner evidence](evidence/issue477-two-owner-old-volume-replay.json)
+does not claim old-version binary rollback, pending-queue reconciliation or
+source-session revocation.
 Read-only inventory of the configured production host on 2026-09-27 showed
 `dano-app:rel-20260922-143917`; its container mount destinations did not
 include `/var/lib/dano-memory-recovery`, and the Dano-related Docker volume

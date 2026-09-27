@@ -214,6 +214,55 @@ it("preflights both owners before replaying either owner's deletion", async () =
   expect(remove).toHaveBeenCalledWith(bobUri);
 });
 
+it("retries both owners after a later remote deletion fails without advancing restored states", async () => {
+  const f = await fixture();
+  const bob = { accountId: "account", userId: "bob" };
+  const bobStore = new FileStateStore({ owner: bob,
+    directory: join(f.data, "host-state", "owner-b", "state", "memory"), policyVersion: "v1" });
+  await bobStore.transact(state => { state.authorization.enabled = false; });
+  await MemoryRecoveryJournal.bootstrap(f.recovery, bob, await bobStore.read());
+  const bobJournal = await MemoryRecoveryJournal.open(f.recovery, bob, await bobStore.read());
+  await f.credentialStore.write(bob, "synthetic-bob-key");
+  await checkpoint(f.data, f.recovery, f.checkpointFile);
+
+  const aliceStatePath = join(f.data, "host-state", "owner-a", "state", "memory", "state.json");
+  const bobStatePath = join(f.data, "host-state", "owner-b", "state", "memory", "state.json");
+  const [aliceSnapshot, bobSnapshot] = await Promise.all([readFile(aliceStatePath), readFile(bobStatePath)]);
+  await new RecoveryStateStore(f.store, f.journal).transact(state => { state.authorization.enabled = true; });
+  await new RecoveryStateStore(bobStore, bobJournal).transact(state => { state.authorization.enabled = true; });
+  const aliceUri = "viking://user/alice/memories/forgotten.md";
+  const bobUri = "viking://user/bob/memories/forgotten.md";
+  await f.journal.append({ kind: "removeMemory", uri: aliceUri });
+  await bobJournal.append({ kind: "removeMemory", uri: bobUri });
+  await Promise.all([writeFile(aliceStatePath, aliceSnapshot), writeFile(bobStatePath, bobSnapshot)]);
+
+  const documents = new Set([aliceUri, bobUri]);
+  const calls: string[] = [];
+  vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockImplementation(async () => { calls.push("verify"); });
+  let failBob = true;
+  vi.spyOn(OwnerMemoryClient.prototype, "removeMemory").mockImplementation(async uri => {
+    calls.push(uri);
+    if (uri === bobUri && failBob) { failBob = false; throw new Error("BOB_REMOTE_DOWN"); }
+    documents.delete(uri);
+  });
+  vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments").mockImplementation(async () => [...documents]);
+
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("BOB_REMOTE_DOWN");
+  expect(calls.slice(0, 4)).toEqual(["verify", "verify", aliceUri, bobUri]);
+  expect(documents).toEqual(new Set([bobUri]));
+  expect(await readFile(aliceStatePath)).toEqual(aliceSnapshot);
+  expect(await readFile(bobStatePath)).toEqual(bobSnapshot);
+
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .resolves.toEqual({ owners: 2, events: 2 });
+  expect(documents.size).toBe(0);
+  expect((await f.store.read()).revision).toBe(2);
+  expect((await bobStore.read()).revision).toBe(2);
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .resolves.toEqual({ owners: 2, events: 2 });
+});
+
 it("keeps the service stopped while a later governance barrier is unfinished", async () => {
   const f = await fixture();
   await checkpoint(f.data, f.recovery, f.checkpointFile);

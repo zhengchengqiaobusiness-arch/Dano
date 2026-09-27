@@ -1,0 +1,42 @@
+{
+  "date": "2026-09-27",
+  "danoCommit": "c7e95ae08",
+  "service": "pinned OpenViking v0.4.20 and embedding images through repository Compose in a dedicated Podman VM",
+  "scope": "two synthetic USERs in one synthetic account; model-free old-volume restoration",
+  "stoppedBackup": {
+    "openVikingDataVolume": true,
+    "protectedOwnerState": true,
+    "protectedMemoryConfigAndCredentials": true,
+    "checkpoint": { "owners": 2, "journalBytes": 0 }
+  },
+  "afterCheckpoint": {
+    "separateRecoveryJournalRetained": true,
+    "ownerStateRevisions": [2, 2],
+    "remoteDeletions": 2
+  },
+  "afterRestoringOldVolumes": {
+    "forgottenDocumentReadStatuses": [200, 200],
+    "unrelatedDocumentReadStatuses": [200, 200],
+    "ownerStateRevisions": [1, 1]
+  },
+  "afterReplay": {
+    "preflight": { "owners": 2, "events": 2 },
+    "replay": { "owners": 2, "events": 2 },
+    "idempotentRetry": { "owners": 2, "events": 2 },
+    "forgottenDocumentReadStatuses": [404, 404],
+    "unrelatedDocumentReadStatuses": [200, 200],
+    "ownerStateRevisions": [2, 2]
+  },
+  "retentionAudit": {
+    "owners": 2,
+    "legacyInlineBodies": 0,
+    "activePayloads": 0,
+    "prunedPayloadReferences": 0,
+    "needsMigration": false
+  },
+  "limitations": [
+    "The Dano recovery command ran from the current host build against real OpenViking, not from a final release image.",
+    "Does not exercise source-session revocation, an old pending queue, a new writer, credential rotation, or a different Dano version.",
+    "Does not satisfy the remaining model, Browser, quality, latency, cost or full rollback gates."
+  ]
+}
