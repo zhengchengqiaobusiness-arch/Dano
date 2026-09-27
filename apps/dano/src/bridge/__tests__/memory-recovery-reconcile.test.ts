@@ -8,7 +8,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { FileStateStore, MemoryGovernanceBarrier, OwnerMemoryClient } from "@josephyoung/pi-openviking/host";
 import { MemoryCredentialStore } from "../memory-credential-store.js";
 import { MemoryRecoveryJournal, RecoveryStateStore } from "../memory-recovery-journal.js";
-import { auditRetention, checkpoint, reconcile } from "../../../runtime/reconcile-memory-recovery.mjs";
+import { auditRetention, checkpoint, migrateLegacyRecovery, reconcile } from "../../../runtime/reconcile-memory-recovery.mjs";
 import { privateDirectory, privateFile } from "../../../runtime/private-recovery-path.mjs";
 
 const roots: string[] = [];
@@ -187,6 +187,90 @@ it("audits legacy inline bodies and live payloads without returning private cont
   expect(result).toEqual({ owners: 1, legacyInlineBodies: 1,
     activePayloads: 0, prunedPayloadReferences: 1, needsMigration: true });
   expect(JSON.stringify(result)).not.toMatch(/alice|legacy private fact|retention\.md/);
+});
+
+it("moves legacy inline bodies into a new checkpoint generation without retaining forgotten text", async () => {
+  const f = await fixture();
+  const oldFile = join(f.recovery, "account", "alice", "events.jsonl");
+  const forgotten = "viking://user/alice/memories/forgotten.md";
+  const retained = "viking://user/alice/memories/retained.md";
+  const current = "viking://user/alice/memories/current.md";
+  const legacy = (uri: string, content: string) => ({ version: 1, id: randomUUID(), owner: f.owner,
+    occurredAt: new Date().toISOString(), mutation: { kind: "replaceMemory", uri, content } });
+  await writeFile(oldFile, [legacy(forgotten, "deleted private body"),
+    legacy(retained, "current private body")].map(entry => JSON.stringify(entry) + "\n").join(""), { mode: 0o600 });
+  await f.journal.append({ kind: "removeMemory", uri: forgotten });
+  await f.journal.append({ kind: "replaceMemory", uri: current, content: "new format body" });
+  const oldBytes = await readFile(oldFile);
+  await checkpoint(f.data, f.recovery, f.checkpointFile);
+  const target = join(f.root, "fresh-recovery"), nextCheckpoint = join(f.root, "fresh-checkpoint.json");
+  await mkdir(target, { mode: 0o700 });
+  vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+  vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments").mockResolvedValue([retained, current]);
+  vi.spyOn(OwnerMemoryClient.prototype, "readMemory").mockImplementation(async uri => {
+    if (uri === retained) return "current private body";
+    if (uri === current) return "new format body";
+    throw new Error("UNEXPECTED_READ");
+  });
+  await expect(migrateLegacyRecovery(f.config, f.data, f.recovery, target, nextCheckpoint))
+    .resolves.toMatchObject({ owners: 1, legacyInlineBodies: 2, retiredBodies: 1, activePayloads: 2 });
+  expect(await readFile(oldFile)).toEqual(oldBytes);
+  const newFile = join(target, "account", "alice", "events.jsonl");
+  expect(await readFile(newFile, "utf8")).not.toMatch(/deleted private body|current private body|new format body/);
+  expect(await readFile(newFile, "utf8")).not.toContain(
+    createHash("sha256").update("deleted private body").digest("hex"));
+  expect(await readdir(join(target, "account", "alice", "payloads"))).toHaveLength(2);
+  expect((await MemoryRecoveryJournal.inspect(target, f.owner)).events.map(event => event.mutation))
+    .toEqual([expect.objectContaining({ kind: "replaceMemory", uri: forgotten }),
+      expect.objectContaining({ kind: "replaceMemory", uri: retained, content: "current private body" }),
+      { kind: "removeMemory", uri: forgotten },
+      expect.objectContaining({ kind: "replaceMemory", uri: current, content: "new format body" })]);
+  expect(await auditRetention(target)).toEqual({ owners: 1, legacyInlineBodies: 0,
+    activePayloads: 2, prunedPayloadReferences: 1, needsMigration: false });
+  await expect(reconcile(f.config, f.data, target, nextCheckpoint, true))
+    .resolves.toEqual({ owners: 1, events: 0 });
+  await expect(reconcile(f.config, f.data, target, f.checkpointFile, true))
+    .rejects.toThrow("RECOVERY_JOURNAL_CHECKPOINT_MISMATCH");
+  await expect(migrateLegacyRecovery(f.config, f.data, f.recovery, target, join(f.root, "another-checkpoint.json")))
+    .rejects.toThrow("RECOVERY_MIGRATION_TARGET_NOT_EMPTY");
+});
+
+it("does not re-anchor a deletion that is still visible on the real-service boundary", async () => {
+  const f = await fixture();
+  const uri = "viking://user/alice/memories/forgotten.md";
+  const entry = { version: 1, id: randomUUID(), owner: f.owner,
+    occurredAt: new Date().toISOString(), mutation: { kind: "replaceMemory", uri, content: "deleted private body" } };
+  await writeFile(join(f.recovery, "account", "alice", "events.jsonl"), JSON.stringify(entry) + "\n", { mode: 0o600 });
+  await f.journal.append({ kind: "removeMemory", uri });
+  const target = join(f.root, "fresh-recovery");
+  await mkdir(target, { mode: 0o700 });
+  vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity").mockResolvedValue(undefined);
+  vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments").mockResolvedValue([uri]);
+  await expect(migrateLegacyRecovery(f.config, f.data, f.recovery, target,
+    join(f.root, "fresh-checkpoint.json"))).rejects.toThrow("MEMORY_DELETION_UNCONFIRMED");
+  expect(await readdir(target)).toEqual([]);
+});
+
+it("preflights every source owner before creating migrated owner files", async () => {
+  const f = await fixture();
+  const bob = { accountId: "account", userId: "bob" };
+  const bobStore = new FileStateStore({ owner: bob,
+    directory: join(f.data, "host-state", "owner-b", "state", "memory"), policyVersion: "v1" });
+  await bobStore.transact(state => { state.authorization.enabled = false; });
+  await MemoryRecoveryJournal.bootstrap(f.recovery, bob, await bobStore.read());
+  const aliceFile = join(f.recovery, "account", "alice", "events.jsonl");
+  const entry = { version: 1, id: randomUUID(), owner: f.owner,
+    occurredAt: new Date().toISOString(), mutation: { kind: "replaceMemory",
+      uri: "viking://user/alice/memories/a.md", content: "legacy body" } };
+  await writeFile(aliceFile, JSON.stringify(entry) + "\n", { mode: 0o600 });
+  const target = join(f.root, "fresh-recovery");
+  await mkdir(target, { mode: 0o700 });
+  await writeFile(join(f.recovery, "account", "bob", "events.jsonl"), "{invalid}\n", { mode: 0o600 });
+  await expect(migrateLegacyRecovery(f.config, f.data, f.recovery, target,
+    join(f.root, "fresh-checkpoint.json")))
+    .rejects.toThrow();
+  expect(await readdir(target)).toEqual([]);
+  expect(await readFile(aliceFile, "utf8")).toContain("legacy body");
 });
 
 it("rejects a changed checkpoint prefix before contacting the remote service", async () => {

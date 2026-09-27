@@ -1093,6 +1093,26 @@ The protected recovery command now has a read-only `audit-retention` mode that
 reports aggregate legacy-inline and current-payload counts without owner IDs,
 URIs or body text. Its synthetic test covers both formats; the actual recovery
 volume has not yet been audited.
+The stopped-service `migrate-legacy` command now takes the private memory
+configuration root, current protected data root, old recovery root, a
+**pre-created empty private** recovery root, and a new checkpoint path. It
+validates every owner against the stopped data, verifies current USER-key
+identity and remote deletion/readback effects before any new owner file is
+written, and refuses unsettled writers or governance jobs. It then
+rewrites old inline corrections as hash-checked sidecars only when still live,
+and omits both the body and its digest for retired corrections. It verifies the
+new generation and writes a fresh checkpoint; the old root and checkpoint stay
+untouched. An old checkpoint must fail against the new journal. This is a
+candidate upgrade path, with a synthetic regression; it has not run against an
+actual retained volume. Operators must first settle any restore against the
+old generation, stop writers, create the new root, run the command, back up the
+new data/recovery/checkpoint together, and switch the recovery volume as one
+release. Old recovery and backup generations still contain the deleted bytes
+and must be retired under the configured backup retention policy. The command
+does not delete them or claim that a retained backup has expired. Run it as the
+protected host UID; if it stops after creating only part of the new root, do
+not switch volumes or reuse that root. Inspect and discard only that new,
+unpublished generation, then retry with another empty private root.
 On 2026-09-27, the current host build replayed one synthetic USER's
 post-checkpoint deletion and correction through the real HTTP client against
 the pinned OpenViking and embedding Compose services in a dedicated Podman VM.
