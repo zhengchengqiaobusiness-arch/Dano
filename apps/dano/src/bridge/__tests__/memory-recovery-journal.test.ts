@@ -130,6 +130,23 @@ it("poisons memory access after an external mirror failure", async () => {
     .rejects.toThrow("MEMORY_RECOVERY_JOURNAL_UNAVAILABLE");
 });
 
+it("mirrors a committed state even when the caller cancels just after commit", async () => {
+  const f = await fixture();
+  const journal = await MemoryRecoveryJournal.open(f.recovery, f.owner, await f.base.read());
+  const store = new RecoveryStateStore(f.base, journal);
+  const controller = new AbortController();
+  const transact = f.base.transact.bind(f.base);
+  vi.spyOn(f.base, "transact").mockImplementation(async (mutation, signal) => {
+    const result = await transact(mutation, signal);
+    controller.abort();
+    return result;
+  });
+  await expect(store.transact(state => { state.authorization.enabled = true; }, controller.signal))
+    .resolves.toBeUndefined();
+  expect(await MemoryRecoveryJournal.inspect(f.recovery, f.owner)).toMatchObject({ state: await f.base.read() });
+  await expect(MemoryRecoveryJournal.open(f.recovery, f.owner, await f.base.read())).resolves.toBeDefined();
+});
+
 it("rejects a partial event tail before publishing an owner runtime", async () => {
   const f = await fixture();
   await MemoryRecoveryJournal.open(f.recovery, f.owner, await f.base.read());

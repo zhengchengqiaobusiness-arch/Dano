@@ -451,6 +451,12 @@ async function prepare(configDirectory, dataRoot, recoveryRoot, checkpointFile) 
     "RECOVERY_JOURNAL_CHECKPOINT_MISMATCH");
     const prefixCount = journal.eventBytes.subarray(0, entry.eventBytes).toString("utf8").split("\n").length - 1;
     const events = journal.events.slice(prefixCount);
+    // A scope/owner clear removes the entire remote tree. A newer writer may
+    // already have produced documents there, so verifying its receipt alone
+    // cannot make replay safe: the clear would delete those documents again.
+    assert.ok(!remoteWriters.length || !events.some(event =>
+      event.mutation.kind === "clearMemoryScope" || event.mutation.kind === "clearOwnerData"),
+    "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
     const effects = expectedEffects(events);
     const key = await credentials.read(entry.owner);
     assert.ok(key, "CREDENTIAL_MISSING");

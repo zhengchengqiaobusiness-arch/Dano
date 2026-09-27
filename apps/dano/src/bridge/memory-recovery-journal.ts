@@ -344,7 +344,9 @@ export class RecoveryStateStore implements GovernanceStateStore {
   async transact<T>(mutation: (state: OwnerState) => T, signal?: AbortSignal): Promise<T> {
     this.#assertAvailable();
     const result = await this.#base.transact(mutation, signal);
-    try { await this.#journal.mirror(await this.#base.read(signal)); }
+    // The state has already been committed. Caller cancellation must not stop
+    // the durable recovery mirror after that irreversible point.
+    try { await this.#journal.mirror(await this.#base.read()); }
     catch { this.#journal.poison(); throw unavailable(); }
     return result;
   }

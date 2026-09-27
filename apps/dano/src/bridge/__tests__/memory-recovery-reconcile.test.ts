@@ -476,6 +476,34 @@ async function stagedLaterWriter(phase: LaterWriterPhase) {
   return { ...f, id, statePath, oldBytes, memoryUri };
 }
 
+it("rejects a clear followed by a new ready writer before any remote mutation", async () => {
+  const f = await fixture();
+  await checkpoint(f.data, f.recovery, f.checkpointFile);
+  const statePath = join(f.data, "host-state", "owner-a", "state", "memory", "state.json");
+  const snapshot = await readFile(statePath);
+  await f.journal.append({ kind: "clearMemoryScope" });
+  const id = "f".repeat(64);
+  const uri = "viking://user/alice/memories/after-clear.md";
+  await new RecoveryStateStore(f.store, f.journal).transact(state => {
+    state.operations[id] = { id, owner: f.owner, scope: null, kind: "explicit",
+      authorizationEpoch: state.authorization.epoch,
+      source: { sessionId: "chat", entryId: "after-clear", branchId: "root", contentVersion: "1" },
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      phase: "ready", remoteSessionId: "after-clear-session", taskId: "task",
+      archiveId: "archive", memoryUris: [uri] };
+  });
+  await writeFile(statePath, snapshot);
+  const verify = vi.spyOn(OwnerMemoryClient.prototype, "verifyIdentity");
+  const clear = vi.spyOn(OwnerMemoryClient.prototype, "clearMemoryScope");
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile, true))
+    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  expect(verify).not.toHaveBeenCalled();
+  expect(clear).not.toHaveBeenCalled();
+  expect(await readFile(statePath)).toEqual(snapshot);
+});
+
 for (const phase of laterWriterPhases) {
   it(`overlays a new ${phase} writer only after its remote receipt is verified`, async () => {
     const f = await stagedLaterWriter(phase);
