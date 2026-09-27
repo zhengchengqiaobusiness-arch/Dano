@@ -1069,6 +1069,12 @@ The current replay skips any legacy inline correction superseded by a later
 correction, deletion or clear; a stopped-service regression proves the old body
 is never sent to OpenViking on a post-checkpoint deletion replay. This prevents
 transient resurrection during replay but does not remove retained legacy bytes.
+A one-owner [real-service replay](evidence/issue477-legacy-inline-replay.json)
+then ran the current host recovery command against pinned OpenViking v0.4.20
+and embedding Compose services. A method-counting loopback proxy observed zero
+replacement writes on both replay and retry; the deleted document returned 404.
+This is a model-free subgate and does not resolve legacy journal or backup
+retention.
 The protected recovery command now has a read-only `audit-retention` mode that
 reports aggregate legacy-inline and current-payload counts without owner IDs,
 URIs or body text. Its synthetic test covers both formats; the actual recovery

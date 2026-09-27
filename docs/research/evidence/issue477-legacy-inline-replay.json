@@ -1,0 +1,26 @@
+{
+  "date": "2026-09-27",
+  "danoCommit": "9dc7054b619f1ecdfb0e104b67d0c32b0284b997",
+  "scope": "one synthetic USER, old checkpoint followed by a legacy inline correction and a later deletion",
+  "runtime": "current host build with real HTTP client and a method-counting loopback proxy",
+  "service": "pinned OpenViking v0.4.20 and embedding Compose services in the dedicated Podman VM",
+  "serviceHealth": {
+    "openViking": "healthy",
+    "embedding": "healthy"
+  },
+  "checkpoint": { "owners": 1, "journalBytes": 0 },
+  "preflight": { "owners": 1, "events": 2 },
+  "replay": { "owners": 1, "events": 2 },
+  "idempotentRetry": { "owners": 1, "events": 2 },
+  "legacyReplacementWriteRequests": 0,
+  "legacyReplacementWriteRequestsOnRetry": 0,
+  "deletedDocumentReadStatus": 404,
+  "modelCalls": false,
+  "modelCredential": "synthetic value; exposed MiMo credential was not used",
+  "limitations": [
+    "One synthetic owner and one legacy correction/deletion sequence; no multi-owner or arbitrary rollback-window proof.",
+    "Host-built recovery command against real services, not bit-exact release-image acceptance.",
+    "No model, OA, Browser, quality, latency or cost acceptance.",
+    "Legacy inline bytes and any retained backup generations still require a retirement or migration policy."
+  ]
+}
