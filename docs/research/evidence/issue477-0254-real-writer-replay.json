@@ -1,0 +1,36 @@
+{
+  "observedAt": "2026-09-28",
+  "sourceCommit": "ca9c12f41fe782c5aad81a38f4a7c729d05a7f30",
+  "productVersion": "0.2.54",
+  "protectedImageId": "3bc034fabad0b51fef9e397e4a5de7d75d60277e85563f5b634ec2bdf8c76795",
+  "service": "Pinned OpenViking v0.4.20 with pinned local embedding, isolated Podman network and synthetic USER keys",
+  "scenarios": [
+    {
+      "phase": "message_delivered",
+      "owners": 1,
+      "postCheckpointWriterChecks": 1,
+      "deletionIntents": 1,
+      "missingRemoteSourceRejectedBeforeDeletion": true,
+      "remoteSourceReadbackBeforeReplay": true,
+      "deletionReadbackAfterReplay": true,
+      "postCheckpointOperationPreserved": true,
+      "immediateRetryIdempotent": true
+    },
+    {
+      "phase": "message_unknown",
+      "owners": 2,
+      "postCheckpointWriterChecks": 1,
+      "deletionIntents": 1,
+      "otherOwnersDeletionPreservedBeforeWriterProof": true,
+      "remoteSourceReadbackBeforeReplay": true,
+      "otherOwnersDeletionReadbackAfterReplay": true,
+      "postCheckpointOperationPreserved": true,
+      "immediateRetryIdempotent": true
+    }
+  ],
+  "limits": [
+    "Checkpointed owner state was restored; the OpenViking volume was not cloned from an older generation",
+    "No commit, model extraction, ready, credential rotation, or concurrent governance transition",
+    "No OA or Browser login; synthetic USER identities only"
+  ]
+}

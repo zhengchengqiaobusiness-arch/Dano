@@ -1,0 +1,17 @@
+{
+  "observedAt": "2026-09-28",
+  "sourceCommit": "ca9c12f41fe782c5aad81a38f4a7c729d05a7f30",
+  "productVersion": "0.2.54",
+  "protectedImageId": "3bc034fabad0b51fef9e397e4a5de7d75d60277e85563f5b634ec2bdf8c76795",
+  "recoveryScriptSha256": "53e029d11e008893effdfc6774fa6cc98d1be0f14e51be8ef501dc951024e988",
+  "checks": {
+    "pinnedReleaseManifest": true,
+    "protectedImageBuild": true,
+    "embeddedProductVersionMatchesSource": true,
+    "embeddedRecoveryScriptMatchesSource": true
+  },
+  "limits": [
+    "No real restored-volume replay has run with this image",
+    "No real OA, MiMo, or Browser acceptance has run with this image"
+  ]
+}
