@@ -227,3 +227,53 @@ Candidate `0.2.66` additionally ignores late `agent_settled` after runtime closu
 or Pi context invalidation. The regression first reproduced the stale-context
 throw, then all 36 focused tests and type/Svelte checks passed. Both final reviews
 reported no new findings; affected real lifecycle checks continue.
+
+## Final targeted supplement (2026-09-28)
+
+The remaining ten frozen cases now have three completed repetitions each:
+12 pause/retry/restart races, 12 queued/in-flight deletions and six old-backup
+restores. Combined retained evidence covers all 240 case rounds. This is coverage,
+not a claim that every original attempt passed: original failures and literal
+color-name scorer false positives remain in the private archive. Semantic recall
+remains 59/60 and independently verified sources 54/60.
+
+Real runtime deletion exposed two extension defects: missing Markdown creation
+normalized outer whitespace, and review removing the last fact left a deleted
+preserved URI in relocation. Pi PR #18 fixes both, passes 266 tests, and has
+published `0.1.19` through the existing OIDC workflow. Dano pins that exact version
+and removes its duplicate outer retry. Recovery still preserves the seal and old
+state on a final transport failure. Both review axes report no new findings.
+
+Eighteen real MiMo/native Pi selection attempts cover credentials, unconfirmed
+inference, thinking, recalled content, cancelled results and positive preferences.
+All expected safety outcomes held: 15 excluded inputs created no automatic
+operation and all three positive controls did. The original scorer marked the
+three correctly blocked cancelled sources false; raw results and this reason are
+retained. This is selector/state evidence, not a second Browser identity.
+
+[Matrix and release summary](evidence/issue477-final-matrix-supplement-20260928.json).
+[Waiting and cost supplement](evidence/issue477-wait-cost-supplement-20260928.json)
+correlates all 100 recall embeddings (1,290 tokens) and bounds complete request
+memory waiting: steady p95 406.851 ms, maximum 1,124.202 ms. Original native
+extraction token totals plus ON chat total 17,647,336 plan credits, versus
+17,879,428 OFF chat credits. Native task usage does not expose exact extraction
+LLM invocation count; local embedding infrastructure cost is not recorded as
+zero. Complete cost reporting remains open.
+
+The final native `0.2.67` / published `0.1.19` image now passes two-owner
+older-backup restore (five documents, nine events and two remote-writer checks)
+and both fresh-chat readbacks. The actual OA Browser retained login, displayed
+ready records and source content through management, and recalled the automatic
+monthly-report fact after container replacement. The fixed port and persistent
+trusted certificate were reused. The temporary connection-refused attempt during
+container startup is retained; a fresh controlled tab recovered without new login.
+
+Lifecycle coverage is recorded by the extension's 266-test run (retry settlement,
+branch divergence, scheduler fencing, timeout and shutdown) and 43 Dano tests
+(shared Viewer initialization, reconnect, disposal and memory default/boundary
+handling), together with the twelve real pause/retry/restart cases. No unrelated
+business or broad-suite rerun is added.
+
+Still open: independent second real OA Browser identity and complete cost reporting.
+Chrome's supported browser connection is unavailable; the existing real OA
+in-app session remains intact. No additional user confirmation is requested.

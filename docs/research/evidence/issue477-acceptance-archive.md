@@ -138,3 +138,18 @@ seed task usage and reproduction drivers. Files are 0600; directories are 0700.
   p95/max 30.705 seconds, native extraction reasoning tokens zero.
 - Includes the initial harness settings-shape failure and all retained raw rows;
   `current-results.jsonl` starts at the latest setup boundary. No old result removed.
+
+## Final targeted rounds and published 0.1.19 (2026-09-28)
+
+- `/Users/joseph/tmp/dano465-acceptance-archive/20260928T120506Z-final-races-deletion-recovery`:
+  245 raw files; manifest SHA-256 `bdd2f34e9568c6ee3af0bc1dbc6c044fd653c6f7a173fe615e4172355c24b3e2`.
+  Includes every retained failed/successful race, queued/in-flight deletion,
+  backup restore, semantic selector result and timestamped waiting/embedding log.
+- `/Users/joseph/tmp/dano465-acceptance-archive/20260928T121200Z-published019-native`:
+  63 files; manifest SHA-256 `8c0abc14834cadf44bc26c18d52c9b8384403675b30b6004c0e235fe954c15f2`.
+  Contains final published-native build/checks, restored source readbacks, rendered
+  Browser screenshots and native selector state. Directories 0700, files 0600.
+
+Brief [matrix/release](issue477-final-matrix-supplement-20260928.json) and
+[waiting/cost](issue477-wait-cost-supplement-20260928.json) summaries retain the
+unfinished independent OA Browser and cost-accounting gates.

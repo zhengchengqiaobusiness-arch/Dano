@@ -1,0 +1,210 @@
+{
+  "recordedOn": "2026-09-28",
+  "archive": {
+    "path": "/Users/joseph/tmp/dano465-acceptance-archive/20260928T120506Z-final-races-deletion-recovery",
+    "manifestSha256": "bdd2f34e9568c6ee3af0bc1dbc6c044fd653c6f7a173fe615e4172355c24b3e2",
+    "files": 245
+  },
+  "races": {
+    "uniqueCaseRounds": 12,
+    "pass": 12,
+    "originalFailureRetained": true
+  },
+  "deletionQueueAndExtraction": {
+    "caseRounds": 12,
+    "passed": 12,
+    "extensionFix": "pi-openviking PR18 commit3b75fb7",
+    "finalThreeProof": "Dano0.2.67 image with compiled candidate0.1.19 two modules mounted; published-native image proof pending",
+    "rows": [
+      {
+        "caseId": "D-02-01",
+        "repetition": 1,
+        "pass": true,
+        "source": "output/results.jsonl:1"
+      },
+      {
+        "caseId": "D-02-01",
+        "repetition": 2,
+        "pass": true,
+        "source": "output-attempt2/results.jsonl:4"
+      },
+      {
+        "caseId": "D-02-01",
+        "repetition": 3,
+        "pass": true,
+        "source": "output-attempt5/results.jsonl:2"
+      },
+      {
+        "caseId": "D-02-02",
+        "repetition": 1,
+        "pass": true,
+        "source": "output-attempt2/results.jsonl:2"
+      },
+      {
+        "caseId": "D-02-02",
+        "repetition": 2,
+        "pass": true,
+        "source": "output-attempt5/results.jsonl:1"
+      },
+      {
+        "caseId": "D-02-02",
+        "repetition": 3,
+        "pass": true,
+        "source": "output-attempt5/results.jsonl:3"
+      },
+      {
+        "caseId": "D-04-02",
+        "repetition": 1,
+        "pass": true,
+        "source": "output/results.jsonl:3"
+      },
+      {
+        "caseId": "D-04-02",
+        "repetition": 2,
+        "pass": true,
+        "source": "output/results.jsonl:11"
+      },
+      {
+        "caseId": "D-04-02",
+        "repetition": 3,
+        "pass": true,
+        "source": "output/results.jsonl:12"
+      },
+      {
+        "caseId": "D-05-01",
+        "repetition": 1,
+        "pass": true,
+        "source": "output/results.jsonl:2"
+      },
+      {
+        "caseId": "D-05-01",
+        "repetition": 2,
+        "pass": true,
+        "source": "output-attempt2/results.jsonl:1"
+      },
+      {
+        "caseId": "D-05-01",
+        "repetition": 3,
+        "pass": true,
+        "source": "output-attempt2/results.jsonl:3"
+      }
+    ],
+    "scoringReview": "D-04-02 rounds2/3 generic palette suggestions were literal false positives; no owner fact asserted, exports and injected facts absent",
+    "allOriginalAttemptsRetained": true
+  },
+  "backup": {
+    "caseRounds": 6,
+    "passed": 6,
+    "rows": [
+      {
+        "caseId": "D-03-01",
+        "repetition": 1,
+        "rawPass": true,
+        "semanticPass": true,
+        "source": "repetition-1/verify-results.jsonl:2"
+      },
+      {
+        "caseId": "D-05-02",
+        "repetition": 1,
+        "rawPass": false,
+        "semanticPass": true,
+        "source": "repetition-1/verify-results.jsonl:3"
+      },
+      {
+        "caseId": "D-03-01",
+        "repetition": 2,
+        "rawPass": true,
+        "semanticPass": true,
+        "source": "repetition-2/verify-results.jsonl:2"
+      },
+      {
+        "caseId": "D-05-02",
+        "repetition": 2,
+        "rawPass": true,
+        "semanticPass": true,
+        "source": "repetition-2/verify-results.jsonl:3"
+      },
+      {
+        "caseId": "D-03-01",
+        "repetition": 3,
+        "rawPass": true,
+        "semanticPass": true,
+        "source": "repetition-3/verify-results.jsonl:2"
+      },
+      {
+        "caseId": "D-05-02",
+        "repetition": 3,
+        "rawPass": true,
+        "semanticPass": true,
+        "source": "repetition-3/verify-results.jsonl:3"
+      }
+    ],
+    "review": "D-05-02 round1 generic palette suggestions contain old color but assert no personal preference; exports and injected facts exclude it",
+    "proof": "Real older local state restored; current independent journal and sealed remote documents replayed with shipped helper source; final native image proof pending",
+    "originalFailuresRetained": true
+  },
+  "matrixCoverage": {
+    "cases": 80,
+    "repetitions": 3,
+    "coveredCaseRounds": 240,
+    "qualitySemanticRecall": {
+      "correct": 59,
+      "total": 60
+    },
+    "sourceHits": {
+      "hits": 54,
+      "total": 60
+    },
+    "finalNative019AffectedProofPending": false
+  },
+  "semanticExclusion": {
+    "attempts": 18,
+    "expectedResults": 18,
+    "rawCancelledScorerFailures": 3,
+    "review": "cancelled source is correctly blocked with MEMORY_SOURCE_UNAVAILABLE; positive3preferencesqueued and other15noautomaticoperations",
+    "surface": "actual published-selector source with real MiMo and native Pi session/state; not a Browser or remote delivery test"
+  },
+  "extensionRelease": {
+    "version": "0.1.19",
+    "pr": "https://github.com/josephyoung/pi-openviking/pull/18",
+    "commit": "c7d10cb2cdaa78c6f4e20f04420831aaa689afbc",
+    "workflow": "https://github.com/josephyoung/pi-openviking/actions/runs/36418991762",
+    "tests": 266,
+    "standardsFindings": 0,
+    "specFindings": 0
+  },
+  "remaining": [
+    "independent second real OA Browser identity",
+    "complete cost accounting, especially native extraction invocation count"
+  ],
+  "fullGoalComplete": false,
+  "nativeArchive": {
+    "path": "/Users/joseph/tmp/dano465-acceptance-archive/20260928T121200Z-published019-native",
+    "manifestSha256": "8c0abc14834cadf44bc26c18d52c9b8384403675b30b6004c0e235fe954c15f2",
+    "files": 63
+  },
+  "nativeFinal": {
+    "dano": "0.2.67",
+    "piOpenViking": "0.1.19",
+    "image": "f729b082c822fe280d1df0f5cdfb8460cb64a524d83a6673ba29917505af19cf",
+    "businessAssetDerivative": "b59711b1c7e9ca79263dd353bdfed543f1a6f54b0da36af624d2b078d86e8fd7",
+    "restoreOwners": 2,
+    "restoreDocuments": 5,
+    "events": 9,
+    "remoteWriterChecks": 2,
+    "freshReadbackCasesPassed": 2,
+    "browser": "real OA existing identity restored; management source readback and new chat recalls automatic fact correctly",
+    "checks": {
+      "extension": 266,
+      "recovery": 84,
+      "lifecycle": 43,
+      "typeSvelteErrors": 0,
+      "typeSvelteWarnings": 0
+    },
+    "reviewFindings": {
+      "standards": 0,
+      "spec": 0
+    },
+    "productionModified": false
+  }
+}

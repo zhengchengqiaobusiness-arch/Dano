@@ -691,16 +691,15 @@ it("seals the actual merged result and restores it without requiring historical 
   expect(f.clear).toHaveBeenCalledTimes(clearCount);
 });
 
-it.each([false, true])("restores exact snapshot bytes after create normalization, persistent mismatch=%s", async persistent => {
+it.each([false, true])("preserves the sealed snapshot when exact transport verification fails=%s", async persistent => {
   const f = await liveSharedWriters();
   const content = "  retained document\n";
   f.documents.set(f.memoryUri, content);
   await sealLiveSnapshot(f.config, f.data, f.recovery, f.checkpointFile);
   await writeFile(f.statePath, f.oldBytes);
   f.replace.mockImplementation(async (uri, body) => {
-    const creates = !f.documents.has(uri);
-    f.documents.set(uri, creates || persistent ? body.trim() : body);
-    if (f.documents.get(uri) !== body) throw new Error("MEMORY_REPLACEMENT_UNCONFIRMED");
+    if (persistent) throw new Error("MEMORY_REPLACEMENT_UNCONFIRMED");
+    f.documents.set(uri, body);
   });
   const replay = reconcile(f.config, f.data, f.recovery, f.checkpointFile);
   if (persistent) {
@@ -712,8 +711,8 @@ it.each([false, true])("restores exact snapshot bytes after create normalization
     expect(f.documents.get(f.memoryUri)).toBe(content);
     await expect(readFile(f.liveSnapshotPath)).rejects.toMatchObject({ code: "ENOENT" });
   }
-  expect(f.replace).toHaveBeenCalledTimes(2);
-  expect(f.replace.mock.calls).toEqual([[f.memoryUri, content], [f.memoryUri, content]]);
+  expect(f.replace).toHaveBeenCalledTimes(1);
+  expect(f.replace.mock.calls).toEqual([[f.memoryUri, content]]);
 });
 
 it("seals and replays committed sources retained in archives after the working context is cleared", async () => {

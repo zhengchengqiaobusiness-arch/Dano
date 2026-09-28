@@ -1,0 +1,53 @@
+{
+  "recordedOn": "2026-09-28",
+  "archive": {
+    "path": "/Users/joseph/tmp/dano465-acceptance-archive/20260928T120506Z-final-races-deletion-recovery",
+    "manifestSha256": "bdd2f34e9568c6ee3af0bc1dbc6c044fd653c6f7a173fe615e4172355c24b3e2",
+    "files": 245
+  },
+  "retainedWorkload": "0.2.63/0.1.18 original100on100off; later governance fixes do not alter recall",
+  "memoryWaitUpperBound": {
+    "method": "prompt submission to first context completion plus later context spans; includes unrelated dispatch overhead",
+    "requests": 100,
+    "firstRequestPerOwner": 5,
+    "steadyP95Ms": 406.851318359375,
+    "overallP95Ms": 680.866943359375,
+    "maxMs": 1124.2018294374575,
+    "isProcessColdStartProof": false
+  },
+  "embedding": {
+    "onRecallCalls": 100,
+    "onRecallTokens": 1290,
+    "ownershipEvidence": "all100 service task completions within actual on-context intervals",
+    "offBackgroundCalls": 36,
+    "offRecallCalls": 0,
+    "backend": "pinned local llama.cpp GGUF; no external embedding provider API invoice",
+    "infrastructureCost": "not measured; not represented as zero",
+    "completedTaskWallMs": {
+      "count": 100,
+      "sum": 1807.587158203125,
+      "p95": 41.342041015625,
+      "max": 57.470947265625,
+      "note": "Observed wall time from actual task launch to completion; concurrent tasks overlap, not CPU-seconds or a monetary invoice."
+    }
+  },
+  "modelCredits": {
+    "unit": "MiMo token plan credits",
+    "inputMiss": 100,
+    "inputHit": 2,
+    "output": 200,
+    "chatOn": 5948564,
+    "chatOff": 17879428,
+    "originalSeedExtraction": 11698772,
+    "onPlusAllSeedExtraction": 17647336,
+    "ratioToOff": 0.987019047812939,
+    "nativeSeedTasks": 20,
+    "nativeExtractionLlmCallCount": null,
+    "limitation": "Native public task usage exposes aggregate tokens but not LLM invocation count; complete cost reporting remains open"
+  },
+  "fullCostGateComplete": false,
+  "chatCalls": {
+    "matched-on": 106,
+    "matched-off": 260
+  }
+}
