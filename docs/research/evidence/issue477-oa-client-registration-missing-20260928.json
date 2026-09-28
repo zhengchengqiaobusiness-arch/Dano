@@ -1,0 +1,43 @@
+{
+  "date": "2026-09-28",
+  "method": "Codex in-app Browser, actual OA login and authenticated OAuth client management UI",
+  "danoEntry": "https://localhost:18711/",
+  "retainedStackProductVersion": "0.2.53",
+  "providerOrigin": "https://ruoyioffice.com",
+  "captcha": {
+    "actionTimeConfirmationReceived": true,
+    "completed": true,
+    "oaAccountLoginSucceeded": true
+  },
+  "oauth": {
+    "requestedClientId": "danoProduction",
+    "requestedScope": "user.read",
+    "requestedRedirectUri": "https://localhost:18711/api/auth/callback",
+    "visibleProviderError": "OAuth2 客户端不存在",
+    "authenticatedClientListRecordCount": 5,
+    "requestedClientPresentInCurrentOaTenant": false,
+    "danoCallbackCompleted": false
+  },
+  "registrationPreparation": {
+    "clientId": "danoProduction",
+    "applicationName": "Dano",
+    "enabled": true,
+    "grantTypes": ["authorization_code", "refresh_token"],
+    "scopes": ["user.read"],
+    "accessTokenValiditySeconds": 1800,
+    "refreshTokenValiditySeconds": 2592000,
+    "redirectUris": [
+      "https://localhost:18711/api/auth/callback",
+      "https://1.15.173.22/api/auth/callback"
+    ],
+    "clientSecretEntered": false,
+    "applicationIconEntered": false,
+    "submitted": false
+  },
+  "evidenceLimits": [
+    "OA account login succeeded; Dano OAuth login did not complete.",
+    "The client absence applies to the authenticated current OA tenant.",
+    "The retained 0.2.53 OA stack is not final 0.2.62 release acceptance.",
+    "Client IDs, callback URIs and non-secret registration metadata are recorded; credentials, tokens and OAuth state are excluded."
+  ]
+}

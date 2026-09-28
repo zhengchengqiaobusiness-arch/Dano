@@ -1556,6 +1556,20 @@ The [build/review receipt](evidence/issue477-0261-protected-build.json) records
 the image, commit, checks and explicit limits. The image is retained for the
 remaining acceptance; it is not a deployed or real old-volume T-13 pass.
 
+### OA account login and missing client registration, 2026-09-28
+
+OA login was rechecked on 2026-09-28 through the retained `0.2.53` stack at
+`https://localhost:18711`. With the user's action-time confirmation, the real
+slider CAPTCHA completed and the OA account signed in. The provider consent
+page then reported `OAuth2 客户端不存在` for `danoProduction`. The authenticated
+current-tenant client management page contained five records and no such
+client. A registration form was prepared with the configured local and
+production callbacks, authorization-code/refresh grants and `user.read` scope;
+the required client secret and icon remain empty and the form was not
+submitted. This is an OA account-login result and a confirmed registration
+blocker, not Dano OAuth or final-image acceptance. The aggregate, secret-free
+receipt is [recorded separately](evidence/issue477-oa-client-registration-missing-20260928.json).
+
 ### Stopped live-state seal, candidate 0.2.62
 
 Inspection of the pinned official `v0.4.20` compressor confirms lock-free patch
