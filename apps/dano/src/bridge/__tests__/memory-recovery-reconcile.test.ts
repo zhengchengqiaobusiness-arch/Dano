@@ -63,7 +63,19 @@ it("rejects linked, exposed and oversized recovery inputs before reading them", 
   await expect(privateDirectory(join(root, "directory-link"))).rejects.toThrow("UNPROTECTED_RECOVERY_PATH");
 });
 
-it("rejects noncanonical ledger document URIs before any remote replay", async () => {
+const invalidLedgerUri = "viking://user/alice/memories/../private.md";
+it.each([
+  ["valid input reaches replay", {}, "replay"],
+  ...[
+    invalidLedgerUri,
+    "viking://user/alice/memories/%2e%2e/private.md",
+    "viking://user/alice/memories/.hidden.md",
+    "viking://user/alice/memories/valid.md?other=1",
+  ].map(uri => [uri, { deleteUris: [uri] }, "load"] as const),
+  ["escaped expected document", { expectedDocumentUris: [invalidLedgerUri] }, "load"],
+  ["escaped retained document", { expectedDocumentUris: [invalidLedgerUri],
+    retainedDocuments: { [invalidLedgerUri]: "synthetic" } }, "load"],
+] as const)("validates recovery ledger input before replay: %s", async (_label, overrides, stage) => {
   const f = await fixture();
   const statePath = "host-state/owner-a/state/memory/state.json";
   const stateBytes = await readFile(join(f.data, statePath));
@@ -80,26 +92,15 @@ it("rejects noncanonical ledger document URIs before any remote replay", async (
     postStateSha256: createHash("sha256").update(stateBytes).digest("hex"),
     deleteUris: [] as string[], sourceSessionIds: [] as string[],
     expectedDocumentUris: [] as string[], retainedDocuments: {} as Record<string, string> };
-  const run = async (ledger: typeof base) => {
+  const run = async (ledger: unknown) => {
     await writeFile(ledgerFile, JSON.stringify(ledger), { mode: 0o600 });
     const result = spawnSync(process.execPath, [script, f.config, f.data, ledgerFile], { encoding: "utf8" });
     expect(result.status).toBe(1);
     return JSON.parse(result.stderr.trim()) as { stage: string; code: string };
   };
-  expect((await run(base)).stage).toBe("replay");
-  for (const uri of [
-    "viking://user/alice/memories/../private.md",
-    "viking://user/alice/memories/%2e%2e/private.md",
-    "viking://user/alice/memories/.hidden.md",
-    "viking://user/alice/memories/valid.md?other=1",
-  ]) {
-    expect(await run({ ...base, deleteUris: [uri] })).toEqual({ result: "failed", stage: "load", code: "INVALID_LEDGER" });
-  }
-  const escaped = "viking://user/alice/memories/../private.md";
-  expect(await run({ ...base, expectedDocumentUris: [escaped] }))
-    .toEqual({ result: "failed", stage: "load", code: "INVALID_LEDGER" });
-  expect(await run({ ...base, expectedDocumentUris: [escaped], retainedDocuments: { [escaped]: "synthetic" } }))
-    .toEqual({ result: "failed", stage: "load", code: "INVALID_LEDGER" });
+  const result = await run({ ...base, ...overrides });
+  if (stage === "replay") expect(result.stage).toBe("replay");
+  else expect(result).toEqual({ result: "failed", stage: "load", code: "INVALID_LEDGER" });
 });
 
 it("checkpoints a stopped owner and preflights only the post-snapshot deletion intent", async () => {
