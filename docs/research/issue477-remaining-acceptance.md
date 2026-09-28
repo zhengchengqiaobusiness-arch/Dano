@@ -277,3 +277,14 @@ business or broad-suite rerun is added.
 Still open: independent second real OA Browser identity and complete cost reporting.
 Chrome's supported browser connection is unavailable; the existing real OA
 in-app session remains intact. No additional user confirmation is requested.
+
+### Cost metadata follow-up
+
+All 20 original seed tasks were re-read through the native public task API and
+confirmed completed before the matched workload. The response exposes aggregate
+usage but no extraction invocation counter. The original tool-event observer is
+also incomplete: even confirmed seed saves have empty `toolCalls` arrays, so those
+arrays cannot support a claim of zero workload extraction calls. The cost gate
+therefore remains explicitly open. The archive and exact timestamps are included
+in the waiting/cost supplement. Chrome selection was revalidated and still returns
+`Browser is not available: chrome`; the real in-app OA session is retained.

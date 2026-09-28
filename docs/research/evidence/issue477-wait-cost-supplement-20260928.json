@@ -49,5 +49,17 @@
   "chatCalls": {
     "matched-on": 106,
     "matched-off": 260
+  },
+  "nativeTaskMetadataAudit": {
+    "tasks": 20,
+    "allCompleted": true,
+    "latestCompletedUtc": "2026-09-28T06:24:48.915388+00:00",
+    "matchedWorkloadStartedUtc": "2026-09-28T06:27:04.482000+00:00",
+    "secondsBeforeMatchedWorkload": 135.56661200523376,
+    "toolObserverValid": false,
+    "toolObserverIssue": "All seed-turn toolCalls arrays are empty despite actual memory_save receipt creation; empty arrays cannot prove absence of tool invocations during workload.",
+    "nativeInvocationCounterExposed": false,
+    "archive": "/Users/joseph/tmp/dano465-acceptance-archive/20260928T121800Z-native-cost-metadata",
+    "manifestSha256": "64c7276e292cb71f0ea4a2d39888192e8745961112ea150671b962502450bd74"
   }
 }
