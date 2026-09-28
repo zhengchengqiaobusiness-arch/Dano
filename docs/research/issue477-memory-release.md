@@ -1813,3 +1813,47 @@ This is one current-image observation, not a full semantic exclusion matrix,
 three-repetition lifecycle/fault gate, 80-case quality matrix, five-user matched
 workload, independent OA Bob, or matched real recovery/rollback completion.
 The remaining original gates stay in the current acceptance runbook.
+
+
+## Current-pair protocol quality and matched workload (2026-09-28)
+
+Dano `0.2.63` / published Pi `0.1.18` completed 90 frozen recall/irrelevant
+attempts and 100 complete requests per matched arm, with five synthetic owners
+and measured peak concurrency five. The [brief summary](evidence/issue477-0263-quality-workload-summary-20260928.json)
+points to all raw attempts, first-driver failures, frozen execution scripts and
+independent source reviews in the external archive; all archive members were
+hash-verified and scanned for actual credential values before delivery.
+
+Recall's literal scorer reports 57/60 correct. Reading all 60 answers against
+the frozen personal facts finds 59/60: two false positives mention other colors
+as optional palette suggestions without claiming another owner's preference.
+The missing first Alice answer stays incorrect. Independent public USER
+identity/task/archive/diff/content correlation establishes 54/60 required source
+hits and 68/70 in the matched on arm. Initial source booleans were retained:
+Alice's timed-out seed wait prevented that scorer from populating her URI map.
+Actual missing references are still counted as misses. All 30 irrelevant
+attempts contain no injected memory; the matched on arm answers 70/70 recall
+questions correctly and also leaves all 30 irrelevant requests uninjected.
+
+Per-request context time sums every observed context callback. Matched on's
+first request per owner has p95 1,078 ms; the other 95 requests have p95 346 ms
+and maximum 607 ms. Actual injection peaks at 203 tokens, with no unmeasured
+injected token count. The raw all-request quality-window p95 remains 1,007 ms;
+it includes initial requests and is not relabeled as steady. Context timing does
+not cover every lifecycle callback, so it alone does not close all foreground
+wait assertions. Chat-only Token Plan consumption is 5,948,564 Credits on versus
+17,879,428 off using the [verified published weights](https://mimo.mi.com/docs/zh-CN/price/token-plan).
+The matched difference is observational; different responses and cache usage
+prevent attributing its entire value to memory. Extraction/embedding call and
+infrastructure data remain incomplete, so no total-cost gate passes.
+
+The fixture copies the frozen shipped SYSTEM template, while the existing
+Browser service uses its rendered product-name variant. The template's literal
+placeholder appears in two model replies. This protocol measurement does not
+establish canonical Browser identity/business behavior. One seed wait exceeded
+180 seconds; several parallel saves exceeded 60 seconds. These records remain
+unchanged after the eventual local ready transition. Full healthy-save latency,
+50 other frozen cases x3, real independent OA Browser and the remaining recovery
+and lifecycle gates stay open. The stopped evaluation container was removed;
+its dedicated runtime volume remains solely for the unfinished Goal's recovery
+work. The existing Browser stack and fixed entrypoint remain healthy.

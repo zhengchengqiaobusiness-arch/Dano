@@ -1,0 +1,109 @@
+{
+  "recordedOn": "2026-09-28",
+  "scope": "Synthetic authenticated protocol fixture, real model/service, test-only context observer",
+  "sourceHead": "3d39e82335fc7384fcab5566390c057119b561b7",
+  "danoVersion": "0.2.63",
+  "piOpenVikingVersion": "0.1.18",
+  "imageId": "b771b66b5480acaf63dab0b4ddcf623c94fcc612169a8d1c420dd390a8fda629",
+  "caseSha256": "8c1ad95d69ab6f58e601d48b353aeea60b63365a65a507de917ed5bc9bca250c",
+  "model": "mimo-v2.5",
+  "existingAuthorizedCredentialsReused": true,
+  "runtime": "Five workers; five synthetic owners; measured peak concurrency 5 in each matched arm",
+  "quality": {
+    "casesExecuted": 30,
+    "repetitionsPerCase": 3,
+    "attempts": 90,
+    "completed": 90,
+    "recallAnswerRuleCorrect": 57,
+    "recallAttempts": 60,
+    "recallAnswerAgentSemanticReviewCorrect": 59,
+    "semanticReviewMethod": "All 60 answers read against frozen personal facts; two literal false positives merely suggest secondary palette colors; one missing answer remains incorrect",
+    "originalSourceScorerHits": 44,
+    "independentPublicSourceReviewHits": 54,
+    "sourceReviewMethod": "Original observed references correlated with public USER task/archive/diff/readback; original booleans retained; absent references remain misses",
+    "irrelevantNoInjection": 30,
+    "irrelevantAttempts": 30,
+    "remainingCasesNotExecutedHere": 50
+  },
+  "matchedWorkload": {
+    "requestsPerArm": 100,
+    "completedPerArm": 100,
+    "requestsPerOwnerPerArm": 20,
+    "onRecallCorrect": 70,
+    "onRecallAttempts": 70,
+    "onPublicSourceReviewHits": 68,
+    "onIrrelevantNoInjection": 30,
+    "onIrrelevantAttempts": 30,
+    "offRecallCorrect": 4,
+    "contextTimingPerRequest": "Sum of actual context callback spans; cold is first request per owner in this arm; other lifecycle callbacks excluded",
+    "cold": {
+      "requests": 5,
+      "p95Ms": 1078.201757999952,
+      "maxMs": 1078.201757999952
+    },
+    "steady": {
+      "requests": 95,
+      "p95Ms": 346.3664779999526,
+      "maxMs": 607.0993960000342
+    },
+    "all": {
+      "requests": 100,
+      "p95Ms": 607.0993960000342,
+      "maxMs": 1078.201757999952
+    },
+    "maximumInjectedTokens": 203,
+    "missingTokenMeasurements": 0,
+    "onChatTokens": {
+      "input": 10855,
+      "output": 18307,
+      "cacheRead": 600832,
+      "cacheWrite": 0
+    },
+    "offChatTokens": {
+      "input": 45499,
+      "output": 51655,
+      "cacheRead": 1499264,
+      "cacheWrite": 0
+    }
+  },
+  "chatCost": {
+    "pricingVerifiedOn": "2026-09-28",
+    "currency": "Token Plan Credits",
+    "inputCacheMissPerToken": 100,
+    "inputCacheHitPerToken": 2,
+    "outputPerToken": 200,
+    "timeDiscount": 1,
+    "onCredits": 5948564,
+    "offCredits": 17879428,
+    "incrementalChatOnlyRatio": -0.6672956204191767,
+    "source": "https://mimo.mi.com/docs/zh-CN/price/token-plan",
+    "totalModelCostGatePassed": false
+  },
+  "retainedFailures": [
+    "First driver used a URI field intentionally absent from public receipts; all records retained",
+    "Alice seed wait exceeded 180 seconds; original timeout retained after eventual local ready",
+    "Several concurrent seeds exceeded 60 seconds; healthy-save gate not claimed"
+  ],
+  "inputLimits": {
+    "systemPromptTemplateSha256": "8b8be807f948417f08a7edf3e5d0c702031f2da51b10370439c1d7b465703c48",
+    "actualBrowserRenderedPromptSha256": "504e7ee195cefb756d699243960734bbe6c20ede9d38cdd7bf486ccc08448a48",
+    "templateProductPlaceholderObserved": true,
+    "canonicalBrowserIdentityProof": false,
+    "extractionAndEmbeddingCallCostObserved": false,
+    "allLifecycleCallbackWaitMeasured": false,
+    "full80CaseMatrixComplete": false
+  },
+  "archive": {
+    "archive": "/Users/joseph/tmp/dano465-acceptance-archive/20260928T061907Z-formal-0263",
+    "bundleSha256": "3762cae3fb481db6bb4b769e9b272b074786b81f77285976ffe468780be4a52a",
+    "manifestSha256": "5108aff433db37548f725095a7caa4f502ba3edf361d21cfb9f6e3b9e449e1b9",
+    "filesVerified": 29,
+    "credentialValueScanMatches": 0
+  },
+  "cleanup": {
+    "evaluationContainerRemoved": true,
+    "runtimeVolume": "dano465formal0263_runtime",
+    "volumeRetainedForRemainingGoalRecovery": true
+  },
+  "fullGoalComplete": false
+}

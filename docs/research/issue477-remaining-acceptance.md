@@ -96,3 +96,14 @@ The [archive catalog](evidence/issue477-acceptance-archive.md) gives their locat
 original paths and SHA-256 hashes. Retain future raw outputs there and commit only
 brief final summaries with archive hashes. Frozen inputs, reproduction scripts,
 thresholds and the unfinished gates above remain unchanged.
+
+## Latest protocol measurement
+
+The current pair completed 90 recall/irrelevant attempts plus matched 100 on and
+100 off requests across five synthetic users. [The brief summary](evidence/issue477-0263-quality-workload-summary-20260928.json)
+retains original failures, source-scorer limitations and independent public source
+review. This is partial evidence: 50 frozen cases x3 remain unexecuted here;
+healthy-save latency, total model cost, all lifecycle waiting, canonical rendered
+profile/Browser identity and the remaining Group 1/3/4 checks still need evidence.
+Use the existing authorized credentials, rendered profile and retained synthetic
+runtime for the next relevant check; do not replace failures with a clean-only run.
