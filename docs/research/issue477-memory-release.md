@@ -261,9 +261,9 @@ RAM. MiMo-v2.5 extraction of the five four-fact source Sessions completed in
 This is batch extraction timing, not the single-fact explicit-save p95 metric.
 
 The real OpenViking `v0.4.20` USER-key run produced these sanitized per-attempt
-files: [recall](evidence/issue477-baseline/recall.json),
-[isolation](evidence/issue477-baseline/isolation.json) and
-[irrelevant requests](evidence/issue477-baseline/irrelevant.json).
+files: [recall](evidence/issue477-acceptance-archive.md#report-12),
+[isolation](evidence/issue477-acceptance-archive.md#report-11) and
+[irrelevant requests](evidence/issue477-acceptance-archive.md#report-10).
 All 60/60 recall searches found a document containing the expected fact and
 none returned the next owner's forbidden value; this is source retrieval,
 not a Dano/MiMo answer-correctness result. All 60/60 cross-user probes kept
@@ -306,7 +306,7 @@ request. The published extension and user-bound credential scope are unchanged.
 
 The formal image `46443b7b95aa` started with the private reranker configuration.
 All 143 Vitest files passed (1,655 tests, one skipped); type/Svelte checks had
-no diagnostics. The [candidate 2 retrieval results](evidence/issue477-candidate2/formal-retrieval.json)
+no diagnostics. The [candidate 2 retrieval results](evidence/issue477-acceptance-archive.md#report-14)
 contain 90 attempts: 60/60 expected source documents selected, 30/30
 irrelevant requests selected no memory, no cross-owner forbidden fact, and
 search plus reranking p95 324.45 ms. In the real in-app Browser, a fresh
@@ -314,7 +314,7 @@ MiMo chat answered both stored upgrade codes after restart; an unrelated
 arithmetic chat returned 45. These are Browser observations, while the
 per-attempt file records service selection, not 90 Dano model answers.
 
-The first [five-user, 100-request selection probe](evidence/issue477-candidate2/five-user-selection.json)
+The first [five-user, 100-request selection probe](evidence/issue477-acceptance-archive.md#report-13)
 then exposed a concurrency flaw: reranking all five vector candidates with
 the 750 ms timeout selected only 7/70 relevant facts. 30/30 irrelevant
 requests omitted memory; steady selection p95 was 962.5 ms. This is a
@@ -337,12 +337,12 @@ protected image `8cb0ff821faf` installed the exact published
 Pi keywords. All 143 Vitest files passed (1,657 tests, one skipped), and the
 server and Svelte checks had no diagnostics.
 
-The [formal retrieval results](evidence/issue477-candidate3/formal-retrieval.json)
+The [formal retrieval results](evidence/issue477-acceptance-archive.md#report-16)
 record all 90 unchanged recall and irrelevant-request attempts across three
 repetitions. Expected source selection was 60/60, irrelevant requests selected
 no memory in 30/30 attempts, and no next-owner forbidden fact was read.
 USER-scoped search plus reranking p95 was 223.25 ms; reranking alone p95 was
-209.41 ms. The [five-user concurrent selection results](evidence/issue477-candidate3/five-user-selection.json)
+209.41 ms. The [five-user concurrent selection results](evidence/issue477-acceptance-archive.md#report-15)
 record 100 attempts: relevant selection 70/70, irrelevant omission 30/30,
 first-round p95 690.97 ms and steady selection p95 817.31 ms. That workload
 uses real OpenViking and reranker requests on the four-CPU isolated Podman VM,
@@ -409,10 +409,10 @@ one removed source, one retained document and all three expected documents.
 This revalidates the repaired credential path on the real service for the one
 synthetic owner; it does not create a general multi-owner ledger policy.
 
-The [candidate-4 formal retrieval results](evidence/issue477-candidate4/formal-retrieval.json)
+The [candidate-4 formal retrieval results](evidence/issue477-acceptance-archive.md#report-18)
 record 60/60 relevant source selections, 30/30 irrelevant omissions and zero
 forbidden cross-owner reads; selection p95 was 279.75 ms. The
-[five-user concurrent selection results](evidence/issue477-candidate4/five-user-selection.json)
+[five-user concurrent selection results](evidence/issue477-acceptance-archive.md#report-17)
 record 70/70 relevant selections and 30/30 irrelevant omissions, with
 first-round p95 849.68 ms and steady p95 958.60 ms. The latter has only
 41.40 ms margin below the 1-second selection threshold **before** Dano host
@@ -431,10 +431,10 @@ at `8c64029b` before this run. Only the maximum USER-scoped vector search and
 local reranker candidate count changed from two to one. The final image remains
 `0.2.38` with exact `pi-openviking@0.1.12`; official OpenViking, Embedding and
 reranker versions and the four-CPU Podman VM are unchanged. The separate
-[formal retrieval evidence](evidence/issue477-candidate5/formal-retrieval.json)
+[formal retrieval evidence](evidence/issue477-acceptance-archive.md#report-20)
 records 60/60 expected-source selections, 30/30 irrelevant omissions, zero
 cross-owner forbidden hits and 185.35 ms selection p95. The
-[five-user concurrent selection evidence](evidence/issue477-candidate5/five-user-selection.json)
+[five-user concurrent selection evidence](evidence/issue477-acceptance-archive.md#report-19)
 records 70/70 relevant selections and 30/30 irrelevant omissions across 100
 attempts, with 710.17 ms cold-round and 537.83 ms steady selection p95.
 These are **memory-selection-only** calls, not complete Dano/MiMo requests.
@@ -842,8 +842,8 @@ The `0.2.42` candidate replaces the tokenizer's single-flight rejection with a
 bounded per-model FIFO. Five simultaneous Dano/MiMo requests then recalled the
 correct owner fact and answered it in a first pilot. The canonical protected
 image was built and ran with published `pi-openviking@0.1.13`. The matched
-[100-request memory-on](evidence/issue477-candidate6/full-workload-on.json)
-and [memory-off](evidence/issue477-candidate6/full-workload-off.json)
+[100-request memory-on](evidence/issue477-acceptance-archive.md#report-22)
+and [memory-off](evidence/issue477-acceptance-archive.md#report-21)
 workloads each completed 100 real Dano/MiMo requests for five authenticated
 synthetic owners. With memory on, strict answer matching passed 63/70 recall
 attempts; all 30 irrelevant answers contained no owner fact. The memory-off
@@ -853,7 +853,7 @@ Answer length and cache variation prevent attributing the cost difference to
 memory alone.
 
 The same frozen workload on a disposable container with sanitized extension
-and transport tracing produced [direct evidence](evidence/issue477-candidate6/traced-workload.json):
+and transport tracing produced [direct evidence](evidence/issue477-acceptance-archive.md#report-23):
 70/70 expected sources returned, 70/70 relevant contexts injected, 30/30
 irrelevant contexts omitted, 759 ms recall-wait p95, 837 ms maximum, and 213
 injected tokens maximum. It completed 100/100 requests, but strict answer
@@ -953,7 +953,7 @@ The first case of the independently frozen
 `云汀201`, but MiMo's `memory_save` argument was `云汀2020`. The operation then
 became `ready` after 173 seconds (UI timestamp precision), above the 60-second
 limit, and the exported content held the wrong fact. The
-[sanitized failure receipt](evidence/issue477-save-ready/first-attempt.json)
+[sanitized failure receipt](evidence/issue477-acceptance-archive.md#report-34)
 records both observations and the exact-document cleanup. A retryable VLM
 connection error appeared during extraction; its contribution to latency is
 not yet isolated. The other nine fixed cases were not run against this failed
@@ -963,7 +963,7 @@ candidate, so no p95 is claimed. The independent package fix was published as
 user message before creating an operation. The rebuilt protected image
 `1f1eea87390f` passed package/version inspection, release-manifest check,
 `pnpm run check`, full Vitest (1675 passed, one skipped), and `pnpm run build`.
-In the [same frozen S-01 Browser retest](evidence/issue477-save-ready/verbatim-guard-retest.json),
+In the [same frozen S-01 Browser retest](evidence/issue477-acceptance-archive.md#report-38),
 MiMo again proposed content that did not match the source; the guard blocked it
 and the save-record list gained no new operation. This establishes the
 fail-closed correction, but S-01 still fails successful-save acceptance and no
@@ -971,7 +971,7 @@ healthy save-ready p95 is established. The remaining fixed cases and release
 gates remain open.
 
 The next full-source `0.2.44` image with the published `0.1.15` retry guidance
-also failed [S-01](evidence/issue477-save-ready/retry-guidance-retest.json).
+also failed [S-01](evidence/issue477-acceptance-archive.md#report-36).
 MiMo repeatedly read the source's `201` as `202`, retried the mismatched call,
 and did not converge; the Browser response was cancelled. No save operation
 was created. The independent extension gained a tested repair for a
@@ -980,7 +980,7 @@ blocked; that candidate was then published for a full-source Browser retest. No
 successful-save or latency claim follows from either blocked attempt.
 
 The `0.2.45`/`0.1.16` full-source Browser retest again failed
-[S-01](evidence/issue477-save-ready/numeric-source-retest.json): MiMo proposed
+[S-01](evidence/issue477-acceptance-archive.md#report-35): MiMo proposed
 `云汀2020`, which differs from source `云汀201` by two numeric edits. The
 single-digit rule correctly blocked the call; no operation was created. A
 subsequent tested extension revision permits only one uniquely aligned
@@ -989,7 +989,7 @@ non-numeric rewrites. That revision was published before the fixed Browser
 workload was rerun.
 
 The published `0.1.17` package in Dano `0.2.46` produced the first
-[successful fixed S-01 Browser receipt](evidence/issue477-save-ready/source-aligned-first-ready.json):
+[successful fixed S-01 Browser receipt](evidence/issue477-acceptance-archive.md#report-37):
 the operation moved from created at 16:12:55 to `ready` at 16:13:26 (31 seconds
 at UI timestamp precision), and the memory content read back `云汀201` rather
 than the model's altered number. This meets the per-case 60-second target for
@@ -1022,7 +1022,7 @@ frozen recall matrix or independent Bob Browser acceptance.
 The frozen 20 cross-USER isolation cases ran three times each against the
 real OpenViking public API in the protected local stack. The
 [executable matrix](fixtures/issue477-isolation-matrix.py) and
-[sanitized per-attempt receipt](evidence/issue477-isolation-matrix.json)
+[sanitized per-attempt receipt](evidence/issue477-acceptance-archive.md#report-28)
 record 60/60 passes: search, direct read, direct write and export returned
 403 in all 48 attempts. In the 12 Session-ID replay attempts, OpenViking
 returned 200 but created an actor-owned Session at a distinct URI; the
@@ -1036,7 +1036,7 @@ sessions, which remain separate acceptance gates.
 The frozen correction and deletion source mappings also ran through a
 disposable OpenViking `v0.4.20` service with the pinned local Embedding model.
 The [public API probe](fixtures/issue477-public-api-correction-delete.py) and
-[sanitized receipt](evidence/issue477-public-api-correction-delete.json) record
+[sanitized receipt](evidence/issue477-acceptance-archive.md#report-33) record
 30/30 replacement readbacks and 30/30 deletions with 404 readback and no
 search hit, across three fresh synthetic accounts. The MiMo model key was
 deliberately disabled. This establishes only the upstream direct-write and
@@ -1231,7 +1231,7 @@ does not establish OA Browser identity, model extraction/`ready`, restored
 multi-volume or old-binary rollback.
 The protected `0.2.54` image built successfully from commit `ca9c12f41`.
 Its embedded product version and recovery script SHA-256 match the checkout;
-the release manifest check passed. The [build receipt](evidence/issue477-0254-protected-build.json)
+the release manifest check passed. The [build receipt](evidence/issue477-acceptance-archive.md#report-01)
 does not count as restored-volume or Browser acceptance.
 The same image then used pinned OpenViking v0.4.20 and local Embedding with
 synthetic USER keys. After restoring checkpointed owner state, one later-phase
@@ -1251,12 +1251,12 @@ The protected image built with that override, retained no apt-mirror build
 argument at runtime, matched the committed recovery script hashes, and
 accepted a private empty recovery root while rejecting a world-readable one.
 All 145 Vitest files passed (1705 tests, one skipped), as did type/Svelte
-checks, local build and release manifest check. The [sanitized build receipt](evidence/issue477-0255-protected-build.json)
+checks, local build and release manifest check. The [sanitized build receipt](evidence/issue477-acceptance-archive.md#report-04)
 does not establish real-volume replay or OA/model/Browser acceptance for 0.2.55.
 The default apt/CA branch of the same bootstrap script was subsequently run
 without `DANO_APT_MIRROR` in the exact Node 22 Debian base image. Debian CA
 installation, switching to Tencent HTTPS apt sources, a second apt update and
-curl installation all succeeded; the CA bundle was present. The [default apt receipt](evidence/issue477-0255-default-apt-bootstrap.json)
+curl installation all succeeded; the CA bundle was present. The [default apt receipt](evidence/issue477-acceptance-archive.md#report-03)
 also records a subsequent complete `protected-runtime` Dockerfile build with
 `DANO_APT_MIRROR` omitted. The resulting `0.2.55` image uses the Tencent HTTPS
 source, retains CA and no apt mirror runtime variable, and embeds release and
@@ -1268,7 +1268,7 @@ base + protected + memory Compose configuration in an isolated project with
 no published ports. Dano, OpenViking, Embedding and Reranker all became healthy;
 Dano's container-local `/api/health` returned 200. The candidate recovery
 volume required Podman's `volume create --uid 1000 --gid 1000` for ownership to
-persist across mounts. The [sanitized Compose receipt](evidence/issue477-0255-compose-startup.json)
+persist across mounts. The [sanitized Compose receipt](evidence/issue477-acceptance-archive.md#report-02)
 records this startup subgate. The existing OA stack at 18710/18711 remained
 running. This did not exercise MiMo, OA callback, Browser acceptance or recovery
 replay.
@@ -1377,7 +1377,7 @@ on the final image; the other five fixed categories and full cross-category
 matrix remain open.
 
 The executable attempt-coverage audit is
-`node scripts/audit-memory-evaluation-coverage.mjs docs/research/evidence/issue477-isolation-matrix.json docs/research/evidence/issue477-public-api-correction-delete.json`.
+documented with its external report paths in the [archive catalog](evidence/issue477-acceptance-archive.md#future-runs).
 On the frozen 80 cases ×3 it finds 120 reported attempts: 60 OpenViking-only
 isolation and 30 each for public-API correction and deletion. Another 120
 attempts remain missing (recall 60; irrelevant and authorization 30 each).
@@ -1413,7 +1413,7 @@ closes the self-incompatible checkpoint found in review; the remaining T-13
 in-flight writer and credential-rotation gates above remain open.
 The formal `0.2.58` protected image reports the matching product version and
 contains byte-identical recovery and USER-key replacement scripts; the build
-receipt is `docs/research/evidence/issue477-0258-protected-build.json`. Image
+receipt is [archived receipt](evidence/issue477-acceptance-archive.md#report-06). Image
 construction alone does not satisfy deployed rollback or Browser acceptance.
 
 An isolated two-owner rollback then exercised the actual old and candidate
@@ -1443,7 +1443,7 @@ windows. This fail-closed rule prevents silent loss; it does not yet reconcile
 such a clear plus new writer or close the upgrade-window T-13 gate. The formal
 `0.2.59` protected image contains the matching product version and byte-identical
 recovery script; the build receipt is
-`docs/research/evidence/issue477-0259-protected-build.json`. A real-volume
+[archived receipt](evidence/issue477-acceptance-archive.md#report-07). A real-volume
 clear/new-writer regression and model/OA Browser acceptance remain open.
 
 The `0.2.60` recovery command can now carry a post-checkpoint writer across a
@@ -1457,7 +1457,7 @@ documents. Targeted recovery tests cover each pre-commit phase and the hidden
 commit rejection. Real OpenViking volume replay, later-phase preservation and
 the complete T-13 gate remain open.
 The formal protected image reports `0.2.60` and contains the byte-identical
-recovery script. Its [build receipt](evidence/issue477-0260-protected-build.json)
+recovery script. Its [build receipt](evidence/issue477-acceptance-archive.md#report-08)
 records 41 targeted recovery tests, 1718 passing full-suite tests, checks,
 build, and release-manifest validation. This image has not yet passed deployed
 Compose, old-volume restoration, MiMo or OA Browser acceptance.
@@ -1480,7 +1480,7 @@ and passed macOS system trust plus curl and Node validation with the existing
 CA. The in-app Browser entered Dano without a security interstitial, connected,
 opened the login menu, and reached the real OA login using a fresh redirect.
 Submitting the filled login showed the provider's slider CAPTCHA. The
-[sanitized stage receipt](evidence/issue477-local-tls-oauth-stage-20260928.json)
+[sanitized stage receipt](evidence/issue477-acceptance-archive.md#report-29)
 records that callback and authenticated identity remain unverified and that
 this older retained stack cannot count as final `0.2.60` Browser acceptance.
 
@@ -1552,7 +1552,7 @@ product version and byte-identical recovery script. A disposable no-network
 container exercised its compiled pending-runtime and pending-checkpoint fences;
 both rejected an incomplete preservation plan. The container and its synthetic
 runtime were removed, while the existing fixed-port OA stack stayed healthy.
-The [build/review receipt](evidence/issue477-0261-protected-build.json) records
+The [build/review receipt](evidence/issue477-acceptance-archive.md#report-09) records
 the image, commit, checks and explicit limits. The image is retained for the
 remaining acceptance; it is not a deployed or real old-volume T-13 pass.
 
@@ -1568,7 +1568,7 @@ production callbacks, authorization-code/refresh grants and `user.read` scope;
 at that stage the required client secret and icon were empty and the form was not
 submitted. This is an OA account-login result and a confirmed registration
 blocker, not Dano OAuth or final-image acceptance. The aggregate, secret-free
-receipt is [recorded separately](evidence/issue477-oa-client-registration-missing-20260928.json).
+receipt is [recorded separately](evidence/issue477-acceptance-archive.md#report-30).
 
 Later the same day, the user explicitly authorized filling the test OA form.
 The existing configured Dano client secret was entered without publishing it;
@@ -1577,7 +1577,7 @@ its preview was observed. The prepared form contained both callbacks and the sta
 grants/scope. Automatic approval rejected final submission because permission
 to fill did not explicitly authorize persistent OAuth client creation. A
 specific action-time submission confirmation was requested; that stage did not
-prove client registration or a Dano callback. The [prepared-form receipt](evidence/issue477-oa-registration-ready-20260928.json)
+prove client registration or a Dano callback. The [prepared-form receipt](evidence/issue477-acceptance-archive.md#report-31)
 contains metadata and the public asset hash only.
 
 The user then explicitly authorized persistent OAuth client creation. Submission
@@ -1781,7 +1781,7 @@ through GitHub Actions OIDC. The registry tarball matches the Dano lockfile and
 retains both Pi keywords. Six real MiMo probes pass on baseline and fixed
 versions, so the deterministic deviating-model regressions establish the guard's
 benefit; those real probes alone do not reproduce the historical failure.
-See the [package fix receipt](evidence/issue477-pi-0118-overlap-fix-20260928.json).
+See the [package fix receipt](evidence/issue477-pi-0118-summary-20260928.json).
 
 Dano pins `0.1.18` and bumps the root/release version to `0.2.63`. The real
 Dockerfile built protected image

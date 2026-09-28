@@ -1,0 +1,65 @@
+{
+  "recordedOn": "2026-09-28",
+  "piOpenVikingVersion": "0.1.18",
+  "pullRequest": "https://github.com/josephyoung/pi-openviking/pull/17",
+  "reviewedHead": "f091a79f9d70139f872979d1f514bc3650325612",
+  "mergedMain": "b090214508a7ad84a35679a7dbe264cf0e8b37f0",
+  "publishRun": "https://github.com/josephyoung/pi-openviking/actions/runs/36381288923",
+  "publication": "successful version-triggered GitHub Actions OIDC publish",
+  "registryIntegrity": "sha512-MGzpKDoM9T2dVMBFML/FCtUphJh5bacF8NzNBMMRou67HLi5cWyFjdCkqIuM6paZ8qJY5S1pj33Zkk1T6ryjUA==",
+  "registryShasum": "8fbb84f1c8d25dafef481cef982ae2317db6c615",
+  "tarballSha256": "0e87f84c89dc2d760d67ae2a9d8c17c95dcd42e16532425719b9b1d51bdbc4d9",
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "tarballContainsSameSourceExactQuoteGuard": true,
+  "deterministicRegression": {
+    "beforeFixFailingCases": 2,
+    "afterFixFullTests": 264,
+    "failures": 0,
+    "skipped": 0,
+    "cases": [
+      "exact saved fact excluded",
+      "contained substring excluded while independent fact retained",
+      "combined full saved fact and extra text remains retryable",
+      "later user source remains eligible",
+      "failed explicit receipt does not suppress fallback"
+    ]
+  },
+  "review": {
+    "standardsActionableFindings": 0,
+    "specInScopeBlockers": 0,
+    "selectionSchedulerTestsPassed": 57
+  },
+  "originalBrowserObservation": {
+    "automaticOperationId": "188bc3484d776dccbef807505043d89cc0eb085fa5a03be62e57bd511539dd4f",
+    "automaticQuoteAndFactDigest": "e5b5c7f6cd2157c51e7ad1fd3fcf9407ff561f0c5d2fd9e3df21b73586a56d51",
+    "digestMatchesExplicitSavedText": true,
+    "inference": "Automatic selection repeated the exact same fact rather than only adjacent temporary text",
+    "historicalRawSelectionInputOrResponseRecorded": false
+  },
+  "realModelProbe": {
+    "provider": "xiaomi-token-plan-cn",
+    "model": "mimo-v2.5",
+    "thinking": "disabled",
+    "baselineCases": 6,
+    "baselinePassed": 6,
+    "fixedCases": 6,
+    "fixedPassed": 6,
+    "datasetHash": "87963f7145dda28c6fb3967e4a1530a70658b7ed8d9462d85acac0a0134e3f7f",
+    "promptHash": "cecb970f4cbe9ee9a4a705d70432b67353c8f3f63c6115eeabcd846bb85e754c",
+    "interpretation": "Both versions pass these six actual selector calls. Deterministic captured-deviation regressions establish the guard benefit; this probe alone does not reproduce the historical failure.",
+    "remoteDeliveryTested": false
+  },
+  "limits": [
+    "Semantic paraphrases and other partial semantic overlap remain model responsibilities",
+    "Original receipt predates the subsequent Dano 0.2.63 Browser rerun; that result has a separate receipt",
+    "Full AC-04 and Goal completion are not claimed"
+  ],
+  "rawReceiptArchive": {
+    "catalog": "issue477-acceptance-archive.md#report-32",
+    "sourcePath": "docs/research/evidence/issue477-pi-0118-overlap-fix-20260928.json",
+    "sha256": "d7b319ca2cea6970df2c4c50f49f5957161250fcc7ab7d8e3cc69ec336a320ee"
+  }
+}

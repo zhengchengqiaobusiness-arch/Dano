@@ -53,7 +53,7 @@ Independent facts and later source turns stay eligible; combined quotes remain
 retryable. The version bump automatically published `0.1.18` through OIDC.
 All 264 extension tests pass. Baseline and fixed versions both pass six real
 MiMo selector probes, so those probes alone do not reproduce the historical
-failure. See the [fix receipt](evidence/issue477-pi-0118-overlap-fix-20260928.json).
+failure. See the [fix receipt](evidence/issue477-pi-0118-summary-20260928.json).
 The affected final-image Browser rerun reached explicit `ready` in 35.259 seconds
 while the completed automatic selection created no operation. Browser source
 readback and a fresh-chat recall succeeded. The broader semantic exclusion
@@ -88,3 +88,11 @@ model key or frozen expected results. Repeat only affected completed checks
 after a repair, plus the final checks required by the original Spec. If a real
 runtime fix requires a new package/image, record the new immutable pair and
 identify which earlier evidence no longer applies before proceeding.
+
+## Evidence storage
+
+Full raw attempts and duplicate intermediate reports are preserved outside Git.
+The [archive catalog](evidence/issue477-acceptance-archive.md) gives their location,
+original paths and SHA-256 hashes. Retain future raw outputs there and commit only
+brief final summaries with archive hashes. Frozen inputs, reproduction scripts,
+thresholds and the unfinished gates above remain unchanged.
