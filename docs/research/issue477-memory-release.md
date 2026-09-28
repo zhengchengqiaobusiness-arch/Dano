@@ -1889,3 +1889,44 @@ were reused. One stable synthetic preference automatically reached ready in
 one affected-path observation; complete quality/lifecycle/business/recovery
 gates remain open. Raw build/test attempts and the initial Browser screenshot
 are in the [brief receipt's archive](evidence/issue477-0264-managed-defaults-20260928.json).
+
+## Real recovery fixes, candidate 0.2.65 (2026-09-28)
+
+The two-owner real-service rehearsal reproduced two recovery defects. A ready
+operation's working context may be cleared after commit while its exact source
+remains in the bound archive. A pending checkpoint writer may finish and acquire
+receipts before a later clear. The native operator now verifies archive/source,
+task and diff bindings, accepts only newly added receipts covered by completed
+revocation, and checks actual terminal tasks before replay can mutate content.
+Existing owner/source/receipt immutability remains enforced. Root version and
+release manifest are `0.2.65`; Pi remains `0.1.18`.
+
+The pinned final image passed restored old-local/latest-remote matched replay
+and repeated replay, checking two owners, six governance events and eight remote
+writers. All six document bytes remained unchanged. Current `0.2.65` and actual
+old `0.2.63` hosts read exact latest exports and sources, preserved owner
+isolation, recalled each owner's newer facts, and did not revive cleared queued
+facts. The old-remote negative probe found six absent task receipts, refused
+replay with `INVALID_MEMORY_RESPONSE`, and left documents unchanged; it used the
+exact final helper copied into the prior image, rather than a native-final-image
+negative rerun. Three real public USER credential rotations also passed actual
+Dano restarts with old-key rejection and content isolation.
+
+Type/Svelte checks and all 82 focused recovery cases pass. The serial rerun of
+nine earlier failed files passed 330 tests. Broad local runs still returned
+failures (mostly deadlines), including the redundant final run; they are retained
+and not relabeled as clean passes. Independent Standards and Spec reviews
+reported zero findings for the recovery code delta. The final image contains the
+tracked helper byte-for-byte. All raw successful and failed attempts, snapshot
+archives, operator scripts, usage receipts and cleanup are stored privately in
+the [brief recovery receipt's archive](evidence/issue477-0265-real-recovery-20260928.json).
+
+One model request timed out at 180 seconds; post-clear saves include 60.293,
+75.235 and 96.980 seconds. One later old-image client creation returned HTTP 500
+with an unknown cause; its finite diagnostic retry exited 0. These observations
+do not establish healthy-save latency or reliability thresholds. The full frozen
+80-case repetitions, total matched cost, independent OA Bob/business checks and
+remaining repeated lifecycle/fault cases still prevent #465/#477 closure. Only
+the two independent recovery containers and six test volumes were removed; the
+main fixed-port Browser stack, private credentials, TLS and candidate image stay
+available for the unfinished Goal.

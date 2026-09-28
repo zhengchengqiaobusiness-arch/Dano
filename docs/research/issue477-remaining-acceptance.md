@@ -7,10 +7,12 @@ The full historical AC/T ledger is [here](issue477-memory-release.md).
 
 ## Fixed inputs and retained passes
 
-- Candidate Dano `0.2.64`, published `pi-openviking@0.1.18`, official
+- Candidate Dano `0.2.65`, published `pi-openviking@0.1.18`, official
   OpenViking `v0.4.20`. Current protected image
+  `9edfcd0b24cc44760aa7460964a78927e165218a44e2427a1475ac7a40f99dcd`
+  contains the repaired native recovery helper. Retained `0.2.64` image
   `5c0794071128d4a62c381c6d216f9aab2982c07dd86f2039752353b0489e162c`
-  contains default-on initialization and the management-only Browser surface.
+  established default-on initialization and the management-only Browser surface.
   Five fresh synthetic accounts verified both defaults without settings writes;
   restart preserved explicit pause/opt-out. The real OA Browser shows automatic
   ready content and its source. These affected-path checks do not close the full
@@ -40,7 +42,7 @@ The full historical AC/T ledger is [here](issue477-memory-release.md).
 |---|---|---|
 | 1. Collection, lifecycle and Browser | Finish semantic exclusion, pause/claim/in-flight, explicitly disabled collection, reconnect/branch/dispose cases beyond the completed same-source overlap rerun. Complete independent real OA Bob and existing business authorization/form/Skill regressions. | Current real entrypoint receipts, separate identities, source/task records and rendered Browser proof; original repetition requirements still apply. |
 | 2. Frozen quality and performance | Run the frozen 80 cases three times on the current pair. Run the matched complete on/off workload of at least 100 requests with five concurrent users. | Every attempt, model answers/source review, actual token counts, cold/steady latency, save-ready latency and matched cost. Apply the existing Spec thresholds without filtering failures. |
-| 3. Real recovery and rollback | On isolated synthetic owners, finish live shared-document sealing, matched old-volume restoration, new/old queues through ready, clear plus newer writer, OpenViking USER credential rotation, candidate upgrade and matched old-image rollback. | Exact binary/volume/checkpoint identities, public service receipts, final content/source readback, deletion non-revival and owner isolation. Synthetic overlays alone do not close this gate. |
+| 3. Real recovery and rollback | Retain completed two-owner shared-document sealing, matched restored volumes, queued completion, clear/new writers, actual old-image rollback and three USER rotations. Finish the remaining original repeated fault/recovery cases. | The [real recovery receipt](evidence/issue477-0265-real-recovery-20260928.json) binds exact binary/volume/checkpoint identities, public receipts, final source/content readback and isolation. It does not close unexecuted matrix cases. |
 | 4. Release audit and closure | Reconcile AC-01–13/T-01–14 against current evidence, review any resulting code changes, finish upstream PR/merge/closure and scoped cleanup. | No unexplained failed hard constraint or unfinished mandatory gate; merged upstream PR, #477/#465 closure, remote branch removal and cleanup receipt. |
 
 ### Current overlap observation
@@ -80,7 +82,9 @@ AC-04. See the [current Browser receipt](evidence/issue477-0263-overlap-browser-
 - Dano real service: reuse `protected-supervisor-http.mjs`; its synthetic
   authenticated protocol proof does not replace real OA Browser identity.
 - Quality: `fixtures/issue477-evaluation.json`, SHA-256
-  `58e0a812fdf684e35896d78ddae042233e44f55b256ba0b3f698dfddbc222af0`.
+  `554c9c0c704a9c465c1f6d4bf215656388b09ef8fd5fde356ffed67efbe013b8`.
+  The `0.2.64` byte input (`58e0a812…`) is archived in the real-recovery
+  bundle; this update changes candidate metadata only.
   Keep the revised expectations frozen. Historical runs retain their original
   fixture hashes. Old candidate reports cannot establish current-pair
   quality or matched workload completion.
@@ -139,3 +143,25 @@ surface exposes receipts, content, correction, forgetting, clear and export.
 Default-on initialization and trusted-host lifecycle controls remain in place;
 UI switch checks are superseded by management-only rendering checks. Internal
 pause/resume, queue and isolation checks remain required.
+
+## Real shared-document restore and credential rotation (2026-09-28)
+
+Two actual defects were reproduced on real OpenViking state: completed commits
+retain sources in archives after working context is cleared, and checkpointed
+pending operations can acquire task/archive receipts before a later clear.
+Candidate `0.2.65` repairs these checks while still refusing active writers.
+Its native helper passed matched-volume replay and repeated replay, preserving
+all six current documents. Both owners read back exact exports and sources,
+kept the newer writers, recalled them with MiMo in fresh chats, and did not
+revive cleared queue content. Actual `0.2.63` rollback passed the same readbacks.
+Three independently authorized public USER rotations passed with real Dano host
+restarts and owner isolation. These results reuse the existing authorized keys.
+
+The [brief receipt](evidence/issue477-0265-real-recovery-20260928.json) preserves
+all original attempts and their limits. In particular, four post-clear ready
+latencies were 60.293, 34.807, 75.235 and 96.980 seconds; these do not establish
+the latency gate. A later old-image HTTP 500 has an unknown cause despite the
+finite diagnostic retry passing. Type/Svelte and 82 focused recovery tests pass;
+the failed-file serial rerun passed 330 tests. Full local suite attempts still
+returned failures, so there is no clean full-suite claim. No further broad local
+reruns are scheduled without a specific unresolved change.

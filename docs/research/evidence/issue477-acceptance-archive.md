@@ -97,3 +97,22 @@ node scripts/audit-memory-evaluation-coverage.mjs \
 
 An audit exit code of 1 remains the recorded incomplete gate; archival does not
 change it to a passing result.
+
+## Real recovery and three rotations, 0.2.65
+
+Private directory: `/Users/joseph/tmp/dano465-acceptance-archive/20260928T085749Z-real-recovery-0265`.
+The bundle has 134 verified evidence files plus its manifest, including
+both recovery defects, all failed attempts, real task usage, full private
+runtime/remote snapshots, three rotation runs, focused/full check attempts and
+scoped cleanup. It contains private runtime keys and stays outside Git with
+0700 directories and 0600 files.
+
+- `evidence.tar.gz` SHA-256: `e9e853240eab20e1e6eeb2575e84bb5d47fdfdf3fe7a3282b2c430bf163d5262`.
+- `manifest.json` SHA-256: `d2dbd60d2120c51897b70b83b5f32e0fce072236d454260f305d0e28d8bc4635`.
+- Every bundled file was read back and hash-verified. The previous and current
+  frozen fixture inputs are retained byte-for-byte. Only candidate version
+  metadata changes from `0.2.64` to `0.2.65`; thresholds and cases do not change.
+- [Brief result and limits](issue477-0265-real-recovery-20260928.json).
+
+Transfer this private bundle through an appropriate private channel; it must not
+be uploaded into the public PR. The local archive alone is not portable CI proof.

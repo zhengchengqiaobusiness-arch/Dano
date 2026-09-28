@@ -1,0 +1,104 @@
+{
+  "recordedOn": "2026-09-28",
+  "sourceCommit": "84c5ff2ff",
+  "danoVersion": "0.2.65",
+  "piOpenVikingVersion": "0.1.18",
+  "openVikingVersion": "0.4.20",
+  "imageId": "9edfcd0b24cc44760aa7460964a78927e165218a44e2427a1475ac7a40f99dcd",
+  "nativeRecoveryHelperSha256": "ee359dd52a5234177f8bc4c6deeb1563e22ff9b3273373a1e6462eb10b2c82bd",
+  "fixedFixtureSha256": "554c9c0c704a9c465c1f6d4bf215656388b09ef8fd5fde356ffed67efbe013b8",
+  "repairs": [
+    "Verify committed sources in their bound archive after working context is cleared",
+    "Accept new terminal receipts for checkpointed writers covered by later completed revocation, while rejecting active tasks"
+  ],
+  "realRecovery": {
+    "syntheticOwners": 2,
+    "remoteTasks": 8,
+    "governanceEvents": 6,
+    "sharedDocumentsPerOwner": 1,
+    "nativeCandidateMatchedRestore": true,
+    "nativeCandidateRepeatedReplayIdempotent": true,
+    "documentDigestBeforeAndAfter": "94c4da1b618f26c65e17d8779beec6eee3d53e926f56aa235ad93d3752b253b8",
+    "nativeCandidateReadback": true,
+    "actualOldImageVersion": "0.2.63",
+    "actualOldImageId": "b771b66b5480acaf63dab0b4ddcf623c94fcc612169a8d1c420dd390a8fda629",
+    "actualOldImageRollbackReadback": true,
+    "finalOldImageExitCode": 0,
+    "exactExportsAndSources": true,
+    "deletedQueuedFactsAbsent": true,
+    "foreignFactsAbsent": true,
+    "newWriterFreshModelRecall": true,
+    "oldRemoteRefusal": {
+      "code": "INVALID_MEMORY_RESPONSE",
+      "missingTaskResponses404": 6,
+      "documentsUnchanged": true,
+      "imageUsesCopiedExactFinalHelper": true,
+      "nativeFinalImageRefusalRerun": false
+    },
+    "syntheticExplicitCollectionOptOutPreserved": true,
+    "postClearSaveReadyMs": [
+      60293,
+      34807,
+      75235,
+      96980
+    ]
+  },
+  "realUserCredentialRotation": {
+    "imageVersion": "0.2.64",
+    "independentRunsPassed": 3,
+    "httpIdentityProbesPerRun": 36,
+    "publicOldKeyRejected": true,
+    "actualDanoHostRestart": true,
+    "ownContentRetainedForeignContentAbsent": true,
+    "containersAndDedicatedRuntimeVolumesRemoved": true,
+    "realOaBrowserIdentity": false
+  },
+  "checks": {
+    "typeAndSvelteErrors": 0,
+    "typeAndSvelteWarnings": 0,
+    "focusedRecoveryTestsPassed": 82,
+    "priorFailedFilesSerialRerunFiles": 9,
+    "priorFailedFilesSerialRerunTestsPassed": 330,
+    "cleanFullSuiteExit0": false,
+    "latestRedundantFullRun": {
+      "exitCode": 1,
+      "filesPassed": 141,
+      "filesFailed": 5,
+      "testsPassed": 1740,
+      "testsFailed": 19,
+      "testsSkipped": 1
+    },
+    "standardsFindings": 0,
+    "specFindings": 0
+  },
+  "originalFailuresRetained": [
+    "Old seal rejected an archived committed source; deterministic same-data reproduction repaired",
+    "Old local checkpoint rejected receipts added before later clear; repaired",
+    "One model request exceeded 180 seconds; later affected request completed",
+    "Old-remote fixture expected a different error code; exact six missing tasks and unchanged documents verified",
+    "One later old-image client creation returned HTTP 500; cause unknown; finite diagnostic retry exited 0",
+    "First protected build apt mirror failed; second built the pinned image",
+    "Repeated full local tests exited 1, mostly launcher timeouts; failed subset passed serially; no clean full-suite claim"
+  ],
+  "archive": {
+    "root": "/Users/joseph/tmp/dano465-acceptance-archive/20260928T085749Z-real-recovery-0265",
+    "members": 134,
+    "archiveSha256": "e9e853240eab20e1e6eeb2575e84bb5d47fdfdf3fe7a3282b2c430bf163d5262",
+    "manifestSha256": "d2dbd60d2120c51897b70b83b5f32e0fce072236d454260f305d0e28d8bc4635"
+  },
+  "cleanup": {
+    "dedicatedRecoveryContainersRemoved": 2,
+    "dedicatedRecoveryVolumesRemoved": 6,
+    "mainBrowserStackPreserved": true,
+    "candidateImageRetainedForUnfinishedGoal": true
+  },
+  "limits": [
+    "Synthetic protocol identity does not establish independent real OA Browser Bob or business authorization",
+    "This shared-document restore scenario and three rotations do not complete the full repeated lifecycle/fault/recovery matrix",
+    "Observed slow saves remain failures for applicable latency thresholds",
+    "Full frozen 80x3, current matched five-user workload and total extraction/embedding/infrastructure cost remain incomplete",
+    "The previous default-on Browser evidence is version 0.2.64; this recovery-only 0.2.65 delta does not change that UI",
+    "Goal #465 and issue #477 remain open; no production deployment"
+  ],
+  "fullGoalComplete": false
+}

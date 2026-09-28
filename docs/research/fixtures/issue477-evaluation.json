@@ -11,7 +11,7 @@
     "failurePolicy": "record every attempt; do not change thresholds after execution"
   },
   "candidate": {
-    "dano": "0.2.64",
+    "dano": "0.2.65",
     "piOpenViking": "0.1.18",
     "openViking": "v0.4.20",
     "embedding": "bge-small-zh-v1.5-f16",
