@@ -129,3 +129,12 @@ seed task usage and reproduction drivers. Files are 0600; directories are 0700.
 - [Brief result and remaining gates](issue477-0265-matrix-supplement-20260928.json).
 - The runtime volume `dano465formal0263_runtime` remains intact for unfinished
   cases. This archive contains evidence, not a substitute for a volume backup.
+
+### Thinking-disabled native extraction retest (2026-09-28)
+
+- Archive: `/Users/joseph/tmp/dano465-acceptance-archive/20260928T112341Z-thinking-off-latency`
+- Manifest SHA-256: `870783a4c5b517e74b940f788be5cd7297e06712468a557488f7568269f6109b`
+- Five users, 20 frozen facts, 17 actual ready tasks; all public source checks pass,
+  p95/max 30.705 seconds, native extraction reasoning tokens zero.
+- Includes the initial harness settings-shape failure and all retained raw rows;
+  `current-results.jsonl` starts at the latest setup boundary. No old result removed.

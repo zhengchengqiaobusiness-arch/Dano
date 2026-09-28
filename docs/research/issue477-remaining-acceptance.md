@@ -206,3 +206,24 @@ exhausting the retained append-only identity pool; no live pool was rewritten. F
 
 Remaining frozen cases: D-02-01, D-02-02, D-03-01, D-04-02, D-05-01,
 D-05-02, A-03, A-04, A-08 and A-09 (three repetitions each).
+
+## Native extraction latency repair (2026-09-28)
+
+Actual native MiMo requests lacked the thinking-disable body even though chat and
+collection selection had thinking off. The slow retained task spent 56.636 seconds
+in native extraction and reported 1,237 reasoning tokens. The isolated OpenViking
+configuration now sets `vlm.extra_request_body.thinking.type` to `disabled`; no
+credentials or production configuration changed. The actual backend parameter
+probe failed before this repair and passed after it.
+
+The [same frozen seed retest](evidence/issue477-thinking-off-latency-20260928.json)
+verified all 20 facts through public source reads across five users. MiMo created
+17 genuine tasks (Bob grouped four facts in one task), all ready, p95/max 30.705
+seconds, and zero extraction reasoning tokens. All old failures are retained.
+This closes this healthy-save latency observation; query embedding/full waiting,
+the remaining frozen attempts and independent real OA Browser proof remain open.
+
+Candidate `0.2.66` additionally ignores late `agent_settled` after runtime closure
+or Pi context invalidation. The regression first reproduced the stale-context
+throw, then all 36 focused tests and type/Svelte checks passed. Both final reviews
+reported no new findings; affected real lifecycle checks continue.

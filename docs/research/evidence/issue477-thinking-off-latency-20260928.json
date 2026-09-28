@@ -1,0 +1,28 @@
+{
+  "candidate": "0.2.65",
+  "extension": "0.1.18",
+  "service": "OpenViking v0.4.20",
+  "model": "mimo-v2.5",
+  "configurationChange": "vlm.extra_request_body.thinking.type=disabled",
+  "scope": "same frozen 20 recall facts, five users; seed-only retest; no matched workload rerun",
+  "factsVerified": 20,
+  "tasksReady": 17,
+  "failedTasks": 0,
+  "readyP95Ms": 30705,
+  "readyMaxMs": 30705,
+  "tokenUsage": {
+    "prompt_tokens": 145023,
+    "completion_tokens": 5027,
+    "cached_tokens": 86848,
+    "reasoning_tokens": 0,
+    "embedding_tokens": 2138
+  },
+  "extractionCredits": 6996596,
+  "limits": [
+    "17 operations because Bob saved four facts in one task; no fabricated 20-operation count",
+    "Earlier slow/failing attempts retained and not overwritten",
+    "Query embedding accounting and remaining release gates still open"
+  ],
+  "archive": "/Users/joseph/tmp/dano465-acceptance-archive/20260928T112341Z-thinking-off-latency",
+  "manifestSha256": "870783a4c5b517e74b940f788be5cd7297e06712468a557488f7568269f6109b"
+}
