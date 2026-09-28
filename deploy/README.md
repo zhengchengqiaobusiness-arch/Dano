@@ -162,12 +162,58 @@ This read-only command reports only aggregate counts of legacy inline bodies,
 active payload files and pruned payload references. `needsMigration=true`
 means the old inline format is still present; the command neither edits the
 volume nor proves that archived backups have expired.
+For settled writers that successively updated a shared document, an earlier
+historical diff cannot match the final merged result. Before replacing any
+volume, stop Dano, keep internal OpenViking available, and capture the actual
+current document set:
+
+```sh
+node /app/runtime/reconcile-memory-recovery.mjs seal-live \
+  /etc/dano-protected /var/lib/dano-protected /var/lib/dano-memory-recovery /checkpoint/snapshot.json
+```
+
+This command requires current local state to match the separate recovery
+mirror, completed governance, terminal known tasks, and stable document reads.
+Completed writer receipts must retain their exact task result, original archive,
+archive source marker and owner-bound diff mapping; historical diff bodies need
+not match a later merged document. Missing, failed or changed completed receipts
+require separate reconciliation.
+It stores a bounded, private `replay-live-snapshot.json` per owner, authenticated
+with a key derived from the host credential encryption key. Capture and retain
+a matching full OpenViking snapshot with identity, source sessions, archives and
+task receipts while Dano remains stopped; stop OpenViking before copying its
+volume. A public content export alone does not preserve those receipts. Restore
+this matched remote generation with the old local checkpoint when older remote
+volumes lack newer source/task receipts. Replay still rejects missing receipts
+and active restored tasks; it cannot create a replacement extraction history.
+Keep credential references consistent with the restored remote identity after
+any USER-key rotation.
+
+The seal represents the actual final state, including legitimate supersession
+of earlier writer diffs. It cannot be minted after restoring older local data.
+Replay checks its checkpoint, state, journal and MAC bindings, clears the
+restored memory tree including indexes, restores the sealed documents, verifies
+the exact set and contents, and then overlays the newer local state. A lost
+reply leaves the same sealed bodies available for retry. A pending seal blocks
+new runtime startup and checkpoint creation; keep Dano stopped until replay
+succeeds. Success deletes and fsyncs the body file, retaining only URI/MAC
+metadata in the replay receipt. A repeated completed replay checks the current
+set against that MAC without mutating it. It does not change a writer's phase
+or fabricate a new `ready` result.
+Checkpoint, seal, preflight, replay and migration hold an exclusive native file
+lock for their entire operation. A second command receives
+`RECOVERY_OPERATION_BUSY`; wait for the first process to exit before retrying.
+Do not remove `.recovery-operation.lock` to bypass contention. The kernel
+releases the lock on process exit, including crashes; the zero-byte file remains
+as private metadata in the recovery volume.
+
 On rollback, retain the **newer** recovery volume, restore the old data/config
 and OpenViking volumes, then start only the internal OpenViking dependencies.
 Run `preflight` and `replay` with the protected config root, restored data
 root, newer recovery root and checkpoint file, in that order. The one-off
 container must run as the protected host UID/GID with the data volume writable
-for state locks and the recovery/checkpoint volumes read-only:
+for state locks and the recovery volume writable for preservation, seals and
+their cleanup; keep the checkpoint read-only:
 
 ```sh
 node /app/runtime/reconcile-memory-recovery.mjs preflight \

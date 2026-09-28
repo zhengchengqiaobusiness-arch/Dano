@@ -1,15 +1,17 @@
-import { appendFile, chmod, copyFile, link, mkdtemp, mkdir, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, copyFile, link, mkdtemp, mkdir, open, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it, vi } from "vitest";
+import { flockSync } from "fs-ext";
+import { OpenVikingClient } from "@openviking/sdk";
 import { FileStateStore, MemoryGovernanceBarrier, MemoryGovernanceService, OwnerMemoryClient } from "@josephyoung/pi-openviking/host";
 import { LazyMemoryClient } from "../lazy-memory-client.js";
 import { MemoryCredentialStore } from "../memory-credential-store.js";
 import { MemoryRecoveryJournal, RecoveryStateStore } from "../memory-recovery-journal.js";
-import { auditRetention, checkpoint, migrateLegacyRecovery, reconcile } from "../../../runtime/reconcile-memory-recovery.mjs";
+import { auditRetention, checkpoint, migrateLegacyRecovery, reconcile, sealLiveSnapshot } from "../../../runtime/reconcile-memory-recovery.mjs";
 import { privateDirectory, privateFile } from "../../../runtime/private-recovery-path.mjs";
 
 const roots: string[] = [];
@@ -265,7 +267,7 @@ it("does not re-anchor a deletion that is still visible on the real-service boun
   vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments").mockResolvedValue([uri]);
   await expect(migrateLegacyRecovery(f.config, f.data, f.recovery, target,
     join(f.root, "fresh-checkpoint.json"))).rejects.toThrow("MEMORY_DELETION_UNCONFIRMED");
-  expect(await readdir(target)).toEqual([]);
+  expect(await readdir(target)).toEqual([".recovery-operation.lock"]);
 });
 
 it("preflights every source owner before creating migrated owner files", async () => {
@@ -286,7 +288,7 @@ it("preflights every source owner before creating migrated owner files", async (
   await expect(migrateLegacyRecovery(f.config, f.data, f.recovery, target,
     join(f.root, "fresh-checkpoint.json")))
     .rejects.toThrow();
-  expect(await readdir(target)).toEqual([]);
+  expect(await readdir(target)).toEqual([".recovery-operation.lock"]);
   expect(await readFile(aliceFile, "utf8")).toContain("legacy body");
 });
 
@@ -586,6 +588,197 @@ for (const phase of ["ready", "processing", "commit_unknown"] as const) {
     if (phase === "commit_unknown") expect(f.inspect).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task" }));
   });
 }
+
+async function liveSharedWriters() {
+  const f = await stagedClearWriter();
+  // Restore the actual latest local state before sealing, rather than minting
+  // a receipt after rollback from the earlier document that happens to match.
+  const latest = (await MemoryRecoveryJournal.inspect(f.recovery, f.owner)).state;
+  await writeFile(f.statePath, JSON.stringify(latest));
+  const secondId = "b".repeat(64);
+  await new RecoveryStateStore(f.store, f.journal).transact(state => {
+    state.operations[secondId] = { ...state.operations[f.id]!, id: secondId,
+      source: { ...state.operations[f.id]!.source, entryId: "later-update" },
+      remoteSessionId: "second-session", taskId: "second-task", archiveId: "second-archive" };
+  });
+  const oldUri = "viking://user/alice/memories/old.md";
+  f.documents.delete(oldUri);
+  f.documents.set(f.memoryUri, "latest merged document B");
+  const operations = (await f.store.read()).operations;
+  vi.spyOn(OpenVikingClient.prototype, "getTask").mockImplementation(async taskId => {
+    const operation = Object.values(operations).find(item => item.taskId === taskId)!;
+    const archiveUri = `viking://user/alice/sessions/${operation.remoteSessionId}/history/${operation.archiveId}`;
+    return { task_id: taskId, task_type: "session_commit", resource_id: operation.remoteSessionId,
+      status: "completed", result: { session_id: operation.remoteSessionId,
+        archive_uri: archiveUri, memory_diff_uri: `${archiveUri}/memory_diff.json` } } as never;
+  });
+  vi.spyOn(OpenVikingClient.prototype, "getSessionArchive").mockImplementation(async (sessionId, archiveId) => {
+    const operation = Object.values(operations).find(item => item.remoteSessionId === sessionId)!;
+    return { archive_id: archiveId, source_message_ids: [operation.id] } as never;
+  });
+  vi.spyOn(OpenVikingClient.prototype, "read").mockImplementation(async uri => JSON.stringify({
+    archive_uri: uri.slice(0, -"/memory_diff.json".length),
+    operations: { adds: [{ uri: f.memoryUri, after: "historical diff may differ" }], updates: [] },
+  }));
+  f.inspect.mockImplementation(async operation => operation.id === secondId
+    ? { status: "ready", archiveId: "second-archive", memoryUris: [f.memoryUri] }
+    : { status: "processing" });
+  const liveSnapshotPath = join(f.recovery, "account", "alice", "replay-live-snapshot.json");
+  return { ...f, secondId, liveSnapshotPath };
+}
+
+it("seals the actual merged result and restores it without requiring historical diffs to match", async () => {
+  const f = await liveSharedWriters();
+  await expect(sealLiveSnapshot(f.config, f.data, f.recovery, f.checkpointFile))
+    .resolves.toEqual({ owners: 1, documents: 1 });
+  // A rollback can return the shared document to A while source/task receipts
+  // survive. Only the pre-rollback authenticated snapshot proves the B result.
+  f.documents.set(f.memoryUri, "earlier document A");
+  f.documents.set("viking://user/alice/memories/old.md", "forgotten old body");
+  await writeFile(f.statePath, f.oldBytes);
+  await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+  expect([...f.documents]).toEqual([[f.memoryUri, "latest merged document B"]]);
+  expect(f.inspect).not.toHaveBeenCalled();
+  expect((await f.store.read()).operations[f.secondId]?.archiveId).toBe("second-archive");
+  await expect(readFile(f.liveSnapshotPath)).rejects.toMatchObject({ code: "ENOENT" });
+  const receipt = await readFile(`${f.statePath}.replay-receipt.json`, "utf8");
+  expect(receipt).not.toContain("latest merged document B");
+  const clearCount = f.clear.mock.calls.length;
+  await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+  expect(f.clear).toHaveBeenCalledTimes(clearCount);
+  expect([...f.documents]).toEqual([[f.memoryUri, "latest merged document B"]]);
+  // Even an idempotent read-only repeat must recheck restored task/source
+  // receipts: equal document bytes do not prove an old queue is quiescent.
+  vi.mocked(OwnerMemoryClient.prototype.writerSettled).mockResolvedValueOnce(false);
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  vi.mocked(OwnerMemoryClient.prototype.hasSource).mockResolvedValueOnce(false);
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  expect(f.clear).toHaveBeenCalledTimes(clearCount);
+  f.documents.set(f.memoryUri, "unexpected external change");
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_LIVE_SNAPSHOT_MISMATCH");
+  expect(f.clear).toHaveBeenCalledTimes(clearCount);
+});
+
+it("retains the sealed result after a lost clear reply and fences runtime/checkpoint until retry succeeds", async () => {
+  const f = await liveSharedWriters();
+  await sealLiveSnapshot(f.config, f.data, f.recovery, f.checkpointFile);
+  const latest = (await MemoryRecoveryJournal.inspect(f.recovery, f.owner)).state;
+  await expect(MemoryRecoveryJournal.open(f.recovery, f.owner, latest))
+    .rejects.toThrow("MEMORY_RECOVERY_REPLAY_PENDING");
+  await expect(checkpoint(f.data, f.recovery, join(f.root, "unsafe-next.json")))
+    .rejects.toThrow("MEMORY_RECOVERY_REPLAY_PENDING");
+  await writeFile(f.statePath, f.oldBytes);
+  f.clear.mockImplementationOnce(async () => { f.documents.clear(); throw new Error("LOST_REPLY"); });
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile)).rejects.toThrow("LOST_REPLY");
+  expect(await readFile(f.liveSnapshotPath, "utf8")).toContain("latest merged document B");
+  expect(await readFile(f.statePath)).toEqual(f.oldBytes);
+  await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+  expect([...f.documents]).toEqual([[f.memoryUri, "latest merged document B"]]);
+  await expect(readFile(f.liveSnapshotPath)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+for (const change of ["body", "foreign", "binding", "mac"] as const) {
+  it(`rejects a tampered live snapshot (${change}) before deleting anything`, async () => {
+    const f = await liveSharedWriters();
+    await sealLiveSnapshot(f.config, f.data, f.recovery, f.checkpointFile);
+    const sealed = JSON.parse(await readFile(f.liveSnapshotPath, "utf8"));
+    if (change === "body") sealed.documents[0].content = "forged replacement";
+    if (change === "foreign") sealed.documents[0].uri = "viking://user/bob/memories/foreign.md";
+    if (change === "binding") sealed.binding.latestStateSha256 = "0".repeat(64);
+    if (change === "mac") sealed.mac = "0".repeat(64);
+    await writeFile(f.liveSnapshotPath, JSON.stringify(sealed));
+    await writeFile(f.statePath, f.oldBytes);
+    await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+      .rejects.toThrow("RECOVERY_LIVE_SNAPSHOT_MISMATCH");
+    expect(f.clear).not.toHaveBeenCalled();
+    expect(f.replace).not.toHaveBeenCalled();
+  });
+}
+
+it("rejects active restored tasks and missing newer sources even with a valid seal", async () => {
+  const f = await liveSharedWriters();
+  await sealLiveSnapshot(f.config, f.data, f.recovery, f.checkpointFile);
+  await writeFile(f.statePath, f.oldBytes);
+  const settled = vi.mocked(OwnerMemoryClient.prototype.writerSettled);
+  settled.mockResolvedValueOnce(false);
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  expect(f.clear).not.toHaveBeenCalled();
+  vi.mocked(OwnerMemoryClient.prototype.hasSource).mockResolvedValueOnce(false);
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  expect(f.clear).not.toHaveBeenCalled();
+});
+
+it("does not seal a remote generation changing during capture or an unresolved deletion", async () => {
+  const f = await liveSharedWriters();
+  f.read.mockResolvedValueOnce("document A").mockResolvedValueOnce("document B");
+  await expect(sealLiveSnapshot(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_LIVE_SNAPSHOT_CHANGED");
+  await expect(readFile(f.liveSnapshotPath)).rejects.toMatchObject({ code: "ENOENT" });
+  await f.journal.append({ kind: "removeMemory", uri: f.memoryUri });
+  await expect(sealLiveSnapshot(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_LIVE_SNAPSHOT_MISMATCH");
+  await expect(readFile(f.liveSnapshotPath)).rejects.toMatchObject({ code: "ENOENT" });
+  expect(f.clear).not.toHaveBeenCalled();
+});
+
+it("rejects a seal when rollback has already replaced the latest local state", async () => {
+  const f = await liveSharedWriters();
+  await writeFile(f.statePath, f.oldBytes);
+  await expect(sealLiveSnapshot(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("MEMORY_RECOVERY_STATE_MISMATCH");
+  await expect(readFile(f.liveSnapshotPath)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+for (const fault of ["failed-task", "missing-archive", "different-archive", "missing-archive-source", "foreign-diff"] as const) {
+  it(`rejects ${fault} in the original commit receipt before replay mutation`, async () => {
+    const f = await liveSharedWriters();
+    await sealLiveSnapshot(f.config, f.data, f.recovery, f.checkpointFile);
+    await writeFile(f.statePath, f.oldBytes);
+    if (fault === "failed-task") {
+      const tasks = vi.mocked(OpenVikingClient.prototype.getTask), original = tasks.getMockImplementation()!;
+      tasks.mockImplementation(async (...args) => ({ ...(await original(...args))!, status: "failed" }) as never);
+    }
+    if (fault === "missing-archive") vi.mocked(OpenVikingClient.prototype.getSessionArchive)
+      .mockRejectedValueOnce(new Error("ARCHIVE_MISSING"));
+    if (fault === "different-archive") {
+      const tasks = vi.mocked(OpenVikingClient.prototype.getTask), original = tasks.getMockImplementation()!;
+      tasks.mockImplementation(async (...args) => {
+        const task = (await original(...args))!;
+        return { ...task, result: { ...(task.result as object), archive_uri: "viking://user/alice/sessions/new-remote-session/history/different" } } as never;
+      });
+    }
+    if (fault === "missing-archive-source") vi.mocked(OpenVikingClient.prototype.getSessionArchive)
+      .mockResolvedValueOnce({ archive_id: "archive", source_message_ids: [] } as never);
+    if (fault === "foreign-diff") vi.mocked(OpenVikingClient.prototype.read).mockImplementation(async uri =>
+      JSON.stringify({ archive_uri: uri.slice(0, -"/memory_diff.json".length),
+        operations: { adds: [{ uri: "viking://user/bob/memories/foreign.md" }], updates: [] } }));
+    await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile)).rejects.toThrow();
+    expect(f.clear).not.toHaveBeenCalled();
+    expect(f.replace).not.toHaveBeenCalled();
+  });
+}
+
+it("rejects a second process while the recovery generation lock is held and works after release", async () => {
+  const f = await fixture();
+  const handle = await open(join(f.recovery, ".recovery-operation.lock"), "wx", 0o600);
+  flockSync(handle.fd, "exnb");
+  try {
+    const script = fileURLToPath(new URL("../../../runtime/reconcile-memory-recovery.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, [script, "checkpoint", f.data, f.recovery, f.checkpointFile], { encoding: "utf8" });
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr)).toMatchObject({ code: "RECOVERY_OPERATION_BUSY" });
+    await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+      .rejects.toThrow("RECOVERY_OPERATION_BUSY");
+    await expect(sealLiveSnapshot(f.config, f.data, f.recovery, f.checkpointFile))
+      .rejects.toThrow("RECOVERY_OPERATION_BUSY");
+  } finally { await handle.close(); }
+  await expect(checkpoint(f.data, f.recovery, f.checkpointFile)).resolves.toEqual({ owners: 1, journalBytes: 0 });
+});
 
 it("recovers the staged body after clear succeeds but its reply is lost", async () => {
   const f = await stagedClearWriter();

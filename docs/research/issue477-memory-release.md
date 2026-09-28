@@ -1555,3 +1555,50 @@ runtime were removed, while the existing fixed-port OA stack stayed healthy.
 The [build/review receipt](evidence/issue477-0261-protected-build.json) records
 the image, commit, checks and explicit limits. The image is retained for the
 remaining acceptance; it is not a deployed or real old-volume T-13 pass.
+
+### Stopped live-state seal, candidate 0.2.62
+
+Inspection of the pinned official `v0.4.20` compressor confirms lock-free patch
+merge: prepared old content supplies `before`, while `after` reads the current
+file following application. Those fields do not establish a causal order for
+overlapping writes. Recovery therefore does not infer an update chain or accept
+an earlier matching diff as proof of a newer writer's result.
+
+The `seal-live` command captures the stopped current service's actual document
+set before replacing any volume. It checks the latest local/mirrored state,
+completed governance, terminal tasks, source markers and stable reads, and
+authenticates a bounded private body file with a domain-separated key derived
+from the host credential encryption key. Every owner passes preflight before
+any seal is published. Pending seals block runtime and new checkpoint creation.
+Replay requires the same checkpoint/state/journal generation, verifies all known
+tasks against the restored service, rebuilds the memory tree from the seal, and
+checks exact contents before local overlay. Lost replies retain the seal for
+retry. Success removes the body and keeps only MAC/URI metadata; repeated
+completed replay verifies that metadata without another clear.
+
+This path needs a matched full remote snapshot containing the newer source,
+archive and task receipts; a content-only seal does not reconstruct missing
+remote history or turn processing into ready. Without a pre-rollback seal,
+ambiguous shared diffs remain fail-closed. Automated shared-document, old-body
+rollback, lost-reply, tampering, active-task, missing-source and changing-capture
+tests exercise the new path. Real multi-owner volume restoration, extraction,
+rotation and old-binary rollback remain required by T-13. No release gate is
+closed by these synthetic tests.
+
+Review additionally required proof of each completed task's exact result,
+original archive, archive source marker and canonical owner-bound diff mapping.
+The command obtains these through the same official SDK version already used
+by the extension; changed/failed tasks and missing archives fail before remote
+mutation. Every replay, including a completed read-only repeat, rechecks tasks
+and sources. Native exclusive locks serialize checkpoint, seal, replay and
+migration through body cleanup, preventing a concurrent command from deleting
+another command's only recovery body. A separate Node process exercises actual
+lock contention in the regression suite.
+
+The final source passed checks (Svelte zero errors/warnings), the complete build,
+frozen offline installation and release-manifest verification. Vitest passed
+146 files with 1750 tests and one skip in 61.52 seconds; targeted recovery
+coverage now contains 83 tests. Both review axes found no remaining actionable
+defect in these changes. An independent two-process review probe also confirmed
+that killing a lock-holder releases the native lock and permits a subsequent
+checkpoint. These results do not replace real volume or Browser acceptance.

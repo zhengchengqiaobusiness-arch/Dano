@@ -123,7 +123,8 @@ export class MemoryRecoveryJournal {
 
   static async open(root: string, owner: Owner, current: OwnerState): Promise<MemoryRecoveryJournal> {
     const journal = await this.#prepare(root, owner);
-    if (await privateFile(join(journal.#directory, "replay-preservation.json"))) {
+    if (await privateFile(join(journal.#directory, "replay-preservation.json"))
+      || await privateFile(join(journal.#directory, "replay-live-snapshot.json"))) {
       throw new Error("MEMORY_RECOVERY_REPLAY_PENDING");
     }
     const saved = await journal.#state();
