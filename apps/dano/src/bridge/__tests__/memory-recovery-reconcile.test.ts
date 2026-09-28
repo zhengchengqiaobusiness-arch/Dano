@@ -508,7 +508,7 @@ it("rejects a clear followed by a new ready writer before any remote mutation", 
   expect(await readFile(statePath)).toEqual(snapshot);
 });
 
-async function stagedClearWriter(phase: "ready" | "processing" | "commit_unknown" = "ready") {
+async function stagedClearWriter(phase: "ready" | "processing" | "commit_unknown" = "ready", checkpointPhase: "ready" | "session_unknown" = "ready") {
   const f = await fixture();
   const store = new RecoveryStateStore(f.store, f.journal);
   const oldId = "c".repeat(64);
@@ -517,13 +517,20 @@ async function stagedClearWriter(phase: "ready" | "processing" | "commit_unknown
     state.operations[oldId] = { id: oldId, owner: f.owner, scope: null, kind: "explicit",
       authorizationEpoch: state.authorization.epoch,
       source: { sessionId: "old-chat", entryId: "old-entry", branchId: "root", contentVersion: "1" },
-      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), phase: "ready",
-      remoteSessionId: "old-session", taskId: "old-task", archiveId: "old-archive",
-      memoryUris: ["viking://user/alice/memories/old.md"] };
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), phase: checkpointPhase,
+      remoteSessionId: "old-session",
+      ...(checkpointPhase === "ready" ? { taskId: "old-task", archiveId: "old-archive",
+        memoryUris: ["viking://user/alice/memories/old.md"] } : { payload: "old queued fact" }) };
   });
   await checkpoint(f.data, f.recovery, f.checkpointFile);
   const statePath = join(f.data, "host-state", "owner-a", "state", "memory", "state.json");
   const oldBytes = await readFile(statePath);
+  if (checkpointPhase === "session_unknown") await store.transact(state => {
+    const operation = state.operations[oldId]!;
+    operation.phase = "ready"; operation.taskId = "old-task"; operation.archiveId = "old-archive";
+    operation.memoryUris = ["viking://user/alice/memories/old.md"];
+    delete operation.payload;
+  });
   const clearJob = await new MemoryGovernanceBarrier(store).begin({ kind: "clear", scope: null });
   const clearId = clearJob.id;
   await f.journal.append({ kind: "removeSource", remoteSessionId: "old-session" });
@@ -534,6 +541,7 @@ async function stagedClearWriter(phase: "ready" | "processing" | "commit_unknown
     operation.phase = "blocked";
     operation.errorCode = "MEMORY_SOURCE_REVOKED";
     delete operation.memoryUris;
+    delete operation.payload;
   });
   const id = "d".repeat(64);
   const memoryUri = "viking://user/alice/memories/current.md";
@@ -570,7 +578,7 @@ async function stagedClearWriter(phase: "ready" | "processing" | "commit_unknown
   const replace = vi.spyOn(OwnerMemoryClient.prototype, "replaceMemory")
     .mockImplementation(async (uri, body) => { documents.set(uri, body); });
   vi.spyOn(OwnerMemoryClient.prototype, "listMemoryDocuments").mockImplementation(async () => [...documents.keys()].sort());
-  return { ...f, id, statePath, oldBytes, memoryUri, clearId, documents, clear, replace, read, inspect,
+  return { ...f, id, oldId, statePath, oldBytes, memoryUri, clearId, documents, clear, replace, read, inspect,
     preservationPath: join(f.recovery, "account", "alice", "replay-preservation.json") };
 }
 
@@ -589,6 +597,25 @@ for (const phase of ["ready", "processing", "commit_unknown"] as const) {
     if (phase === "commit_unknown") expect(f.inspect).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task" }));
   });
 }
+
+it("replays a checkpointed pending writer that completed before a later clear", async () => {
+  const f = await stagedClearWriter("ready", "session_unknown");
+  await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+  await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+  expect([...f.documents]).toEqual([[f.memoryUri, "new retained body"]]);
+  expect((await f.store.read()).operations[f.oldId]).toMatchObject({
+    phase: "blocked", errorCode: "MEMORY_SOURCE_REVOKED", taskId: "old-task" });
+});
+
+it("does not replay a clear while its checkpointed writer still has an active task", async () => {
+  const f = await stagedClearWriter("ready", "session_unknown");
+  vi.mocked(OwnerMemoryClient.prototype.writerSettled)
+    .mockImplementation(async operation => operation.id !== f.oldId);
+  await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
+    .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  expect(f.clear).not.toHaveBeenCalled();
+  expect(await readFile(f.statePath)).toEqual(f.oldBytes);
+});
 
 async function liveSharedWriters() {
   const f = await stagedClearWriter();
@@ -653,7 +680,8 @@ it("seals the actual merged result and restores it without requiring historical 
   vi.mocked(OwnerMemoryClient.prototype.writerSettled).mockResolvedValueOnce(false);
   await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
     .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
-  vi.mocked(OwnerMemoryClient.prototype.hasSource).mockResolvedValueOnce(false);
+  vi.mocked(OpenVikingClient.prototype.getSessionArchive)
+    .mockResolvedValueOnce({ archive_id: "archive", source_message_ids: [] } as never);
   await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
     .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
   expect(f.clear).toHaveBeenCalledTimes(clearCount);
@@ -661,6 +689,17 @@ it("seals the actual merged result and restores it without requiring historical 
   await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
     .rejects.toThrow("RECOVERY_LIVE_SNAPSHOT_MISMATCH");
   expect(f.clear).toHaveBeenCalledTimes(clearCount);
+});
+
+it("seals and replays committed sources retained in archives after the working context is cleared", async () => {
+  const f = await liveSharedWriters();
+  vi.mocked(OwnerMemoryClient.prototype.hasSource).mockResolvedValue(false);
+  await expect(sealLiveSnapshot(f.config, f.data, f.recovery, f.checkpointFile))
+    .resolves.toEqual({ owners: 1, documents: 1 });
+  await writeFile(f.statePath, f.oldBytes);
+  await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+  await reconcile(f.config, f.data, f.recovery, f.checkpointFile);
+  expect([...f.documents]).toEqual([[f.memoryUri, "latest merged document B"]]);
 });
 
 it("retains the sealed result after a lost clear reply and fences runtime/checkpoint until retry succeeds", async () => {
@@ -708,7 +747,8 @@ it("rejects active restored tasks and missing newer sources even with a valid se
   await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
     .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
   expect(f.clear).not.toHaveBeenCalled();
-  vi.mocked(OwnerMemoryClient.prototype.hasSource).mockResolvedValueOnce(false);
+  vi.mocked(OpenVikingClient.prototype.getSessionArchive)
+    .mockResolvedValueOnce({ archive_id: "archive", source_message_ids: [] } as never);
   await expect(reconcile(f.config, f.data, f.recovery, f.checkpointFile))
     .rejects.toThrow("RECOVERY_WRITER_RECONCILIATION_REQUIRED");
   expect(f.clear).not.toHaveBeenCalled();

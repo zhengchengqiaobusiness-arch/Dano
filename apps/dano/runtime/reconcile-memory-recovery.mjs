@@ -64,6 +64,32 @@ function checkedLiveSnapshot(value, binding, key) {
   return snapshot.documents;
 }
 
+// Completed commits move source messages from the working context into this
+// task-bound archive. Its owner, source and diff are the durable evidence.
+async function verifyArchivedSource(receipts, owner, operation) {
+  const taskId = operation.taskId;
+  assert.ok(validId(taskId), "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  const task = await receipts.getTask(taskId);
+  assert.ok(task && task.status === "completed" && task.task_id === taskId
+    && task.task_type === "session_commit" && task.resource_id === operation.remoteSessionId
+    && task.result?.session_id === operation.remoteSessionId, "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  const root = `viking://user/${owner.userId}/sessions/${operation.remoteSessionId}/history/`;
+  const archiveUri = task.result.archive_uri;
+  assert.ok(typeof archiveUri === "string" && archiveUri.startsWith(root), "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  const archiveId = archiveUri.slice(root.length);
+  assert.ok(validId(archiveId) && (!operation.archiveId || archiveId === operation.archiveId)
+    && task.result.memory_diff_uri === `${archiveUri}/memory_diff.json`, "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  const archive = await receipts.getSessionArchive(operation.remoteSessionId, archiveId);
+  assert.ok(archive?.archive_id === archiveId && sourcePresent(archive, operation.id),
+    "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  const diff = JSON.parse(await receipts.read(task.result.memory_diff_uri));
+  assert.ok(diff.archive_uri === archiveUri && Array.isArray(diff.operations?.adds)
+    && Array.isArray(diff.operations?.updates), "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+  const uris = [...diff.operations.adds, ...diff.operations.updates].map(change => change?.uri);
+  assert.ok(uris.length && uris.every(uri => isRecoveryDocumentUri(owner, uri))
+    && (operation.memoryUris ?? []).every(uri => uris.includes(uri)), "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+}
+
 // A stopped service's actual final document set, rather than historical diff
 // ordering, is the authority here. Check all known tasks again after restoring
 // remote volumes: an old running queue must not overwrite the sealed result.
@@ -74,38 +100,16 @@ async function verifyLiveWriters(client, state, receipts) {
       assert.equal(await client.writerSettled({ ...operation, phase: "processing" }), true,
         "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
     } else if (operation.phase === "commit_unknown") {
-      await verifyNewWriter(client, operation, true);
+      await verifyNewWriter(client, operation, true, receipts);
     } else {
       // A source session without a task receipt could hide a restored commit.
       // Absence is sufficient; otherwise retain the existing recovery path.
       assert.equal(await client.sessionExists(operation.remoteSessionId), false,
         "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
     }
-    if (["processing", "ready"].includes(operation.phase)) {
-      assert.equal(await client.hasSource(operation), true, "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
-    }
     if (["commit_unknown", "processing", "ready"].includes(operation.phase)) {
       const taskId = operation.taskId ?? (await client.findCommit(operation.remoteSessionId))?.taskId;
-      assert.ok(validId(taskId), "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
-      const task = await receipts.getTask(taskId);
-      assert.ok(task && task.status === "completed" && task.task_id === taskId
-        && task.task_type === "session_commit" && task.resource_id === operation.remoteSessionId
-        && task.result?.session_id === operation.remoteSessionId, "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
-      const root = `viking://user/${state.owner.userId}/sessions/${operation.remoteSessionId}/history/`;
-      const archiveUri = task.result.archive_uri;
-      assert.ok(typeof archiveUri === "string" && archiveUri.startsWith(root), "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
-      const archiveId = archiveUri.slice(root.length);
-      assert.ok(validId(archiveId) && (!operation.archiveId || archiveId === operation.archiveId)
-        && task.result.memory_diff_uri === `${archiveUri}/memory_diff.json`, "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
-      const archive = await receipts.getSessionArchive(operation.remoteSessionId, archiveId);
-      assert.ok(archive?.archive_id === archiveId && sourcePresent(archive, operation.id),
-        "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
-      const diff = JSON.parse(await receipts.read(task.result.memory_diff_uri));
-      assert.ok(diff.archive_uri === archiveUri && Array.isArray(diff.operations?.adds)
-        && Array.isArray(diff.operations?.updates), "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
-      const uris = [...diff.operations.adds, ...diff.operations.updates].map(change => change?.uri);
-      assert.ok(uris.length && uris.every(uri => isRecoveryDocumentUri(state.owner, uri))
-        && (operation.memoryUris ?? []).every(uri => uris.includes(uri)), "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+      await verifyArchivedSource(receipts, state.owner, { ...operation, taskId });
     }
   }
 }
@@ -484,9 +488,10 @@ function noUnreconciledWrites(oldState, latest, effects) {
     if (operation.phase !== "queued") remoteWriters.push(operation);
   }
   assert.ok(oldIds.every(id => latest.operations?.[id]), "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
-  const stableOperation = (operation, revoked) => Object.fromEntries(Object.entries(operation)
+  const stableOperation = (operation, revoked, addedReceipts = []) => Object.fromEntries(Object.entries(operation)
     .filter(([field]) => !["phase", "payload", "updatedAt", "errorCode",
-      "reconciliationPhase", "deliveryAttempts", "nextAttemptAt", ...(revoked ? ["memoryUris"] : [])].includes(field)));
+      "reconciliationPhase", "deliveryAttempts", "nextAttemptAt", ...addedReceipts,
+      ...(revoked ? ["memoryUris"] : [])].includes(field)));
   for (const id of oldIds) {
     const before = oldState.operations[id], after = latest.operations[id];
     // Governance can remove or relocate a ready document mapping. Certify the
@@ -502,8 +507,17 @@ function noUnreconciledWrites(oldState, latest, effects) {
       && beforeUris.filter(uri => !afterUris.includes(uri)).every(uri =>
         effects.cleared || effects.documents.has(uri) && effects.documents.get(uri) === null
         || !effects.documents.has(uri) && effects.sources.has(before.remoteSessionId));
-    assert.deepEqual(stableOperation(after, governedMapping), stableOperation(before, governedMapping),
+    const revokedWriter = governedMapping && after.phase === "blocked"
+      && after.errorCode === "MEMORY_SOURCE_REVOKED";
+    // A checkpointed queue can finish before governance revokes it. Added
+    // receipts are delivery progress, not changes to its immutable source.
+    // Verify the bound task is terminal before replaying the revocation.
+    const addedReceipts = revokedWriter ? ["taskId", "archiveId"].filter(field =>
+      before[field] === undefined && after[field] !== undefined && validId(after[field])) : [];
+    assert.deepEqual(stableOperation(after, governedMapping, addedReceipts),
+      stableOperation(before, governedMapping, addedReceipts),
       "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
+    if (revokedWriter && after.taskId) remoteWriters.push(after);
     if (governedMapping && !effects.cleared) for (const uri of beforeUris.filter(uri => !afterUris.includes(uri))) {
       if (!effects.documents.has(uri)) {
         assert.ok(isRecoveryDocumentUri(latest.owner, uri), "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
@@ -521,9 +535,14 @@ function noUnreconciledWrites(oldState, latest, effects) {
 /** Read-only proofs must cover every post-checkpoint writer before deletion
  * replay. Unknown or live remote work stays fail-closed; neither append nor
  * commit is retried by this recovery command. */
-async function verifyNewWriter(client, operation, preserved = false) {
+async function verifyNewWriter(client, operation, preserved = false, receipts) {
   const failCode = "RECOVERY_WRITER_RECONCILIATION_REQUIRED";
   switch (operation.phase) {
+    case "blocked":
+      assert.equal(operation.errorCode, "MEMORY_SOURCE_REVOKED", failCode);
+      assert.ok(validId(operation.taskId), failCode);
+      assert.equal(await client.writerSettled({ ...operation, phase: "processing" }), true, failCode);
+      return;
     case "session_unknown":
       assert.equal(await client.sessionExists(operation.remoteSessionId), false, failCode);
       return;
@@ -536,16 +555,18 @@ async function verifyNewWriter(client, operation, preserved = false) {
       assert.equal(await client.hasSource(operation), true, failCode);
       return;
     case "commit_unknown": {
-      assert.equal(await client.hasSource(operation), true, failCode);
       const receipt = await client.findCommit(operation.remoteSessionId);
       assert.ok(receipt && (!operation.taskId || receipt.taskId === operation.taskId), failCode);
       assert.equal(await client.writerSettled(operation), true, failCode);
+      if (!await client.hasSource(operation)) {
+        await verifyArchivedSource(receipts, client.owner, { ...operation, taskId: receipt.taskId });
+      }
       return receipt;
     }
     case "processing":
     case "ready": {
-      assert.equal(await client.hasSource(operation), true, failCode);
       assert.equal(await client.writerSettled(operation), true, failCode);
+      if (!await client.hasSource(operation)) await verifyArchivedSource(receipts, client.owner, operation);
       if (operation.phase === "ready" && !preserved) {
         const result = await client.inspect(operation);
         assert.ok(result.status === "ready" && result.archiveId === operation.archiveId
@@ -807,7 +828,8 @@ async function prepare(configDirectory, dataRoot, recoveryRoot, checkpointFile) 
         && settledWriters.every(operation => !clear.writerOperationIds.includes(operation.id)),
       "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
     }
-    assert.ok(remoteWriters.every(operation => !effects.sources.has(operation.remoteSessionId)),
+    assert.ok(remoteWriters.every(operation => operation.phase === "blocked"
+      && operation.errorCode === "MEMORY_SOURCE_REVOKED" || !effects.sources.has(operation.remoteSessionId)),
       "RECOVERY_WRITER_RECONCILIATION_REQUIRED");
     const key = await credentials.read(entry.owner);
     assert.ok(key, "CREDENTIAL_MISSING");
@@ -877,7 +899,7 @@ async function reconcileUnlocked(configDirectory, dataRoot, recoveryRoot, checkp
   // remote receipt cannot be followed by a deletion replay or state overlay.
   for (const plan of plans) for (const operation of plan.remoteWriters) {
     if (plan.completedLive) continue;
-    const result = await verifyNewWriter(plan.client, operation, Boolean(plan.preserved || plan.liveDocuments));
+    const result = await verifyNewWriter(plan.client, operation, Boolean(plan.preserved || plan.liveDocuments), plan.receipts);
     if (result) plan.writerResults.set(operation.id, result);
     if (plan.memoryCleared && ["session_created", "message_unknown", "message_delivered"].includes(operation.phase)) {
       assert.equal(await plan.client.findCommit(operation.remoteSessionId), null,
