@@ -1,0 +1,57 @@
+{
+  "recordedAtUtc": "2026-09-28T04:04:36.450875+00:00",
+  "sourceRuntimeCommit": "fb99cafb1c1fe308fac903db94f7830d1650e3fc",
+  "image": "localhost/dano465-protected:0.2.62",
+  "imageId": "1297fc14a8f8ae6ab5f5527fa5eec3a6b72378bccc2bf900be2e9f24fb7e925a",
+  "danoVersion": "0.2.62",
+  "piOpenVikingVersion": "0.1.17",
+  "model": {
+    "provider": "xiaomi-token-plan-cn",
+    "id": "mimo-v2.5",
+    "thinkingLevel": "high",
+    "existingConfigurationReuseExplicitlyAuthorized": true,
+    "credentialRotationRequiredForAcceptance": false,
+    "credentialsPrinted": false
+  },
+  "browser": {
+    "surface": "Codex in-app Browser",
+    "entry": "https://localhost:18711/",
+    "realOaLoginAuthenticatedAccountVisible": true,
+    "plainTextAnswer": "服务可用",
+    "imageUploaded": true,
+    "imageFilename": "shapes.png",
+    "imageSha256": "837408bf3dda5ee8c4e3bc8795271e640950a204b446927e85a53609be5cee43",
+    "imageAnswer": "左侧是一个红色的圆形，右侧是一个蓝色的正方形。",
+    "modelTriggeredBashCommand": "ls",
+    "completeBashAnswer": "uploads",
+    "reconnectPreservedImageAndBashTranscript": true,
+    "logoutReturnedToConnectedAnonymousPage": true,
+    "reloginAuthenticatedAccountVisible": true,
+    "anonymousConversationTransferredToAuthenticatedOwnedSessionFiles": true,
+    "loginOpensNewChatAsRequiredByExistingRuntimeAndRegression": true,
+    "screenshot": "issue477-0262-browser/image-bash.jpg"
+  },
+  "retainedFirstAttempt": {
+    "bashToolSucceeded": true,
+    "sdkAssistantErrorRecordObservedBeforeToolRetry": true,
+    "postToolAnswerProducedRepetitiveThinking": true,
+    "postToolAnswerCancelled": true,
+    "laterCompleteBashRetestPassed": true,
+    "fullAnswerAcceptanceClaimForFirstAttempt": false
+  },
+  "deployment": {
+    "runtimeUsesIsolatedLinuxNamedVolumes": true,
+    "actualUserWorkspaceFilesystem": "xfs",
+    "actualUserBubblewrapWritePreflightExitCode": 0,
+    "tlsReusedWithoutRegenerationOrNewTrustPrompt": true,
+    "smokeApiCookieAndSse": "passed",
+    "memoryConfiguredDuringTheseBrowserChecks": false,
+    "old0253DataVolumesRetained": true,
+    "productionDeploymentChanged": false
+  },
+  "limits": [
+    "One actual OA identity was tested; no independent dual-user Browser acceptance.",
+    "The real memory overlay started after these Browser checks; no save-ready, recall, correction, delete or recovery conclusion from this receipt.",
+    "The full frozen 80-case x3 matrix and current complete concurrency/cost workload are pending."
+  ]
+}

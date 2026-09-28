@@ -1591,8 +1591,40 @@ control. Reopening the entry preserved the authenticated identity. The
 contains only public configuration and aggregate observations; the authenticated
 browser screenshot remains outside the repository. This removes the observed
 missing-client blocker for the retained `0.2.53` stack. Production login,
-final `0.2.62` and independent dual-user acceptance remain unverified, and the
-replacement MiMo key is still absent.
+final `0.2.62` and independent dual-user acceptance were still unverified at
+that stage.
+
+The user subsequently explicitly authorized continuing with the existing MiMo
+configuration. Requiring a replacement model key was an additional agent-imposed
+condition, not a PRD/Spec release criterion, and has been removed. Credentials
+remain in host-private configuration and are excluded from output and evidence.
+The existing configuration produced a real `mimo-v2.5` response on the final
+`0.2.62` protected image.
+
+### Final-image real OA and model Browser checks, 2026-09-28
+
+The final protected image `1297fc14a8f8` ran through the shipped Compose path,
+with isolated Linux volumes and the existing trusted fixed HTTPS entry. Real
+OA login displayed the authenticated account. MiMo answered the plain-text
+probe, described the actually uploaded synthetic image as a left red circle
+and right blue square, and triggered `bash` with command `ls`, followed by
+the complete answer `uploads`. Reopening the page retained those messages;
+logout returned to a connected fresh Anonymous User and login authenticated
+again. The current implementation and existing regression explicitly create a
+new chat after login; the transferred anonymous probe was retained in the
+authenticated user's session files. This does not claim automatic display of
+the old chat after login.
+
+The first bash attempt returned a successful tool result, but its post-tool
+answer repeated thinking and was cancelled. That attempt is retained separately
+and is not a complete-answer pass. The later explicit empty-result handling
+probe completed. The actual user's workspace resolved to an `xfs` named-volume
+mount and passed a minimal Bubblewrap write check using its worker identity.
+API/anonymous-cookie/SSE smoke also passed. The
+[Browser receipt](evidence/issue477-0262-real-oa-model-browser-20260928.json) and
+[screenshot](evidence/issue477-0262-browser/image-bash.jpg) record these outcomes.
+Memory was not configured during these checks. Real final-image memory,
+independent dual-user OA, complete quality/cost and recovery gates remain open.
 
 ### Stopped live-state seal, candidate 0.2.62
 
