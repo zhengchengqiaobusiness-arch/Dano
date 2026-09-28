@@ -1565,7 +1565,7 @@ page then reported `OAuth2 客户端不存在` for `danoProduction`. The authent
 current-tenant client management page contained five records and no such
 client. A registration form was prepared with the configured local and
 production callbacks, authorization-code/refresh grants and `user.read` scope;
-the required client secret and icon remain empty and the form was not
+at that stage the required client secret and icon were empty and the form was not
 submitted. This is an OA account-login result and a confirmed registration
 blocker, not Dano OAuth or final-image acceptance. The aggregate, secret-free
 receipt is [recorded separately](evidence/issue477-oa-client-registration-missing-20260928.json).
@@ -1573,12 +1573,26 @@ receipt is [recorded separately](evidence/issue477-oa-client-registration-missin
 Later the same day, the user explicitly authorized filling the test OA form.
 The existing configured Dano client secret was entered without publishing it;
 the public Dano SVG icon was uploaded through the supported file chooser and
-its preview was observed. The form now contains both callbacks and the stated
+its preview was observed. The prepared form contained both callbacks and the stated
 grants/scope. Automatic approval rejected final submission because permission
 to fill did not explicitly authorize persistent OAuth client creation. A
-specific action-time submission confirmation is pending; no client registration
-or Dano callback is claimed. The [prepared-form receipt](evidence/issue477-oa-registration-ready-20260928.json)
+specific action-time submission confirmation was requested; that stage did not
+prove client registration or a Dano callback. The [prepared-form receipt](evidence/issue477-oa-registration-ready-20260928.json)
 contains metadata and the public asset hash only.
+
+The user then explicitly authorized persistent OAuth client creation. Submission
+succeeded, and `danoProduction` appeared in the server-loaded client table.
+Reopening its edit form confirmed enabled status, authorization-code/refresh
+grants, `user.read`, token validity and both registered callbacks. A fresh login
+from the fixed local Dano entry reached the provider's Dano consent page; after
+consent it returned to Dano and showed the authenticated account and logout
+control. Reopening the entry preserved the authenticated identity. The
+[registration and login receipt](evidence/issue477-oa-client-registration-login-20260928.json)
+contains only public configuration and aggregate observations; the authenticated
+browser screenshot remains outside the repository. This removes the observed
+missing-client blocker for the retained `0.2.53` stack. Production login,
+final `0.2.62` and independent dual-user acceptance remain unverified, and the
+replacement MiMo key is still absent.
 
 ### Stopped live-state seal, candidate 0.2.62
 

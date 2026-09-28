@@ -1,0 +1,47 @@
+{
+  "observedAtUtc": "2026-09-28T03:18:02Z",
+  "method": "Codex in-app Browser, authenticated test OA client management and real Dano OAuth login",
+  "providerOrigin": "https://ruoyioffice.com",
+  "userExplicitlyAuthorizedPersistentClientCreation": true,
+  "clientId": "danoProduction",
+  "existingConfiguredClientSecretReused": true,
+  "credentialsIncludedInReceipt": false,
+  "registration": {
+    "submitted": true,
+    "dialogClosedAfterSubmit": true,
+    "persistedClientObservedInServerLoadedTable": true,
+    "persistedConfigurationReopenedAndChecked": true,
+    "applicationName": "Dano",
+    "enabled": true,
+    "grantTypes": ["authorization_code", "refresh_token"],
+    "scopes": ["user.read"],
+    "autoAuthorizedScopes": [],
+    "accessTokenValiditySeconds": 1800,
+    "refreshTokenValiditySeconds": 2592000,
+    "redirectUris": [
+      "https://localhost:18711/api/auth/callback",
+      "https://1.15.173.22/api/auth/callback"
+    ],
+    "applicationIconFilename": "dano-assistant.svg",
+    "applicationIconSha256": "7ae469048c393fb14545f0e5d2bc39f3c0ed2f7f8096170d3ebcb6fa2d76f32d"
+  },
+  "localLogin": {
+    "appImage": "localhost/dano465-acceptance:0.2.53",
+    "entry": "https://localhost:18711/",
+    "freshOAuthFlowStartedAfterRegistration": true,
+    "providerConsentDisplayedApplicationName": "Dano",
+    "userReadConsentGranted": true,
+    "returnedToDano": true,
+    "connectedIndicatorVisible": true,
+    "authenticatedAccountNameVisible": true,
+    "logoutButtonVisible": true,
+    "authenticatedIdentityStillVisibleAfterReopeningEntry": true,
+    "privateScreenshotPath": "/private/tmp/dano465-oa-login-success-20260928.jpg"
+  },
+  "evidenceLimits": [
+    "The production callback is registered, but no production Dano login or deployment was performed.",
+    "This proves one real OA-to-Dano login on the retained 0.2.53 stack; it does not prove final 0.2.62 release or independent dual-user acceptance.",
+    "No model request, Pi functional save/recall, memory writer recovery or frozen quality matrix was exercised.",
+    "The replacement MiMo key file is still absent."
+  ]
+}
