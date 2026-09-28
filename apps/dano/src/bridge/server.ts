@@ -601,7 +601,7 @@ export class BridgeServer {
             }
             if (jobId && pathname.endsWith("/review") && req.method === "POST") {
               const operationId = body?.operationId;
-              if (typeof operationId !== "string" || !/^[a-f0-9-]{36}$/.test(operationId)) throw new HttpError(400, "复核对象无效");
+              if (typeof operationId !== "string" || !/^(?:[a-f0-9]{64}|[a-f0-9-]{36})$/.test(operationId)) throw new HttpError(400, "复核对象无效");
               let receipt;
               if (Object.keys(body!).length === 2 && (body?.decision === "target" || body?.decision === "unrelated")) {
                 receipt = await governance.reviewWriter(jobId, operationId, body.decision);

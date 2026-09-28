@@ -948,7 +948,16 @@ async function reconcileUnlocked(configDirectory, dataRoot, recoveryRoot, checkp
     if (plan.liveDocuments) await plan.client.clearMemoryScope();
     const documents = plan.liveDocuments ?? plan.preserved;
     if (Array.isArray(documents)) for (const { uri, content } of documents) {
-      await plan.client.replaceMemory(uri, content);
+      try {
+        await plan.client.replaceMemory(uri, content);
+      } catch (error) {
+        if (error?.message !== "MEMORY_REPLACEMENT_UNCONFIRMED") throw error;
+        // OpenViking parses a newly created Markdown file and can normalize its
+        // whitespace. Replacing that now-existing file preserves the original
+        // bytes. Retry once with the identical sealed body; the transport still
+        // requires exact readback, and a second mismatch leaves replay pending.
+        await plan.client.replaceMemory(uri, content);
+      }
     }
   }
   for (const plan of plans) {

@@ -825,6 +825,7 @@ it("authenticates memory settings, isolates owners and projects only safe status
   runtimeRoots.push(root);
   const setup = authenticatedServerSetup(root);
   const states = new Map<string, { enabled: boolean; automaticCollection: boolean; fail: boolean }>();
+  const reviews: Array<{ user: string; args: unknown[] }> = [];
   const controller = await startDanoServer(setup.config, {
     captureSigint: false, userContextResolver: setup.resolver,
     protectedToolsForUser: async context => {
@@ -843,8 +844,8 @@ it("authenticates memory settings, isolates owners and projects only safe status
           clear: async () => ({ jobId: "00000000-0000-0000-0000-000000000001", status: "pending" }),
           status: async () => ({ jobId: "00000000-0000-0000-0000-000000000001", status: "pending" }),
           review: async () => ({ stage: "classify", candidates: [] }),
-          reviewWriter: async () => ({ jobId: "00000000-0000-0000-0000-000000000001", status: "pending" }),
-          resolveMergedWriter: async () => ({ jobId: "00000000-0000-0000-0000-000000000001", status: "pending" }),
+          reviewWriter: async (...args: unknown[]) => { reviews.push({ user: context.user.id, args }); return { jobId: "00000000-0000-0000-0000-000000000001", status: "pending" }; },
+          resolveMergedWriter: async (...args: unknown[]) => { reviews.push({ user: context.user.id, args }); return { jobId: "00000000-0000-0000-0000-000000000001", status: "pending" }; },
         } as unknown as ReturnType<import("../bridge/user-memory-controls.js").UserMemoryControls["governance"]>; },
         wakeGovernance() {},
         async retire() {},
@@ -885,6 +886,23 @@ it("authenticates memory settings, isolates owners and projects only safe status
   const alice = await createClient(origin, aliceToken), bob = await createClient(origin, bobToken);
   const url = (client: TestClient) => `${origin}/api/clients/${client.client.id}/memory/settings`;
   const headers = (token: string) => ({ authorization: `Bearer ${token}`, "content-type": "application/json" });
+  const jobId = "00000000-0000-0000-0000-000000000001";
+  const reviewUrl = `${origin}/api/clients/${alice.client.id}/memory/governance/${jobId}/review`;
+  const operationId = "a".repeat(64);
+  for (const decision of [{ decision: "target" }, { exactText: "exact current fact" }]) {
+    const body = JSON.stringify({ operationId, ...decision });
+    expect((await fetch(reviewUrl, { method: "POST", headers: headers(bobToken), body })).status).toBe(403);
+    expect((await fetch(reviewUrl, { method: "POST", headers: headers(aliceToken), body })).status).toBe(200);
+  }
+  expect(reviews).toEqual([
+    { user: "alice", args: [jobId, operationId, "target"] },
+    { user: "alice", args: [jobId, operationId, "exact current fact"] },
+  ]);
+  for (const invalidId of ["a".repeat(63), "g".repeat(64), "../foreign", ""]) {
+    expect((await fetch(reviewUrl, { method: "POST", headers: headers(aliceToken),
+      body: JSON.stringify({ operationId: invalidId, decision: "target" }) })).status).toBe(400);
+  }
+  expect(reviews).toHaveLength(2);
   expect((await fetch(url(alice))).status).toBe(401);
   expect((await fetch(url(alice), { headers: headers(bobToken) })).status).toBe(403);
   const initial = await fetch(url(alice), { headers: headers(aliceToken) });
