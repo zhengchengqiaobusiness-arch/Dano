@@ -1925,8 +1925,26 @@ One model request timed out at 180 seconds; post-clear saves include 60.293,
 75.235 and 96.980 seconds. One later old-image client creation returned HTTP 500
 with an unknown cause; its finite diagnostic retry exited 0. These observations
 do not establish healthy-save latency or reliability thresholds. The full frozen
-80-case repetitions, total matched cost, independent OA Bob/business checks and
+80-case repetitions, total matched cost, independent OA Bob checks and
 remaining repeated lifecycle/fault cases still prevent #465/#477 closure. Only
 the two independent recovery containers and six test volumes were removed; the
 main fixed-port Browser stack, private credentials, TLS and candidate image stay
 available for the unfinished Goal.
+
+
+## Frozen-matrix supplement, candidate 0.2.65 (2026-09-28)
+
+The [current supplement](evidence/issue477-0265-matrix-supplement-20260928.json)
+adds 60 real OpenViking isolation attempts, 30 real-model correction/source
+attempts, 12 deletion/old-ledger attempts and 18 real Dano authorization attempts.
+Raw literal scorers, semantic review reasons and rejected requests are retained.
+Together with the retained 90 quality attempts this covers 70 of 80 frozen cases
+at three repetitions. The remaining ten cases and all other unfinished gates are
+listed in [remaining acceptance](issue477-remaining-acceptance.md).
+
+The eight supplemental ready measurements include 60.230 seconds; they do not
+pass the 60-second p95 threshold or erase previous slower saves. Native task
+usage is now available for the 20 original seed tasks; full query embedding
+accounting and matched-workload lifecycle waiting still need evidence. No
+additional USER key rotation, image build, broad regression or OA business
+acceptance is required merely by this evidence supplement.

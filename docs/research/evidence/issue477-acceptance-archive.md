@@ -116,3 +116,16 @@ scoped cleanup. It contains private runtime keys and stays outside Git with
 
 Transfer this private bundle through an appropriate private channel; it must not
 be uploaded into the public PR. The local archive alone is not portable CI proof.
+
+## Frozen matrix supplement, 0.2.65
+
+Private directory: `/Users/joseph/tmp/dano465-acceptance-archive/20260928T105551Z-matrix-supplement-0265`.
+
+Contains 52 hash-verified files, including original rejected requests,
+semantic review inputs, all correction/deletion/authorization attempts, native
+seed task usage and reproduction drivers. Files are 0600; directories are 0700.
+
+- `manifest.json` SHA-256: `35cda75a75640582d22291e4b76e8b3972f0d494d61a7682c1a8286f1e2da23d`.
+- [Brief result and remaining gates](issue477-0265-matrix-supplement-20260928.json).
+- The runtime volume `dano465formal0263_runtime` remains intact for unfinished
+  cases. This archive contains evidence, not a substitute for a volume backup.

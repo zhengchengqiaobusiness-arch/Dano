@@ -1,0 +1,133 @@
+{
+  "recordedOn": "2026-09-28",
+  "danoVersion": "0.2.65",
+  "piOpenVikingVersion": "0.1.18",
+  "imageId": "9edfcd0b24cc44760aa7460964a78927e165218a44e2427a1475ac7a40f99dcd",
+  "frozenCaseSha256": "554c9c0c704a9c465c1f6d4bf215656388b09ef8fd5fde356ffed67efbe013b8",
+  "isolation": {
+    "suite": "issue477-frozen-isolation",
+    "server": "real OpenViking",
+    "requestedRepetitions": 3,
+    "completedAttempts": 60,
+    "passedAttempts": 60,
+    "allHardCasesPassed": true,
+    "allSyntheticUsersCleaned": true,
+    "runFingerprint": "0471be309125"
+  },
+  "correction": {
+    "attempts": 30,
+    "complete": 30,
+    "sourceHit": 30,
+    "originalLiteralRulePass": 28,
+    "semanticReviewPass": 30,
+    "semanticReview": "C-03-02 repetitions 1 and 3 explicitly retain deep green as current preference; optional secondary colors are suggestions, not obsolete personal preferences. Original booleans retained.",
+    "preliminaryAttempts": "First driver submitted an invalid short replacement containing the entire selected text; API rejected before mutation. Corrected driver selects the current full document and preserves unrelated facts."
+  },
+  "deletion": {
+    "distinctFrozenCases": 4,
+    "repetitionsPerCase": 3,
+    "finalAttempts": 12,
+    "originalAttempts": 12,
+    "originalLiteralRulePass": 6,
+    "affectedRetries": 5,
+    "retryPass": 5,
+    "finalLiteralRulePass": 11,
+    "semanticReviewPass": 12,
+    "semanticReview": "D-03-02 repetition 1 contains generic palette advice, no remembered personal preference. Public export contains no old fact; fresh memory injection is empty. Old chat text is not treated as resurrection.",
+    "retries": "Five requests failed before a governance job because repeated date suffix made selection ambiguous. Exact user fact text without trailing date succeeds and preserves unrelated facts. No runtime code or frozen expectation changed."
+  },
+  "supplementalSaveReady": {
+    "observations": 8,
+    "milliseconds": [
+      29683.0,
+      24644.0,
+      29746.0,
+      24719.0,
+      24642.0,
+      29740.0,
+      39778.0,
+      60230.0
+    ],
+    "p95Ms": 60230.0,
+    "gatePassed": false,
+    "limit": "Supplemental sequential/low-concurrency saves. Earlier concurrent and recovery failures remain in the aggregate; this does not replace the original workload."
+  },
+  "lifecycleObserver": {
+    "callbacks": 362,
+    "maximumByTypeMs": {
+      "agent_settled": 0.04833300000609597,
+      "before_agent_start": 85.84096500000305,
+      "context": 436.2038959999991,
+      "session_shutdown": 0.4312519999803044,
+      "session_start": 2.3513010000006034
+    },
+    "limit": "All registered memory hook callbacks observed in deletion subset; not a replacement for 100 matched workload measurements."
+  },
+  "extractionCostSupplement": {
+    "realCompletedSeedTasks": 20,
+    "nativeUsage": {
+      "llm.prompt_tokens": 158147,
+      "llm.completion_tokens": 31917,
+      "llm.total_tokens": 190064,
+      "llm.cached_tokens": 107136,
+      "llm.reasoning_tokens": 24552,
+      "embedding.total_tokens": 2075,
+      "total.total_tokens": 192139,
+      "total.cached_tokens": 107136,
+      "total.reasoning_tokens": 24552
+    },
+    "source": "Public native OpenViking task receipts for the retained original 20 seed operations",
+    "credits": 11698772,
+    "reasoningTokensAlreadyIncludedInCompletion": true,
+    "embeddingCallsAndQueryTokensStillIncomplete": true,
+    "gatePassed": false
+  },
+  "scope": "Synthetic authenticated HTTP/SSE owners and real OpenViking/MiMo; does not establish second OA Browser identity",
+  "remainingFrozenCases": 10,
+  "remainingFrozenAttempts": 30,
+  "fullGoalComplete": false,
+  "authorization": {
+    "distinctFrozenCases": 6,
+    "repetitionsPerCase": 3,
+    "attempts": 18,
+    "passed": 18,
+    "caseIds": [
+      "A-01",
+      "A-02",
+      "A-05",
+      "A-06",
+      "A-07",
+      "A-10"
+    ],
+    "transport": "Real Dano protected HTTP/SSE with MiMo and OpenViking; fresh synthetic authenticated owners",
+    "defaults": "No settings mutation precedes fresh default and automatic-collection checks",
+    "initialHarnessFailures": [
+      "Hypervisor failure before batch execution; same VM/volumes recovered",
+      "Second repetition exhausted the retained append-only eight-identity pool before cases; changing a live range was refused. Fresh isolated runtime roots resolve fixture capacity without mutating that pool."
+    ],
+    "runtimeRoots": [
+      "/tmp/dano-supervisor-http-w0J3S9",
+      "/tmp/dano-auth-matrix-t9Jrbc",
+      "/tmp/dano-auth-matrix-Bhe8J1"
+    ]
+  },
+  "remainingCaseIds": [
+    "D-02-01",
+    "D-02-02",
+    "D-03-01",
+    "D-04-02",
+    "D-05-01",
+    "D-05-02",
+    "A-03",
+    "A-04",
+    "A-08",
+    "A-09"
+  ],
+  "archive": {
+    "root": "/Users/joseph/tmp/dano465-acceptance-archive/20260928T105551Z-matrix-supplement-0265",
+    "members": 52,
+    "manifestSha256": "35cda75a75640582d22291e4b76e8b3972f0d494d61a7682c1a8286f1e2da23d",
+    "verifiedEveryMember": true,
+    "mode": "0700 directories / 0600 files"
+  }
+}

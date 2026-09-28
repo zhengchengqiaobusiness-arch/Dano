@@ -36,14 +36,25 @@ The full historical AC/T ledger is [here](issue477-memory-release.md).
   one collection/pause/export/forget/resume observation. Their receipts state
   their limits. Retain every failed attempt alongside subsequent passes.
 
-## Remaining execution order
+## Remaining execution scope
+
+The user confirmed this scope on 2026-09-28. Only #465 requirements and paths
+directly affected by these changes are acceptance gates. Reuse passing checks
+unless a later relevant code change invalidates them; a product version change
+alone does not require rerunning them. Ordinary OA business Skills and forms are
+outside this remaining scope. Retain completed image/bash checks without repeats,
+and do not use unrelated full-suite failures to block this memory release.
 
 | Group | Next concrete checks | Completion evidence |
 |---|---|---|
-| 1. Collection, lifecycle and Browser | Finish semantic exclusion, pause/claim/in-flight, explicitly disabled collection, reconnect/branch/dispose cases beyond the completed same-source overlap rerun. Complete independent real OA Bob and existing business authorization/form/Skill regressions. | Current real entrypoint receipts, separate identities, source/task records and rendered Browser proof; original repetition requirements still apply. |
-| 2. Frozen quality and performance | Run the frozen 80 cases three times on the current pair. Run the matched complete on/off workload of at least 100 requests with five concurrent users. | Every attempt, model answers/source review, actual token counts, cold/steady latency, save-ready latency and matched cost. Apply the existing Spec thresholds without filtering failures. |
-| 3. Real recovery and rollback | Retain completed two-owner shared-document sealing, matched restored volumes, queued completion, clear/new writers, actual old-image rollback and three USER rotations. Finish the remaining original repeated fault/recovery cases. | The [real recovery receipt](evidence/issue477-0265-real-recovery-20260928.json) binds exact binary/volume/checkpoint identities, public receipts, final source/content readback and isolation. It does not close unexecuted matrix cases. |
-| 4. Release audit and closure | Reconcile AC-01–13/T-01–14 against current evidence, review any resulting code changes, finish upstream PR/merge/closure and scoped cleanup. | No unexplained failed hard constraint or unfinished mandatory gate; merged upstream PR, #477/#465 closure, remote branch removal and cleanup receipt. |
+| 1. Collection and lifecycle | Finish sensitive-data/reasoning/unconfirmed-inference exclusion, pause/in-flight overlap, reconnect/branch/dispose without duplicate collection or historical backfill. Retain default-on and management-only rendering proof. | Source/task records and relevant rendered Browser proof; original repetition requirements still apply. |
+| 2. Real user isolation | Complete a second independent real OA identity: memory, sources, export/delete permissions and account switching. | Separate authenticated identities and owner-scoped Browser readbacks; no OA business regression expansion. |
+| 3. Correction, deletion and fault recovery | Cover remaining queue/cache/in-flight/recovery cases, deletion non-resurrection and honest failed-save status. Reuse two-owner real recovery/rollback and all three USER rotations. | The [real recovery receipt](evidence/issue477-0265-real-recovery-20260928.json) and the remaining frozen-case attempts; no additional rotation round. |
+| 4. Quality and performance | Execute the remaining 10 frozen cases x3 = 30 attempts and any cases invalidated by relevant changes. Reuse the 90 quality attempts and matched 100 on / 100 off requests with five users; add missing save-ready latency, complete waiting and extraction/embedding cost evidence. | Every attempt retained; original Spec thresholds and complete cost accounting, without clean-only filtering or repeated baseline workloads. |
+
+After these four groups reach the agreed standards, audit AC-01–13/T-01–14,
+review resulting changes, merge upstream PR #490, close #477/#465 and complete
+scoped branch/runtime cleanup. Unrelated checks are not additional merge gates.
 
 ### Current overlap observation
 
@@ -87,7 +98,8 @@ AC-04. See the [current Browser receipt](evidence/issue477-0263-overlap-browser-
   bundle; this update changes candidate metadata only.
   Keep the revised expectations frozen. Historical runs retain their original
   fixture hashes. Old candidate reports cannot establish current-pair
-  quality or matched workload completion.
+  quality or matched workload completion. Reuse the current published-extension
+  `0.2.63` measurements above where subsequent changes did not affect their paths.
 - Recovery: use the shipped operator recovery commands and existing public-API
   recovery fixtures. Check ownership, exact image, matching volumes and current
   synthetic dataset before any mutation; keep credentials and original receipts
@@ -115,7 +127,7 @@ thresholds and the unfinished gates above remain unchanged.
 The prior `0.2.63` / `0.1.18` pair completed 90 recall/irrelevant attempts plus matched 100 on and
 100 off requests across five synthetic users. [The brief summary](evidence/issue477-0263-quality-workload-summary-20260928.json)
 retains original failures, source-scorer limitations and independent public source
-review. This is partial evidence: 50 frozen cases x3 remain unexecuted here;
+review. The current supplement completes 60 isolation, 30 correction, 12 deletion and 18 authorization attempts. This remains partial evidence: 10 frozen cases x3 remain;
 healthy-save latency, total model cost, all lifecycle waiting, canonical rendered
 profile/Browser identity and the remaining Group 1/3/4 checks still need evidence.
 Use the existing authorized credentials, rendered profile and retained synthetic
@@ -165,3 +177,32 @@ finite diagnostic retry passing. Type/Svelte and 82 focused recovery tests pass;
 the failed-file serial rerun passed 330 tests. Full local suite attempts still
 returned failures, so there is no clean full-suite claim. No further broad local
 reruns are scheduled without a specific unresolved change.
+
+## Current frozen-matrix supplement (2026-09-28)
+
+The current candidate completed real-service isolation **60/60**, correction
+**30/30** with source readback, and four deletion/old-ledger cases **12/12** after
+targeted request repairs. Raw scoring and all failed requests remain preserved:
+two correction answers and one deletion answer needed semantic review because
+generic palette suggestions were mistaken for old personal preferences. Five
+forget requests were rejected before mutation because their selected line ended
+with repeated date metadata; selecting the exact fact without that suffix passed
+and retained unrelated facts. No runtime code, frozen fact or threshold changed.
+
+Eight additional explicit saves reached ready in 24.644–60.230 seconds. The
+supplemental p95 is **60.230 seconds**, exceeding the 60-second target; prior
+concurrent-save and recovery observations remain included in the evidence.
+All registered memory hook types were timed in the deletion subset. These
+measurements do not replace the original matched 100-request workload. Native
+public receipts now supply extraction and embedding usage for its 20 retained
+seed tasks; query-embedding accounting is still incomplete.
+
+The second real OA identity and independent Browser authentication context remain
+unverified. The isolated VM stopped with a hypervisor virtualization error while
+starting the authorization subset; the same VM, volumes and fixed entry were
+restored without rebuilding or rotating credentials. All 18 attempts for A-01/A-02/A-05/A-06/A-07/A-10 then passed through
+real Dano HTTP/SSE, MiMo and OpenViking. Independent runtime roots avoided
+exhausting the retained append-only identity pool; no live pool was rewritten. Full acceptance and merge are still open.
+
+Remaining frozen cases: D-02-01, D-02-02, D-03-01, D-04-02, D-05-01,
+D-05-02, A-03, A-04, A-08 and A-09 (three repetitions each).

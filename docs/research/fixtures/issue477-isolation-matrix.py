@@ -182,6 +182,12 @@ def main():
                     statuses.append(0)
             try:
                 restored = user_ids(base, account, admin_key) == baseline
+                # USER deletion is asynchronous on the pinned real service.
+                # Verify its terminal result before starting another repetition.
+                deadline = time.monotonic() + 120
+                while not restored and time.monotonic() < deadline:
+                    time.sleep(0.5)
+                    restored = user_ids(base, account, admin_key) == baseline
             except Exception:
                 restored = False
             repetitions.append({"repetition": repetition,
