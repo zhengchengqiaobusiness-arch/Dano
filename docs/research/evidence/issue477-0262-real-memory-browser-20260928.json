@@ -1,0 +1,151 @@
+{
+  "recordedAtUtc": "2026-09-28T04:54:34.271085+00:00",
+  "danoVersion": "0.2.62",
+  "piOpenVikingVersion": "0.1.17",
+  "imageId": "1297fc14a8f8ae6ab5f5527fa5eec3a6b72378bccc2bf900be2e9f24fb7e925a",
+  "model": "mimo-v2.5",
+  "surface": "Codex in-app Browser",
+  "entry": "https://localhost:18711/",
+  "existingModelCredentialReuseAuthorized": true,
+  "modelKeyRotationPrerequisite": false,
+  "realOaAuthenticated": true,
+  "explicitEnableLeftAutomaticCollectionOff": true,
+  "retainedAttempts": [
+    {
+      "operationId": "210a01e964fe2057898d51dbe5b2a64df24ae41a19172b288d7fd52a784767ba",
+      "phase": "failed",
+      "errorCode": "MEMORY_EXTRACTION_FAILED",
+      "upstreamStatus": 401,
+      "cause": "Operator copied a Pi environment-variable key reference as a literal OpenViking api_key",
+      "configurationCorrectedWithoutKeyRotation": true
+    },
+    {
+      "operationId": "8e6ff9ca511ef8e6b5f66c0144ead57c1c06bbd9fa586da64ecf493c5e14bea6",
+      "initialPhase": "blocked",
+      "errorCode": "MEMORY_RECONCILIATION_LIMIT",
+      "cause": "Operator real-service configuration allowed only five status queries",
+      "reopenedPhase": "ready",
+      "readOnlyReconciliationAfterRestart": true,
+      "createdAt": "2026-09-28T04:17:49.869Z",
+      "readyAt": "2026-09-28T04:25:04.000Z",
+      "healthySaveLatencySample": false,
+      "sourceContentReadInBrowser": true,
+      "newChatRecallVerified": true
+    }
+  ],
+  "failedExtractionSelectiveCleanup": {
+    "jobId": "4d570cef-fe85-430d-954f-c7ff33e9c980",
+    "errorCode": "MEMORY_GOVERNANCE_CLEAR_REQUIRED",
+    "countedAsSuccessfulCorrection": false,
+    "supersededByConfirmedSyntheticOwnerClear": "ef0fad96-fe94-469b-a6b6-a2b40725b5aa"
+  },
+  "healthySave": {
+    "operationId": "b99c0467882eeb582aaa24a3b15dfc8a068cf9b0f4f3975fbbd41adc5e900009",
+    "createdAt": "2026-09-28T04:29:58.280Z",
+    "readyAt": "2026-09-28T04:30:27.929Z",
+    "readyMs": 29649,
+    "oneSampleOnly": true,
+    "p95GateClaimed": false
+  },
+  "correction": {
+    "jobId": "252b676d-76fe-4882-86b0-a105874fa320",
+    "phase": "complete",
+    "oldFact": "柏舟62",
+    "newFact": "柏舟63",
+    "newChatAnswer": "根据当前保存的记录，你的技术方案验收代号是 柏舟63。"
+  },
+  "remaining": [
+    "Automatic-versus-explicit same-fact selection and remaining lifecycle/fault Browser matrix",
+    "Independent real OA Bob context and business regression",
+    "Full frozen 80-case x3 current evaluation and matched complete workload",
+    "Final seal-live matched-volume recovery, upgrade and rollback"
+  ],
+  "deletion": {
+    "jobId": "641dc8bd-1526-4b35-924a-766a4a492c7a",
+    "phase": "complete",
+    "completedAt": "2026-09-28T04:34:16.217Z",
+    "targetAbsentInBrowserManagement": true,
+    "newChatVerificationPending": false,
+    "firstNewChatAttempt": {
+      "thinkingLevel": "high",
+      "completeAnswer": false,
+      "cancelledAfterExtendedThinking": true,
+      "passed": false
+    },
+    "newChatCompleteAnswer": "我已经查看了当前的长期记忆，里面只包含身份和灵魂方面的基础信息，没有关于技术方案验收代号的记录。",
+    "oldAndCorrectedFactAbsent": true,
+    "danoRestartAfterDeletion": true,
+    "restoredConversationStillReportsFactUnknown": true
+  },
+  "followUpModelConfiguration": {
+    "provider": "xiaomi-token-plan-cn",
+    "id": "mimo-v2.5",
+    "thinkingLevel": "off",
+    "onlyIsolatedAcceptanceStackChanged": true,
+    "imageSourceUnchanged": true
+  },
+  "collectionConsent": {
+    "separateBrowserAction": true,
+    "policyVersion": "collection-v1",
+    "revision": 1,
+    "effectiveAt": "2026-09-28T04:39:19.824Z",
+    "futureOnly": true,
+    "actualCollectionPending": false
+  },
+  "automaticCollection": {
+    "operationId": "188bc3484d776dccbef807505043d89cc0eb085fa5a03be62e57bd511539dd4f",
+    "phase": "ready",
+    "createdAt": "2026-09-28T04:40:23.172Z",
+    "readyAt": "2026-09-28T04:41:08.329Z",
+    "readyMs": 45157,
+    "sourceSessionId": "01a0e64f-cebc-751b-9a4e-e928917c0a52",
+    "contentAndAutomaticSourceReadInBrowser": true,
+    "newChatAnswer": "根据你已保存的记忆，合成验收报告的最后一行通常固定写：“寒江验收完成”。这是一个长期格式要求。",
+    "sameTurnExplicitAttempt": {
+      "operationId": "911c6f25a4370f1d85e7bccc638623582bcf840c58980a98782320b2667c184c",
+      "phase": "failed",
+      "errorCode": "MEMORY_NO_EXTRACTED_FACT",
+      "userExplicitSaveIntent": false,
+      "rootCauseConfirmed": false,
+      "receiptAndPersistedUserSourceHashesMatch": true,
+      "fullDedupGatePassed": false
+    }
+  },
+  "pauseResume": {
+    "sameOwnerIndependentChats": true,
+    "independentUsers": false,
+    "peerNewChatWhilePaused": "01a0e658-123c-751b-9a4e-e92c5a5e260f",
+    "peerManagementShowsPaused": true,
+    "peerRecallDenied": true,
+    "pausedExplicitSaveAnswer": "当前长期记忆功能未启用，无法为您保存这个图表格式偏好。",
+    "pausedSyntheticFact": "暂停期雪岚42",
+    "pausedFactNoOperationCreated": true,
+    "browserExportWhilePaused": {
+      "filename": "dano-memory-export.json",
+      "bytes": 1847,
+      "sha256": "782886ca820110120bdd7390f3394789ac93c604b782f4a54c3fe6643b41e343",
+      "existingPreferencePresent": true,
+      "pausedFactAbsent": true,
+      "privateCredentialsAbsent": true
+    },
+    "forgetWhilePaused": {
+      "jobId": "ffe6e463-a7c3-438d-9ba0-930f024ef042",
+      "phase": "complete",
+      "createdAt": "2026-09-28T04:49:56.513Z",
+      "targetAbsentInManagement": true
+    },
+    "resumeEpoch": 3,
+    "resumeCollectionRevision": 2,
+    "resumeEffectiveAt": "2026-09-28T04:50:28.623Z",
+    "postResumeNewChat": "01a0e659-a282-751b-9a4e-e92e6b59afc2",
+    "postResumeAnswer": "根据当前保存的长期记忆，未记录关于合成验收报告最后一行固定格式或图表标题前固定格式的信息。",
+    "postResumeSelectionOperationIds": [],
+    "deletedFactNotRevived": true,
+    "pausedFactNotBackfilled": true,
+    "originalCollectionRequestDedupStillPending": true,
+    "automaticConsentRevokedAtHandoff": true,
+    "oneRepetitionOnly": true,
+    "automaticConsentRevokedRevision": 3,
+    "automaticConsentRevokedAt": "2026-09-28T04:54:33.858Z"
+  }
+}

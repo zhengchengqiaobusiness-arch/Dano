@@ -1069,7 +1069,7 @@ establish Dano model answers.
 
 | Spec test | Current evidence | Missing acceptance |
 |---|---|---|
-| T-01 | Published `0.1.17`, exact registry/lockfile integrity and image package identity, real Pi loader double-reload of both entries; earlier one real-service ordinary Pi CLI save/new-session recall used `0.1.13` | Current-pair ordinary Pi CLI functional save/recall, no duplicate runtime instance during real use, and repeated functional checks |
+| T-01 | Published `0.1.17`, exact registry/lockfile integrity and image package identity, real Pi loader double-reload of both entries; current `0.2.62`/`0.1.17` ordinary Pi CLI real MiMo save to ready, source read, new-session recall and pause | Remaining repeated functional checks and lifecycle matrix; do not repeat the completed current-pair run merely because other gates remain open |
 | T-02/03 | Real USER-key isolation matrix 20×3, including header forgery and Session-ID collision | Dano/Peer/project scope and independent Bob Browser across fixed repetitions |
 | T-04/05 | Automated lifecycle/collection tests; one real Browser automatic collection/recall/revocation path | Full multi-viewer/rebind/branch/dispose and collection exclusions |
 | T-06/07 | Actual old `session_unknown` recovery and credential-store replay; one restored-volume queue resumed to `message_delivered` without duplicate operation; after real USER-key rotation the protected Dano process restarted against its retained state and owner-only exports succeeded | All crash windows, ready completion, restored multi-volume deployment with rotation, user switch and anonymous transfer on fixed service |
@@ -1689,3 +1689,81 @@ source and installed Skill SHA-256 matched. The
 [sanitized build receipt](evidence/issue477-0262-protected-build.json) records
 both failures, the exact image/source identity, cleanup, reviews and limits.
 This is an image/fence check, not a real-volume, model or Browser T-13 pass.
+
+
+### Existing MiMo configuration and current real entrypoints (2026-09-28)
+
+The user explicitly authorized continued acceptance with the existing MiMo
+configuration. Replacing the model key is not a #465 acceptance prerequisite.
+The private inputs remain in the user-designated `~/tmp` credentials directory;
+no model or USER credential is printed or committed.
+
+The immutable `0.2.62` image with published `pi-openviking@0.1.17` now completed
+an ordinary Pi RPC CLI run through the package's standard protected launcher:
+default-off consent, explicit enablement leaving collection unapproved, real
+MiMo save to ready, content/source viewing, new-session recall and pause. The
+fixed MiMo tokenizer assets were checked before launch. The isolated synthetic
+USER was removed and absence read back; an empty test account remains. This
+[ordinary Pi receipt](evidence/issue477-0117-ordinary-pi-real-20260928.json)
+replaces the functional-repeat gap for the current package. The first attempt
+failed and is retained in the receipt; its asynchronous cleanup returned 202.
+The operator fixture now waits for removal rather than treating acceptance as
+completed deletion. This CLI run does not establish OAuth or Browser identity.
+
+The final Compose image also completed real OA single-user Browser save,
+source/content viewing and new-chat recall. Its first extraction failed with
+401 because the operator had copied Pi's `$XIAOMI_TOKEN_PLAN_CN_API_KEY`
+reference literally into OpenViking's `api_key`. Resolving that reference from
+the already authorized private configuration fixed the upstream model call;
+no model-key rotation occurred. A second save exhausted a five-query operator
+status budget while the remote service produced the document. After restoring
+the real-service fixture's bounded 90-query policy, runtime restart reconciled
+the same task read-only to ready. Its roughly seven-minute delay is retained
+and excluded from the healthy latency sample. A selective cleanup of the failed
+extraction required confirmed clear because partial upstream effects could not
+be established; only this dedicated synthetic account was cleared.
+
+From the clean state, a new model-triggered synthetic save reached ready in
+29.649 seconds. Browser full-document correction changed `柏舟62` to `柏舟63`,
+and a fresh chat answered only the current code. Browser forget completed,
+management removed the target, and a fresh chat reported that no code was
+recorded. The first deletion-answer request with high thinking was cancelled
+without a completed answer; the completed retest and Dano restart retained the
+unknown result. The isolated stack's default thinking setting was then made
+explicitly `off` for subsequent acceptance, matching ordinary Pi's setting;
+no runtime source or image changed. Actual new-session JSONL confirms `off`.
+See the [current Browser receipt](evidence/issue477-0262-real-memory-browser-20260928.json)
+and screenshots in `evidence/issue477-0262-browser/`. One healthy save is not
+a p95 sample gate. These single-user paths do not close the full frozen matrix,
+independent dual-user OA Browser, business regression or matched-volume
+recovery/rollback gates.
+
+Separate Browser automatic-collection consent then produced one ready operation
+in 45.157 seconds, with its automatic source and content visible in management;
+a fresh chat recalled the report-ending preference. The same ordinary user
+request also caused the chat model to call `memory_save`, although it did not
+request explicit saving. That explicit operation failed with
+`MEMORY_NO_EXTRACTED_FACT`. The original tool receipt and persisted user-entry
+hashes match. The selector has exclusion context for explicit saves, but this
+observation does not yet prove where that exclusion failed. Preserve both
+operations and investigate the affected automatic/explicit overlap; this is not
+a complete AC-04 deduplication pass and must not be hidden by the successful
+automatic operation.
+
+One current-pair, same-owner Browser pause/resume flow also completed. A second
+chat showed the paused state, did not recall the stored preference, and declined
+to save a new synthetic format preference. While paused, the Browser downloaded
+`dano-memory-export.json`; the actual 1,847-byte JSON contained the existing
+preference and excluded the paused request. Targeted forget completed from the
+same paused management UI. After resume, a new chat reported both formats
+unrecorded, and selection created no new operation. The restored authorization
+used a fresh epoch and collection revision. Automatic consent was withdrawn at
+handoff, leaving explicit memory enabled; the light theme stayed unchanged.
+This is one observation, not the complete three-repetition/in-flight-send matrix
+or independent Bob identity proof. See the current Browser receipt and
+`memory-resumed.jpg` / `memory-collection-revoked.jpg`.
+
+The bounded remaining execution order is in
+[the current acceptance runbook](issue477-remaining-acceptance.md). Existing
+applicable passes remain evidence; a configuration repair or code fix only
+triggers rechecks for the affected paths and the mandatory final release gates.

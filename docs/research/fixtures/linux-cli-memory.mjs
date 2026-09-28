@@ -5,6 +5,12 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 const root = '/tmp/pi-openviking-memory-acceptance';
+const provider = process.env.DANO_FIXTURE_PROVIDER;
+const modelId = process.env.DANO_FIXTURE_MODEL;
+assert(provider && modelId, 'Set DANO_FIXTURE_PROVIDER and DANO_FIXTURE_MODEL');
+const connectionInput = JSON.parse(await readFile(process.argv[3], 'utf8'));
+assert.equal(connectionInput.model?.provider, provider);
+assert.equal(connectionInput.model?.id, modelId);
 const hostUid = 1000, workerUid = 65534, groupId = 1000;
 await mkdir(root, { mode: 0o711 });
 for (const name of ['agent', 'state', 'workspace']) {
@@ -29,7 +35,7 @@ await writeFile(profileFile, JSON.stringify(profile), { mode: 0o600 });
 const env = { ...process.env };
 for (const key of ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy']) delete env[key];
 const child = spawn(process.execPath, [fileURLToPath(new URL('./cli.js', import.meta.resolve('@josephyoung/pi-openviking/launcher'))), profileFile,
-  '--offline', '--mode', 'rpc', '--provider', 'cestc', '--model', 'qwen35', '--thinking', 'off'],
+  '--offline', '--mode', 'rpc', '--provider', provider, '--model', modelId, '--thinking', 'off'],
   { env, stdio: ['pipe', 'pipe', 'pipe'] });
 const events = []; let errors = '', exitCode, nextId = 0, confirmed = false;
 child.on('exit', code => { exitCode = code; });
@@ -83,7 +89,11 @@ try {
   console.log(JSON.stringify({ stage: 'explicit-consent', defaultOff: true, separateCollectionConsent: true }));
   const saved = await model('请记住我的稳定偏好：所有验收报告都以“松风验收”作为标题，正文使用简体中文。请调用 memory_save 保存。');
   assert(saved.some(e=>e.type==='tool_execution_end' && e.toolName==='memory_save' && e.result?.details?.status==='queued'));
-  const operation = await wait(async()=>Object.values((await state())?.operations ?? {}).find(o=>o.phase==='ready'),180000);
+  const operation = await wait(async()=>{
+    const operations = Object.values((await state())?.operations ?? {});
+    assert(!operations.some(o=>o.phase==='failed'), 'Real extraction failed');
+    return operations.find(o=>o.phase==='ready');
+  },180000);
   assert(operation.memoryUris.length>0);
   console.log(JSON.stringify({ stage: 'saved-ready', operationId: operation.id }));
   const showFrom = events.length;
@@ -100,7 +110,9 @@ try {
   assert(!JSON.stringify(events).includes(connection.apiKey) && !errors.includes(connection.apiKey));
   const evidence = { standardCliRpc: true, realService: true, explicitConsent: true, ready: true,
     viewContentAndSource: true, newSessionRecall: true, pause: true, automaticCollectionUnapproved: true,
-    credentialAbsentFromEvents: true, operationId: operation.id, tokenizerRevision: '60d8d70770c6776ff598c94bb586a859a38244f1' };
+    credentialAbsentFromEvents: true, operationId: operation.id,
+    provider, modelId, tokenizerRevision: connectionInput.tokenizer.revision,
+    extensionVersion: JSON.parse(await readFile(new URL('../package.json', import.meta.resolve('@josephyoung/pi-openviking/host')), 'utf8')).version };
   await writeFile('/evidence/result.json',JSON.stringify(evidence,null,2),{mode:0o600});
   console.log(JSON.stringify(evidence));
 } finally {

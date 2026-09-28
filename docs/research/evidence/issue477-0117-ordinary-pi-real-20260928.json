@@ -1,0 +1,30 @@
+{
+  "standardCliRpc": true,
+  "realService": true,
+  "explicitConsent": true,
+  "ready": true,
+  "viewContentAndSource": true,
+  "newSessionRecall": true,
+  "pause": true,
+  "automaticCollectionUnapproved": true,
+  "credentialAbsentFromEvents": true,
+  "operationId": "a913ec30951b31b9d82fa0ad9ce951c25286e7c0b25af43a61fc3f61aed3fbe0",
+  "provider": "xiaomi-token-plan-cn",
+  "modelId": "mimo-v2.5",
+  "tokenizerRevision": "63651580ca774f8504f676040460aed3e1244ac1",
+  "extensionVersion": "0.1.17",
+  "recordedAtUtc": "2026-09-28T04:27:23.092730+00:00",
+  "image": "localhost/dano465-protected:0.2.62",
+  "imageId": "1297fc14a8f8ae6ab5f5527fa5eec3a6b72378bccc2bf900be2e9f24fb7e925a",
+  "realOaVerified": false,
+  "browserVerified": false,
+  "syntheticUserCleanupVerified": true,
+  "emptyTestAccountRetained": true,
+  "retainedFirstAttempt": {
+    "exit": 1,
+    "stdoutBytes": 0,
+    "stderrBytes": 503,
+    "resultCountedAsPass": false,
+    "cleanupFirstReturned202": true
+  }
+}
