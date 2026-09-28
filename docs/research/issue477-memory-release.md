@@ -1570,6 +1570,16 @@ submitted. This is an OA account-login result and a confirmed registration
 blocker, not Dano OAuth or final-image acceptance. The aggregate, secret-free
 receipt is [recorded separately](evidence/issue477-oa-client-registration-missing-20260928.json).
 
+Later the same day, the user explicitly authorized filling the test OA form.
+The existing configured Dano client secret was entered without publishing it;
+the public Dano SVG icon was uploaded through the supported file chooser and
+its preview was observed. The form now contains both callbacks and the stated
+grants/scope. Automatic approval rejected final submission because permission
+to fill did not explicitly authorize persistent OAuth client creation. A
+specific action-time submission confirmation is pending; no client registration
+or Dano callback is claimed. The [prepared-form receipt](evidence/issue477-oa-registration-ready-20260928.json)
+contains metadata and the public asset hash only.
+
 ### Stopped live-state seal, candidate 0.2.62
 
 Inspection of the pinned official `v0.4.20` compressor confirms lock-free patch
