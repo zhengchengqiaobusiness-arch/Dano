@@ -52,6 +52,32 @@ function bind(profile: ProtectedSessionTools, worker: Awaited<ReturnType<Protect
   return { handlers, tools };
 }
 
+it("ignores late settlement from an invalidated pi context without losing another session's provenance", async () => {
+  const h = await harness();
+  const profile = await h.start();
+  const oldSession = SessionManager.inMemory();
+  const activeSession = SessionManager.inMemory();
+  const cancelOld = h.runtime().provenance.capture(oldSession, "old input", "old input");
+  h.runtime().provenance.capture(activeSession, "active input", "active input");
+  oldSession.appendMessage({ role: "user", content: "old input", timestamp: Date.now() });
+  activeSession.appendMessage({ role: "user", content: "active input", timestamp: Date.now() });
+  const settled: Array<(event: unknown, context: unknown) => unknown> = [];
+  const pi = {
+    on(name: string, handler: (event: unknown, context: unknown) => unknown) {
+      if (name === "agent_settled") settled.push(handler);
+    },
+    registerTool() {},
+    appendEntry(type: string, data: unknown) { activeSession.appendCustomEntry(type, data); },
+  } as unknown as ExtensionAPI;
+  profile.createMemoryExtension!(h.worker.workspace, h.worker)(pi);
+  const staleContext = { get sessionManager(): never { throw new Error("This extension ctx is stale after session replacement or reload."); } };
+  for (const handler of settled) await expect(Promise.resolve().then(() => handler({}, staleContext))).resolves.toBeUndefined();
+  cancelOld();
+  for (const handler of settled) await handler({}, { sessionManager: activeSession });
+  expect(oldSession.getEntries().filter(entry => entry.type === "custom")).toHaveLength(0);
+  expect(activeSession.getEntries().filter(entry => entry.type === "custom")).toHaveLength(1);
+});
+
 it("does not record user provenance without a configured collector", async () => {
   const h = await harness();
   const profile = await h.start();

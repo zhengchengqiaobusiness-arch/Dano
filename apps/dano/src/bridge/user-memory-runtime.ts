@@ -165,11 +165,16 @@ export class UserMemoryRuntime implements UserMemoryControls {
       wakeDelivery: () => { if (!this.#closed) this.#scheduler.wake(); } });
     return ((pi) => {
       pi.on("agent_settled", (_event, ctx) => {
+        if (this.#closed) return;
+        let sessionManager: typeof ctx.sessionManager;
+        // Pi can settle an aborted request after its context was invalidated.
+        // Do not access that context or discard another session's pending input.
+        try { sessionManager = ctx.sessionManager; } catch { return; }
         this.provenance.settle({
-          getSessionId: () => ctx.sessionManager.getSessionId(),
-          getEntry: id => ctx.sessionManager.getEntry(id),
-          getEntries: () => ctx.sessionManager.getEntries(),
-          getBranch: id => ctx.sessionManager.getBranch(id),
+          getSessionId: () => sessionManager.getSessionId(),
+          getEntry: id => sessionManager.getEntry(id),
+          getEntries: () => sessionManager.getEntries(),
+          getBranch: id => sessionManager.getBranch(id),
           appendCustomEntry: (type, data) => { pi.appendEntry(type, data); return ""; },
         });
       });
