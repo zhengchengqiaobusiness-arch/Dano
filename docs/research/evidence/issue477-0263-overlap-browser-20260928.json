@@ -1,0 +1,96 @@
+{
+  "recordedOn": "2026-09-28",
+  "danoVersion": "0.2.63",
+  "piOpenVikingVersion": "0.1.18",
+  "imageId": "b771b66b5480acaf63dab0b4ddcf623c94fcc612169a8d1c420dd390a8fda629",
+  "surface": "Codex in-app Browser",
+  "entry": "https://localhost:18711/",
+  "model": "mimo-v2.5",
+  "existingCredentialsAndTrustedCertificateReused": true,
+  "sameOaAuthenticatedAccountAfterUpgrade": true,
+  "collectionConsentSeparatelyGrantedRevision": 4,
+  "explicitSave": {
+    "id": "521743ceb5d4f7bcabd0c88325c4fe6e2dd58e00c1e0d4537e264b39d896d2c0",
+    "kind": "explicit",
+    "phase": "ready",
+    "createdAt": "2026-09-28T05:30:14.441Z",
+    "updatedAt": "2026-09-28T05:30:49.700Z",
+    "source": {
+      "sessionId": "01a0e67d-cbde-768b-ab3a-64d1deb29c11",
+      "entryId": "bd2b1063:948c465f2dc69e4cd0a6b4d01450278ee53b851e9e68c10c9b8dbb1e4d3aa90e",
+      "branchId": "bd2b1063",
+      "contentVersion": "b0fb07a3015393fdaed9087482f35bb8de6ec67020d1a5e1cfe4737485d650d1"
+    },
+    "factDigest": "948c465f2dc69e4cd0a6b4d01450278ee53b851e9e68c10c9b8dbb1e4d3aa90e",
+    "readyMs": 35259,
+    "sourceContentReadInBrowser": true,
+    "savedText": "- 最后一行总是写\"星桥18验收完成\"作为验收标记"
+  },
+  "collectionRequests": [
+    {
+      "id": "3441c957-5f5f-4d29-9eb5-b32bc371250e",
+      "sessionId": "01a0e67d-cbde-768b-ab3a-64d1deb29c11",
+      "phase": "processed",
+      "createdAt": "2026-09-28T05:30:09.546Z",
+      "updatedAt": "2026-09-28T05:30:30.270Z",
+      "operationIds": [],
+      "selectionAttempts": 1,
+      "selectionDigest": "5ec440533496fb383f6a4d18525d8fb1ebb8c557c33574316ab7353613299a5f"
+    },
+    {
+      "id": "3c8864b8-06c3-4469-bb54-30cc83a241e5",
+      "sessionId": "01a0e67f-9d64-768b-ab3a-64d3e7cd3c45",
+      "phase": "processed",
+      "createdAt": "2026-09-28T05:32:10.669Z",
+      "updatedAt": "2026-09-28T05:32:36.349Z",
+      "operationIds": [],
+      "selectionAttempts": 1,
+      "selectionDigest": "1828ed2076c522378b33ec58108d8a0f8da5262bd60a26e38b4e49b4faccb186"
+    },
+    {
+      "id": "1f802d06-24cf-4b42-a6ea-94fea2d09150",
+      "sessionId": "01a0e67f-9d64-768b-ab3a-64d3e7cd3c45",
+      "phase": "processed",
+      "createdAt": "2026-09-28T05:35:14.016Z",
+      "updatedAt": "2026-09-28T05:35:29.938Z",
+      "operationIds": [],
+      "selectionAttempts": 1,
+      "selectionDigest": "90e18533c7887b1bd465d06c66268e6d9823ded808b83037ff327be7d856f85e"
+    }
+  ],
+  "newAutomaticOperations": 0,
+  "newChatRecall": "根据您的长期记忆，您的合成验收报告最后一行固定写：“星桥18验收完成”。",
+  "textArithmetic": {
+    "question": "7+5",
+    "answer": "12",
+    "passed": true
+  },
+  "bash": {
+    "actualTool": "bash",
+    "command": "ls",
+    "result": "uploads",
+    "passed": true
+  },
+  "image": {
+    "sameFixedSyntheticAsset": true,
+    "realUpload": true,
+    "actualTool": "read",
+    "uploadedAssetSha256": "837408bf3dda5ee8c4e3bc8795271e640950a204b446927e85a53609be5cee43",
+    "response": "左边是红色的椭圆形，右边是蓝色的正方形。",
+    "colorsOrderAndActualReadPassed": true,
+    "geometryNote": "The asset has a red circle; model called it an ellipse. Retain the unedited answer; do not claim exact shape accuracy."
+  },
+  "automaticCollectionRevokedAtHandoff": true,
+  "originalLightThemeRetained": true,
+  "screenshots": {
+    "overlap-ready.jpg": "1615bb9050c3d3b1f421fc0ea9cf0be5980cfdbf9ecf2c0cebd5fc2a295967a7",
+    "recall-bash.jpg": "56fa6fe6262c9cf0b49eb22d705563800eb3b3d0684cdb3e940d9f7e918d0d8e",
+    "image.jpg": "c3f0a529c0894a485388cd51cfae4e9c47c0aedbf8b789e245e70b902c63aaba"
+  },
+  "limits": [
+    "One current-image affected-path Browser observation; no three-repetition full AC-04 claim",
+    "Historical selector model deviation not reproduced by this Browser run",
+    "Frozen quality, independent real OA Bob, lifecycle fault matrix and real matched recovery/rollback remain open"
+  ],
+  "fullGoalComplete": false
+}

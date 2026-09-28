@@ -1767,3 +1767,49 @@ The bounded remaining execution order is in
 [the current acceptance runbook](issue477-remaining-acceptance.md). Existing
 applicable passes remain evidence; a configuration repair or code fix only
 triggers rechecks for the affected paths and the mandatory final release gates.
+
+### Same-source overlap guard and candidate 0.2.63 (2026-09-28)
+
+Read-only digest comparison establishes that the earlier automatic operation
+selected the exact explicit saved fact. Raw historical selection input/response
+was not captured, so whether the old model ignored or lacked its exclusion
+context remains unknown. Independent Pi PR #17 adds a receipt-bound exact-quote
+guard and keeps a combined saved/new quote retryable. Later source turns and
+independent facts remain eligible. It passed 264 extension tests and independent
+Standards/Spec reviews; the version bump automatically published `0.1.18`
+through GitHub Actions OIDC. The registry tarball matches the Dano lockfile and
+retains both Pi keywords. Six real MiMo probes pass on baseline and fixed
+versions, so the deterministic deviating-model regressions establish the guard's
+benefit; those real probes alone do not reproduce the historical failure.
+See the [package fix receipt](evidence/issue477-pi-0118-overlap-fix-20260928.json).
+
+Dano pins `0.1.18` and bumps the root/release version to `0.2.63`. The real
+Dockerfile built protected image
+`b771b66b5480acaf63dab0b4ddcf623c94fcc612169a8d1c420dd390a8fda629`.
+Only the exact package/version/lock/manifest inputs changed; the isolated Compose
+stack retains its named volumes, private configuration and trusted fixed entry.
+Type/Svelte, release manifest, full build and all 146 Vitest files pass:
+1750 passed, 1 skipped. Retained test attempts include the default Python's
+missing `httpx` and a multi-child Node integration test exceeding Vitest's 5s
+launcher deadline. A 15s launcher deadline leaves all assertions and product
+thresholds unchanged. At the user's request, `httpx==0.28.1` was installed in the
+default Python's user site; its 35 OA/Python tests also pass directly.
+See the [build receipt](evidence/issue477-0263-protected-build.json).
+
+The real OA-authenticated in-app Browser sent a stable synthetic fact with
+explicit-save intent while automatic collection was separately enabled. Exactly
+one explicit operation reached ready in 35.259 seconds, its source/document was
+read in the Browser, and automatic selection completed with no new operation.
+A fresh chat recalled the fact, answered `7+5=12`, and actually executed `bash
+ls`. The same fixed synthetic image was uploaded and read through the model's
+`read` tool; its answer preserves correct colors/order but calls the red circle
+an ellipse. Keep this original answer, without claiming exact geometric
+accuracy. The Browser then revoked automatic consent (revision 5); explicit
+memory and the original light theme remain enabled. The
+[Browser receipt](evidence/issue477-0263-overlap-browser-20260928.json) and
+screenshots in `evidence/issue477-0263-browser/` cover this affected path.
+
+This is one current-image observation, not a full semantic exclusion matrix,
+three-repetition lifecycle/fault gate, 80-case quality matrix, five-user matched
+workload, independent OA Bob, or matched real recovery/rollback completion.
+The remaining original gates stay in the current acceptance runbook.

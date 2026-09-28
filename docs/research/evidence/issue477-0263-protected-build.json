@@ -1,0 +1,72 @@
+{
+  "recordedOn": "2026-09-28",
+  "sourceBaseCommit": "02a5f77211984dc3dea2b2484c8f24b972a24126",
+  "sourceDelta": "Only exact Pi dependency, root patch version and release manifest changed in Docker build inputs; docs excluded by .dockerignore",
+  "inputSha256": {
+    "package.json": "327f325cc49767ac6f90731fb99cb5dc5e67191aa88c46937837ed0594e3230e",
+    "apps/dano/package.json": "12a7d899e4273917f7b04aded49c30e31569d0c1ecef36951d732e4f751d3f45",
+    "pnpm-lock.yaml": "07733abd9ed9a44c376ab8f74a2e3191dd64ed57d9ba4e18cf347f55f39c776e",
+    "deploy/memory-release.json": "1276dba5813ca8d6e671f01b388dabbb44d8730b5f420dd11cedc323f503663b"
+  },
+  "danoVersion": "0.2.63",
+  "piOpenVikingVersion": "0.1.18",
+  "image": "localhost/dano465-protected:0.2.63",
+  "imageId": "b771b66b5480acaf63dab0b4ddcf623c94fcc612169a8d1c420dd390a8fda629",
+  "checks": {
+    "typeAndSvelte": "passed, 0 errors/0 warnings",
+    "releaseManifest": "passed",
+    "fullBuild": "passed",
+    "frozenLockfileDockerBuild": "passed",
+    "fullVitest": {
+      "files": 146,
+      "passed": 1750,
+      "skipped": 1,
+      "durationSeconds": 151.36,
+      "launcher": "pnpm run test --maxWorkers=2 --testTimeout=15000; existing isolated httpx Python environment"
+    },
+    "defaultPythonAfterRequestedInstall": {
+      "httpx": "0.28.1",
+      "import": "passed",
+      "providerPythonTestsPassed": 35
+    }
+  },
+  "retainedTestFailures": [
+    {
+      "attempt": "initial full suite",
+      "passed": 1743,
+      "failed": 7,
+      "skipped": 1,
+      "causes": [
+        "6 default Python imports missing httpx",
+        "one URI integration test starts multiple Node children and exceeds the 5s test-runner deadline"
+      ]
+    },
+    {
+      "attempt": "two affected files with correct Python",
+      "passed": 107,
+      "failed": 1,
+      "cause": "same 5s URI test-runner deadline"
+    },
+    {
+      "attempt": "URI test with 15s test-runner deadline",
+      "passed": 1,
+      "assertionsUnchanged": true,
+      "testDurationMs": 6650
+    }
+  ],
+  "testTimeoutNote": "The 15s launcher deadline permits child-process integration assertions to finish. Product recall/save thresholds and frozen expectations are unchanged.",
+  "buildSkill": {
+    "tag": "v2.1.11",
+    "annotatedTagObject": "af4fffa9bc5a2ec35d27114cbcf0deacbcf05acf",
+    "commit": "3094fa558fce35a8373e45ed5a6c43362e206906",
+    "sha256": "8f65293274b24479ee9ec9ca84f24166c13848f59cd035baf17b0b80a49bfadf",
+    "routing": "read-only local Git mirror"
+  },
+  "composeUpgrade": {
+    "sameVolumes": true,
+    "entry": "https://localhost:18711/",
+    "permanentTrustedTlsReused": true,
+    "actualVersionAndHealthVerified": true
+  },
+  "fullGoalComplete": false
+}
