@@ -1,0 +1,77 @@
+{
+  "recordedAt": "2026-09-28T00:18:14.629167+00:00",
+  "sourceCommit": "fb99cafb1c1fe308fac903db94f7830d1650e3fc",
+  "danoVersion": "0.2.62",
+  "piOpenVikingVersion": "0.1.17",
+  "officialSdkVersion": "0.1.0",
+  "image": "localhost/dano465-protected:0.2.62",
+  "imageId": "1297fc14a8f8ae6ab5f5527fa5eec3a6b72378bccc2bf900be2e9f24fb7e925a",
+  "recoveryScriptSha256": "e71827d82374ede44a4685327cee72d693b2e26a58aa546039bd595b3277405e",
+  "checks": {
+    "typeAndSvelte": "passed, 0 errors/0 warnings",
+    "fullBuild": "passed",
+    "frozenOfflineInstall": "passed",
+    "releaseManifest": "passed",
+    "fullVitest": {
+      "files": 146,
+      "passed": 1750,
+      "skipped": 1,
+      "durationSeconds": 61.52
+    },
+    "recoveryTests": 83
+  },
+  "imageProbe": {
+    "version": "0.2.62",
+    "scriptSha256": "e71827d82374ede44a4685327cee72d693b2e26a58aa546039bd595b3277405e",
+    "pendingRuntimeFence": true,
+    "pendingCheckpointFence": true,
+    "nativeLockContention": true,
+    "nativeLockRelease": true,
+    "network": "none",
+    "synthetic": true
+  },
+  "reviews": {
+    "standards": "No remaining actionable finding; independent process lock contention and SIGKILL release checked",
+    "spec": "Original task/archive/source/diff and serialized replay P1 findings fixed; no new spec defect"
+  },
+  "buildRetries": [
+    {
+      "result": "failed",
+      "cause": "Podman VM disk full while committing dependency layer"
+    },
+    {
+      "result": "failed",
+      "cause": "Direct GitHub clone of fixed Skill source timed out"
+    },
+    {
+      "result": "passed",
+      "routing": "Read-only local Git mirror; original GitHub source and fixed tag unchanged",
+      "skillTag": "v2.1.11",
+      "skillCommit": "af4fffa9bc5a2ec35d27114cbcf0deacbcf05acf",
+      "skillSourceAndImageSha256": "8f65293274b24479ee9ec9ca84f24166c13848f59cd035baf17b0b80a49bfadf"
+    }
+  ],
+  "cleanup": {
+    "obsoleteNamedDanoImagesRemoved": [
+      "0.2.53 protected",
+      "0.2.54",
+      "0.2.55-default",
+      "0.2.57",
+      "0.2.58",
+      "0.2.59",
+      "0.2.60"
+    ],
+    "obsoleteDanoBuildStageHeadsRemoved": 9,
+    "imageStorageReportedBeforeGb": 20.25,
+    "imageStorageReportedAfterScopedRemovalGb": 7.537,
+    "measurementLimit": "Podman image accounting before new build; not host filesystem free-space measurement",
+    "probeContainers": "removed automatically; synthetic container runtime removed",
+    "retained": "current candidate, prior fallback, 0.2.55 rollback, existing OA stack, pinned official/base images, volumes, persistent TLS and model assets"
+  },
+  "limits": [
+    "No final Compose, real extraction, shared-ready volume rollback or credential-rotation acceptance in this receipt",
+    "No model-answer matrix or dual-user OA Browser acceptance",
+    "Missing source/task receipts still fail closed; must retain a matched full remote snapshot",
+    "Issue #477/#465 and PR #490 remain open; no release conclusion"
+  ]
+}

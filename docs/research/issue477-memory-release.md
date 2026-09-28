@@ -1602,3 +1602,20 @@ coverage now contains 83 tests. Both review axes found no remaining actionable
 defect in these changes. An independent two-process review probe also confirmed
 that killing a lock-holder releases the native lock and permits a subsequent
 checkpoint. These results do not replace real volume or Browser acceptance.
+
+The formal `0.2.62` protected image reports the matching product version and
+byte-identical recovery script; a disposable no-network container verified the
+compiled pending-seal runtime/checkpoint fences and actual native lock
+contention/release. Its synthetic runtime and probe containers were removed.
+An initial build exhausted VM storage: an explicit inventory and allowlist
+removed seven obsolete named Dano images and nine verified Dano build-stage
+heads, reducing reported image storage from 20.25 GB to 7.537 GB before the
+next build. The current OA stack stayed healthy, and fallback/rollback images,
+volumes, official bases, model assets and permanent TLS were retained.
+
+The next attempt hit the fixed Skill source's direct GitHub clone timeout.
+A read-only local mirror of that same `v2.1.11` tag completed the build;
+source and installed Skill SHA-256 matched. The
+[sanitized build receipt](evidence/issue477-0262-protected-build.json) records
+both failures, the exact image/source identity, cleanup, reviews and limits.
+This is an image/fence check, not a real-volume, model or Browser T-13 pass.
