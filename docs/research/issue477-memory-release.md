@@ -1857,3 +1857,35 @@ unchanged after the eventual local ready transition. Full healthy-save latency,
 and lifecycle gates stay open. The stopped evaluation container was removed;
 its dedicated runtime volume remains solely for the unfinished Goal's recovery
 work. The existing Browser stack and fixed entrypoint remain healthy.
+
+## Default-on memory and management-only UI (2026-09-28)
+
+The user's revised PRD/Spec defaults authenticated memory and configured
+automatic collection on, without a consent step. Untouched accounts persist both
+settings atomically before sessions and schedulers become visible. Explicit
+pause/opt-out survives restart and upgrade; policy changes rebind active
+collection with fresh boundaries. Anonymous sessions remain excluded.
+
+The header menu and dialog are now **Memory management**, exposing content,
+receipts, correction, forgetting, clear and export. Manual enable/pause and
+collection controls are temporarily hidden; trusted-host lifecycle APIs remain.
+The root/release version is `0.2.64`; Pi remains pinned to published `0.1.18`.
+The revised frozen fixture changes only three authorization expectations and
+candidate metadata; case counts, repetitions and thresholds remain unchanged.
+
+Type/Svelte checks report zero errors/warnings. All 146 Vitest files pass:
+1756 tests passed, one skipped. Seven recovery CLI input variants now run as
+separate cases with their original assertions and 5-second deadlines, avoiding
+one aggregate timeout. Initial failed attempts remain archived. Both independent
+Standards/Spec reviews of this delta report no findings.
+
+Five fresh synthetic authenticated users verified default-on settings with no
+initial settings mutation and no model calls. Restart retained both defaults and
+explicit opt-outs. The final protected image is
+`5c0794071128d4a62c381c6d216f9aab2982c07dd86f2039752353b0489e162c`;
+the existing OA Browser login, fixed ports, volumes, certificate and light theme
+were reused. One stable synthetic preference automatically reached ready in
+30.028 seconds and was read with its source in the management surface. This is
+one affected-path observation; complete quality/lifecycle/business/recovery
+gates remain open. Raw build/test attempts and the initial Browser screenshot
+are in the [brief receipt's archive](evidence/issue477-0264-managed-defaults-20260928.json).

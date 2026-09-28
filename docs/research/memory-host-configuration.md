@@ -60,17 +60,23 @@ The user runtime now drains the active delivery tick after settling its network
 client before releasing the worker. There is no local drain timeout that could
 be mistaken for completed persistence. Supervisor-level forced termination must
 still be treated as crash recovery, not a successful drain.
-Startup does not turn memory on, does not create remote identities and does not establish a
-production deployment or completed #465 acceptance.
+Startup initializes untouched authenticated accounts with memory enabled, without
+creating remote identities. Existing pause/collection settings remain unchanged.
+This does not establish production deployment or completed #465 acceptance.
 
 ## Optional automatic collection
 
 Add `collection` only when the protected deployment has a configured selector
-model. Omitting it preserves explicit memory without offering a new automatic
-grant. Configuration does not grant user consent: both main memory and the
-separate automatic switch still default off. Changing `collection.policyVersion`
-requires a new user grant. Keep that version tied to the reviewed selection
-policy, including any future trusted task-fact adapters.
+model. Omitting it preserves explicit memory without enabling collection.
+Untouched authenticated accounts default to memory on and, when configured,
+collection on in one durable transaction; there is no consent prompt. The browser exposes memory management only;
+manual enable/pause and collection controls are temporarily hidden. Trusted-host
+lifecycle controls remain available.
+Existing explicit pause or collection opt-out is preserved across restart and
+upgrade. Changing `collection.policyVersion` binds active collection to the new
+policy before schedulers start and stops old unsent automatic work. A paused
+collector binds the new policy on resume, using a fresh source boundary. Keep
+that version tied to the reviewed selection policy and trusted task-fact adapters.
 
 Example collection block (budgets are explicit administrator choices):
 
@@ -120,7 +126,8 @@ teardown. Model/provider errors never become browser-visible configuration.
 Keep this configuration in the protected memory file, never a Skill or user
 workspace. Without an approved contract, provider results remain excluded.
 Add or change a contract only with a new `collection.policyVersion`, so existing
-consent is invalidated before the new collector starts.
+active collection is rebound before the new collector starts, without
+reenabling a user-disabled collector.
 
 The following is a **synthetic contract**, not a shipped OA route. Replace it
 only after verifying the provider's actual response semantics:

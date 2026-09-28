@@ -9,7 +9,7 @@
   import ExtensionDialog from "./components/ExtensionDialog.svelte";
   import ReconnectBanner from "./components/ReconnectBanner.svelte";
   import ReauthenticationDialog from "./components/ReauthenticationDialog.svelte";
-  import MemorySettingsDialog from "./components/MemorySettingsDialog.svelte";
+  import MemoryManagementDialog from "./components/MemoryManagementDialog.svelte";
   import ThemeSettingsDialog from "./components/ThemeSettingsDialog.svelte";
   import { hasActiveCenterFocusStage } from "./layout/centerFocusStage";
   import {
@@ -69,7 +69,7 @@
   let leftSidebarCollapsed = $state(false);
   let outlineSidebarOpen = $state(false);
   let themeSettingsOpen = $state(false);
-  let memorySettingsOpen = $state(false);
+  let memoryManagementOpen = $state(false);
   let newSessionPending = $state(false);
   let activeRightSidebarTabId = $state<RightSidebarTabId>(TREE_TAB_ID);
   let fileViewerTabs = $state<FileViewerTab[]>([]);
@@ -1223,7 +1223,7 @@
       {showNewSession}
       authentication={bridge.authentication}
       onOpenTheme={openThemeSettings}
-      onOpenMemory={() => { memorySettingsOpen = true; }}
+      onOpenMemory={() => { memoryManagementOpen = true; }}
       onLogin={bridge.login}
       onLogout={bridge.logout}
     />
@@ -1340,11 +1340,11 @@
     onDismiss={handleDismissNotification}
   />
 
-  <MemorySettingsDialog open={memorySettingsOpen}
+  <MemoryManagementDialog open={memoryManagementOpen}
     authenticated={bridge.authentication.status === "authenticated"}
-    url={bridge.memorySettingsUrl} operationsUrl={bridge.memoryOperationsUrl}
+    operationsUrl={bridge.memoryOperationsUrl}
     governanceUrl={bridge.memoryGovernanceUrl} exportUrl={bridge.memoryExportUrl} themeStyle={allStyle}
-    onClose={() => { memorySettingsOpen = false; }} />
+    onClose={() => { memoryManagementOpen = false; }} />
 
   <ThemeSettingsDialog
     open={themeSettingsOpen}

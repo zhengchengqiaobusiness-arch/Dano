@@ -1,0 +1,78 @@
+{
+  "recordedOn": "2026-09-28",
+  "danoVersion": "0.2.64",
+  "piOpenVikingVersion": "0.1.18",
+  "imageId": "5c0794071128d4a62c381c6d216f9aab2982c07dd86f2039752353b0489e162c",
+  "defaultsProbeImageId": "90dd33d99bac0569e1da8550ad3c2dd9b5f55a45722becb5631761cbf5aac7a6",
+  "defaultsProbe": {
+    "authenticatedSyntheticUsers": 5,
+    "initialSettingsMutations": 0,
+    "defaultMemoryEnabled": 5,
+    "defaultAutomaticCollectionEnabled": 5,
+    "policyBound": 5,
+    "restartRetainsDefaults": true,
+    "explicitCollectionOptOutRetained": true,
+    "explicitMemoryPauseRetained": true,
+    "cliEntrypoint": true,
+    "observer": false,
+    "modelCalls": 0,
+    "realOAuthBrowserIdentity": false,
+    "disposableContainerAndVolumeRemoved": true
+  },
+  "browser": {
+    "surface": "Codex in-app Browser",
+    "entry": "https://localhost:18711/",
+    "existingOaLoginAndTrustedCertificateReused": true,
+    "originalLightThemeRetained": true,
+    "menuAndDialogTitle": "记忆管理",
+    "manualMemoryAndCollectionControlsVisible": false,
+    "contentSourceAndManagementActionsVisible": true,
+    "freshAccountDefaultsEstablishedByBrowser": false,
+    "automaticSave": {
+      "id": "ee78177c1c2314e9406c6f5833e5c32a11af8a4b399a5b36da5a0a9abf534a08",
+      "phase": "ready",
+      "createdAt": "2026-09-28T07:19:45.124Z",
+      "updatedAt": "2026-09-28T07:20:15.152Z",
+      "readyMs": 30028,
+      "savedText": "- 固定的月报标题格式为“晨光29月报”",
+      "sourceSessionId": "01a0e6e1-f3dc-7221-b223-fed85cd01b28",
+      "contentAndSourceReadInManagementSurface": true,
+      "noExplicitSaveToolInSourceConversation": true
+    },
+    "newConversationRecall": "根据长期记忆，你的合成月报标题格式是 “晨光29月报”。",
+    "bash": { "command": "ls", "actualToolExecuted": true, "result": "uploads" },
+    "image": {
+      "realUpload": true,
+      "uploadCount": 1,
+      "assetSha256": "837408bf3dda5ee8c4e3bc8795271e640950a204b446927e85a53609be5cee43",
+      "modelRecognizedShapesColorsAndOrder": true,
+      "actualWhiteBackgroundCalledBlack": true
+    },
+    "modelAttempts": "Initial stable-fact attempt produced thinking without visible text; arithmetic retry completed. Later automatic fact saved. Combined image/bash reply was interrupted after bash; continuation recalled the fact and returned the tool result. Original failures retained."
+  },
+  "checks": {
+    "typeAndSvelteErrors": 0,
+    "typeAndSvelteWarnings": 0,
+    "vitestFilesPassed": 146,
+    "vitestTestsPassed": 1756,
+    "vitestTestsSkipped": 1,
+    "managementRelatedTestsPassed": 14,
+    "standardsFindings": 0,
+    "specFindings": 0,
+    "livePrdAndSpecExactReadback": true
+  },
+  "archive": {
+    "root": "/Users/joseph/tmp/dano465-acceptance-archive/20260928T073325Z-managed-defaults-0264",
+    "members": 25,
+    "archiveSha256": "cc3d36077c1544e2febccecb3a5e55e71d7b332ce421a4f0114b8cc4e4646aa8",
+    "manifestSha256": "6b3e8f8cbc07b961736eea69b033d3be537ec1052203bfa0ee66801f1be17bd3",
+    "supplementSha256": "8f632be1f81df0a6f5ac1c5b6fb46d02980c3817573c29db952cd8614f03960a"
+  },
+  "limits": [
+    "Fresh-default protocol probe and real OA Browser observation cover different owners",
+    "One affected-path Browser observation does not establish the full repeated quality, lifecycle, dual-user/business or recovery/rollback gates",
+    "Prior 0.2.63 protocol quality remains historical evidence; revised 0.2.64 frozen matrix is not complete",
+    "No production deployment; current isolated Browser stack retained for the unfinished Goal"
+  ],
+  "fullGoalComplete": false
+}

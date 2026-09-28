@@ -115,14 +115,27 @@ export class UserMemoryRuntime implements UserMemoryControls {
     const runtime = new UserMemoryRuntime(store, client, { ...options, collection }, context, join(stateDirectory, "memory"), sessionRoot);
     runtime.#taskFacts = taskFacts;
     try {
-      // Runtime creation completes before this user's authenticated controls or
-      // sessions are published by UserRuntimeRegistry. Invalidate an obsolete
-      // grant before either scheduler can claim work under the new host policy.
+      // Initialize untouched accounts before controls/sessions or schedulers
+      // become visible. One durable transaction keeps both defaults together;
+      // existing pause/collection settings are never replaced on restart.
       const state = await store.read();
       runtime.#retired = Boolean(state.retirement);
-      if (state.authorization.automaticCollection && (!collection
-        || state.authorization.collectionConsent?.policyVersion !== collection.policyVersion)) {
+      if (!runtime.#retired && state.revision === 0) {
+        const boundaries = await runtime.#collection?.sessions.boundaries(
+          AbortSignal.timeout(collection!.lifecycleTimeoutMs)) ?? [];
+        await store.transact(current => {
+          if (current.revision !== 0 || current.retirement) return;
+          const effectiveAt = new Date().toISOString();
+          current.authorization = { ...current.authorization, enabled: true,
+            epoch: current.authorization.epoch + 1, effectiveAt,
+            automaticCollection: Boolean(collection),
+            ...(collection ? { collectionConsent: { policyVersion: collection.policyVersion,
+              scope: null, revision: 1, effectiveAt, boundaries } } : {}) };
+        });
+      } else if (state.authorization.automaticCollection && !collection) {
         await runtime.#delivery.revokeCollection();
+      } else if (!runtime.#retired && state.authorization.enabled) {
+        await runtime.#refreshCollectionPolicy();
       }
       runtime.#scheduler.start();
       runtime.#governanceScheduler.start();
@@ -196,6 +209,7 @@ export class UserMemoryRuntime implements UserMemoryControls {
         this.#assertOpen();
         if (!state.authorization.enabled) await this.#delivery.enable(this.#options.policyVersion,
           await this.#collection?.sessions.boundaries(AbortSignal.timeout(this.#options.collection!.lifecycleTimeoutMs)) ?? []);
+        await this.#refreshCollectionPolicy();
       } else await this.#delivery.pause();
     });
     this.#settings = pending.catch(() => {});
@@ -221,7 +235,18 @@ export class UserMemoryRuntime implements UserMemoryControls {
       } } : {}) };
   }
 
-  /** Separate consent, bound to the policy actually shown by the authenticated UI. */
+  async #refreshCollectionPolicy(): Promise<void> {
+    const configuration = this.#options.collection;
+    if (!configuration || !this.#collection) return;
+    const state = await this.#store.read();
+    if (state.authorization.enabled && state.authorization.automaticCollection
+      && state.authorization.collectionConsent?.policyVersion !== configuration.policyVersion) {
+      await this.#delivery.authorizeCollection({ policyVersion: configuration.policyVersion, scope: null,
+        boundaries: await this.#collection.sessions.boundaries(AbortSignal.timeout(configuration.lifecycleTimeoutMs)) });
+    }
+  }
+
+  /** Authenticated settings switch; policy binding is independent of user consent. */
   setAutomaticCollection(enabled: boolean, policyVersion?: string): Promise<void> {
     if (typeof enabled !== "boolean" || (enabled && (!policyVersion || typeof policyVersion !== "string"))
       || (!enabled && policyVersion !== undefined)) return Promise.reject(new Error("INVALID_MEMORY_SETTING"));

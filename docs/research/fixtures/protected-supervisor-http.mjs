@@ -53,6 +53,7 @@ const primaryUsers = actualMemoryService
   : ['alice-fixture', 'bob-fixture'];
 const memoryFailure = process.argv.includes('--memory-failure');
 let memoryAccountId, corruptOwnerPath, realModel, rotation;
+let collectionConfigured = false;
 let memoryHttpBoundaryProbes = 0;
 if (memoryFailure) assert(realService, 'Memory failure check requires the real model/service configuration');
 if (realMemoryService) assert(withMemory && useCli, 'Real memory service mode requires --cli --memory');
@@ -115,6 +116,7 @@ if (withMemory) {
     config.requestTimeoutMs = 5000;
   }
   const path = join(options.memoryConfigDirectory, 'memory-service.json');
+  collectionConfigured = Boolean(config.collection);
   memoryAccountId = config.accountId;
   await writeFile(path, JSON.stringify(config), { mode: 0o600 }); await chown(path, hostUid, hostGid);
   if (realMemoryService) {
@@ -245,10 +247,11 @@ try {
         assert.equal(response.status, 503);
         continue;
       }
-      const state = await settings(entry); assert.equal(state.enabled, false); assert.equal(state.automaticCollection, false);
+      const state = await settings(entry); assert.equal(state.enabled, true);
+      assert.equal(state.automaticCollection, collectionConfigured);
     }
     if (!memoryFailure) assert.equal((await settings(clients[0], true)).enabled, true);
-    assert.equal((await settings(clients[1])).enabled, false);
+    assert.equal((await settings(clients[1], false)).enabled, false);
     if (realMemoryService) {
       for (const entry of clients) {
         const exported = await fetch(`${origin}/api/clients/${entry.client.id}/memory/export`, {

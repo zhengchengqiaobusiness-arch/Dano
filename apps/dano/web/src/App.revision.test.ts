@@ -112,7 +112,7 @@ vi.mock("./components/ReauthenticationDialog.svelte", async () => ({
 vi.mock("./components/ThemeSettingsDialog.svelte", async () => ({
   default: (await import("./test/EmptyComponentHarness.svelte")).default,
 }));
-vi.mock("./components/MemorySettingsDialog.svelte", async () => ({
+vi.mock("./components/MemoryManagementDialog.svelte", async () => ({
   default: (await import("./test/EmptyComponentHarness.svelte")).default,
 }));
 vi.mock("./layout/AppHeader.svelte", async () => ({

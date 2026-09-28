@@ -1,13 +1,21 @@
 # #465 remaining acceptance
 
-Updated 2026-09-28. This records the unfinished original PRD/Spec gates; it
+Updated 2026-09-28. This records the unfinished PRD/Spec gates, including the user-approved default-on revision; it
 does not add release requirements. #473–476 are closed; #477, #465 and Draft
 [PR #490](https://github.com/zhengchengqiaobusiness-arch/Dano/pull/490) remain open.
 The full historical AC/T ledger is [here](issue477-memory-release.md).
 
 ## Fixed inputs and retained passes
 
-- Candidate Dano `0.2.63`, published `pi-openviking@0.1.18`, official
+- Candidate Dano `0.2.64`, published `pi-openviking@0.1.18`, official
+  OpenViking `v0.4.20`. Current protected image
+  `5c0794071128d4a62c381c6d216f9aab2982c07dd86f2039752353b0489e162c`
+  contains default-on initialization and the management-only Browser surface.
+  Five fresh synthetic accounts verified both defaults without settings writes;
+  restart preserved explicit pause/opt-out. The real OA Browser shows automatic
+  ready content and its source. These affected-path checks do not close the full
+  matrix; see the [current summary](evidence/issue477-0264-managed-defaults-20260928.json).
+- Retained prior Dano `0.2.63` / `pi-openviking@0.1.18`, official
   OpenViking `v0.4.20`. Built protected image
   `b771b66b5480acaf63dab0b4ddcf623c94fcc612169a8d1c420dd390a8fda629`
   completed the affected Browser rerun, new-chat recall, text/bash and actual
@@ -30,7 +38,7 @@ The full historical AC/T ledger is [here](issue477-memory-release.md).
 
 | Group | Next concrete checks | Completion evidence |
 |---|---|---|
-| 1. Collection, lifecycle and Browser | Finish semantic exclusion, pause/claim/in-flight, revoked consent, reconnect/branch/dispose cases beyond the completed same-source overlap rerun. Complete independent real OA Bob and existing business authorization/form/Skill regressions. | Current real entrypoint receipts, separate identities, source/task records and rendered Browser proof; original repetition requirements still apply. |
+| 1. Collection, lifecycle and Browser | Finish semantic exclusion, pause/claim/in-flight, explicitly disabled collection, reconnect/branch/dispose cases beyond the completed same-source overlap rerun. Complete independent real OA Bob and existing business authorization/form/Skill regressions. | Current real entrypoint receipts, separate identities, source/task records and rendered Browser proof; original repetition requirements still apply. |
 | 2. Frozen quality and performance | Run the frozen 80 cases three times on the current pair. Run the matched complete on/off workload of at least 100 requests with five concurrent users. | Every attempt, model answers/source review, actual token counts, cold/steady latency, save-ready latency and matched cost. Apply the existing Spec thresholds without filtering failures. |
 | 3. Real recovery and rollback | On isolated synthetic owners, finish live shared-document sealing, matched old-volume restoration, new/old queues through ready, clear plus newer writer, OpenViking USER credential rotation, candidate upgrade and matched old-image rollback. | Exact binary/volume/checkpoint identities, public service receipts, final content/source readback, deletion non-revival and owner isolation. Synthetic overlays alone do not close this gate. |
 | 4. Release audit and closure | Reconcile AC-01–13/T-01–14 against current evidence, review any resulting code changes, finish upstream PR/merge/closure and scoped cleanup. | No unexplained failed hard constraint or unfinished mandatory gate; merged upstream PR, #477/#465 closure, remote branch removal and cleanup receipt. |
@@ -72,8 +80,9 @@ AC-04. See the [current Browser receipt](evidence/issue477-0263-overlap-browser-
 - Dano real service: reuse `protected-supervisor-http.mjs`; its synthetic
   authenticated protocol proof does not replace real OA Browser identity.
 - Quality: `fixtures/issue477-evaluation.json`, SHA-256
-  `8c1ad95d69ab6f58e601d48b353aeea60b63365a65a507de917ed5bc9bca250c`.
-  Keep expectations frozen. Old candidate reports cannot establish current-pair
+  `58e0a812fdf684e35896d78ddae042233e44f55b256ba0b3f698dfddbc222af0`.
+  Keep the revised expectations frozen. Historical runs retain their original
+  fixture hashes. Old candidate reports cannot establish current-pair
   quality or matched workload completion.
 - Recovery: use the shipped operator recovery commands and existing public-API
   recovery fixtures. Check ownership, exact image, matching volumes and current
@@ -99,7 +108,7 @@ thresholds and the unfinished gates above remain unchanged.
 
 ## Latest protocol measurement
 
-The current pair completed 90 recall/irrelevant attempts plus matched 100 on and
+The prior `0.2.63` / `0.1.18` pair completed 90 recall/irrelevant attempts plus matched 100 on and
 100 off requests across five synthetic users. [The brief summary](evidence/issue477-0263-quality-workload-summary-20260928.json)
 retains original failures, source-scorer limitations and independent public source
 review. This is partial evidence: 50 frozen cases x3 remain unexecuted here;
@@ -107,3 +116,26 @@ healthy-save latency, total model cost, all lifecycle waiting, canonical rendere
 profile/Browser identity and the remaining Group 1/3/4 checks still need evidence.
 Use the existing authorized credentials, rendered profile and retained synthetic
 runtime for the next relevant check; do not replace failures with a clean-only run.
+
+## Default-on requirement revision
+
+On 2026-09-28 the user explicitly replaced default-off/separate consent with
+memory and configured automatic collection on by default. The live [PRD](https://github.com/zhengchengqiaobusiness-arch/Dano/issues/465)
+and [Spec](https://github.com/zhengchengqiaobusiness-arch/Dano/issues/465#issuecomment-5674833976)
+now require no consent step, preservation of explicit pause/opt-out, and fresh
+source boundaries without historical backfill. Historical default-off receipts
+remain historical results. The [revised frozen input](fixtures/issue477-evaluation.json)
+changes only A-01/A-02/A-06 scenarios and candidate metadata; the previous input is retained byte-for-byte in the protocol archive
+`20260928T061907Z-formal-0263` as `cases.json` and in Git history; all raw
+attempts remain intact. Counts, repetition requirements, quality,
+latency and cost thresholds are unchanged. The old Goal text's separate-consent
+clause is superseded by this user instruction.
+
+### Management entry revision
+
+The user's subsequent instruction hides manual memory/collection configuration
+and renames the remaining menu/dialog to **Memory management**. The browser
+surface exposes receipts, content, correction, forgetting, clear and export.
+Default-on initialization and trusted-host lifecycle controls remain in place;
+UI switch checks are superseded by management-only rendering checks. Internal
+pause/resume, queue and isolation checks remain required.
