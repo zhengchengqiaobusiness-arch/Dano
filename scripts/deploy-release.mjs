@@ -34,7 +34,13 @@ const nginxSharedDir = join(deployDir, "nginx/shared");
 const exposureComposeFile = join(deployDir, "docker-compose.exposure.yml");
 const envPath = join(deployDir, ".env");
 const exposure = resolveDeploymentExposure(process.env, { baseDir: deployDir });
-const runtimeOwner = "1000:1000";
+const savedRuntimeEnv = existsSync(envPath) ? readEnvValues(readFileSync(envPath, "utf8")) : new Map();
+const hostId = name => {
+  const value = process.env[name] || savedRuntimeEnv.get(name) || "1000";
+  if (!/^[1-9][0-9]*$/.test(value)) throw new Error(`Invalid ${name}`);
+  return value;
+};
+const runtimeOwner = `${hostId("DANO_HOST_UID")}:${hostId("DANO_HOST_GID")}`;
 const defaultNpmRegistry = "https://mirrors.cloud.tencent.com/npm/";
 const oauthCredentialKeyName = "DANO_OAUTH_CREDENTIAL_KEY";
 const oauthCredentialKeyVersionName = "DANO_OAUTH_CREDENTIAL_KEY_VERSION";
@@ -48,7 +54,12 @@ const aptMirror = process.env.DANO_APT_MIRROR;
 let buildDir;
 let unlock;
 const productNameOverlay = join(deployDir, "docker-compose.product-name.json");
-const productNameArgs = () => existsSync(productNameOverlay) ? ["-f", productNameOverlay] : [];
+const memoryArgs = () => {
+  const values = existsSync(envPath) ? readEnvValues(readFileSync(envPath, "utf8")) : new Map();
+  return (process.env.DANO_MEMORY_CONFIG_DIR || values.get("DANO_MEMORY_CONFIG_DIR"))?.trim()
+    ? ["-f", "docker-compose.memory.yml"] : [];
+};
+const productNameArgs = () => [...memoryArgs(), ...(existsSync(productNameOverlay) ? ["-f", productNameOverlay] : [])];
 
 function output(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -100,7 +111,8 @@ function requireValue(name, value) {
 function prepareRuntimeDir() {
   mkdirSync(runtimeDir, { recursive: true });
   chmodSync(runtimeDir, 0o755);
-  run("chown", ["-R", runtimeOwner, runtimeDir]);
+  // Worker ownership below this root is persistent; never reset it on redeploy.
+  run("chown", [runtimeOwner, runtimeDir]);
 }
 
 function ensureOAuthCredentialEncryption() {
@@ -169,6 +181,7 @@ try {
   prepareRuntimeDir();
   mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
   cpSync(join(buildDir, "docker-compose.yml"), join(deployDir, "docker-compose.yml"));
+  cpSync(join(buildDir, "deploy/compose/memory.yml"), join(deployDir, "docker-compose.memory.yml"));
   cpSync(
     join(buildDir, `deploy/compose/${exposure.mode}.yml`),
     exposureComposeFile,
@@ -209,6 +222,7 @@ try {
       "run",
       "--rm",
       "--no-deps",
+      "--user", runtimeOwner,
       "--entrypoint",
       "node",
       "app",
@@ -241,6 +255,7 @@ try {
       "run",
       "--rm",
       "--no-deps",
+      "--user", runtimeOwner,
       "--entrypoint",
       "node",
       "app",
@@ -254,7 +269,7 @@ try {
   // Independent read-back gate: no container switch on render or check failure.
   run(composeBin, [...composeArgs, "-f", "docker-compose.yml", "-f",
     "docker-compose.exposure.yml", ...productNameArgs(), "--env-file", ".env",
-    "run", "--rm", "--no-deps", "--entrypoint", "node", "app",
+    "run", "--rm", "--no-deps", "--user", runtimeOwner, "--entrypoint", "node", "app",
     "./deploy/system-prompt.mjs", "check", ...expectedNameArgs], { cwd: deployDir });
 
   const finalIdentity = await preflightProductIdentity(buildDir, deployDir, identity.targetSha);

@@ -299,96 +299,42 @@ and a new chat recalled the replacement. See the release manifest for the
 current version pair and [the #477 evidence](../docs/research/issue477-memory-release.md)
 for its remaining acceptance gates.
 
-### Protected image entry
+### Unified container entry and memory storage
 
-Build the opt-in supervisor target from the same repository Dockerfile:
+Build and start the normal image with the existing Release Build / Compose entry.
+There is no separate protected image target, alternate startup command or protected
+Compose overlay. The image starts a small root supervisor, which runs Dano as UID/GID
+1000 and assigns distinct worker identities internally. The HTTP host supervises
+open-websearch. Ordinary local development commands remain unchanged.
 
-```sh
-podman build --target protected-runtime -t dano-protected:acceptance .
-```
+The existing runtime mount and `DANO_SESSIONS_ROOT` remain authoritative. With the
+standard Compose file, sessions stay at `/opt/dano/runtime-data/.dano/sessions` and
+workspaces stay under the existing `users` tree. The initializer does not move or
+rewrite session JSONL. First adoption accepts existing host-owned user/session data;
+a missing/corrupt identity registry after adoption fails closed. Back up the `host-state`
+volume together with runtime data so allocated worker identities survive recreation.
 
-This target starts `node ./dist/server/protected-main.js` as the root supervisor.
-After dropping privileges, the HTTP host starts the local `open-websearch`
-daemon and waits for readiness before starting Dano. It stops the daemon during
-shutdown and stops Dano with a failure exit code if the daemon exits unexpectedly.
-The daemon uses `OPEN_WEBSEARCH_HOST` and `OPEN_WEBSEARCH_PORT`, with the same
-loopback defaults as the ordinary container entrypoint.
-Supply one root-owned supervisor JSON path as the container command. The
-supervisor validates installation/configuration ownership, prepares the isolated
-user roots and drops the HTTP host to the configured non-root UID/GID. See
-[the supervisor configuration contract](../docs/research/protected-supervisor-cli.md)
-and [private memory configuration](../docs/research/memory-host-configuration.md).
-Do not put credentials in the image, command line or supervisor JSON.
+The independent `host-state` volume at `/var/lib/dano-host` holds worker identities,
+private per-user settings, memory credentials, delivery state and operation receipts.
+It is not a second memory database. OpenViking owns memory documents and indexes.
+Pending delivery/correction payloads may contain content needed for reliable replay.
+The separate memory-recovery volume retains deletion/revocation records across rollback.
+Do not restore it to an older snapshot when restoring OpenViking or host state.
 
-Provision the supervisor file and host-private configuration with the required
-Linux ownership; a macOS bind mount does not establish that ownership. Use
-dedicated Linux named volumes for user runtime/state and keep private config
-separate. Production enablement remains gated on the full #465 acceptance,
-including governance, real-service/browser flows and backup/rollback. This
-target supplies the executable image entry; it does not provision the complete
-deployment automatically.
+Enable memory with the existing optional `deploy/compose/memory.yml` service overlay.
+Set `DANO_MEMORY_CONFIG_DIR` to a host directory containing the private
+`memory-service.json` and tokenizer assets (owned by container host UID/GID, directory
+0700 and files 0600). It mounts read-only at `/etc/dano-memory`. Configure the existing
+OpenViking/model/recovery volumes documented above. This overlay adds the backend
+services and private memory configuration; it does not replace the app image, command,
+runtime mount, session directory or upload directory.
 
-The default Dockerfile target remains `default-runtime`, inheriting the existing
-non-root app entrypoint. Selecting `protected-runtime` is explicit and does not
-change ordinary deployments.
-
-The protected entry does not run `docker-entrypoint.sh` or discover Skills from
-the mutable Agent Config Directory. List each image-owned Skill directory in
-the supervisor profile's `host.trustedSkillPaths`, using its absolute path
-under `/app` (for example,
-`/app/open-websearch-skill-seed/.agents/skills/open-websearch`). The supervisor
-verifies these paths are in the image installation, and the worker mounts them
-read-only. An empty list means the protected session has no Skills, even if a
-copy exists under the Agent Config Directory. Keep the Skill content and this
-allowlist in the same reviewed image/configuration release.
-
-For isolated Compose acceptance, append `deploy/compose/protected.yml` to the
-base Compose file and the selected exposure overlay. Set
-`DANO_PROTECTED_IMAGE`, `DANO_PROTECTED_CONFIG_VOLUME` and
-`DANO_PROTECTED_DATA_VOLUME` explicitly. Set `DANO_PROTECTED_UPLOAD_DIR` to an
-absolute path within the configured private host-state root so uploads are
-included with protected data rather than the base runtime bind mount.
-These are external Linux volumes;
-Compose does not create or initialize them and does not remove them on `down`.
-Record their exact names for deliberate acceptance cleanup and backup.
-When the memory overlay is enabled, also provision a distinct external
-`DANO_MEMORY_RECOVERY_VOLUME`. It is mounted at
-`/var/lib/dano-memory-recovery` and must be excluded from any rollback that
-restores older protected data or OpenViking snapshots. Own its root by the
-protected host UID/GID with mode 0700; keep its contents private.
-
-Provision `/etc/dano-protected/supervisor.json` as root-owned mode 0600, with
-root-owned non-writable ancestors. Provision `/etc/dano-protected/agent` and
-`/etc/dano-protected/memory` as host-UID/GID-owned mode 0700; credential files
-inside them must be mode 0600. Set the profile's `memoryConfigDirectory` to
-the latter path and `memoryRecoveryDirectory` to
-`/var/lib/dano-memory-recovery`; configure tokenizer asset paths explicitly. Put distinct
-runtime, session, host-state and identity roots beneath
-`/var/lib/dano-protected`; their ownership must satisfy the supervisor contract.
-If protected Skills invoke Python, put `/usr/local/lib/dano-python/bin` first
-in the profile's `broker.path`, ahead of the required system executable
-directories. The broker launches workers with this explicit path, so the
-image's `ENV PATH` does not supply the Python virtual environment to those
-workers. Verify `python -c 'import httpx'` through the authenticated Browser's
-model-triggered bash before running an OA Skill; a direct app-container shell
-uses a different environment and does not verify this boundary.
-For a fresh deployment, let the supervisor create those empty child roots.
-Never reuse a pre-existing identity range or initialize it against unrelated
-data. Configuration remains writable to the appropriate owner because Pi
-persists host settings, while the supervisor JSON remains root-owned.
-Before starting the protected host, render `/app/deploy/runtime-defaults/SYSTEM.md`
-into `/etc/dano-protected/agent/SYSTEM.md` with the image's
-`deploy/render-system-prompt.mjs --replace` as the configured host UID/GID.
-The protected entry bypasses the ordinary entrypoint, so a raw template would
-leave `{产品名称}` in the model prompt. Verify the deployed file has no
-placeholder and matches the effective product name, then confirm the identity
-in a fresh Browser chat.
-
-The existing OAuth configuration, nginx and exposure settings still apply.
-This overlay supplies no substitute identity provider and does not certify
-the browser, clean deployment or recovery gates. Its two private volumes are
-additional to the base deployment volumes; do not treat the base `workspaces`
-volume as the protected supervisor's user workspace root.
+Container resource defaults are in `container-profile.ts`. Deployment environment
+variables `DANO_HOST_UID`, `DANO_HOST_GID`, `DANO_MAX_WORKERS`, `DANO_WORKER_FIRST_UID`,
+`DANO_WORKER_FIRST_GID` and `DANO_WORKER_IDENTITY_COUNT` allow deliberate sizing.
+Never change an allocated identity range on an existing state volume. No credentials
+belong in these settings. The old supervisor CLI remains an internal test harness,
+not a second supported deployment path.
 
 ## Product Site Sidecar
 

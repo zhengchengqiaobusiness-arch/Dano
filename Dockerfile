@@ -110,22 +110,14 @@ RUN chmod +x ./deploy/docker-entrypoint.sh \
   && chown -R node:node /opt/dano /home/node
 
 EXPOSE 8080
-USER node
+USER root
 ENTRYPOINT ["./deploy/docker-entrypoint.sh"]
 CMD ["node", "./dist/server/main.js"]
 
-# Explicit opt-in for the root supervisor. It drops HTTP-host privileges before
-# loading Dano; secrets belong in the separately provisioned private config.
-FROM runtime AS protected-runtime
-USER root
+# Recovery tools share the single shipped runtime image.
 COPY apps/dano/runtime/replay-memory-deletions.mjs ./replay-memory-deletions.mjs
 COPY apps/dano/runtime/private-recovery-path.mjs ./private-recovery-path.mjs
 COPY apps/dano/runtime/bootstrap-memory-recovery.mjs ./bootstrap-memory-recovery.mjs
 COPY apps/dano/runtime/reconcile-memory-recovery.mjs ./runtime/reconcile-memory-recovery.mjs
 COPY apps/dano/runtime/replace-memory-user-key.mjs ./runtime/replace-memory-user-key.mjs
 COPY apps/dano/runtime/private-recovery-path.mjs ./runtime/private-recovery-path.mjs
-ENTRYPOINT ["node", "./dist/server/protected-main.js"]
-CMD []
-
-# An ordinary build keeps the existing non-root entrypoint and startup behavior.
-FROM runtime AS default-runtime

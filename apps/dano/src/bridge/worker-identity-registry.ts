@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, readdir, realpath, stat, type FileHandle } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, realpath, stat, type FileHandle } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { flock } from "fs-ext";
@@ -8,6 +8,7 @@ import { writeFile as atomicWrite } from "atomically";
 
 interface IdentityRange { firstUid: number; firstGid: number; count: number }
 interface StoredIdentities { version: 1; range: IdentityRange; owners: string[] }
+export interface LegacyHostData { roots: readonly string[]; uid: number; gid: number }
 export interface WorkerIdentity { readonly uid: number; readonly gid: number }
 
 const unavailable = () => new Error("WORKER_IDENTITIES_UNAVAILABLE");
@@ -46,9 +47,9 @@ export class WorkerIdentityRegistry {
 
   /** Before serving users, establish an empty pool only if all associated
    * persistent data roots are empty. Never recreate a lost pool over old data. */
-  async initialize(dataRoots: readonly string[]): Promise<void> {
+  async initialize(dataRoots: readonly string[], legacy?: LegacyHostData): Promise<void> {
     if (!dataRoots.length) throw unavailable();
-    await this.#update(undefined, undefined, dataRoots);
+    await this.#update(undefined, undefined, dataRoots, legacy);
   }
 
   /** Provisioning must not implicitly create a new pool. */
@@ -57,7 +58,7 @@ export class WorkerIdentityRegistry {
     try { await this.#checkFile(handle); } finally { await handle.close(); }
   }
 
-  async #update(owner?: string, signal?: AbortSignal, dataRoots?: readonly string[]): Promise<WorkerIdentity | undefined> {
+  async #update(owner?: string, signal?: AbortSignal, dataRoots?: readonly string[], legacy?: LegacyHostData): Promise<WorkerIdentity | undefined> {
     signal?.throwIfAborted();
     await mkdir(this.#directory, { mode: 0o700, recursive: true });
     if (await realpath(this.#directory) !== this.#directory) throw unavailable();
@@ -90,6 +91,18 @@ export class WorkerIdentityRegistry {
       if (!input && dataRoots) {
         for (const root of dataRoots) {
           if (await realpath(root) !== resolve(root) || (await readdir(root)).length) throw unavailable();
+        }
+        // First upgrade from the ordinary host is allowed only when every
+        // existing entry still belongs to that host. Never follow workspace
+        // symlinks or reuse IDs from a lost isolated deployment.
+        if (legacy) {
+          const pending = [...legacy.roots];
+          while (pending.length) {
+            const path = pending.pop()!;
+            const metadata = await lstat(path);
+            if (metadata.uid !== legacy.uid || metadata.gid !== legacy.gid) throw unavailable();
+            if (metadata.isDirectory()) for (const name of await readdir(path)) pending.push(join(path, name));
+          }
         }
       }
       if (input) {

@@ -37,11 +37,13 @@ const composeEnv = {
     ? { DANO_NGINX_SHARED_DIR: join(sourceRoot, "deploy/nginx/shared") }
     : {}),
 };
+const memoryComposeFile = usesReleaseAssets ? "docker-compose.memory.yml" : "deploy/compose/memory.yml";
 const composeFileArgs = [
   "-f",
   "docker-compose.yml",
   "-f",
   exposureComposeFile,
+  ...(process.env.DANO_MEMORY_CONFIG_DIR?.trim() ? ["-f", memoryComposeFile] : []),
   ...(existsSync("docker-compose.product-name.json") ? ["-f", "docker-compose.product-name.json"] : []),
 ];
 

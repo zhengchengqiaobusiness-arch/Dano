@@ -170,6 +170,7 @@ function runRelease(
       : tlsKeyPath;
 
   mkdirSync(join(fakeRepo, "deploy/compose"), { recursive: true });
+  writeFileSync(join(fakeRepo, "deploy/compose/memory.yml"), "services: {}\n");
   mkdirSync(join(fakeRepo, "deploy/nginx/shared"), { recursive: true });
   mkdirSync(join(fakeRepo, "scripts"), { recursive: true });
   mkdirSync(join(fakeRepo, "apps/dano/runtime"), { recursive: true });
@@ -701,8 +702,8 @@ writeFileSync(process.env.DANO_LOCAL_CONTAINER_LOG, JSON.stringify({
     expect(dockerfileText).toContain("chown -R node:node /opt/dano /home/node");
     expect(dockerfileText).toContain("chmod 4755 /usr/bin/bwrap");
     expect(dockerfileText).not.toContain("/tmp/dano");
-    expect(dockerfileText).toContain("USER node");
-    expect(dockerfileText.indexOf("USER node")).toBeGreaterThan(
+    expect(dockerfileText).toContain("USER root");
+    expect(dockerfileText.indexOf("USER root")).toBeGreaterThan(
       dockerfileText.indexOf("RUN sh ./deploy/apt-bootstrap.sh"),
     );
   });
@@ -1061,68 +1062,17 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     expect(existsSync(join(workspaceDir, ".pi"))).toBe(false);
   });
 
-  it("runs the local open-websearch daemon for the lifetime of the app", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "dano-open-websearch-entrypoint-"));
+  it("routes the ordinary container command through the internal supervisor", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "dano-container-entry-"));
     tempDirs.push(cwd);
-    const defaultsDir = join(cwd, "defaults");
-    const runtimeDir = join(cwd, "runtime-data");
-    const fakeBin = join(cwd, "node-bin");
-    const appPath = join(cwd, "dist/server/main.js");
-    const daemonStarted = join(cwd, "daemon-started");
-    const daemonStopped = join(cwd, "daemon-stopped");
-    const appStarted = join(cwd, "app-started");
-
-    mkdirSync(defaultsDir, { recursive: true });
     mkdirSync(join(cwd, "dist/server"), { recursive: true });
-    writeFileSync(join(defaultsDir, "SYSTEM.md"), "你是{产品名称}\n");
-    writeFileSync(join(defaultsDir, "settings.json"), "{}\n");
-    writeFileSync(join(defaultsDir, "heimdall.json"), "{}\n");
-    const path = nodeOnlyPath(cwd);
-    writeFileSync(
-      join(fakeBin, "open-websearch"),
-      `#!/bin/sh
-case "$1" in
-  serve)
-    : > "$DANO_TEST_DAEMON_STARTED"
-    trap ': > "$DANO_TEST_DAEMON_STOPPED"; exit 0' TERM INT
-    while :; do sleep 1; done
-    ;;
-  status)
-    test -f "$DANO_TEST_DAEMON_STARTED"
-    ;;
-  *)
-    exit 2
-    ;;
-esac
-`,
-    );
-    chmodSync(join(fakeBin, "open-websearch"), 0o755);
-    writeFileSync(
-      appPath,
-      `import { writeFileSync } from "node:fs";
-writeFileSync(process.env.DANO_TEST_APP_STARTED, "started");
-`,
-    );
-
-    execFileSync("sh", [entrypointFile], {
-      cwd,
-      env: {
-        ...process.env,
-        PATH: path,
-        DANO_RUNTIME_DEFAULTS_DIR: defaultsDir,
-        DANO_RUNTIME_DIR: runtimeDir,
-        DANO_PRODUCT_NAME: "测试助手",
-        DANO_SKILL_SEED_DIR: join(cwd, "missing-seed"),
-        DANO_TEST_DAEMON_STARTED: daemonStarted,
-        DANO_TEST_DAEMON_STOPPED: daemonStopped,
-        DANO_TEST_APP_STARTED: appStarted,
-      },
-      timeout: 10_000,
+    const received = join(cwd, "args.json");
+    writeFileSync(join(cwd, "dist/server/container-main.js"),
+      `require('node:fs').writeFileSync(process.env.DANO_ARGS_FILE, JSON.stringify(process.argv.slice(2)));`);
+    execFileSync("sh", [entrypointFile, "node", "./dist/server/main.js", "--sessions-root", "/existing/sessions"], {
+      cwd, env: { ...process.env, PATH: nodeOnlyPath(cwd), DANO_ARGS_FILE: received },
     });
-
-    expect(readFileSync(appStarted, "utf8")).toBe("started");
-    expect(existsSync(daemonStarted)).toBe(true);
-    expect(existsSync(daemonStopped)).toBe(true);
+    expect(JSON.parse(readFileSync(received, "utf8"))).toEqual(["--sessions-root", "/existing/sessions"]);
   });
 
   it("renders a missing system prompt from the configured product name", () => {
@@ -1253,7 +1203,6 @@ writeFileSync(process.env.DANO_TEST_APP_STARTED, "started");
     ]);
     expect(JSON.parse(logLines[1])).toEqual([
       "chown",
-      "-R",
       "1000:1000",
       runtimeDir,
     ]);
@@ -1268,6 +1217,7 @@ writeFileSync(process.env.DANO_TEST_APP_STARTED, "started");
       "run",
       "--rm",
       "--no-deps",
+      "--user", "1000:1000",
       "--entrypoint",
       "node",
       "app",
@@ -1285,6 +1235,7 @@ writeFileSync(process.env.DANO_TEST_APP_STARTED, "started");
       "run",
       "--rm",
       "--no-deps",
+      "--user", "1000:1000",
       "--entrypoint",
       "node",
       "app",

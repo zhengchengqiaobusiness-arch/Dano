@@ -1,4 +1,6 @@
-# Protected supervisor CLI
+# Protected supervisor CLI (internal harness)
+
+Production containers now use the unified entry described in [deployment](../../deploy/README.md#unified-container-entry-and-memory-storage). The material below records the original internal harness and historical acceptance; it is not a second deployment procedure.
 
 The built Linux root entry is:
 
@@ -6,7 +8,7 @@ The built Linux root entry is:
 node /path/to/dano/dist/server/protected-main.js /etc/dano/supervisor.json
 ```
 
-The repository also exposes `pnpm start:protected /etc/dano/supervisor.json`.
+The harness is invoked directly only by isolated process tests.
 Run inside the dedicated container/mount namespace required by the supervisor.
 The configuration file and its canonical ancestors must be root-owned and not
 writable by group or others. The launcher reads at most 1 MiB of JSON, validates

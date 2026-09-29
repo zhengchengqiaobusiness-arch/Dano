@@ -12,6 +12,13 @@ services:
       DANO_HOST: 0.0.0.0
       DANO_PORT: 8080
       DANO_RUNTIME_DIR: /opt/dano/runtime-data
+      DANO_HOST_DATA_DIR: /var/lib/dano-host
+      DANO_HOST_UID: ${DANO_HOST_UID:-1000}
+      DANO_HOST_GID: ${DANO_HOST_GID:-1000}
+      DANO_MAX_WORKERS: ${DANO_MAX_WORKERS:-16}
+      DANO_WORKER_FIRST_UID: ${DANO_WORKER_FIRST_UID:-10001}
+      DANO_WORKER_FIRST_GID: ${DANO_WORKER_FIRST_GID:-10001}
+      DANO_WORKER_IDENTITY_COUNT: ${DANO_WORKER_IDENTITY_COUNT:-50000}
       DANO_PRODUCT_NAME: ${DANO_PRODUCT_NAME:-}
       DANO_SESSIONS_ROOT: /opt/dano/runtime-data/.dano/sessions
       DANO_UPLOAD_DIR: /opt/dano/runtime-data/.dano/uploads
@@ -77,6 +84,7 @@ services:
       - "8080"
     volumes:
       - ${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/opt/dano/runtime-data
+      - host-state:/var/lib/dano-host
       - agent-config:/opt/dano/runtime-data/.pi
       - workspaces:/opt/dano/runtime-data/workspaces
       - ${DANO_SECRETS_DIR:-/opt/dano/deploy/.secrets}:/run/secrets:ro
@@ -121,5 +129,6 @@ networks:
     name: skillmanner_default
 
 volumes:
+  host-state:
   agent-config:
   workspaces:

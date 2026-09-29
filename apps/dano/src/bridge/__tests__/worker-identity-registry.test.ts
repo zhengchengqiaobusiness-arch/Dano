@@ -139,3 +139,30 @@ it("times out on a live holder and recovers the OS lock after that process dies"
     await exited;
   }
 }, 15000);
+
+it("adopts host-owned legacy sessions in place but refuses lost identity metadata", async () => {
+  const h = await harness(20, false);
+  const sessions = join(h.root, "sessions"), state = join(h.root, "private");
+  await mkdir(sessions); await mkdir(state);
+  const file = join(sessions, "old-session.jsonl");
+  const content = '{"type":"session","id":"existing"}\n';
+  await writeFile(file, content);
+  const legacy = { roots: [sessions], uid: process.getuid!(), gid: process.getgid!() };
+  await h.registry.initialize([state], legacy);
+  expect(await readFile(file, "utf8")).toBe(content);
+  await h.registry.get("alice");
+  await rm(join(h.options.directory, "allocations.json"));
+  await expect(h.registry.initialize([state], legacy)).rejects.toThrow("IDENTITIES_UNAVAILABLE");
+  expect(await readFile(file, "utf8")).toBe(content);
+});
+
+it("does not adopt foreign-owned data or an existing isolated private state", async () => {
+  const h = await harness(20, false);
+  const sessions = join(h.root, "sessions"), state = join(h.root, "private");
+  await mkdir(sessions); await mkdir(state);
+  await expect(h.registry.initialize([state], { roots: [sessions], uid: process.getuid!() + 1, gid: process.getgid!() }))
+    .rejects.toThrow("IDENTITIES_UNAVAILABLE");
+  await writeFile(join(state, "retained-memory-state"), "preserve");
+  await expect(h.registry.initialize([state], { roots: [sessions], uid: process.getuid!(), gid: process.getgid!() }))
+    .rejects.toThrow("IDENTITIES_UNAVAILABLE");
+});

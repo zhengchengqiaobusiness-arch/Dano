@@ -13,6 +13,8 @@ import { serveWorkerSupervisor } from "./worker-supervisor-rpc.js";
 import { parseProtectedHostProfile, type ProtectedHostProfile } from "./protected-host-profile.js";
 
 export interface ProtectedSupervisorOptions {
+  /** Internal unified-container upgrade; never accepted from an external profile. */
+  adoptLegacyHostData?: boolean;
   runtimeRoot: string;
   sessionsRoot: string;
   hostStateRoot: string;
@@ -126,7 +128,8 @@ export async function runProtectedSupervisor(options: ProtectedSupervisorOptions
     await provisionRoot(usersRoot, host.hostUid, host.hostGid, 0o711);
     await provisionRoot(options.sessionsRoot, host.hostUid, host.hostGid, 0o700);
     await provisionRoot(options.hostStateRoot, host.hostUid, host.hostGid, 0o700);
-    await identities.initialize([usersRoot, options.sessionsRoot, options.hostStateRoot]);
+    await identities.initialize(options.adoptLegacyHostData ? [options.hostStateRoot] : [usersRoot, options.sessionsRoot, options.hostStateRoot],
+      options.adoptLegacyHostData ? { roots: [usersRoot, options.sessionsRoot], uid: host.hostUid, gid: host.hostGid } : undefined);
     await prepareLinuxProcessPrivacy(host.hostUid, host.hostGid);
     signal?.throwIfAborted();
     const pool = new WorkerSupervisor({ usersRoot, hostStateRoot: options.hostStateRoot, identities,

@@ -2,9 +2,15 @@
 # persistent volume before starting this stack. Never publish port 1933.
 services:
   app:
+    depends_on:
+      openviking:
+        condition: service_healthy
     volumes:
+      - ${DANO_MEMORY_CONFIG_DIR:?DANO_MEMORY_CONFIG_DIR is required}:/etc/dano-memory:ro
       - memory-recovery:/var/lib/dano-memory-recovery
     environment:
+      DANO_MEMORY_CONFIG_DIR: /etc/dano-memory
+      DANO_MEMORY_RECOVERY_DIR: /var/lib/dano-memory-recovery
       NO_PROXY: ${DANO_MEMORY_NO_PROXY:-embedding,openviking,reranker,localhost,127.0.0.1}
       no_proxy: ${DANO_MEMORY_NO_PROXY:-embedding,openviking,reranker,localhost,127.0.0.1}
     networks:
