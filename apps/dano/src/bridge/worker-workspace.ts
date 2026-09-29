@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { createHash } from "node:crypto";
-import { mkdir, open, realpath, type FileHandle } from "node:fs/promises";
+import { lstat, mkdir, open, realpath, type FileHandle } from "node:fs/promises";
+import { adoptLegacyWorkspaceAccess } from "./legacy-workspace-access.js";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { WorkerIdentity, WorkerIdentityRegistry } from "./worker-identity-registry.js";
 export { WorkerIdentityRegistry } from "./worker-identity-registry.js";
@@ -60,7 +61,8 @@ async function policyFile(path: string, value: object, hostUid: number, workerGi
 /** Root supervisor operation. Inputs must come from its authenticated-owner
  * binding; never accept a User Folder or an arbitrary path from model tools.
  * Shared ancestors must already allow traversal; this function never opens
- * permissions on an existing runtime root or rewrites user file ownership. */
+ * permissions on an existing runtime root. Legacy workspace content is adopted
+ * once by its assigned identity; session and host configuration stay in place. */
 export async function provisionWorkerWorkspace(options: Options): Promise<{ workspace: string; agentDir: string; stateDir: string; identity: WorkerIdentity }> {
   if (process.platform !== "linux" || process.getuid?.() !== 0) throw new Error("PRIVILEGED_WORKSPACE_PROVISIONING_REQUIRED");
   const validId = (id: number) => Number.isSafeInteger(id) && id > 0 && id < 2 ** 32 - 1;
@@ -111,6 +113,15 @@ export async function provisionWorkerWorkspace(options: Options): Promise<{ work
   try {
     await ensure(user, identity.gid, 0o710);
     await ensure(workspaces, identity.gid, 0o710);
+    // Complete legacy content adoption before changing the root's GID. A
+    // failure leaves this marker unchanged, so the next start resumes safely.
+    let existing;
+    try { existing = await lstat(workspace); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    if (existing && existing.gid === options.hostGid) {
+      if (!existing.isDirectory() || existing.uid !== options.hostUid) throw unsafe();
+      await adoptLegacyWorkspaceAccess(workspace, options.hostUid, options.hostGid, identity.uid, identity.gid);
+    }
     // Sticky + setgid: the worker can manage its files but cannot replace the
     // host-owned .pi directory. New normal files retain the owner's worker GID.
     await ensure(workspace, identity.gid, 0o3770);

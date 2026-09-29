@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { containerProfile } from "./bridge/container-profile.js";
 import { runProtectedSupervisor } from "./bridge/protected-supervisor.js";
+import { snapshotOperatorSkills } from "./bridge/operator-skill-snapshot.js";
 
 const execute = promisify(execFile);
 
@@ -41,11 +42,16 @@ export async function runContainerMain(args: readonly string[], environment: Nod
   const env = { ...environment, PI_CODING_AGENT_DIR: agentDir };
   await execute(options.broker.privilegeGuard, ["--reuid", String(uid), "--regid", String(gid), "--clear-groups", "--",
     "/bin/sh", join(installation, "deploy/docker-entrypoint.sh"), "--initialize-only"], { env });
+  const skills = await snapshotOperatorSkills(installation, [
+    environment.DANO_SKILLS_DIR?.trim() || join(agentDir, "skills"),
+    join(options.runtimeRoot, ".agents/skills"),
+  ], uid);
+  options.host.trustedSkillPaths = skills.paths;
   const controller = new AbortController();
   const stop = () => controller.abort();
   process.on("SIGTERM", stop); process.on("SIGINT", stop);
   try { return await runProtectedSupervisor({ ...options, adoptLegacyHostData: true }, env, args, controller.signal); }
-  finally { process.off("SIGTERM", stop); process.off("SIGINT", stop); }
+  finally { process.off("SIGTERM", stop); process.off("SIGINT", stop); await skills.cleanup(); }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

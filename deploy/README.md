@@ -314,6 +314,15 @@ rewrite session JSONL. First adoption accepts existing host-owned user/session d
 a missing/corrupt identity registry after adoption fails closed. Back up the `host-state`
 volume together with runtime data so allocated worker identities survive recreation.
 
+On first workspace use, ordinary legacy files are assigned to that user's worker
+identity so editing, renaming and deleting remain possible. Their contents and paths
+stay unchanged; session records and host-owned `.pi` configuration are excluded.
+Operator Skills from `DANO_SKILLS_DIR` (default: the existing agent `skills` folder)
+and runtime `.agents/skills` are loaded from installation snapshots refreshed at
+container startup. Only Skill trees are published to workers read-only; adjacent
+agent credentials remain private. Skill trees must be regular operator-owned files
+and directories, without symbolic/hard links or group/world write access.
+
 The independent `host-state` volume at `/var/lib/dano-host` holds worker identities,
 private per-user settings, memory credentials, delivery state and operation receipts.
 It is not a second memory database. OpenViking owns memory documents and indexes.

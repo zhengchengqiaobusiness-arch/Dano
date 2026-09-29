@@ -5,6 +5,8 @@ services:
     depends_on:
       openviking:
         condition: service_healthy
+      reranker:
+        condition: service_healthy
     volumes:
       - ${DANO_MEMORY_CONFIG_DIR:?DANO_MEMORY_CONFIG_DIR is required}:/etc/dano-memory:ro
       - memory-recovery:/var/lib/dano-memory-recovery
