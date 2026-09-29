@@ -68,6 +68,61 @@ function emptyFromQuery(query) {
   return [...new URLSearchParams(text).entries()].filter(([, value]) => value === "").map(([key]) => key);
 }
 
+function parseJson(raw) {
+  if (raw && typeof raw === "object") return raw;
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function isUrl(value) {
+  return typeof value === "string" && /^https?:\/\//i.test(value.trim());
+}
+
+function walkFacts(value, path, lists, urls) {
+  if (urls.length > 1) return;
+  if (isUrl(value)) {
+    urls.push(path);
+    return;
+  }
+  if (Array.isArray(value)) {
+    const objects = value.filter((item) => item && typeof item === "object" && !Array.isArray(item));
+    if (objects.length >= 2) {
+      const keys = Object.keys(objects[0]).filter((key) => !/^_[A-Z0-9_]+$/.test(key)).slice(0, 12);
+      if (keys.length >= 2) lists.push({ result_path: path || "", keys, count: objects.length });
+    }
+    for (const item of value) walkFacts(item, path ? `${path}[]` : "[]", lists, urls);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, item] of Object.entries(value)) {
+    if (/^_[A-Z0-9_]+$/.test(key)) continue;
+    walkFacts(item, path ? `${path}.${key}` : key, lists, urls);
+  }
+}
+
+export function responseFacts(raw) {
+  if (isUrl(raw)) return { url_string: true, url_path: "" };
+  const parsed = parseJson(raw);
+  if (parsed == null) return {};
+  const lists = [];
+  const urls = [];
+  walkFacts(parsed, "", lists, urls);
+  const out = {};
+  if (lists.length) {
+    out.option_list = true;
+    out.records = lists.slice(0, 4);
+  }
+  if (urls.length === 1) {
+    out.url_string = true;
+    out.url_path = urls[0];
+  }
+  return out;
+}
+
 export function requestIndexRow(row) {
   const keys = new Set([
     ...keysFromPostData(row.post_data ?? row.body?.post_data),
@@ -90,6 +145,8 @@ export function requestIndexRow(row) {
     ...(issued ? { issues_credential: true } : {}),
     ...(actionId ? { action_id: actionId } : {}),
     ...(row.action ? { action: row.action } : {}),
+    ...responseFacts(row.response_body ?? row.body?.response_body),
+    ...observedSamples(row),
   };
 }
 
@@ -136,6 +193,25 @@ function collectValues(value, prefix, out) {
   if (!prefix) return;
   if (!out.has(prefix)) out.set(prefix, []);
   out.get(prefix).push(value == null ? "" : String(value));
+}
+
+const SECRET_KEY = /token|password|cookie|authorization|secret/i;
+
+export function observedSamples(row) {
+  const values = payloadValues(row);
+  const samples = {};
+  let count = 0;
+  for (const [key, list] of values) {
+    if (count >= 40) break;
+    count += 1;
+    samples[key] = SECRET_KEY.test(key)
+      ? ["[redacted]"]
+      : list.slice(0, 2).map((item) => {
+        const text = String(item ?? "");
+        return text.length > 48 ? `${text.slice(0, 48)}…` : text;
+      });
+  }
+  return Object.keys(samples).length ? { samples } : {};
 }
 
 function payloadValues(row) {
@@ -411,6 +487,13 @@ export function collapseRequestIndex(rows) {
     const added = new Set([...(prev.added_keys || []), ...(row.added_keys || [])]);
     if (added.size) prev.added_keys = [...added];
     else delete prev.added_keys;
+    if (row.option_list) prev.option_list = true;
+    if (Array.isArray(row.records) && row.records.length && !prev.records) prev.records = row.records;
+    if (row.url_string && !prev.url_string) {
+      prev.url_string = true;
+      if (row.url_path) prev.url_path = row.url_path;
+    }
+    if (row.samples && typeof row.samples === "object") prev.samples = { ...(prev.samples || {}), ...row.samples };
     rememberChanges(prev, row);
   }
   return [...grouped.values()];

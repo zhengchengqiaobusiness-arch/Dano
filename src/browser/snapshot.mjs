@@ -1,6 +1,5 @@
 import { browserSession } from "./session.mjs";
 import { sealAction } from "./network.mjs";
-import { readGoal } from "../evidence/store.mjs";
 
 export function frameLabel(url) {
   try {
@@ -74,24 +73,7 @@ export function parseSnapshotYaml(yaml) {
       depth: Math.floor(indent / 2),
     });
   }
-  return annotatePopup(markMergedCells(annotateRows(annotateColumns(stripEmbeddedNames(nodes)))));
-}
-
-export function stripEmbeddedNames(nodes) {
-  const extras = [...new Set((nodes || [])
-    .filter((node) => (node.role === "button" || node.role === "link") && String(node.name || "").trim().length >= 6)
-    .map((node) => String(node.name || "").trim()))].sort((left, right) => right.length - left.length);
-  if (!extras.length) return nodes;
-  for (const node of nodes || []) {
-    if (!node?.name || node.role === "button" || node.role === "link") continue;
-    let name = String(node.name);
-    for (const extra of extras) {
-      const suffix = ` ${extra}`;
-      if (name.endsWith(suffix) && name.length > suffix.length) name = name.slice(0, -suffix.length).trim();
-    }
-    node.name = name;
-  }
-  return nodes;
+  return annotatePopup(annotateRows(annotateColumns(nodes)));
 }
 
 export function annotatePopup(nodes) {
@@ -106,23 +88,6 @@ export function annotatePopup(nodes) {
     const parentPopup = [...stack].reverse().find((item) => item.popup)?.popup || "";
     node.popup = dialog || floating ? (node.name || node.role) : parentPopup;
     stack.push({ depth, role: node.role, popup: node.popup || "" });
-  }
-  return nodes;
-}
-
-function markMergedCells(nodes) {
-  const byColumn = new Map();
-  for (const node of nodes) {
-    if ((node.role !== "cell" && node.role !== "gridcell") || !node.column) continue;
-    if (!byColumn.has(node.column)) byColumn.set(node.column, []);
-    byColumn.get(node.column).push(node);
-  }
-  for (const group of byColumn.values()) {
-    if (!group.some((node) => /^\d+$/.test(String(node.name || "").trim()))) continue;
-    for (const node of group) {
-      const parts = String(node.name || "").trim().split(/\s+/);
-      if (parts.length > 1 && /^\d+$/.test(parts[0])) node.merged = true;
-    }
   }
   return nodes;
 }
@@ -256,17 +221,11 @@ function annotateRows(nodes) {
 }
 
 const CONTROL_ROLE = /(?:^|\s)(button|link|menuitem|tab|textbox|searchbox|combobox|spinbutton|slider|checkbox|radio|switch|treeitem|option|cell|gridcell)\b/;
-const NAMED_ROLE = new Set(["button", "link", "menuitem", "menuitemcheckbox", "menuitemradio", "tab", "textbox", "searchbox", "combobox", "spinbutton", "slider", "checkbox", "radio", "switch", "treeitem", "option", "cell", "gridcell", "columnheader"]);
 
-export function includeInSnapshot(node, goalText = "") {
+export function includeInSnapshot(node) {
   if (!node) return false;
-  if (node.ariaRef) return true;
-  if (!node.name) return false;
-  if (NAMED_ROLE.has(node.role)) return true;
-  if (node.role !== "generic") return false;
-  const goal = String(goalText || "");
-  const folded = goal.replace(/\s+/g, "");
-  return goalNames(node.name).some((name) => name.length >= 2 && (goal.includes(name) || folded.includes(name.replace(/\s+/g, ""))));
+  if (node.ariaRef || node.ref) return true;
+  return Boolean(node.name || node.placeholder || node.value);
 }
 
 export function refTail(ref) {
@@ -294,150 +253,12 @@ export function controlText(node, { row = false } = {}) {
   const label = node.name ? `${node.role} "${node.name}"` : node.role;
   const state = node.states?.length ? ` ${node.states.map((item) => `[${item}]`).join(" ")}` : "";
   const placeholder = node.placeholder ? ` placeholder="${node.placeholder}"` : "";
-  const merged = node.merged ? " merged" : "";
   const place = row && node.row ? ` row="${node.row}"` : "";
   const value = node.value ? `: ${node.value}` : "";
   const range = [node.min ? `min=${node.min}` : "", node.max ? `max=${node.max}` : "", node.step ? `step=${node.step}` : ""].filter(Boolean).join(" ");
   const popup = node.popup ? ` popup="${node.popup}"` : "";
   const column = node.column ? ` ${node.column}` : "";
-  return `${label}${state}${placeholder}${merged}${place}${value}${range ? ` ${range}` : ""}${popup}${column}`;
-}
-
-function boundary(char) {
-  return !char || /[\s,，.。;；、:：!！?？(（)）[\]【】"'“”<>《》/\\|]/.test(char);
-}
-
-function delimited(goal, value) {
-  let from = 0;
-  while (from < goal.length) {
-    const at = goal.indexOf(value, from);
-    if (at < 0) return false;
-    const before = at > 0 ? goal[at - 1] : "";
-    const after = goal[at + value.length] || "";
-    if (boundary(before) && boundary(after)) return true;
-    from = at + value.length;
-  }
-  return false;
-}
-
-function goalNames(value) {
-  const text = String(value || "").trim();
-  if (!text) return [];
-  const bare = text.replace(/^\*\s*/, "");
-  const names = bare && bare !== text ? [text, bare] : [text];
-  for (const name of [...names]) {
-    const coded = name.match(/^(?=.*\d)[A-Z0-9]{4,}\s+(.+)$/);
-    if (coded?.[1] && !names.includes(coded[1])) names.push(coded[1]);
-  }
-  const folded = names.map((name) => name.replace(/\s+/g, "")).filter((name) => name && !names.includes(name));
-  return [...names, ...folded];
-}
-
-export function unactedGoalControls(snapshotText, summaries) {
-  const lines = String(snapshotText || "").split(/\n/);
-  const start = lines.findIndex((line) => line.trim() === "goal_exact");
-  if (start < 0) return [];
-  const acted = new Set();
-  for (const summary of summaries || []) {
-    for (const match of String(summary).matchAll(/"([^"]*)"/g)) {
-      const folded = match[1].replace(/^\*\s*/, "").replace(/\s+/g, "");
-      if (folded) acted.add(folded);
-    }
-  }
-  const pending = [];
-  for (const line of lines.slice(start + 1)) {
-    const trimmed = line.trim();
-    if (trimmed === "fields" || trimmed.startsWith("frame ")) break;
-    if (!trimmed.startsWith("- ")) break;
-    if (!trimmed.includes("ref=") || /\[disabled\]/.test(trimmed)) continue;
-    const name = (trimmed.match(/"([^"]*)"/) || [])[1] || "";
-    const folded = name.replace(/^\*\s*/, "").replace(/\s+/g, "");
-    if (folded.length < 2 || acted.has(folded)) continue;
-    const shown = trimmed.replace(/\s+ref=\S+/, "");
-    if (!pending.includes(shown)) pending.push(shown);
-    if (pending.length >= 8) break;
-  }
-  return pending;
-}
-
-export function goalExactLines(nodes, goalText) {
-  const goal = String(goalText || "");
-  const foldedGoal = goal.replace(/\s+/g, "");
-  const present = new Set();
-  for (const node of nodes || []) {
-    for (const value of [node.name, node.column, node.placeholder]) {
-      for (const name of goalNames(value)) {
-        const haystack = goal.includes(name) ? goal : foldedGoal;
-        if (name.length >= 2 && haystack.includes(name)) present.add(name);
-      }
-    }
-  }
-  const inGoal = (value) => goalNames(value).some((name) => {
-    const haystack = goal.includes(name) ? goal : foldedGoal;
-    if (!name || name.length < 2 || !haystack.includes(name)) return false;
-    if (delimited(haystack, name)) return true;
-    for (const other of present) {
-      if (other.length > name.length && other.includes(name)) return false;
-    }
-    return true;
-  });
-  const hits = (nodes || []).filter((node) => inGoal(node.name) || inGoal(node.column) || inGoal(node.placeholder));
-  const covered = new Set(hits.map((node) => node.column).filter(Boolean));
-  const interactive = new Set(["button", "link", "menuitem", "tab", "checkbox", "radio", "switch", "option", "treeitem", "textbox", "searchbox", "combobox", "spinbutton", "slider"]);
-  const list = nodes || [];
-  const inside = (parent, child) => {
-    if (parent === child || parent.depth == null || child.depth == null || child.depth <= parent.depth) return false;
-    const from = list.indexOf(parent);
-    const to = list.indexOf(child);
-    if (from < 0 || to <= from) return false;
-    for (let index = from + 1; index < to; index += 1) {
-      if (list[index].depth != null && list[index].depth <= parent.depth) return false;
-    }
-    return true;
-  };
-  const visible = hits.filter((node) => {
-    if (node.role === "columnheader" && covered.has(node.name)) return false;
-    if (node.merged && hits.some((other) => other !== node && other.column === node.column && !other.merged)) return false;
-    if (interactive.has(node.role)) return true;
-    const named = node.name || node.column || "";
-    return !hits.some((other) => other !== node && interactive.has(other.role) && (other.name === named || other.column === named) && inside(node, other));
-  });
-  const hasAncestor = (node, roles) => {
-    let depth = node.depth ?? 0;
-    for (let index = list.indexOf(node) - 1; index >= 0; index -= 1) {
-      const item = list[index];
-      if (item.depth == null || item.depth >= depth) continue;
-      depth = item.depth;
-      if (roles.includes(item.role)) return true;
-    }
-    return false;
-  };
-  const dialogs = list.filter((node) => {
-    if (node.role === "dialog" || node.role === "alertdialog") return true;
-    if (node.role !== "menu" && node.role !== "listbox") return false;
-    return !hasAncestor(node, ["navigation", "banner", "main", "complementary"]);
-  });
-  if (!dialogs.length) return visible;
-  const last = dialogs[dialogs.length - 1];
-  const inLast = (node) => last === node || inside(last, node);
-  const namesInLast = new Set(visible.filter(inLast).flatMap((node) => [node.name, node.column].filter(Boolean)));
-  return visible.filter((node) => inLast(node) || !namesInLast.has(node.name || node.column || ""));
-}
-
-export function sameColumnRefs(snapshotText, headerLabel) {
-  const label = String(headerLabel || "");
-  if (!label.startsWith("columnheader")) return [];
-  const name = (label.match(/"([^"]+)"/) || [])[1] || "";
-  if (name.length < 2) return [];
-  const needle = ` ${name} ref=`;
-  const refs = [];
-  for (const line of String(snapshotText || "").split("\n")) {
-    const at = line.lastIndexOf(needle);
-    if (at < 0) continue;
-    const ref = line.slice(at + needle.length).trim();
-    if (ref) refs.push(line.trim());
-  }
-  return refs;
+  return `${label}${state}${placeholder}${place}${value}${range ? ` ${range}` : ""}${popup}${column}`;
 }
 
 function directRowCells(nodes, rowIndex) {
@@ -703,13 +524,6 @@ export async function takeSnapshot(recordingId) {
   const rest = frames.filter((frame) => frame !== main).sort((a, b) => frameSortKey(a).localeCompare(frameSortKey(b)));
   const ordered = [main, ...rest];
   state.refs.clear();
-  let goalText = "";
-  try {
-    const goal = await readGoal(recordingId);
-    goalText = `${goal.goal_text || ""}`;
-  } catch {
-    goalText = "";
-  }
   state.snap = (state.snap || 0) + 1;
   const framesLines = [];
   const controls = [];
@@ -725,7 +539,7 @@ export async function takeSnapshot(recordingId) {
       yaml = "";
     }
     for (const node of parseSnapshotYaml(yaml)) {
-      if (!includeInSnapshot(node, goalText)) continue;
+      if (!includeInSnapshot(node)) continue;
       const ref = node.ariaRef ? `${frameId}:${node.ariaRef}@${state.snap}` : "";
       const shown = node.name
         ? `${node.role} "${node.name}"`
@@ -739,6 +553,10 @@ export async function takeSnapshot(recordingId) {
         snap: state.snap,
         frame,
         label: withColumn,
+        role: node.role,
+        name: node.name || "",
+        value: node.value || "",
+        column: node.column || "",
         row: node.row || "",
         popup: node.popup || "",
       });
@@ -804,10 +622,8 @@ export async function takeSnapshot(recordingId) {
     counts.set(key, (counts.get(key) || 0) + 1);
   }
   const duplicated = (node) => (counts.get(`${node.role}\n${node.name}`) || 0) > 1;
-  const exact = goalExactLines(controls, goalText).map((node) => `- ${controlText(node, { row: true })}${refTail(node.ref)}`);
   const fields = controls.filter((node) => FIELD_ROLES.has(node.role)).map((node) => `- ${controlText(node, { row: true })}${refTail(node.ref)}`);
   const textLines = [`epoch ${state.epoch} snap ${state.snap}`];
-  if (exact.length) textLines.push("goal_exact", ...exact);
   if (fields.length) textLines.push("fields", ...fields);
   for (const line of framesLines) {
     if (line.kind === "frame") textLines.push(line.text);

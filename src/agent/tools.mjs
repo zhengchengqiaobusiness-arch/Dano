@@ -11,28 +11,28 @@ import { takeSnapshot } from "../browser/snapshot.mjs";
 import { getNetwork, labelAction, listNetwork, listScripts, requestKeyIndex, scriptExcerpts } from "../browser/network.mjs";
 import { readSkillFile, skillIdFor, writeSkillFile } from "../skillpack/files.mjs";
 import { actionEvidenceSummary, authBlocksRun, commandAuthFailed, filledLabels, finishSkill } from "../skillpack/verify.mjs";
-import { GUIDE_NAMES, guideText } from "./guides.mjs";
+import { GUIDE_NAMES, guideText, guidesFor } from "./guides.mjs";
 import { credentialShape, presentToModel, readAuthVault } from "../auth-vault.mjs";
 import { logLine } from "../log.mjs";
 
 const GUIDE_FILES = {
+  "skill-contract.md": path.join(packageRoot(), "src", "agent", "skill-contract.md"),
   "skill-generator-auth-and-token.md": path.join(docDir(), "skill-generator-auth-and-token.md"),
   "skill-generator-live-options.md": path.join(docDir(), "skill-generator-live-options.md"),
   "skill-generator-ask-user-question-guide.md": path.join(docDir(), "skill-generator-ask-user-question-guide.md"),
-  "writing-for-agents.md": path.join(packageRoot(), "skill", "writing-for-agents", "SKILL.md"),
-  "writing-for-agents-mechanics.md": path.join(packageRoot(), "skill", "writing-for-agents", "SKILL-MECHANICS.md"),
+  "skill-generator-workflow.md": path.join(docDir(), "skill-generator-workflow.md"),
 };
 
 const TOOL_SPECS = [
   { name: "browser_open", description: "打开入口同源的地址。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
-  { name: "browser_snapshot", description: "读取当前页面快照。ref 整段照抄，形如 fN:eN@数字。", parameters: { type: "object", properties: {} } },
-  { name: "browser_act", description: "ref 整段照抄最近一次 snapshot，格式 fN:eN@数字。快照是缩进树，冒号后是当前值，方括号是选中、禁用、展开、必填。控件自己标出的 min、max、step 写在同一行。开头的 fields 是可填写控件。同名带 row，点这一行的 ref。行内 popup 是所在弹层，不是控件名，点这一行末尾的 ref。侧栏和正文里的菜单没有 popup。格子里的下级控件是另一个 ref。@ 后数字对不上就是过期，用返回的新快照。返回 stale_ref 时这个 ref 上的名字已经和快照不同，只用新快照。同名不要请求程序挑第一个。快照开头的 goal_exact 是名字或列名出现在目标原文里的项，目标点名的控件点这些 ref。下拉分两次 click。返回里的 clicked、row、requests、changed 和 snapshot 是这一下的结果。同名控件的 row 是点中的那一行。requests 为空就是这一下没有 xhr/fetch。每一条保留 keys、query、empty、body_missing、changed_keys 和 added_keys。body_missing 为真就是还没有正文。changed 里先是新出现的格子、选项和输入框，没有名字的容器不算变化，只是焦点变了也不算，展开或收起也不算。带 merged 的格子不拿来代表这一列。changed_keys 是同一条 path、同一组键和上一次相比变了的键。added_keys 是这组键比上一条同 path 多出来的键。same_as_unlinked 且没有 changed_keys，表示这条和动作之外反复出现的请求一样，不是这次点击改出来的。点了格子、选项或弹出的项之后，focused_value 是焦点输入框此刻的值，或它旁边新出现的名字。focused_unchanged 表示这个值没有变，旁边也没有新名字。填写成功时 filled_value 是控件收下的值，和填进去的字不同时以它为准。按键后控件里的值变了，同样记在 filled_value。快照那一行没有冒号，不表示没写上。返回 same_column 时那是这一列的格子。返回 uploaded 表示文件选择已经写入，采用 requests。返回 needs_upload 时只对同一 ref 调用 upload。返回 click_timeout 时只用新快照里的 ref。填写用 fill。", parameters: { type: "object", properties: { action: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, fields: { type: "array" }, key: { type: "string" }, file_path: { type: "string" } }, required: ["action"] } },
+  { name: "browser_snapshot", description: "读取当前页快照。每一行是这个控件的事实。ref 整段照抄。", parameters: { type: "object", properties: {} } },
+    { name: "browser_act", description: "对最近一次快照里的 ref 做 open、click、fill、fill_fields、press、select、upload、screenshot。ref 整段照抄 fN:eN@数字。返回 clicked、requests、changed、filled_value、snapshot。用这份快照，不要为同一次操作再 snapshot。requests 为空表示这一下没有 xhr/fetch。写字段前对要采用的 id 调用 network_get。", parameters: { type: "object", properties: { action: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, key: { type: "string" }, url: { type: "string" }, file_path: { type: "string" }, fields: { type: "array" } }, required: ["action"] } },
   { name: "browser_screenshot", description: "把当前画面作为图像送回。", parameters: { type: "object", properties: { ref: { type: "string" }, as_image: { type: "boolean" } } } },
   { name: "network_list", description: "列出 xhr/fetch 索引。scripts 是已加载的脚本路径，不是业务请求。", parameters: { type: "object", properties: { after_id: { type: "string" }, action_id: { type: "string" } } } },
   { name: "network_get", description: "按 id 读取一条请求的全文。body_missing 表示没有正文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
   { name: "evidence_get", description: "按 id 读取一条证据全文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
   { name: "read_page_asset", description: "按 network_list 里 scripts 的 path 读取已加载的脚本。不是业务请求。脚本较长时再传 find，用请求里的键名取附近片段。全文在 evidence_id。", parameters: { type: "object", properties: { url: { type: "string" }, find: { type: "string" } }, required: ["url"] } },
-  { name: "read_guide", description: "写 Skill 前读取一份文档。name 见返回的 names。鉴权、提问、活选项和写作方法都从这里读，写进 SKILL.md、scripts/client.py、references/api.md。本场没有 CONTRACT.json 和 flow.py。", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
+  { name: "read_guide", description: "按索引读，先读 skill-contract.md。本场没有 CONTRACT。", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
   { name: "assist", description: "登录或验证码挡住时调用。这次调用会停住，直到人在预览里处理完并确认。返回里的 snapshot 才是确认后的当前页，从那张快照接着做。", parameters: { type: "object", properties: { reason: { type: "string" } }, required: ["reason"] } },
   { name: "append_goal", description: "只填充目标里仍为空的键，写入原句。", parameters: { type: "object", properties: { key: { type: "string" }, text: { type: "string" } }, required: ["key", "text"] } },
   { name: "write_skill_file", description: "只写 SKILL.md、scripts/client.py、references/api.md。", parameters: { type: "object", properties: { relative_path: { type: "string" }, contents: { type: "string" } }, required: ["relative_path", "contents"] } },
@@ -299,7 +299,9 @@ export function hostTools(recording) {
           ? [{ summary: row.summary || "", controls: row.also_changed }]
           : []
       )).slice(-40);
-      return { goal, snapshot, index, requests: requestKeyIndex(id), filled: filledLabels(evidence), ...(filledValue.length ? { filled_value: filledValue } : {}), ...(alsoChanged.length ? { also_changed: alsoChanged } : {}), ...(authFile ? { auth_file: authFile } : {}) };
+      const requests = requestKeyIndex(id);
+      const filled = filledLabels(evidence);
+      return { goal, snapshot, index, requests, guides: guidesFor(requests, filled), filled, ...(filledValue.length ? { filled_value: filledValue } : {}), ...(alsoChanged.length ? { also_changed: alsoChanged } : {}), ...(authFile ? { auth_file: authFile } : {}) };
     },
   };
   return tools;

@@ -161,6 +161,11 @@ interface WorkflowSnapshot {
   assist?: { reason?: string };
   human_can_click?: boolean;
   skill_dir?: string;
+  verify?: {
+    ok?: boolean;
+    status?: string;
+    errors?: Array<{ code?: string; file?: string; name?: string; hint?: string; path?: string }>;
+  } | null;
 }
 
 interface FlowParam {
@@ -685,13 +690,29 @@ function pageInteractive(status: WorkflowStatus) {
   return status === "recording" || status === "waiting_operator";
 }
 
+const RECORDING_STAY_STATUSES = [
+  "recording", "processing", "waiting_operator",
+  "skill_ready", "skill_written_needs_auth", "verify_failed", "stopped",
+];
+const RECORDING_RESULT_STATUSES = ["skill_ready", "skill_written_needs_auth", "verify_failed", "stopped"];
+const LIVE_SNAPSHOT_KEY = "dano.recording.live";
+
 function pageStage(status: WorkflowStatus, _resumeOnly = false, _verificationLive = false) {
   if (status === "idle") return 0;
-  if ([
-    "recording", "processing", "waiting_operator",
-    "skill_ready", "skill_written_needs_auth", "verify_failed", "stopped",
-  ].includes(status)) return 1;
+  if (RECORDING_STAY_STATUSES.includes(status)) return 1;
   return 1;
+}
+
+function readLiveSnapshot(): WorkflowSnapshot | null {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(LIVE_SNAPSHOT_KEY) || "null");
+    if (!parsed || typeof parsed !== "object") return null;
+    if (!RECORDING_RESULT_STATUSES.includes(String(parsed.status || ""))) return null;
+    if (!String(parsed.run_id || "").startsWith("rec_")) return null;
+    return parsed as WorkflowSnapshot;
+  } catch {
+    return null;
+  }
 }
 
 function recorderWebSocketUrl() {
@@ -798,7 +819,7 @@ export default function PageRecorder({
   const [goalText, setGoalText] = useState(setup.goalText);
   const [machineVerification, setMachineVerification] = useState(setup.machineVerification);
   const [title, setTitle] = useState(setup.title);
-  const [snapshot, setSnapshot] = useState<WorkflowSnapshot | null>(null);
+  const [snapshot, setSnapshot] = useState<WorkflowSnapshot | null>(readLiveSnapshot);
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [answer, setAnswer] = useState("");
@@ -809,8 +830,8 @@ export default function PageRecorder({
   const [localValues, setLocalValues] = useState<Record<string, unknown>>({});
   const [localCapabilityStepIds, setLocalCapabilityStepIds] = useState<Record<string, string[]>>({});
   const [editingResult, setEditingResult] = useState(false);
-  const [viewStage, setViewStage] = useState(0);
-  const [keepRecording, setKeepRecording] = useState(false);
+  const [viewStage, setViewStage] = useState(() => (readLiveSnapshot() ? 1 : 0));
+  const [keepRecording, setKeepRecording] = useState(() => Boolean(readLiveSnapshot()));
   const [keepResult, setKeepResult] = useState(false);
   const [resumeOnly, setResumeOnly] = useState(false);
   const [thoughts, setThoughts] = useState<ThoughtChunk[]>([]);
@@ -827,13 +848,14 @@ export default function PageRecorder({
   const [deletingId, setDeletingId] = useState("");
   const [openingId, setOpeningId] = useState("");
   const [analysisRequested, setAnalysisRequested] = useState(false);
-  const reachedStageRef = useRef(0);
+  const reachedStageRef = useRef(readLiveSnapshot() ? 1 : 0);
+  const userLeftRecordingRef = useRef(false);
   const verificationLogRef = useRef<HTMLDivElement | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const connectedRef = useRef(false);
   const disconnectNoticeRef = useRef(false);
-  const snapshotRef = useRef<WorkflowSnapshot | null>(null);
+  const snapshotRef = useRef<WorkflowSnapshot | null>(readLiveSnapshot());
   const actionRef = useRef("");
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -967,6 +989,42 @@ export default function PageRecorder({
     }
     reachedStageRef.current = reachedStage;
   }, [reachedStage, resumeOnly]);
+
+  useEffect(() => {
+    if (userLeftRecordingRef.current || viewStage !== 0) return;
+    if (!connected && !RECORDING_STAY_STATUSES.includes(status)) return;
+    setKeepRecording(true);
+    setViewStage(1);
+  }, [connected, status, viewStage]);
+
+  useEffect(() => {
+    if (!snapshot || !RECORDING_RESULT_STATUSES.includes(snapshot.status)) return;
+    const errors = Array.isArray(snapshot.verify?.errors)
+      ? snapshot.verify.errors.slice(0, 12).map((item) => ({
+        code: item.code || "",
+        file: item.file || "",
+        name: item.name || "",
+        path: item.path || "",
+        hint: item.hint || "",
+      }))
+      : [];
+    try {
+      sessionStorage.setItem(LIVE_SNAPSHOT_KEY, JSON.stringify({
+        run_id: snapshot.run_id,
+        action: snapshot.action || "",
+        title: snapshot.title || "",
+        revision: snapshot.revision || 0,
+        status: snapshot.status,
+        progress: snapshot.progress || { step: "capturing", label: "" },
+        skill_dir: snapshot.skill_dir || "",
+        assist: snapshot.assist || { reason: "" },
+        human_can_click: snapshot.human_can_click !== false,
+        verify: { ok: snapshot.verify?.ok === true, status: snapshot.verify?.status || snapshot.status, errors },
+      }));
+    } catch {
+      // 配额不够时仍留在当前页，只是刷新后无法还原这一次结果。
+    }
+  }, [snapshot]);
 
   useEffect(() => {
     const node = assistantLogRef.current;
@@ -1789,6 +1847,11 @@ export default function PageRecorder({
       }
       if (["recording", "waiting_operator"].includes(status || "")) {
         scheduleRecordingReconnect();
+        return;
+      }
+      if (RECORDING_RESULT_STATUSES.includes(status || "") && !userLeftRecordingRef.current) {
+        setKeepRecording(true);
+        setViewStage(1);
       }
     };
   }
@@ -1822,8 +1885,14 @@ export default function PageRecorder({
     acceptNextSnapshotRef.current = true;
     setKeepResult(false);
     setKeepRecording(true);
+    userLeftRecordingRef.current = false;
     setViewStage(1);
     reachedStageRef.current = 1;
+    try {
+      sessionStorage.removeItem(LIVE_SNAPSHOT_KEY);
+    } catch {
+      // 清不掉旧结果也不影响这次录制。
+    }
     setConnecting(true);
     snapshotRef.current = null;
     setSnapshot(null);
@@ -2193,13 +2262,16 @@ export default function PageRecorder({
 
   function canSteerPi() {
     if (!socketLive()) return false;
-    if (pageInteractive(status) || processing || connecting) return true;
+    if (pageInteractive(status) || processing || connecting || status === "verify_failed") return true;
     return keepRecording && status === "idle";
   }
 
   function steerPlaceholder() {
-    if (canSteerPi()) return "发指示，例如：继续搜、去点新增";
+    if (canSteerPi()) return status === "verify_failed" ? "校验未通过，可以继续发指示" : "发指示，例如：继续搜、去点新增";
     if (keepRecording && (status === "recording" || connecting)) return "正在重连，稍候即可发送指示";
+    if (status === "verify_failed") return "校验未通过，仍留在录制页";
+    if (status === "skill_ready" || status === "skill_written_needs_auth") return "Skill 已写好，仍留在录制页";
+    if (status === "stopped") return "已停止，仍留在录制页";
     return "未连接或录制已结束，暂时无法发送指示";
   }
 
@@ -2649,6 +2721,7 @@ export default function PageRecorder({
   }
 
   function changeStage(next: number) {
+    if (next === 0) userLeftRecordingRef.current = true;
     if (next === 2) {
       setViewStage(2);
       return;
@@ -3916,12 +3989,27 @@ export default function PageRecorder({
     <div className="studio-feed">
       <Alert
         showIcon
-        type={status === "failed" ? "error" : status === "waiting_operator" ? "warning" : "info"}
+        type={status === "failed" || status === "verify_failed" ? "error" : status === "waiting_operator" ? "warning" : status === "skill_ready" || status === "skill_written_needs_auth" ? "success" : "info"}
         message={sanitizePublicThoughtText(snapshot?.progress.label || "") || STATUS_LABELS[status]}
-        description={processing && snapshot?.progress.round
-          ? `自动处理第 ${snapshot.progress.round} 轮`
-          : undefined}
+        description={snapshot?.skill_dir
+          ? snapshot.skill_dir
+          : processing && snapshot?.progress.round
+            ? `自动处理第 ${snapshot.progress.round} 轮`
+            : undefined}
       />
+      {snapshot?.verify?.errors?.length ? (
+        <Card size="small" title="校验结果">
+          <List
+            size="small"
+            dataSource={snapshot.verify.errors.slice(0, 8)}
+            renderItem={(item, index) => (
+              <List.Item key={`${item.code || "error"}-${index}`}>
+                <Text>{[item.code, item.name, item.file].filter(Boolean).join(" · ")}</Text>
+              </List.Item>
+            )}
+          />
+        </Card>
+      ) : null}
       {snapshot?.question ? (
         <Card size="small" title="需要你确认">
           <Space direction="vertical" style={{ width: "100%" }}>

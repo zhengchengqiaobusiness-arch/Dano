@@ -3,7 +3,7 @@ import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { originFromUrl } from "../session-store.mjs";
 import { browserSession, withPage } from "./session.mjs";
-import { choiceClick, currentControlLabel, focusAfterChoice, labelsMatch, locatorFor, sameColumnRefs, snapshotHasControl, takeSnapshot } from "./snapshot.mjs";
+import { choiceClick, currentControlLabel, focusAfterChoice, labelsMatch, locatorFor, takeSnapshot } from "./snapshot.mjs";
 import { armAction, beginAction, endAction, listNetwork, waitForAction, withRequestChanges } from "./network.mjs";
 import { logLine } from "../log.mjs";
 
@@ -85,36 +85,40 @@ function delay(ms) {
 }
 
 async function takeReadySnapshot(recordingId) {
-  let snapshot = await takeSnapshot(recordingId);
-  let waited = false;
-  const deadline = Date.now() + 6000;
-  while (!snapshotHasControl(snapshot.text) && Date.now() < deadline) {
-    waited = true;
-    await delay(400);
-    snapshot = await takeSnapshot(recordingId);
-  }
-  return { snapshot, waited };
+  return { snapshot: await takeSnapshot(recordingId), waited: false };
+}
+
+function actedBody(hit) {
+  if (!hit) return "";
+  const role = hit.role || "";
+  const visible = hit.name || hit.value || "";
+  if (role && visible) return `${role} "${visible}"`;
+  return hit.label || "";
+}
+
+function withOpen(payload) {
+  return payload;
 }
 
 function notApplied(ref, snapshot) {
-  return {
+  return withOpen({
     ok: false,
     error: "value_not_applied",
     ...(ref ? { ref } : {}),
-    hint: "这个控件没有留下这次填写的字。只用返回的 snapshot。若里面新出现了格子或选项，点那些 ref。",
+    hint: "这个控件没有留下这次填写的字。只用返回的 snapshot。",
     snapshot,
-  };
+  }, snapshot);
 }
 
 async function stale(recordingId, ref = "") {
   const snapshot = await takeSnapshot(recordingId);
-  return {
+  return withOpen({
     ok: false,
     error: "stale_ref",
     ...(ref ? { ref } : {}),
     hint: "这个 ref 上的名字已经和快照不同，或快照已过期。只用新快照里的 ref。",
     snapshot,
-  };
+  }, snapshot);
 }
 
 async function nameStill(hit, recordingId) {
@@ -187,12 +191,15 @@ async function perform(recordingId, input) {
       await waitForAction(recordingId, actionId);
       const requests = withRequestChanges(recordingId, listNetwork(recordingId, { action_id: actionId }));
       const snapshot = requests.length ? await takeSnapshot(recordingId) : ready.snapshot;
-      return { ok: true, action_id: actionId, requests, snapshot, ...(snapshot.changed ? { changed: snapshot.changed } : {}) };
+      return withOpen({ ok: true, action_id: actionId, requests, snapshot, ...(snapshot.changed ? { changed: snapshot.changed } : {}) }, snapshot);
     } finally {
       endAction(recordingId);
     }
   }
-  if (action === "snapshot") return { ok: true, snapshot: (await takeReadySnapshot(recordingId)).snapshot };
+  if (action === "snapshot") {
+    const snapshot = (await takeReadySnapshot(recordingId)).snapshot;
+    return withOpen({ ok: true, snapshot }, snapshot);
+  }
   if (action === "screenshot") {
     const target = input.ref ? locatorFor(recordingId, input.ref)?.locator : state.page;
     if (input.ref && !target) return stale(recordingId);
@@ -246,15 +253,16 @@ async function perform(recordingId, input) {
         }
       }
       await waitForAction(recordingId, actionId);
+      const requests = requestsDuring();
       const snapshot = await takeSnapshot(recordingId);
-      return tag({
+      return tag(withOpen({
         ok: true,
         filled,
         ...(filledValue.length ? { filled_value: filledValue } : {}),
-        requests: requestsDuring(),
+        requests,
         snapshot,
         ...(snapshot.changed ? { changed: snapshot.changed } : {}),
-      });
+      }, snapshot));
     }
     if (!hit) {
       logLine(`[browser] ${action} ref=${input.ref || ""} stale`);
@@ -270,7 +278,7 @@ async function perform(recordingId, input) {
         ok: false,
         error: "needs_upload",
         ref: input.ref,
-        hint: "文件选择还开着。对打开它的那个 ref 调用 upload。不要点关闭、取消，也不要改去提交。",
+        hint: "文件选择还开着。对同一 ref 调用 upload。",
       });
     }
     if (action === "click") {
@@ -292,14 +300,14 @@ async function perform(recordingId, input) {
           logLine(`[browser] click failed ${message}`);
           await waitForAction(recordingId, actionId);
           const snapshot = await takeSnapshot(recordingId);
-          return tag({
+          return tag(withOpen({
             ok: false,
             error: "click_timeout",
             ref: input.ref,
-            hint: "这一下没有点中。只用返回的 snapshot 里的 ref，不要再点刚才这个 ref。",
+            hint: "这一下没有点中。只用返回的 snapshot 里的 ref。",
             requests: requestsDuring(),
             snapshot,
-          });
+          }, snapshot));
         }
       }
       if (!chooser) {
@@ -330,16 +338,16 @@ async function perform(recordingId, input) {
         await waitForAction(recordingId, actionId);
         const requests = requestsDuring();
         logLine(`[browser] upload accepted ref=${input.ref || ""} requests=${requests.map((row) => row.path).join(",") || "-"}`);
-        return tag({
+        const snapshot = await takeSnapshot(recordingId);
+        return tag(withOpen({
           ok: true,
           uploaded: true,
-          clicked: hit.label || "",
+          clicked: actedBody(hit) || hit.label || "",
           ...(hit.popup ? { popup: hit.popup } : {}),
           ...(hit.row ? { row: hit.row } : {}),
           requests,
-          snapshot: await takeSnapshot(recordingId),
-          hint: "文件已写入这次选择。采用 requests 里的上传请求写进附件。不要再点关闭。",
-        });
+          snapshot,
+        }, snapshot));
       }
     }
     let wrote = null;
@@ -414,18 +422,17 @@ async function perform(recordingId, input) {
       }
     }
     const previous = [...(browserSession(recordingId)?.controls || [])];
+    const requests = requestsDuring();
     const ready = await takeReadySnapshot(recordingId);
     if (ready.waited) await waitForAction(recordingId, actionId);
     const snapshot = ready.waited ? await takeSnapshot(recordingId) : ready.snapshot;
-    const requests = requestsDuring();
     const after = browserSession(recordingId)?.controls || [];
     const focus = focusAfterChoice(held, previous, after);
-    const sameColumn = requests.length ? [] : sameColumnRefs(snapshot.text, hit.label);
     const changed = snapshot.changed ? { changed: snapshot.changed } : {};
-    return tag(action === "click"
+    return tag(withOpen(action === "click"
       ? {
           ok: true,
-          clicked: hit.label || "",
+          clicked: actedBody(hit) || hit.label || "",
           ...(hit.popup ? { popup: hit.popup } : {}),
           ...(hit.row ? { row: hit.row } : {}),
           requests,
@@ -433,9 +440,8 @@ async function perform(recordingId, input) {
           ...changed,
           ...(focus.focused_unchanged ? { focused_unchanged: focus.focused_unchanged } : {}),
           ...(focus.focused_value ? { focused_value: focus.focused_value } : {}),
-          ...(sameColumn.length ? { same_column: sameColumn } : {}),
         }
-      : { ok: true, filled, ...(filledValue.length ? { filled_value: filledValue } : {}), requests, snapshot, ...changed });
+      : { ok: true, filled, ...(filledValue.length ? { filled_value: filledValue } : {}), requests, snapshot, ...changed }, snapshot));
   } finally {
     state.agentClick = false;
     endAction(recordingId);

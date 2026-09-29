@@ -6,30 +6,9 @@ import { handbookChanged, writeRuntimeConfig } from "./files.mjs";
 import { credentialShape, hasCredentialHeaders } from "../auth-vault.mjs";
 import { upsertCatalog } from "./catalog.mjs";
 import { adoptedEvidencePaths, authHeaderOverlay, changedRequestKeys, citationErrors, citedPaths, executableSource, previousMatchingRequest, readsIssuedCredential, rebuildsCredentialPath, rebuildsCredentialQuery, requestIndexRow, windowsForPath, writerRequestRows } from "./request-keys.mjs";
-import { unactedGoalControls } from "../browser/snapshot.mjs";
+import { fieldContractErrors, observeRequest, parseApiContract } from "./observations.mjs";
 import { nonStdlibImports } from "./stdlib-imports.mjs";
-import { GUIDE_NAMES } from "../agent/guides.mjs";
-
-function section(text, title) {
-  const match = text.match(new RegExp(`## ${title}\\n([\\s\\S]*?)(?=\\n## |$)`));
-  return match ? match[1] : "";
-}
-
-function blocks(body, startKey) {
-  const rows = [];
-  let current = null;
-  for (const line of body.split(/\n/)) {
-    const item = line.match(/^- ([a-z_]+):\s*(.*)$/);
-    if (!item) continue;
-    if (item[1] === startKey) {
-      current = {};
-      rows.push(current);
-    }
-    if (!current) continue;
-    current[item[1]] = item[2].trim();
-  }
-  return rows;
-}
+import { guidesFor } from "../agent/guides.mjs";
 
 export function commandAuthFailed(text) {
   const value = String(text || "");
@@ -50,6 +29,120 @@ function verifyOutput(blob) {
 
 function subcommand(line) {
   return (String(line).match(/scripts\/client\.py\s+(\S+)/) || [])[1] || "";
+}
+
+function listed(list, pick) {
+  return [...new Set(list.map(pick).filter(Boolean))];
+}
+
+export function collapseVerifyErrors(errors) {
+  const kept = [];
+  const grouped = {
+    evidence_not_opened: [],
+    field_unaccounted: [],
+    filled_not_written: [],
+    option_unclassified: [],
+    url_unclassified: [],
+    source_unlinked: [],
+    key_ambiguous: [],
+    binding_unaccounted: [],
+    caller_not_in_handbook: [],
+  };
+  const commands = new Map();
+  const writes = new Map();
+  for (const item of errors) {
+    if (item.code === "key_not_written") {
+      const id = `${item.file || ""}\n${item.path || ""}`;
+      const list = writes.get(id) || [];
+      list.push(item);
+      writes.set(id, list);
+      continue;
+    }
+    if (item.code === "command_not_run" && item.command) {
+      const sub = subcommand(item.command);
+      if (!commands.has(sub)) commands.set(sub, item);
+      continue;
+    }
+    if (grouped[item.code]) {
+      grouped[item.code].push(item);
+      continue;
+    }
+    kept.push(item);
+  }
+  const oneOrMany = (list, build) => {
+    if (list.length === 1) kept.push(list[0]);
+    else if (list.length) kept.push(build(list));
+  };
+  oneOrMany(grouped.evidence_not_opened, (list) => ({
+    code: "evidence_not_opened",
+    ids: listed(list, (item) => item.id),
+    file: "references/api.md",
+    hint: "这些 id 写进了手册但全文还没打开。一次用 network_get 打开它们，或从手册删掉没采用的 id。对照填写值、changed_keys 和正文写来源。没分清就放未解决。",
+  }));
+  oneOrMany(grouped.field_unaccounted, (list) => ({
+    code: "field_unaccounted",
+    keys: listed(list, (item) => item.key),
+    paths: listed(list, (item) => item.path),
+    file: "references/api.md",
+    hint: "这些键还没写完整。用 `- page_name:` 起一条，或用槽名做表头。每条要有 page_name、caller_name、request_path、request_key、source、required_kind、evidence_ids。constant 要写 constant_reason。unknown 放未解决。source 只能是 caller、current_user、now、previous_response、other_api、constant、unknown。required_kind 只能是 page、caller_all、server_verified、server_unknown。",
+  }));
+  oneOrMany(grouped.filled_not_written, (list) => ({
+    code: "filled_not_written",
+    field: list.map((item) => item.field).filter(Boolean).join("、"),
+    file: "references/api.md",
+    hint: list[0].hint,
+  }));
+  oneOrMany(grouped.option_unclassified, (list) => ({
+    code: "option_unclassified",
+    paths: listed(list, (item) => item.path),
+    file: "references/api.md",
+    hint: list[0].hint,
+  }));
+  oneOrMany(grouped.url_unclassified, (list) => ({
+    code: "url_unclassified",
+    paths: listed(list, (item) => item.path),
+    file: "references/api.md",
+    hint: list[0].hint,
+  }));
+  oneOrMany(grouped.source_unlinked, (list) => ({
+    code: "source_unlinked",
+    keys: listed(list, (item) => item.key),
+    file: "references/api.md",
+    hint: list[0].hint,
+  }));
+  oneOrMany(grouped.key_ambiguous, (list) => ({
+    code: "key_ambiguous",
+    keys: listed(list, (item) => item.key),
+    file: "references/api.md",
+    hint: list[0].hint,
+  }));
+  oneOrMany(grouped.binding_unaccounted, (list) => ({
+    code: "binding_unaccounted",
+    count: list.length,
+    file: "references/api.md",
+    hint: list[0].hint,
+  }));
+  oneOrMany(grouped.caller_not_in_handbook, (list) => ({
+    code: "caller_not_in_handbook",
+    caller_names: listed(list, (item) => item.caller_name),
+    file: "SKILL.md",
+    hint: list[0].hint,
+  }));
+  for (const item of commands.values()) kept.push(item);
+  for (const list of writes.values()) {
+    if (list.length === 1) {
+      kept.push(list[0]);
+      continue;
+    }
+    kept.push({
+      code: "key_not_written",
+      path: list[0].path,
+      keys: listed(list, (item) => item.key),
+      file: list[0].file,
+      hint: list[0].hint,
+    });
+  }
+  return kept;
 }
 
 function hasWord(text, token) {
@@ -293,9 +386,10 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     if (sourceHasSecret(texts[rel] || "")) errors.push({ code: "secret_in_source", path: rel });
   }
   const api = texts["references/api.md"] || "";
-  const fields = blocks(section(api, "字段"), "page_name");
-  const bindings = blocks(section(api, "绑定"), "from");
-  const unresolved = blocks(section(api, "未解决"), "field");
+  const parsed = parseApiContract(api);
+  const fields = parsed.fields;
+  const bindings = parsed.bindings;
+  const unresolved = parsed.unresolved;
   const evidence = await listEvidence(recordingId, { limit: 0 });
   const known = new Set(evidence.map((row) => row.id));
   for (const group of [...fields, ...bindings, ...unresolved]) {
@@ -303,19 +397,15 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
       if (!known.has(id)) errors.push({ code: "evidence_missing", id });
     }
   }
-  const readGuides = new Set(evidence.filter((row) => row.kind === "guide").map((row) => row.summary));
-  for (const name of GUIDE_NAMES) {
-    if (!readGuides.has(name)) errors.push({ code: "guide_not_read", name });
-  }
   const skillMd = texts["SKILL.md"] || "";
   const buttonNames = await snapshotButtonNames(recordingId);
   for (const label of filledLabels(evidence)) {
-    if (labelTexts(label, buttonNames).some((name) => skillMd.includes(name))) continue;
+    if (labelTexts(label, buttonNames).some((name) => api.includes(name))) continue;
     errors.push({
       code: "filled_not_written",
       field: label,
-      file: "SKILL.md",
-      hint: "SKILL.md 要能看出填过哪个控件。开头的 * 不是名字。popup 和 row 不是字段名。引号里的名字如果以同一张快照里的按钮或链接结尾，写下剩下的那段。",
+      file: "references/api.md",
+      hint: "这个名字要写进字段或未解决。",
     });
   }
   const front = skillMd.match(/^---\r?\n([\s\S]*?)\r?\n---/);
@@ -364,7 +454,7 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   }
   const actionNames = new Map(evidence.filter((row) => row.kind === "action" && row.action_id).map((row) => [row.action_id, row.summary]));
   const indexed = detailed.map((row, at) => {
-    const base = requestIndexRow(row);
+    const base = { ...requestIndexRow(row), ...observeRequest(row) };
     const name = actionNames.get(row.action_id || "");
     const tagged = name ? { ...base, action: name } : base;
     const prev = previousMatchingRequest(detailed, at);
@@ -372,6 +462,10 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     return changed.length ? { ...tagged, changed_keys: changed } : tagged;
   });
   const requests = writerRequestRows(indexed);
+  const readGuides = new Set(evidence.filter((row) => row.kind === "guide").map((row) => row.summary));
+  for (const name of guidesFor(requests, filledLabels(evidence))) {
+    if (!readGuides.has(name)) errors.push({ code: "guide_not_read", name });
+  }
   const opened = new Set(evidence.filter((row) => row.kind === "read").map((row) => row.summary));
   const credentialIds = new Set(indexed.filter((row) => row.issues_credential).map((row) => row.id));
   const networkIds = new Set(evidence.filter((row) => row.kind === "network").map((row) => row.id));
@@ -490,7 +584,16 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
       hint: "scripts/client.py 里要写索引中的 path，并用标准库发出这次录到的请求。只返回动作名字、脚本里没有这些 path，调用方打不到。",
     });
   }
-  errors.push(...citationErrors(texts["references/api.md"] || "", requests, "references/api.md"));
+  errors.push(...citationErrors(texts["references/api.md"] || "", requests, "references/api.md").filter((item) => item.code !== "key_not_written"));
+  errors.push(...fieldContractErrors({
+    fields,
+    unresolved,
+    unresolvedText: parsed.unresolvedText,
+    bindings,
+    requests,
+    clientText,
+    skillMd,
+  }));
   for (const cited of adoptedEvidencePaths(citedPaths(clientText), requests)) {
     const hit = requests.some((row) => row.path === cited);
     if (!hit) continue;
@@ -558,33 +661,16 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   } catch {
     headers = {};
   }
-  let snapshotText = "";
-  for (let index = evidence.length - 1; index >= 0 && !snapshotText; index -= 1) {
-    const row = evidence[index];
-    if (row.kind !== "snapshot" && row.kind !== "action") continue;
-    const blob = await getEvidence(recordingId, row.id).catch(() => null);
-    const text = String(blob?.body?.snapshot?.text || blob?.body?.text || "");
-    if (text.includes("snap ")) snapshotText = text;
-  }
-  const acted = evidence.filter((row) => row.kind === "action").map((row) => row.summary);
-  for (const name of unactedGoalControls(snapshotText, acted)) {
-    errors.push({
-      code: "goal_not_acted",
-      name,
-      file: "SKILL.md",
-      hint: "这个名字在目标原文里，最新快照里还有 ref，这次还没点过或填过。先对这个 ref 做完再写文件。",
-    });
-  }
   const unique = [];
   const seenError = new Set();
   for (const item of errors) {
-    const key = [item.code, item.field, item.path, item.command, item.name, item.key, item.file].join("|");
+    const key = [item.code, item.field, item.path, item.command, item.name, item.key, item.file, item.id, item.from].join("|");
     if (seenError.has(key)) continue;
     seenError.add(key);
     unique.push(item);
   }
   errors.length = 0;
-  errors.push(...unique);
+  errors.push(...collapseVerifyErrors(unique));
   let status = "verify_failed";
   if (!errors.length && hasCredentialHeaders(headers)) status = "skill_ready";
   else if (!errors.length) status = "skill_written_needs_auth";
