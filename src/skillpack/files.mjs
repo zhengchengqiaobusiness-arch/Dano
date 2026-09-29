@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { recordingDir, skillDir } from "../paths.mjs";
-import { usableAuthHeaders, refreshVault } from "../auth-vault.mjs";
+import { redactSecrets, refreshVault, usableAuthHeaders } from "../auth-vault.mjs";
 import { readTokenRecord, writeAuthLocalFile } from "../token-store.mjs";
 import { originFromUrl } from "../session-store.mjs";
 
@@ -66,8 +66,22 @@ export async function writeSkillFile(recordingId, skillId, relativePath, content
 
 export async function readSkillFile(skillId, relativePath) {
   const rel = String(relativePath || "").replaceAll("\\", "/");
+  const file = path.join(skillDir(skillId), rel);
+  if (rel === "config/auth.local.json") {
+    let parsed = {};
+    try {
+      parsed = JSON.parse(await readFile(file, "utf8"));
+    } catch {
+      parsed = {};
+    }
+    return { ok: true, contents: JSON.stringify(redactSecrets(parsed), null, 2) };
+  }
+  if (rel === "config/runtime.json") {
+    const text = await readFile(file, "utf8").catch(() => "");
+    return { ok: true, contents: text };
+  }
   if (!WRITABLE.has(rel)) return { ok: false, error: "frozen_file", writable: [...WRITABLE] };
-  const text = await readFile(path.join(skillDir(skillId), rel), "utf8");
+  const text = await readFile(file, "utf8");
   return { ok: true, contents: text };
 }
 

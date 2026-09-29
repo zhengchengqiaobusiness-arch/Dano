@@ -1,0 +1,12 @@
+<!doctype html>
+<html>
+<body>
+  <input id="qty" type="number" required min="0" max="10" step="1" aria-label="数量">
+  <input id="code" aria-label="编码">
+  <script>
+    document.querySelector("#code").addEventListener("input", (event) => {
+      event.target.value = event.target.value.toUpperCase();
+    });
+  </script>
+</body>
+</html>

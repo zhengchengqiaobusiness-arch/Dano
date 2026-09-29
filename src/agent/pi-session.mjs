@@ -42,11 +42,26 @@ function resultLine(result) {
 const SKILL_TOOLS = new Set(["write_skill_file", "run_skill_command", "verify_skill"]);
 const MAX_SKILL_CONTINUES = 8;
 
+export function modelContextPacket(current, { index = false } = {}) {
+  const packet = {
+    goal: current?.goal || {},
+    requests: current?.requests || [],
+    filled: current?.filled || [],
+  };
+  if (index && Array.isArray(current?.index)) packet.index = current.index;
+  if (current?.snapshot?.text) packet.snapshot = { evidence_id: current.snapshot.evidence_id || "", text: current.snapshot.text };
+  if (Array.isArray(current?.filled_value) && current.filled_value.length) packet.filled_value = current.filled_value;
+  if (Array.isArray(current?.also_changed) && current.also_changed.length) packet.also_changed = current.also_changed;
+  if (current?.auth_file) packet.auth_file = current.auth_file;
+  return packet;
+}
+
 export function nextRecordingPrompt({ finished, paused, progressed, continues, verifyErrors }) {
   if (finished || paused || continues >= MAX_SKILL_CONTINUES) return null;
-  const errors = Array.isArray(verifyErrors) && verifyErrors.length ? `\n${JSON.stringify(verifyErrors)}` : "";
+  if (Array.isArray(verifyErrors) && verifyErrors.some((item) => item.code === "auth_expired")) return null;
+  const errors = Array.isArray(verifyErrors) && verifyErrors.length ? `校验没过：\n${JSON.stringify(verifyErrors)}\n` : "";
   const lead = progressed ? "页面操作的总结不是结束。" : "Skill 还没产出。";
-  return `${lead}read_guide 读完名单。对照目标原文、requests（方法、路径、证据 id、keys、empty、issues_credential）和 filled 里的控件名，写三个文件。SKILL.md 从 --- 起行，写 name 和 description，再写一行 ---。要采用的请求用 network_get 打开全文。调用方会执行的命令要带上 keys：来自参数，或命令里先按证据再读。empty 里的键传空。录到的字面值不写进默认参数。filled 里每个控件名在 SKILL.md 各占一行必填。同一子命令写一行，会变的参数写成 <参数名>，跑一次即可。issues_credential 的请求按 auth.local.json 的 credential 在业务请求前重放，失败或 401 再停止。DANO_AUTH_HEADERS 只覆盖同名头。scripts/client.py 只用 Python 标准库。跑读命令，再 verify_skill。${errors}`;
+  return `${errors}${lead}read_guide 读完名单。对照目标原文、索引里的 requests（方法、路径、证据 id、keys、changed_keys、added_keys、changed_by、empty、issues_credential、actions）、filled 里的控件名和 filled_value，写三个文件。filled_value 是控件收下的值，和填进去的字不同时以它为准。also_changed 是同一次填写或点击里另外自己变了的输入控件，不是这次点中或填进去的。fields 上的 [required]、min、max、step 是控件自己标的。actions 是当时那一下点击或填写的名字，带 popup 的是弹层里的那一下，不是页面上的同名按钮。索引里也会留下没有挂在某一下动作上、但只出现过一两次的请求。changed_keys 是同一条 path、同一组键和上一次相比变了的键。added_keys 是这组键比上一条同 path 多出来的键。changed_by 记下这个键变化时正在进行的点击或填写。同一条 path 若 keys 或 empty 不同，索引里是两行，写成两个命令。没有出现在 changed_keys 里的键，不要写成固定值，也不要用空字符串或 0 顶上。SKILL.md 从 --- 起行，写 name 和 description，再写一行 ---。要采用的请求用 network_get 打开全文。references/api.md 里每条 path 旁边写证据 id，并写清是什么、调用方提供什么、请求值从哪来、依据是哪次动作。来源没分清就放未解决。调用方会执行的命令要带上 keys：来自参数，或命令里先按证据再读。引用这条 path 的函数里要逐个写出这些键名，只写 data=data 不算写过。empty 里的键传空。录到的字面值不写进默认参数。filled 里每个引号中的控件名在 SKILL.md 各占一行必填，开头的 * 是必填标记，写名字本身。popup 和 row 标明所在层和行，不是字段名。同一子命令写一行，会变的参数写成 <参数名>，跑一次即可。issues_credential 时，校验错误上的 auth_file 只有 method、path，以及 query 是否存在。可执行代码里写 credential = auth["credential"]，再 Request(credential["url"], method=credential["method"])，注释不算。query 为真时用这整段 url，不要用 base_url 另拼 path。响应带回新的刷新凭证时，只替换 credential["url"] 里原来的查询值再写回。当前脚本改过之后，先用现在的脚本再跑一次非写入命令；这次仍失败或 401 再停止。查询串里的凭证不在这里。DANO_AUTH_HEADERS 只覆盖同名头。scripts/client.py 只用 Python 标准库。跑读命令，再 verify_skill。`;
 }
 
 let startOverride = null;
@@ -153,7 +168,7 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
       if (!follow) return;
       continues += 1;
       const current = typeof host.context === "function" ? await host.context() : {};
-      await prompt(`${follow}\n${JSON.stringify({ goal: current.goal || {}, requests: current.requests || [], filled: current.filled || [] })}`);
+      await prompt(`${follow}\n${JSON.stringify(modelContextPacket(current, { index: true }))}`);
     }
   }
   const handle = {
@@ -177,7 +192,7 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
     recording.earlySteer = [];
     recording.pi = handle;
   }
-  prompt(`${goalText}\n${JSON.stringify({ snapshot: context.snapshot, index: context.index, requests: context.requests || [], filled: context.filled || [] })}`).catch((error) => {
+  prompt(`${goalText}\n${JSON.stringify(modelContextPacket(context, { index: true }))}`).catch((error) => {
     logLine(`[pi] ${error?.message || error}`);
     recording?.emitThought?.({ kind: "text", text: String(error?.message || error) });
   });

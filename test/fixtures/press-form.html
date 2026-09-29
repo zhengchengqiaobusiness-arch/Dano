@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<body>
+  <input id="q" aria-label="查询" value="ab">
+  <script>
+    document.querySelector("#q").addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.target.value = event.target.value.toUpperCase();
+      fetch("/api/search", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ q: event.target.value }),
+      });
+    });
+  </script>
+</body>
+</html>

@@ -1,46 +1,9 @@
-# 活选项：OA Skill 生成指南
+# 候选项和文件地址
 
-本文档供负责核对消费者 Skill 的模型阅读。合同里声明了 `option_source` 的调用方字段，运行时必须打真正的选项接口，不得把录制样本冻成选项。
+请求索引里 `option_list` 为 true 的读取，响应是多条记录，每条有 id 和名称。
 
-## INPUT_FORMS 必须保留 dataSource
+目标要调用方做选择、并且查询或提交用了其中的 id 时：写成一条读命令，调用前现查这条路径。问句用 select 或 tree，给人看名称，提交 id。页面上的单选保持页面上的那些选项。
 
-合同字段若来自选项接口，`references/INPUT_FORMS.md` **必须保留完整 `dataSource`**：
+这次用不到的 `option_list` 路径，把路径写进 `references/api.md` 的「未解决」。
 
-- endpoint
-- method
-- params
-- resultPath
-- idField
-- labelField
-- 合同已声明的 `childrenField` 及其它映射
-
-这些由运输层从录制合同投影。禁止重写 INPUT_FORMS 把 dataSource 删掉。
-
-禁止：
-
-- 「把 options 填进 question 后删除 dataSource」
-- 「拉完候选再删 dataSource」
-- 把录制当时看到的几条写成静态 `options` 并宣称已解决
-
-用户看见 label，接口接收稳定 id 或合同声明的值。树形结果必须按 `childrenField` 展平后再提问。
-
-## 预取与刷新
-
-助手必须先用本包鉴权拉候选，再提问。不要让问句自己裸打 dataSource。
-
-```text
-python3 scripts/flow.py --list-options <capability_id> <field>
-```
-
-选项接口和业务接口走同一套 `auth.local.json` / `DANO_AUTH_HEADERS`。401 按鉴权规范停问。
-
-## 失败即停
-
-选项接口失败、空列表、或无法映射到稳定 id：
-
-- 停问用户
-- 不得默默取第一条
-- 不得用录制样本冒充实时选项
-- 不得把未识别来源写成可执行默认
-
-`references/OPTIONS.md` 只写「何时打哪条 option_source、如何映射、失败怎么停」，不要贴真实 token，不要写死一批录制 label。
+请求索引里 `url_string` 为 true 的读取，响应是一个 URL。写成命令，把返回的字符串写进后续请求正文里对应的那一项。

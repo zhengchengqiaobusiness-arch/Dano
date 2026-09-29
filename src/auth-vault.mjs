@@ -158,6 +158,65 @@ export async function writeAuthVault(recordingId, headers, extra = {}) {
   return payload;
 }
 
+export function redactSecrets(value) {
+  if (typeof value === "string") {
+    return value.replace(/([?&](?:refresh[_-]?token|access[_-]?token|password)=)[^&#\s"']+/gi, "$1");
+  }
+  if (Array.isArray(value)) return value.map(redactSecrets);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (key === "headers" && item && typeof item === "object" && !Array.isArray(item)) {
+        out[key] = Object.fromEntries(Object.keys(item).map((name) => [name, ""]));
+        continue;
+      }
+      if (/^(?:refresh[_-]?token|access[_-]?token|password)$/i.test(key) && typeof item === "string") out[key] = "";
+      else out[key] = redactSecrets(item);
+    }
+    return out;
+  }
+  return value;
+}
+
+export function presentToModel(value, vault) {
+  const shown = redactSecrets(value);
+  const shape = credentialShape(vault);
+  if (!shape?.path) return shown;
+  return markCredentialReplay(shown, shape.path);
+}
+
+function markCredentialReplay(value, credPath) {
+  if (Array.isArray(value)) return value.map((item) => markCredentialReplay(item, credPath));
+  if (!value || typeof value !== "object") return value;
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    out[key] = item && typeof item === "object" ? markCredentialReplay(item, credPath) : item;
+  }
+  const url = typeof value.url === "string" ? value.url : "";
+  if (!url) return out;
+  try {
+    if (new URL(url).pathname === credPath) out.replay = "credential";
+  } catch {
+    // 不是完整 url 就不标
+  }
+  return out;
+}
+
+export function credentialShape(vault) {
+  const cred = vault?.credential;
+  if (!cred?.url || !cred?.method) return null;
+  let path = "";
+  let query = false;
+  try {
+    const url = new URL(String(cred.url));
+    path = url.pathname;
+    query = Boolean(url.search);
+  } catch {
+    path = "";
+  }
+  return { method: String(cred.method), path, ...(query ? { query: true } : {}) };
+}
+
 export async function refreshVault(recordingId) {
   const vault = await readAuthVault(recordingId);
   const cred = vault.credential;

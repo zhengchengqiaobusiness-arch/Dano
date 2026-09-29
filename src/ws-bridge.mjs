@@ -1,7 +1,7 @@
 import { WebSocketServer } from "ws";
 import { appendEvidence } from "./evidence/store.mjs";
 import { browserSession, captureFrame, closeBrowser, getPage, openBrowser, withPage } from "./browser/session.mjs";
-import { beginAction, endAction, listNetwork, waitForAction } from "./browser/network.mjs";
+import { beginAction, endAction, labelAction, listNetwork, waitForAction } from "./browser/network.mjs";
 import { loadStorageState, saveStorageState } from "./session-store.mjs";
 import { createRecording, emit, persist, snapshotMessage } from "./session.mjs";
 import { hostTools } from "./agent/tools.mjs";
@@ -31,10 +31,12 @@ async function applyPointer(recording, event, send) {
       await waitForAction(recording.id, actionId);
       endAction(recording.id);
       const requests = listNetwork(recording.id, { action_id: actionId });
+      labelAction(recording.id, actionId, "manual_click");
       await appendEvidence(recording.id, {
         kind: "action",
         summary: "manual_click",
-        body: { ok: true, requests },
+        action_id: actionId,
+        body: { ok: true, action_id: actionId, requests },
         body_missing: false,
       });
       recording.emitThought?.({
@@ -142,10 +144,12 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
           state.pendingFileChooser = null;
           await waitForAction(recording.id, actionId);
           const requests = listNetwork(recording.id, { action_id: actionId });
+          labelAction(recording.id, actionId, `upload:${name}`);
           await appendEvidence(recording.id, {
             kind: "action",
             summary: `upload:${name}`,
-            body: { ok: true, filled: [name], requests },
+            action_id: actionId,
+            body: { ok: true, action_id: actionId, filled: [name], requests },
             body_missing: false,
           });
         } catch (error) {
