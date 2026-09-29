@@ -3,7 +3,6 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, realpath } from "node:fs/promises";
 import { join, relative, resolve, isAbsolute } from "node:path";
 import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
 import { flock } from "fs-ext";
 import { prepareLinuxProcessPrivacy } from "./linux-process-privacy.js";
 import { rootFile, rootInstallation } from "./trusted-installation.js";
@@ -102,7 +101,8 @@ export async function runProtectedSupervisor(options: ProtectedSupervisorOptions
       recoveryDirectory: recovery };
   }
   await rootInstallation(installation);
-  const entry = await rootFile(fileURLToPath(new URL("./protected-host-entry.js", import.meta.url)));
+  // Bundling can move this module into a shared chunk outside bridge/.
+  const entry = await rootFile(join(installation, "dist/server/bridge/protected-host-entry.js"));
   if (!inside(installation, entry)) throw unsafe();
   const node = await rootFile(process.execPath);
   const guard = await rootFile(options.broker.privilegeGuard);

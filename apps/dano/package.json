@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "pnpm run build:server && pnpm run build:web",
-    "build:server": "tsdown",
+    "build:server": "tsdown && node ../../scripts/check-built-supervisor-entry.mjs",
     "build:web": "vite build",
     "check": "pnpm run check:server && pnpm run check:web",
     "check:server": "tsc -p tsconfig.server.json --noEmit",

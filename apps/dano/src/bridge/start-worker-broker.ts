@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { isAbsolute, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isAbsolute, join, relative } from "node:path";
 import * as bootstrap from "@josephyoung/pi-openviking/bootstrap";
 import { assertWorkerPrivacyEvidence } from "./linux-process-privacy.js";
 import { assertWorkerProviderApi } from "./worker-broker.js";
@@ -21,7 +20,7 @@ export async function startWorkerBroker(profile: WorkerBrokerProfile): Promise<W
     || profile.hostGid === profile.workerGid) throw new Error("INVALID_WORKER_BROKER_PROFILE");
   const paths = await bootstrap.validateProtectedPaths(profile);
   await rootInstallation(paths.installationDir);
-  const entry = await rootFile(fileURLToPath(new URL("./worker-broker-entry.js", import.meta.url)));
+  const entry = await rootFile(join(paths.installationDir, "dist/server/bridge/worker-broker-entry.js"));
   const suffix = relative(paths.installationDir, entry);
   if (!suffix || suffix === ".." || suffix.startsWith("../") || isAbsolute(suffix)) throw new Error("WORKER_BROKER_INSTALLATION_REQUIRED");
   const node = await rootFile(process.execPath);
