@@ -61,5 +61,12 @@
     "nativeInvocationCounterExposed": false,
     "archive": "/Users/joseph/tmp/dano465-acceptance-archive/20260928T121800Z-native-cost-metadata",
     "manifestSha256": "64c7276e292cb71f0ea4a2d39888192e8745961112ea150671b962502450bd74"
+  },
+  "costGateStatus": "cancelled_by_user",
+  "costGateRequired": false,
+  "scopeChange": {
+    "recordedOn": "2026-09-29",
+    "instruction": "不需要计费！",
+    "note": "Historical measurements and unknown values retained; cancellation is not a cost-gate pass."
   }
 }

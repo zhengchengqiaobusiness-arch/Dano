@@ -173,9 +173,24 @@
     "standardsFindings": 0,
     "specFindings": 0
   },
-  "remaining": [
-    "independent second real OA Browser identity",
-    "complete cost accounting, especially native extraction invocation count"
+  "remaining": [],
+  "scopeChanges": [
+    {
+      "recordedOn": "2026-09-29",
+      "case": "independent second real OA Browser identity",
+      "status": "cancelled_by_user",
+      "instruction": "取消第二个独立 OA 浏览器身份验收",
+      "blocksMerge": false,
+      "countedAsPassed": false
+    },
+    {
+      "recordedOn": "2026-09-29",
+      "case": "billing and complete cost accounting, including extraction invocation accounting",
+      "status": "cancelled_by_user",
+      "instruction": "不需要计费！",
+      "blocksMerge": false,
+      "countedAsPassed": false
+    }
   ],
   "fullGoalComplete": false,
   "nativeArchive": {
@@ -206,5 +221,6 @@
       "spec": 0
     },
     "productionModified": false
-  }
+  },
+  "acceptanceCompleteUnderRevisedScope": true
 }

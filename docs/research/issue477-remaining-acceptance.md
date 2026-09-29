@@ -228,6 +228,24 @@ or Pi context invalidation. The regression first reproduced the stale-context
 throw, then all 36 focused tests and type/Svelte checks passed. Both final reviews
 reported no new findings; affected real lifecycle checks continue.
 
+## Current acceptance scope (2026-09-29)
+
+The user explicitly cancelled acceptance using a second independent real OA
+Browser identity. This case is removed from the remaining acceptance and merge
+conditions; its status is **cancelled by the user**, not passed. Prior unsuccessful
+attempts and existing isolation evidence remain retained. Chrome connectivity and
+plugin reinstallation are no longer prerequisites for this cancelled case.
+
+The user also explicitly cancelled billing/cost acceptance ("不需要计费！").
+Exact extraction-call accounting, model pricing and local infrastructure cost are
+no longer release gates. Historical measurements and unknown values remain
+unchanged; cancellation is not recorded as a passed measurement.
+
+No acceptance gate remains under the revised scope. Final AC/T audit is recorded
+in [the closeout](issue477-final-closeout-20260929.md); upstream merge and issue
+closure complete delivery. Earlier progress entries describe historical scope and
+are superseded by these explicit scope changes.
+
 ## Final targeted supplement (2026-09-28)
 
 The remaining ten frozen cases now have three completed repetitions each:
