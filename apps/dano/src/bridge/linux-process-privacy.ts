@@ -39,7 +39,7 @@ export function procPrivacyGroup(mountInfo: string): number {
 }
 
 /** A worker must not be able to join the exempt host group or remount procfs. */
-export function assertWorkerPrivacyEvidence(status: string): void {
+export function assertWorkerPrivacyEvidence(status: string, trustedToolLauncher = false): void {
   const identity = (field: string) => {
     const match = new RegExp(`^${field}:\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)$`, "m").exec(status);
     const values = match?.slice(1).map(Number);
@@ -52,7 +52,9 @@ export function assertWorkerPrivacyEvidence(status: string): void {
   if (!groups) throw unavailable();
   const supplementary = groups[1].trim() ? groups[1].trim().split(/\s+/).map(Number) : [];
   if (supplementary.some(value => value !== gid)) throw unavailable();
-  if (!/^NoNewPrivs:\s+1$/m.test(status)) throw unavailable();
+  // Only fixed, installation-owned tool code may launch setuid Bubblewrap.
+  // The HTTP host retains no_new_privs; Bubblewrap applies it to every shell.
+  if (!new RegExp(`^NoNewPrivs:\\s+${trustedToolLauncher ? 0 : 1}$`, "m").test(status)) throw unavailable();
   for (const name of ["CapPrm", "CapEff", "CapAmb"]) {
     if (!new RegExp(`^${name}:\\s+0+$`, "m").test(status)) throw unavailable();
   }
@@ -65,7 +67,7 @@ export async function assertWorkerProcessPrivacy(): Promise<void> {
       readFile("/proc/self/mountinfo", "utf8"), readFile("/proc/self/status", "utf8"),
     ]);
     procPrivacyGroup(mountInfo);
-    assertWorkerPrivacyEvidence(status);
+    assertWorkerPrivacyEvidence(status, true);
     if (process.ppid <= 0) throw unavailable();
     // procfs can report its exemption GID in an outer user namespace. Prove
     // exclusion using the actual kernel access decision, not numeric equality.

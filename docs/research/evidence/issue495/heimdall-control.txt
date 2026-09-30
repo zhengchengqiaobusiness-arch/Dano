@@ -1,0 +1,11 @@
+tools [ 'bash' ]
+Uid:	10001	10001	10001	10001
+Gid:	10001	10001	10001	10001
+CapInh:	0000000000000000
+CapPrm:	0000000000000000
+CapEff:	0000000000000000
+CapBnd:	0000001fffffffff
+CapAmb:	0000000000000000
+NoNewPrivs:	0
+{"executable":"/usr/bin/bwrap","args":["--tmpfs","/","--dev-bind","/dev","/dev","--ro-bind","/usr","/usr","--ro-bind","/opt","/opt","--ro-bind","/srv","/srv","--ro-bind","/etc","/etc","--ro-bind","/bin","/bin","--ro-bind","/sbin","/sbin","--ro-bind","/lib","/lib","--ro-bind","/lib64","/lib64","--ro-bind","/home/node","/home/node","--bind","/tmp/dano495-6uSkAd/workspace","/tmp/dano495-6uSkAd/workspace","--bind","/tmp","/tmp","--ro-bind","/tmp/heimdall-sandbox-81203123-d808-42c3-8f6f-cc5e75989828/_tmp_dano495-6uSkAd_agent_heimdall.json","/tmp/dano495-6uSkAd/agent/heimdall.json","--ro-bind","/tmp/heimdall-sandbox-81203123-d808-42c3-8f6f-cc5e75989828/_tmp_dano495-6uSkAd_workspace_.pi_heimdall.json","/tmp/dano495-6uSkAd/workspace/.pi/heimdall.json","--unshare-pid","--die-with-parent","--new-session","--","bash","-c","printf DANO495_BASH_OK"]}
+{"content":[{"type":"text","text":"DANO495_BASH_OK"}]}

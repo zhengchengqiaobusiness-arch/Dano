@@ -79,9 +79,10 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 - For browser validation, use the Codex in-app Browser against the relevant flow. Use another browser surface only when the user explicitly requests it or the in-app Browser cannot exercise the required flow.
 - Do not add or run repository scripts that launch system Chrome or Chromium headlessly for browser acceptance. Keep deterministic logic and component behavior in Vitest, and use the Codex in-app Browser for rendered interaction and visual evidence.
 - When browser validation temporarily changes the theme, record the initial theme before testing and restore it before handoff. Do not leave a test theme preference in the user's browser, including when the current UI does not expose the theme selector.
-- For Podman/deploy/runtime/Heimdall/bash/upload validation, `smoke:deploy` alone is not enough. Also verify in a browser: plain text chat, image upload with model read/description, and a model-triggered `bash ls` tool call.
-- If `podman ps` works but `podman compose` or `podman machine list` fails with `podman-machine-default.lock: operation not permitted` or `could not find a matching machine`, treat it as local Podman machine metadata being blocked by the sandbox, not a Dano bug. Re-run the same Compose command outside the sandbox/escalated instead of changing Dano code.
-- After Podman-based deployment or smoke tests, stop and remove the test containers and pods, then remove Dano temporary images/tags and dangling build layers after confirming no containers reference them; keep reusable base images unless explicitly asked.
+- 完成修改后，可按上述 Local development lifecycle 启动本地开发服务器测试。需要容器的测试在生产主机的隔离测试环境执行，不再使用本地 Podman 测试。
+- 生产主机上的容器测试使用独立容器、运行数据和回环端口，保留现有生产服务及相邻服务；测试授权不等于切换生产部署或修改宿主机全局安全配置的授权。
+- For container/deploy/runtime/Heimdall/bash/upload validation, `smoke:deploy` alone is not enough. Also verify in a browser: plain text chat, image upload with model read/description, and a model-triggered `bash ls` tool call.
+- After container tests, stop and remove only this run's test containers, temporary images/tags and unreferenced build layers; keep reusable base images and production data.
 
 ### 镜像验收入口、上传与审批
 

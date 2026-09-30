@@ -231,6 +231,13 @@ try {
     ],
     { cwd: deployDir },
   );
+  // Execute real guarded tools and owner-bound file attacks before replacement.
+  // The gate creates only disposable /tmp fixtures inside this one-off container.
+  run(composeBin, [...composeArgs, "-f", "docker-compose.yml", "-f",
+    "docker-compose.exposure.yml", ...productNameArgs(), "--env-file", ".env",
+    "run", "--rm", "--no-deps", "--user", "0:0", "--entrypoint", "node", "app",
+    "./dist/server/bridge/sandbox-preflight.js"], { cwd: deployDir });
+
   removeEnvFileValues(envPath, [
     "DANO_AUTH_JWT_SECRET",
     "DANO_AUTH_JWT_ISSUER",

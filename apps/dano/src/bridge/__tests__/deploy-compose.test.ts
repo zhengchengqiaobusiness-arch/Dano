@@ -248,7 +248,8 @@ if (process.env.DANO_FAKE_REQUIRE_OAUTH_CREDENTIAL_PAIR && args.includes("--vali
   if (!key || Buffer.from(key, "base64url").byteLength !== 32 || !version) process.exit(2);
 }
 if (process.env.DANO_FAKE_SYSTEM_FAIL && args.includes("./deploy/system-prompt.mjs") && args.includes(process.env.DANO_FAKE_SYSTEM_FAIL)) process.exit(1);
-if (process.env.DANO_FAKE_CONFIG_INVALID && args.includes("--validate-config")) {
+if ((process.env.DANO_FAKE_CONFIG_INVALID && args.includes("--validate-config"))
+  || (process.env.DANO_FAKE_SANDBOX_INVALID && args.includes("./dist/server/bridge/sandbox-preflight.js"))) {
   process.exit(1);
 }
 `,
@@ -1043,6 +1044,7 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
         PATH: nodeOnlyPath(cwd),
         DANO_RUNTIME_DEFAULTS_DIR: defaultsDir,
         DANO_RUNTIME_DIR: runtimeDir,
+        PI_CODING_AGENT_DIR: "",
         DANO_PRODUCT_NAME: " 部署助手 ",
         DANO_DEFAULT_WORKSPACE_PATH: workspaceDir,
         DANO_AGENT_DIR_OUT: agentDirOut,
@@ -1093,6 +1095,7 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
         PATH: nodeOnlyPath(cwd),
         DANO_RUNTIME_DEFAULTS_DIR: defaultsDir,
         DANO_RUNTIME_DIR: runtimeDir,
+        PI_CODING_AGENT_DIR: "",
         DANO_PRODUCT_NAME: "",
         DANO_CONFIG_PATH: configPath,
       },
@@ -1224,7 +1227,11 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
       "./dist/server/main.js",
       "--validate-config",
     ]);
-    expect(JSON.parse(logLines[3])).toEqual([
+    expect(JSON.parse(logLines[3]).slice(-6)).toEqual([
+      "--user", "0:0", "--entrypoint", "node", "app",
+      "./dist/server/bridge/sandbox-preflight.js",
+    ]);
+    expect(JSON.parse(logLines[4])).toEqual([
       "compose",
       "-f",
       "docker-compose.yml",
@@ -1244,8 +1251,8 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
       "--expected-product-name",
       "源码助手",
     ]);
-    expect(JSON.parse(logLines[4]).slice(-4)).toEqual(["./deploy/system-prompt.mjs", "check", "--expected-product-name", "源码助手"]);
-    expect(JSON.parse(logLines[5])).toEqual([
+    expect(JSON.parse(logLines[5]).slice(-4)).toEqual(["./deploy/system-prompt.mjs", "check", "--expected-product-name", "源码助手"]);
+    expect(JSON.parse(logLines[6])).toEqual([
       "compose",
       "-f",
       "docker-compose.yml",
@@ -1259,7 +1266,7 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
       "app",
       "nginx",
     ]);
-    expect(logLines[6]).toBe("smoke");
+    expect(logLines[7]).toBe("smoke");
   });
 
   it("initializes Dano-owned OAuth credential encryption before the production gate", () => {
@@ -1329,7 +1336,7 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     expect(statSync(join(deployDir, ".env")).mode & 0o777).toBe(0o600);
   });
 
-  it("stops a release before switching containers when configuration validation fails", () => {
+  it.each(["DANO_FAKE_CONFIG_INVALID", "DANO_FAKE_SANDBOX_INVALID"])("stops a release before switching containers when %s fails", failure => {
     const markerRoot = mkdtempSync(join(tmpdir(), "dano-release-gate-"));
     tempDirs.push(markerRoot);
     const switchMarker = join(markerRoot, "switched");
@@ -1343,7 +1350,7 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
       runRelease({
         deployDir,
         env: {
-          DANO_FAKE_CONFIG_INVALID: "1",
+          [failure]: "1",
           DANO_FAKE_SWITCH_MARKER: switchMarker,
         },
       }),

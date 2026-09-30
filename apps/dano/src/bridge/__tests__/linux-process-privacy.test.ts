@@ -34,3 +34,15 @@ it("rejects privileged identities, group membership, capabilities and missing ke
     expect(() => assertWorkerPrivacyEvidence(candidate)).toThrow("MEMORY_PROCESS_PRIVACY_REQUIRED");
   }
 });
+
+it("allows only a capability-free trusted launcher before setuid Bubblewrap", () => {
+  const launcher = status.replace("NoNewPrivs:\t1", "NoNewPrivs:\t0");
+  expect(() => assertWorkerPrivacyEvidence(launcher, true)).not.toThrow();
+  // Host policy is unchanged, and a launcher that cannot use setuid fails early.
+  expect(() => assertWorkerPrivacyEvidence(launcher)).toThrow();
+  expect(() => assertWorkerPrivacyEvidence(status, true)).toThrow();
+  for (const candidate of [launcher.replace("Groups:\t", "Groups:\t1000"),
+    launcher.replace("CapEff:\t0000000000000000", "CapEff:\t0000000000200000")]) {
+    expect(() => assertWorkerPrivacyEvidence(candidate, true)).toThrow();
+  }
+});

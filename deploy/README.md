@@ -307,6 +307,20 @@ Compose overlay. The image starts a small root supervisor, which runs Dano as UI
 1000 and assigns distinct worker identities internally. The HTTP host supervises
 open-websearch. Ordinary local development commands remain unchanged.
 
+The per-User tool process loads only protected, fixed Pi/Heimdall code. It permits
+the installed setuid Bubblewrap to initialize namespaces; Bubblewrap then sets
+`no_new_privs=1` and drops capabilities before any model Shell command executes.
+The HTTP host retains `no_new_privs=1`. Do not set no-new-privileges for the entire
+container or mount Bubblewrap on a nosuid filesystem in this deployment profile.
+No host user-namespace sysctl change is required for the supported setuid path.
+
+Before replacing containers, Release Build runs
+`node ./dist/server/bridge/sandbox-preflight.js` in a disposable Compose app
+container. It executes real Heimdall tools and checks private/cross-user file
+denials with synthetic data. Every actual tool process also checks its Shell
+privilege drop and workspace before becoming ready. An incompatible sandbox
+fails closed. See [the architecture comparison and evidence](../docs/research/issue495-memory-isolation.md).
+
 The existing runtime mount and `DANO_SESSIONS_ROOT` remain authoritative. With the
 standard Compose file, sessions stay at `/opt/dano/runtime-data/.dano/sessions` and
 workspaces stay under the existing `users` tree. The initializer does not move or

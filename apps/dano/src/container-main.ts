@@ -31,6 +31,9 @@ export async function runContainerMain(args: readonly string[], environment: Nod
   const { hostUid: uid, hostGid: gid } = options.host;
   await hostDirectory(options.runtimeRoot, uid, gid, 0o711);
   await hostDirectory(join(options.runtimeRoot, "users"), uid, gid, 0o711);
+  // A fresh Compose named volume starts root-owned. The ordinary startup
+  // persistence probe still creates its default workspace under this mount.
+  await hostDirectory(join(options.runtimeRoot, "workspaces"), uid, gid, 0o700);
   await hostDirectory(join(options.runtimeRoot, ".dano"), uid, gid, 0o700);
   await hostDirectory(options.sessionsRoot, uid, gid, 0o700);
   await hostDirectory(dirname(options.hostStateRoot), 0, 0, 0o711);

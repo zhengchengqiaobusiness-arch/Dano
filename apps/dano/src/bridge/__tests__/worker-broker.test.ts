@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { expect, it, vi } from "vitest";
-import { assertWorkerProviderApi, serveWorkerBroker } from "../worker-broker.js";
+import { serveWorkerBroker } from "../worker-broker.js";
 
 function harness() {
   const events = new EventEmitter();
@@ -72,11 +72,4 @@ it("closes the worker on oversized traffic and does not accept further calls", a
   expect(h.worker.close).toHaveBeenCalledOnce();
   expect(h.worker.assertIsolated).not.toHaveBeenCalled();
   expect(h.channel.connected).toBe(false);
-});
-
-it("requires an explicit supported provider capability instead of assuming unknown versions work", () => {
-  for (const value of [null, {}, { protectedWorkerProviderApiVersion: 0 }, { protectedWorkerProviderApiVersion: "1" }]) {
-    expect(() => assertWorkerProviderApi(value)).toThrow("PROTECTED_WORKER_PROVIDER_API_REQUIRED");
-  }
-  expect(() => assertWorkerProviderApi({ protectedWorkerProviderApiVersion: 1 })).not.toThrow();
 });

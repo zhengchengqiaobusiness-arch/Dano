@@ -1,6 +1,27 @@
 import { lstat, readdir, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative } from "node:path";
 
+/** Every search directory and ancestor must be immutable to model tools. */
+export async function rootSearchPath(path: string): Promise<string> {
+  const directories: string[] = [];
+  for (const entry of path.split(":")) {
+    if (!isAbsolute(entry)) throw new Error("WORKER_BROKER_INSTALLATION_REQUIRED");
+    const canonical = await realpath(entry);
+    let current = canonical;
+    for (;;) {
+      const metadata = await lstat(current);
+      if (!metadata.isDirectory() || metadata.uid !== 0 || (metadata.mode & 0o022)) {
+        throw new Error("WORKER_BROKER_INSTALLATION_REQUIRED");
+      }
+      const parent = dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+    directories.push(canonical);
+  }
+  return directories.join(":");
+}
+
 /** Root code/executables must not be replaceable by the dropped host either. */
 export async function rootFile(path: string): Promise<string> {
   if (!isAbsolute(path)) throw new Error("WORKER_BROKER_INSTALLATION_REQUIRED");
@@ -34,4 +55,3 @@ export async function rootInstallation(root: string): Promise<void> {
     } else if (!metadata.isFile()) throw new Error("WORKER_BROKER_INSTALLATION_REQUIRED");
   }
 }
-

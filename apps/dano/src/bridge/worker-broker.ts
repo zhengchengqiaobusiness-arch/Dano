@@ -10,13 +10,6 @@ interface BrokerLimits { maxConcurrentOperations: number; maxResultBytes: number
 type Worker = IsolatedToolExecutor & { close(): void };
 export const workerOperations: ReadonlySet<string> = new Set(["read", "write", "edit", "bash", "grep", "find", "ls", "user_bash"]);
 
-export function assertWorkerProviderApi(capabilities: unknown): void {
-  if (!capabilities || typeof capabilities !== "object"
-    || (capabilities as Record<string, unknown>).protectedWorkerProviderApiVersion !== 1) {
-    throw new Error("PROTECTED_WORKER_PROVIDER_API_REQUIRED");
-  }
-}
-
 /** A fixed RPC surface in the already-dropped broker process. No filesystem,
  * environment, module loading or process creation is exposed by this protocol. */
 export function serveWorkerBroker(worker: Worker, channel: WorkerBrokerChannel, limits: BrokerLimits): () => void {

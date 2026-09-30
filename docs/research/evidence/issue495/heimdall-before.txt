@@ -1,0 +1,14 @@
+tools [ 'bash' ]
+Uid:	10001	10001	10001	10001
+Gid:	10001	10001	10001	10001
+CapInh:	0000000000000000
+CapPrm:	0000000000000000
+CapEff:	0000000000000000
+CapBnd:	0000001fffffffff
+CapAmb:	0000000000000000
+NoNewPrivs:	1
+{"executable":"/usr/bin/bwrap","args":["--tmpfs","/","--dev-bind","/dev","/dev","--ro-bind","/usr","/usr","--ro-bind","/opt","/opt","--ro-bind","/srv","/srv","--ro-bind","/etc","/etc","--ro-bind","/bin","/bin","--ro-bind","/sbin","/sbin","--ro-bind","/lib","/lib","--ro-bind","/lib64","/lib64","--ro-bind","/home/node","/home/node","--bind","/tmp/dano495-clSvnQ/workspace","/tmp/dano495-clSvnQ/workspace","--bind","/tmp","/tmp","--ro-bind","/tmp/heimdall-sandbox-946d98e3-f13d-4810-b9a4-3bf33c1b1f54/_tmp_dano495-clSvnQ_agent_heimdall.json","/tmp/dano495-clSvnQ/agent/heimdall.json","--ro-bind","/tmp/heimdall-sandbox-946d98e3-f13d-4810-b9a4-3bf33c1b1f54/_tmp_dano495-clSvnQ_workspace_.pi_heimdall.json","/tmp/dano495-clSvnQ/workspace/.pi/heimdall.json","--unshare-pid","--die-with-parent","--new-session","--","bash","-c","printf DANO495_BASH_OK"]}
+Error: bwrap: Creating new namespace failed, likely because the kernel does not support user namespaces.  bwrap must be installed setuid on such systems.
+
+
+Command exited with code 1

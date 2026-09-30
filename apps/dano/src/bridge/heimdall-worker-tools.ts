@@ -14,9 +14,8 @@ import { assertWorkerProcessPrivacy } from "./linux-process-privacy.js";
 /** Load only inside the isolated tool process, whose HOME/config is tool-only. */
 export async function createWorkerTools({ workspace }: { workspace: string }) {
   await assertWorkerProcessPrivacy();
-  // The no_new_privs worker cannot create a fresh devpts mount. Reuse the
-  // container's devices and omit procfs inside each Shell sandbox so a new
-  // proc mount cannot undo the launcher's cross-user process privacy policy.
+  // Omit procfs inside model shells; never expose the container process tree.
+  // Only this trusted launcher remains able to invoke setuid Bubblewrap.
   process.env.HEIMDALL_BWRAP_BIND_KERNEL_FS = "1";
   process.env.HEIMDALL_BWRAP_BIND_PROC = "0";
   process.env.HEIMDALL_BWRAP_BIND_ROOT = workspace;
