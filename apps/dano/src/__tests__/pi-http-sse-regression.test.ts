@@ -5,7 +5,7 @@ import * as path from "node:path";
 import {
   fauxAssistantMessage,
   fauxProvider,
-  type Context,
+  type TranscriptContext,
   type FauxResponseStep,
 } from "@earendil-works/pi-ai";
 import {
@@ -179,7 +179,7 @@ async function createFieldAssistHttpHarness(
   };
 }
 
-describe("Pi 0.85.1 HTTP/SSE regression baseline", () => {
+describe("Pi 0.99.1 HTTP/SSE regression baseline", () => {
   it("projects a real Pi runtime configured through package-root interfaces", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-pi-http-sse-"));
     const provider = fauxProvider({ provider: "dano-regression" });
@@ -279,7 +279,7 @@ describe("Pi 0.85.1 HTTP/SSE regression baseline", () => {
   it("runs Field Assist through ModelRuntime without changing the main Assistant Turn", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-field-assist-"));
     const provider = fauxProvider({ provider: "dano-field-assist" });
-    let observedContext: Context | undefined;
+    let observedContext: TranscriptContext | undefined;
     provider.setResponses([
       context => {
         observedContext = context;
@@ -394,14 +394,16 @@ describe("Pi 0.85.1 HTTP/SSE regression baseline", () => {
       });
 
       expect(provider.state.callCount).toBe(1);
-      expect(observedContext?.systemPrompt).toContain("字段文本润色助手");
-      expect(observedContext?.messages).toEqual([
+      expect(observedContext?.messages.find(message => message.role === "system")).toMatchObject({
+        content: expect.stringContaining("字段文本润色助手"),
+      });
+      expect(observedContext?.messages.filter(message => message.role !== "system")).toEqual([
         expect.objectContaining({
           role: "user",
           content: "个人事务",
         }),
       ]);
-      expect(observedContext?.tools).toBeUndefined();
+      expect(observedContext?.messages.flatMap(message => message.role === "system" ? message.toolsAdded ?? [] : [])).toEqual([]);
       expect(sessionManager.getEntries()).toEqual(entriesBefore);
       expect(fs.readFileSync(sessionFile, "utf8")).toBe(sessionFileBefore);
       expect(

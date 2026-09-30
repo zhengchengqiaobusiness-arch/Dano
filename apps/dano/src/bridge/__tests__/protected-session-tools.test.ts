@@ -70,7 +70,7 @@ it("routes file and interactive Shell operations through the worker without load
   const runner = runtime.session.extensionRunner;
   expect(runtime.session.getAllTools().filter(tool => tool.name === "read")).toHaveLength(1);
   const read = runner.getToolDefinition("read")!;
-  expect(await read.execute("read", { path: "missing-on-host.txt" }, undefined, undefined, runner.createContext()))
+  expect(await read.execute("read", { path: "missing-on-host.txt" }, undefined, undefined, runner.createToolContext("test-call", undefined)))
     .toMatchObject({ content: [{ text: "WORKER_RESULT" }] });
   expect(h.worker.execute).toHaveBeenCalledWith("read", { path: "missing-on-host.txt" },
     expect.any(AbortSignal), expect.any(Function));
@@ -209,7 +209,7 @@ it("keeps the protected binding during registry forks and rejects foreign worksp
     const session = await registry.ensureSession(fork.sessionPath);
     const runner = session.extensionRunner;
     await runner.getToolDefinition("read")!.execute("fork", { path: "worker.txt" },
-      undefined, undefined, runner.createContext());
+      undefined, undefined, runner.createToolContext("test-call", undefined));
     expect(h.worker.execute.mock.calls.some(([name]) => name === "read")).toBe(true);
   } finally {
     await registry.dispose();
@@ -221,7 +221,7 @@ it("rebinds new and restored runtimes and invalidates old tool references", asyn
   const runtime = await h.start();
   const oldRunner = runtime.session.extensionRunner;
   const oldRead = oldRunner.getToolDefinition("read")!;
-  const oldContext = oldRunner.createContext();
+  const oldContext = oldRunner.createToolContext("test-call", undefined);
   await runtime.newSession();
   await runtime.session.bindExtensions({ mode: "rpc", uiContext: createHeadlessUIContext() });
   await expect(oldRead.execute("old", { path: "old.txt" }, undefined, undefined, oldContext)).rejects.toThrow();
@@ -236,7 +236,7 @@ it("rebinds new and restored runtimes and invalidates old tool references", asyn
   expect(h.bindMemory).toHaveBeenCalledTimes(3);
   const runner = runtime.session.extensionRunner;
   await runner.getToolDefinition("write")!.execute("new", { path: "worker-only.txt", content: "fixture" },
-    undefined, undefined, runner.createContext());
+    undefined, undefined, runner.createToolContext("test-call", undefined));
   await expect(readFile(join(h.workspace, "worker-only.txt"))).rejects.toMatchObject({ code: "ENOENT" });
 }, 30_000);
 

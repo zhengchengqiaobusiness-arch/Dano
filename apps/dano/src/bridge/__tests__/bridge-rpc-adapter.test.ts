@@ -668,9 +668,9 @@ describe("BridgeRpcAdapter", () => {
           prompt: vi.fn(
             async (
               message: string,
-              options?: { preflightResult?: (success: boolean) => void },
+              options?: { preflightResult?: (disposition: "started") => void },
             ) => {
-              options?.preflightResult?.(true);
+              options?.preflightResult?.("started");
               emit({
                 type: "message_start",
                 message: { role: "user", content: message, timestamp: 1 },

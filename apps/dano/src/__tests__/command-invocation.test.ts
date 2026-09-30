@@ -88,18 +88,20 @@ SKILL_BODY_EXPANDED
 
       await session.prompt("/fixture-prompt current changes");
       const templateMessages = agentPrompt.mock.calls[0]?.[0] as Array<{
+        role: string;
         content: Array<{ type: string; text?: string }>;
       }>;
-      expect(templateMessages[0]?.content[0]?.text).toBe(
+      expect(templateMessages.find(message => message.role === "user")?.content[0]?.text).toBe(
         "PROMPT_TEMPLATE_EXPANDED current changes",
       );
 
       agentPrompt.mockClear();
       await session.prompt("/skill:fixture-skill repository");
       const skillMessages = agentPrompt.mock.calls[0]?.[0] as Array<{
+        role: string;
         content: Array<{ type: string; text?: string }>;
       }>;
-      const skillText = skillMessages[0]?.content[0]?.text;
+      const skillText = skillMessages.find(message => message.role === "user")?.content[0]?.text;
       expect(skillText).toContain('<skill name="fixture-skill"');
       expect(skillText).toContain("SKILL_BODY_EXPANDED");
       expect(skillText).toContain("repository");

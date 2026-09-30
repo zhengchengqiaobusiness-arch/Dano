@@ -79,7 +79,7 @@ export async function createWorkerTools({ workspace }: { workspace: string }) {
         await check();
         if (decision?.block) throw new Error("WORKER_TOOL_BLOCKED");
         operationSignal.throwIfAborted();
-        const result = await tool.execute(id, parameters, operationSignal, onUpdate, runner.createContext());
+        const result = await tool.execute(id, parameters, operationSignal, onUpdate, runner.createToolContext(id, operationSignal));
         const projection = await runner.emitToolResult({ type: "tool_result", toolName: name,
           toolCallId: id, input: parameters, content: result.content, details: result.details,
           isError: false } as ToolResultEvent);

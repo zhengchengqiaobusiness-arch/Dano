@@ -88,7 +88,7 @@ it("screens projected secrets before the selection model and rejects invalid too
     const receipt = await h.facts.capture({ ...h.input, response: { ok: true, status: 200, headers: {},
       body: JSON.stringify({ code: 0, data: { owner: "oa-alice", reference } }) } });
     session.appendMessage({ role: "toolResult", toolName: "bash", toolCallId: "call-a", isError,
-      content: [{ type: "text", text: "RAW_PRIVATE_BODY" }], details: { danoTaskFacts: [receipt] }, timestamp: Date.now() });
+      content: [{ type: "text", text: "RAW_PRIVATE_BODY" }], details: JSON.parse(JSON.stringify({ danoTaskFacts: receipt ? [receipt] : [] })), timestamp: Date.now() });
     session.appendMessage({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "请求完成。" }], timestamp: Date.now() } as never);
     await lifecycle.settle(request, session);
     const result = await builder.build(request, session);

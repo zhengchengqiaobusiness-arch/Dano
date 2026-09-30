@@ -7,6 +7,7 @@ import {
   SessionManager,
   type AgentEndEvent as PiAgentEndEvent,
   type AgentSession,
+  type PromptOptions,
   type AgentSessionEvent,
   type ExtensionUIContext,
   type SessionEntry,
@@ -449,7 +450,7 @@ function toRpcAgentAssistantContentBlock(
         type: "toolCall",
         id: block.id,
         name: block.name,
-        arguments: block.arguments,
+        arguments: JSON.parse(JSON.stringify(block.arguments)),
         ...(questionRequest ? { questionRequest } : {}),
         ...(questionRequest
           ? {
@@ -6314,7 +6315,7 @@ export class BridgeRpcAdapter {
    * Dispatch command to Pi extension API
    */
   private async dispatchMemoryInput(session: AgentSession, originalText: string,
-    dispatchedText: string, dispatch: () => Promise<void>): Promise<void> {
+    dispatchedText: string, dispatch: () => Promise<unknown>): Promise<void> {
     const cancel = await this.context.captureMemoryInput?.(session.sessionManager, originalText, dispatchedText);
     try {
       await dispatch();
@@ -6413,8 +6414,8 @@ export class BridgeRpcAdapter {
                     source: "rpc" as const,
                     images,
                     ...promptExpansionOptions,
-                    preflightResult: (success: boolean) => {
-                      if (!success) {
+                    preflightResult: (disposition: Parameters<NonNullable<PromptOptions["preflightResult"]>>[0]) => {
+                      if (disposition === "handled") {
                         this.cancelQueuedAssistantTurn(binding);
                       }
                     },

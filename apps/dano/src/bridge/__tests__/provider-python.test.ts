@@ -493,7 +493,7 @@ it("captures signed facts from both real provider transports and replaces forged
   ] as const) {
     const text = await facts.policy().tools.get(toolName)!({ role: "toolResult", toolName,
       toolCallId: toolName === "bash" ? "bash-call" : "direct-call", content: result.content,
-      details: result.details, isError: false, timestamp: Date.now() }, { owner, scope: null });
+      details: JSON.parse(JSON.stringify(result.details)), isError: false, timestamp: Date.now() }, { owner, scope: null });
     expect(text).toContain("REPORT-42");
     expect(text).not.toContain("PRIVATE_BODY"); expect(text).not.toContain("FORGED");
     expect(JSON.stringify(result.details)).not.toContain("token-a");

@@ -992,9 +992,10 @@ export interface RpcCommandErrorEvent {
 
 /** Map of RPC command types to their success response data shapes. */
 export interface RpcResponseMap {
-  prompt: PiRpcResponseData<"prompt">;
-  steer: PiRpcResponseData<"steer">;
-  follow_up: PiRpcResponseData<"follow_up">;
+  // Dano acknowledges scheduling before Pi dispatch; outcomes arrive over SSE.
+  prompt: undefined;
+  steer: undefined;
+  follow_up: undefined;
   abort: PiRpcResponseData<"abort">;
   field_assist: FieldAssistResult;
   present_question: FormInteractionProjection | null;

@@ -160,10 +160,10 @@ describe("Dano main", () => {
       "0.2.17",
     );
     expect(appPackage.dependencies?.["@earendil-works/pi-coding-agent"]).toBe(
-      "0.85.1",
+      "0.99.1",
     );
     expect(appPackage.dependencies?.["@earendil-works/pi-ai"]).toBe(
-      "0.85.1",
+      "0.99.1",
     );
     expect(
       appPackage.dependencies?.["@mariozechner/pi-coding-agent"],

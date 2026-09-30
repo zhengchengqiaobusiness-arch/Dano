@@ -12,9 +12,8 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "ignoreDeprecations": "6.0",
-    "baseUrl": ".",
     "paths": {
-      "@dano/types/*": ["apps/dano/types/*"]
+      "@dano/types/*": ["./apps/dano/types/*"]
     },
     "outDir": "./dist",
     "types": ["node"]

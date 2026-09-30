@@ -1,15 +1,14 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "baseUrl": "../..",
     "module": "ESNext",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "isolatedModules": true,
     "noEmit": true,
     "paths": {
-      "$lib": ["apps/dano/web/src"],
-      "$lib/*": ["apps/dano/web/src/*"],
-      "@dano/types/*": ["apps/dano/types/*"]
+      "$lib": ["../../apps/dano/web/src"],
+      "$lib/*": ["../../apps/dano/web/src/*"],
+      "@dano/types/*": ["../../apps/dano/types/*"]
     },
     "types": ["svelte"]
   },

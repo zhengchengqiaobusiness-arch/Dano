@@ -1,6 +1,6 @@
 {
   "name": "@dano/dano",
-  "version": "0.2.70",
+  "version": "1.0.0",
   "private": true,
   "description": "Dano P0 web LLM chat",
   "type": "module",
@@ -13,7 +13,7 @@
     "container:up": "node scripts/local-container.mjs up",
     "build:server": "pnpm -C apps/dano build:server",
     "build:web": "pnpm -C apps/dano build:web",
-    "check": "pnpm -C apps/dano check",
+    "check": "pnpm -C apps/dano check && node scripts/check-memory-release.mjs",
     "check:server": "pnpm -C apps/dano check:server",
     "check:type": "pnpm run check:server",
     "check:web": "pnpm -C apps/dano check:web",
