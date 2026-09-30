@@ -1223,7 +1223,6 @@
       {showNewSession}
       authentication={bridge.authentication}
       onOpenTheme={openThemeSettings}
-      onOpenMemory={() => { memoryManagementOpen = true; }}
       onLogin={bridge.login}
       onLogout={bridge.logout}
     />

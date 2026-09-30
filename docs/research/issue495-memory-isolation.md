@@ -103,3 +103,9 @@ nosuid 后继续宣称该配置可用。没有静默降级到无沙箱 Shell 的
 生产应用容器 ID、镜像及 StartedAt 与清理前一致，健康检查正常；持久 localhost 证书保留。
 
 本次不改变 ask_user_question 的能力、参数、提示或结果投影，无需更新其 Skill 生成器指南。
+
+## 后续界面调整
+
+按用户要求隐藏左上角菜单的记忆管理入口：App 不再向 AppHeader 传入可选回调。
+本地开发服务器验证菜单只显示主题色及账号入口；`check` 和 AppHeader 的 8 项既有测试通过。
+截图见 `evidence/issue495/menu-memory-hidden.jpg`。验证后已停止开发服务并删除本轮临时 runtime。
