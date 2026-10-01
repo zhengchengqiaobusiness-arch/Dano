@@ -50,6 +50,10 @@ const UPLOAD_INDEX_VERSION = 1;
 const UPLOAD_RECORDS_DIRECTORY = "records";
 const UPLOAD_RECORD_RE = /^([A-Za-z0-9_-]+)\.json$/;
 
+export function isManagedUploadFileName(name: string): boolean {
+  return UPLOAD_FILE_RE.test(name);
+}
+
 export class UploadRegistry {
   private readonly uploads = new Map<string, StoredUpload>();
   private readonly uploadDir: string;

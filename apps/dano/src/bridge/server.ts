@@ -1781,7 +1781,8 @@ async function writeUploadBody(
   filePath: string,
   maxBytes: number,
 ): Promise<{ size: number; hash: string }> {
-  const out = fs.createWriteStream(filePath, { flags: "wx" });
+  const file = await fs.promises.open(filePath, "wx", 0o600);
+  const out = file.createWriteStream({ autoClose: false });
   const hash = createHash("sha256");
   let size = 0;
   try {
@@ -1798,11 +1799,17 @@ async function writeUploadBody(
     }
     out.end();
     await once(out, "finish");
+    // The protected workspace inherits its worker GID. Grant that worker file
+    // access explicitly rather than relying on the host process's umask.
+    await file.chmod(0o660);
     return { size, hash: hash.digest("hex") };
   } catch (error) {
     out.destroy();
     fs.rm(filePath, { force: true }, () => {});
     throw error;
+  } finally {
+    out.destroy();
+    await file.close();
   }
 }
 

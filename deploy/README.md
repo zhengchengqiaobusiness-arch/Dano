@@ -313,7 +313,10 @@ create their own files; the sticky bit protects the host-owned directory and
 browser files from replacement or deletion by workers. Provisioning preserves
 this ownership on restart and repairs directories adopted by the same worker,
 rejecting symlinks and foreign owners. Legacy content adoption excludes managed
-upload storage. To verify real Linux UID/GID access, run
+upload storage. Managed upload files retain host ownership and worker group
+read/write access (`0660`), including existing private files previously adopted
+by that worker. Repair rejects symlinks, hard links and foreign file owners.
+To verify real Linux UID/GID access, run
 `node scripts/check-upload-workspace-access.mjs` after building the server in a
 disposable root Linux container without production mounts. The check covers
 upload/rename/preview/cleanup, model access, restarts and cross-user denial.

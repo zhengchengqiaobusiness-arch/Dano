@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chown, chmod, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chown, chmod, link, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -38,18 +38,16 @@ try {
       await chown(uploads, kind === "legacy" ? hostUid : identity.uid,
         kind === "legacy" ? hostGid : identity.gid);
       await chmod(uploads, 0o2775);
-      await writeFile(join(uploads, "existing.txt"), "existing upload", { mode: 0o644 });
-      await chown(join(uploads, "existing.txt"), kind === "legacy" ? hostUid : identity.uid, identity.gid);
+      const existing = join(uploads, 'a'.repeat(64) + '.txt');
+      await writeFile(existing, "existing upload", { mode: kind === "legacy" ? 0o600 : 0o660 });
+      await chown(existing, kind === "legacy" ? hostUid : identity.uid, identity.gid);
     }
     const options = { usersRoot, hostStateRoot, userId: kind, workspace, hostUid, hostGid, identities };
     await provisionWorkerWorkspace(options);
     await provisionWorkerWorkspace(options); // Restart must retain access.
-    const metadata = await lstat(uploads);
-    assert.equal(metadata.uid, hostUid); assert.equal(metadata.gid, identity.gid);
-    assert.equal(metadata.mode & 0o7777, 0o3770);
     await run(hostUid, hostGid, `
       import assert from 'node:assert/strict';
-      import { mkdir, writeFile, rename, readFile, unlink } from 'node:fs/promises';
+      import { mkdir, writeFile, rename, readFile, unlink, open } from 'node:fs/promises';
       import { createHash } from 'node:crypto';
       import { join } from 'node:path';
       assert.match(await readFile('/proc/self/status', 'utf8'), /^Groups:\\s*$/m);
@@ -60,21 +58,27 @@ try {
       await writeFile(file + '.part', bytes, { flag: 'wx' });
       await rename(file + '.part', file);
       assert.deepEqual(await readFile(file), bytes);
-      if (process.argv[2] !== 'fresh') assert.equal(await readFile(join(uploads, 'existing.txt'), 'utf8'), 'existing upload');
+      if (process.argv[2] !== 'fresh') assert.equal(await readFile(join(uploads, 'a'.repeat(64) + '.txt'), 'utf8'), 'existing upload');
       await unlink(file);
-      await writeFile(join(uploads, 'model-readable.txt'), bytes);
+      const modelFile = await open(join(uploads, 'model-readable.txt'), 'wx', 0o600);
+      await modelFile.writeFile(bytes); await modelFile.chmod(0o660); await modelFile.close();
     `, uploads, kind);
+    const metadata = await lstat(uploads);
+    assert.equal(metadata.uid, hostUid); assert.equal(metadata.gid, identity.gid);
+    assert.equal(metadata.mode & 0o7777, 0o3770);
     await run(identity.uid, identity.gid, `
       import assert from 'node:assert/strict';
       import { readFile, writeFile, unlink, rename } from 'node:fs/promises';
       import { join } from 'node:path';
       const uploads = process.argv[1];
       assert.equal(await readFile(join(uploads, 'model-readable.txt'), 'utf8'), 'synthetic upload');
+      await writeFile(join(uploads, 'model-readable.txt'), 'worker edit');
+      if (process.argv[2] !== 'fresh') assert.equal(await readFile(join(uploads, 'a'.repeat(64) + '.txt'), 'utf8'), 'existing upload');
       await writeFile(join(uploads, 'worker.txt'), 'worker-created');
       await unlink(join(uploads, 'worker.txt'));
       await assert.rejects(unlink(join(uploads, 'model-readable.txt')), { code: 'EPERM' });
       await assert.rejects(rename(uploads, uploads + '-replaced'), { code: 'EPERM' });
-    `, uploads);
+    `, uploads, kind);
     await run(identity.uid + 100, identity.gid + 100, `
       import assert from 'node:assert/strict';
       import { readFile, writeFile } from 'node:fs/promises';
@@ -82,6 +86,23 @@ try {
       await assert.rejects(readFile(join(process.argv[1], 'model-readable.txt')), { code: 'EACCES' });
       await assert.rejects(writeFile(join(process.argv[1], 'intruder.txt'), 'intruder'), { code: 'EACCES' });
     `, uploads);
+    const unsafeFile = join(uploads, 'b'.repeat(64) + '.txt');
+    const outsideFile = join(root, 'outside-file-' + kind);
+    await writeFile(outsideFile, 'synthetic private file', { mode: 0o600 });
+    await chown(outsideFile, hostUid, hostGid);
+    await symlink(outsideFile, unsafeFile);
+    await assert.rejects(provisionWorkerWorkspace(options));
+    await rm(unsafeFile);
+    await link(outsideFile, unsafeFile);
+    await assert.rejects(provisionWorkerWorkspace(options), /UNSAFE_WORKER_WORKSPACE/);
+    assert.equal((await lstat(outsideFile)).mode & 0o7777, 0o600);
+    assert.equal((await lstat(outsideFile)).gid, hostGid);
+    await rm(unsafeFile);
+    await writeFile(unsafeFile, 'foreign-owned');
+    await chown(unsafeFile, identity.uid + 100, identity.gid + 100);
+    await assert.rejects(provisionWorkerWorkspace(options), /UNSAFE_WORKER_WORKSPACE/);
+    assert.equal((await lstat(unsafeFile)).uid, identity.uid + 100);
+    await rm(unsafeFile);
     await rm(uploads, { recursive: true });
     const outside = join(root, 'outside-' + kind);
     await mkdir(outside, { mode: 0o700 });
@@ -94,5 +115,5 @@ try {
     assert.equal((await lstat(uploads)).uid, identity.uid + 100);
   }
   console.log(JSON.stringify({ uploadWorkspaceAccess: "passed", cases: ["legacy", "worker-created", "fresh"],
-    checks: ["host-without-groups", "upload-rename-preview-cleanup", "model-read-write", "restart", "cross-user-denial", "symlink-denial", "foreign-owner-denial"] }));
+    checks: ["host-without-groups", "upload-rename-preview-cleanup", "private-upload-repair", "model-read-write", "restart", "cross-user-denial", "symlink-denial", "hardlink-denial", "foreign-owner-denial"] }));
 } finally { await rm(root, { recursive: true, force: true }); }

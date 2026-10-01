@@ -1,7 +1,8 @@
 import { constants } from "node:fs";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, open, realpath, type FileHandle } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, realpath, type FileHandle } from "node:fs/promises";
 import { adoptLegacyWorkspaceAccess } from "./legacy-workspace-access.js";
+import { isManagedUploadFileName } from "./upload-registry.js";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { WorkerIdentity, WorkerIdentityRegistry } from "./worker-identity-registry.js";
 export { WorkerIdentityRegistry } from "./worker-identity-registry.js";
@@ -134,6 +135,24 @@ export async function provisionWorkerWorkspace(options: Options): Promise<{ work
     // directories without following links or accepting another user's owner.
     handles.push(await directory(join(workspace, "uploads"), options.hostUid, identity.gid, 0o3770,
       [0, options.hostGid, identity.gid], [0, options.hostUid, identity.uid]));
+    // Restore HTTP read access to managed files already adopted by the worker,
+    // including formerly private uploads. Ordinary worker files remain theirs.
+    const uploads = join(workspace, "uploads");
+    for (const name of await readdir(uploads)) {
+      if (!isManagedUploadFileName(name)) continue;
+      const path = join(uploads, name);
+      const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const metadata = await file.stat();
+        if (!metadata.isFile() || metadata.nlink !== 1
+          || ![options.hostUid, identity.uid].includes(metadata.uid)
+          || ![options.hostGid, identity.gid].includes(metadata.gid)) throw unsafe();
+        await file.chown(options.hostUid, identity.gid);
+        await file.chmod(0o660);
+        const current = await lstat(path);
+        if (current.dev !== metadata.dev || current.ino !== metadata.ino || current.nlink !== 1) throw unsafe();
+      } finally { await file.close(); }
+    }
     const configuration = join(workspace, ".pi");
     await ensure(configuration, identity.gid, 0o750);
     await ensure(join(configuration, "agent"), identity.gid, 0o750);

@@ -1706,6 +1706,7 @@ describe("BridgeServer HTTP/SSE transport", () => {
     });
     expect(uploaded.path).toBe(path.join(workspaceDir, "uploads", `${hash}.txt`));
     expect(fs.existsSync(uploaded.path)).toBe(true);
+    expect(fs.statSync(uploaded.path).mode & 0o777).toBe(0o660);
 
     const previewResponse = await fetch(`${origin}${uploaded.previewUrl}`);
     expect(previewResponse.status).toBe(200);
