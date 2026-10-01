@@ -357,8 +357,10 @@ export class BridgeServer {
     req: http.IncomingMessage,
     res: http.ServerResponse,
   ): Promise<void> {
+    let uploadRequest = false;
     try {
       const url = new URL(req.url || "/", `http://${req.headers.host}`);
+      uploadRequest = url.pathname.startsWith("/api/uploads");
       const pathname = url.pathname;
 
       if (
@@ -724,6 +726,10 @@ export class BridgeServer {
       }
       if (error instanceof HttpError) {
         writeJson(res, error.status, { error: error.message });
+        return;
+      }
+      if (uploadRequest) {
+        writeJson(res, 500, { error: "Upload storage is unavailable" });
         return;
       }
       const message = error instanceof Error ? error.message : String(error);

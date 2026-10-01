@@ -18,6 +18,8 @@ it("preserves content, grants private group access, and leaves agent secrets and
   await writeFile(join(workspace, "nested/file"), "original bytes", { mode: 0o600 });
   await mkdir(join(workspace, ".pi"));
   await writeFile(join(workspace, ".pi/auth.json"), "private", { mode: 0o600 });
+  await mkdir(join(workspace, "uploads"), { mode: 0o700 });
+  await writeFile(join(workspace, "uploads/browser.txt"), "uploaded", { mode: 0o600 });
   await writeFile(join(root, "outside"), "outside", { mode: 0o600 });
   await symlink(join(root, "outside"), join(workspace, "link"));
   await adoptLegacyWorkspaceAccess(workspace, process.getuid!(), process.getgid!(), process.getuid!(), process.getgid!());
@@ -25,6 +27,8 @@ it("preserves content, grants private group access, and leaves agent secrets and
   expect((await lstat(join(workspace, "nested/file"))).mode & 0o7777).toBe(0o660);
   expect((await lstat(join(workspace, "nested"))).mode & 0o7777).toBe(0o2770);
   expect((await lstat(join(workspace, ".pi/auth.json"))).mode & 0o777).toBe(0o600);
+  expect((await lstat(join(workspace, "uploads"))).mode & 0o7777).toBe(0o700);
+  expect((await lstat(join(workspace, "uploads/browser.txt"))).mode & 0o777).toBe(0o600);
   expect((await lstat(join(root, "outside"))).mode & 0o777).toBe(0o600);
 });
 it("refuses hard links so adoption cannot change access outside the workspace", async () => {

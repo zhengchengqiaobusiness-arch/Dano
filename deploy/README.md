@@ -307,6 +307,17 @@ Compose overlay. The image starts a small root supervisor, which runs Dano as UI
 1000 and assigns distinct worker identities internally. The HTTP host supervises
 open-websearch. Ordinary local development commands remain unchanged.
 
+The HTTP host owns each Runtime Workspace's managed `uploads` directory, with
+the assigned worker GID and mode `3770`. Workers can read browser uploads and
+create their own files; the sticky bit protects the host-owned directory and
+browser files from replacement or deletion by workers. Provisioning preserves
+this ownership on restart and repairs directories adopted by the same worker,
+rejecting symlinks and foreign owners. Legacy content adoption excludes managed
+upload storage. To verify real Linux UID/GID access, run
+`node scripts/check-upload-workspace-access.mjs` after building the server in a
+disposable root Linux container without production mounts. The check covers
+upload/rename/preview/cleanup, model access, restarts and cross-user denial.
+
 The per-User tool process loads only protected, fixed Pi/Heimdall code. It permits
 the installed setuid Bubblewrap to initialize namespaces; Bubblewrap then sets
 `no_new_privs=1` and drops capabilities before any model Shell command executes.

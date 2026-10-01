@@ -3,11 +3,12 @@ import { lchown, lstat, open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 /** Transfer only a user's ordinary workspace access to its isolated group.
- * Session records are elsewhere. Never follow links or touch host-owned .pi.
+ * Session records are elsewhere. Never follow links or touch host-managed
+ * configuration and upload storage; HTTP retains access to browser uploads.
  * Already converted entries make interrupted adoption safe to resume.
  */
 export async function adoptLegacyWorkspaceAccess(workspace: string, hostUid: number, hostGid: number, workerUid: number, workerGid: number): Promise<void> {
-  const pending = (await readdir(workspace)).filter(name => name !== ".pi").map(name => join(workspace, name));
+  const pending = (await readdir(workspace)).filter(name => name !== ".pi" && name !== "uploads").map(name => join(workspace, name));
   while (pending.length) {
     const path = pending.pop()!;
     const metadata = await lstat(path);

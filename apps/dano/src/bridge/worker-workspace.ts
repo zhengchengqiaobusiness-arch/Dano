@@ -29,18 +29,20 @@ export function workerSandboxPolicy(workspace: string, trustedReadPaths: readonl
   return { disabled: [], sandbox: { enabled: true, userNamespace: false, paths } };
 }
 
-async function directory(path: string, hostUid: number, gid: number, mode: number, allowedGroups: number[]): Promise<FileHandle> {
+async function directory(path: string, hostUid: number, gid: number, mode: number, allowedGroups: number[], allowedOwners = [0, hostUid]): Promise<FileHandle> {
   try { await mkdir(path, { mode: 0o700 }); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
   const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
     const metadata = await handle.stat();
-    // Root creates new entries; existing entries must remain host-owned. Never
-    // take over a directory that a model tool could already control.
-    if (!metadata.isDirectory() || ![0, hostUid].includes(metadata.uid) || !allowedGroups.includes(metadata.gid)
+    // Configuration directories must already be host-owned. Only the managed
+    // upload directory permits repair from this workspace's assigned worker.
+    if (!metadata.isDirectory() || !allowedOwners.includes(metadata.uid) || !allowedGroups.includes(metadata.gid)
       || (metadata.mode & 0o002)) throw unsafe();
     await handle.chown(hostUid, gid);
     await handle.chmod(mode);
+    const current = await lstat(path);
+    if (current.dev !== metadata.dev || current.ino !== metadata.ino || !current.isDirectory()) throw unsafe();
     return handle;
   } catch (error) { await handle.close(); throw error; }
 }
@@ -125,6 +127,13 @@ export async function provisionWorkerWorkspace(options: Options): Promise<{ work
     // Sticky + setgid: the worker can manage its files but cannot replace the
     // host-owned .pi directory. New normal files retain the owner's worker GID.
     await ensure(workspace, identity.gid, 0o3770);
+    // HTTP receives, previews and expires uploads without worker supplementary
+    // groups. Keep its managed directory host-owned; sticky prevents the worker
+    // from replacing it or unlinking browser uploads while group access lets
+    // the worker read uploads and create its own files. Repair already adopted
+    // directories without following links or accepting another user's owner.
+    handles.push(await directory(join(workspace, "uploads"), options.hostUid, identity.gid, 0o3770,
+      [0, options.hostGid, identity.gid], [0, options.hostUid, identity.uid]));
     const configuration = join(workspace, ".pi");
     await ensure(configuration, identity.gid, 0o750);
     await ensure(join(configuration, "agent"), identity.gid, 0o750);
