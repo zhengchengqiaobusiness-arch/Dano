@@ -159,9 +159,9 @@ export function createApp({ startRecordingPi } = {}) {
   return server;
 }
 
-export function listen(server, port = Number(process.env.PORT || 18081)) {
+export function listen(server, port = Number(process.env.PORT || 18081), host = process.env.HOST || "127.0.0.1") {
   return new Promise((resolve) => {
-    server.listen(port, "127.0.0.1", () => resolve(server.address()));
+    server.listen(port, host, () => resolve(server.address()));
   });
 }
 

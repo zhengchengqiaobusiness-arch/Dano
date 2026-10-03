@@ -1,0 +1,55 @@
+name: playwright_cabp
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: playwright-cabp-api
+    restart: unless-stopped
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "18081"
+      CABP_DATA: /app/data
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
+    shm_size: "2gb"
+    init: true
+    ports:
+      - "18081:18081"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:18081/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: playwright-cabp-frontend
+    restart: unless-stopped
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      VITE_BASE: /playwright-cabp/
+      DANO_PI_CHECK: http://api:18081
+      DANO_GATEWAY: http://api:18081
+      DISABLE_HMR: "1"
+    depends_on:
+      api:
+        condition: service_healthy
+    init: true
+    ports:
+      - "19082:19082"
+    networks:
+      - default
+      - skillmanner_default
+
+networks:
+  skillmanner_default:
+    external: true

@@ -1,0 +1,6 @@
+node_modules
+frontend
+data
+.git
+.env
+test/tmp
