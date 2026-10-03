@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>mixed query page</title>
+</head>
+<body>
+  <h2>组织机构</h2>
+  <ul role="tree">
+    <li role="treeitem">研发部门</li>
+  </ul>
+  <input type="search" placeholder="请输入部门名称" aria-label="请输入部门名称" />
+  <label>开始日期 <input type="text" aria-label="开始日期" value="2026-10-01" /></label>
+  <table aria-label="日期">
+    <thead>
+      <tr>
+        <th>周一</th>
+        <th>周二</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><button type="button">1</button></td>
+        <td><button type="button">2</button></td>
+      </tr>
+    </tbody>
+  </table>
+  <table>
+    <thead>
+      <tr>
+        <th>应填数量</th>
+        <th>已填数量</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><button type="button">12</button></td>
+        <td><button type="button">3</button></td>
+      </tr>
+    </tbody>
+  </table>
+  <button type="button" id="query">查询</button>
+  <script>
+    document.getElementById("query").addEventListener("click", () => {
+      setTimeout(() => fetch("/api/items?deptId=1"), 120);
+    });
+  </script>
+</body>
+</html>

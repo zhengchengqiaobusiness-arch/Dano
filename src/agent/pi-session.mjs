@@ -5,6 +5,7 @@ import { readGoal } from "../evidence/store.mjs";
 import { applyPiModelConfig } from "./pi-model.mjs";
 import { installOpenAIToolCallStreamCompatibility } from "./openai-stream-compat.mjs";
 import { hostTools, toolNames, wrapHostTools } from "./tools.mjs";
+import { browserSession } from "../browser/session.mjs";
 import { logLine } from "../log.mjs";
 
 function toolLine(toolName, args) {
@@ -42,32 +43,59 @@ function resultLine(result) {
 const SKILL_TOOLS = new Set(["write_skill_file", "run_skill_command", "verify_skill"]);
 const MAX_SKILL_CONTINUES = 8;
 
-export function modelContextPacket(current, { index = false } = {}) {
-  const packet = {
-    goal: current?.goal || {},
-    requests: current?.requests || [],
-    filled: current?.filled || [],
-  };
-  if (index && Array.isArray(current?.index)) packet.index = current.index;
-  if (current?.snapshot?.text) packet.snapshot = { evidence_id: current.snapshot.evidence_id || "", text: current.snapshot.text };
-  if (Array.isArray(current?.filled_value) && current.filled_value.length) packet.filled_value = current.filled_value;
-  if (Array.isArray(current?.also_changed) && current.also_changed.length) packet.also_changed = current.also_changed;
-  if (current?.auth_file) packet.auth_file = current.auth_file;
-  if (Array.isArray(current?.guides)) packet.guides = current.guides;
-  return packet;
+export function continueIncludesTree(lastTool) {
+  const lastName = String(lastTool || "").split(" ")[0];
+  return lastName.startsWith("browser_") || lastName.startsWith("network_") || lastName === "evidence_get" || lastName === "assist" || lastName === "read_page_asset";
 }
 
-export function nextRecordingPrompt({ finished, paused, continues, verifyErrors }) {
+export function factsForContinue(facts) {
+  if (!facts) return facts;
+  return {
+    goal: facts.goal,
+    requests: facts.requests,
+    filled: facts.filled,
+    clicked: facts.clicked,
+    commands: facts.commands || [],
+    ran: facts.ran || [],
+    snapshot: facts.snapshot
+      ? {
+          ...(facts.snapshot.evidence_id ? { evidence_id: facts.snapshot.evidence_id } : {}),
+          epoch: facts.snapshot.epoch ?? 0,
+        }
+      : facts.snapshot,
+  };
+}
+
+export function continueCountAfterSkillTool(continues, { skillTool, enteredSkill }) {
+  if (skillTool && !enteredSkill) return 0;
+  return continues;
+}
+
+export function nextRecordingPrompt({ finished, paused, progressed, continues, verifyErrors }) {
   if (finished || paused || continues >= MAX_SKILL_CONTINUES) return null;
-  if (Array.isArray(verifyErrors) && verifyErrors.some((item) => item.code === "auth_expired")) return null;
-  const errors = Array.isArray(verifyErrors) && verifyErrors.length ? `校验没过：\n${JSON.stringify(verifyErrors)}\n` : "";
-  const follow = errors
-    ? "目标里点到名的操作，要有这次返回的 requests 或 filled_value。还没有就继续做。有了就按这些错误改 SKILL.md、scripts/client.py、references/api.md，再跑读命令，再 verify_skill。"
-    : "目标里点到名的操作，要有这次返回的 requests 或 filled_value。还没有就继续做。有了就写 SKILL.md、scripts/client.py、references/api.md，跑读命令，再 verify_skill。";
-  return errors ? `${errors}${follow}` : follow;
+  const errors = Array.isArray(verifyErrors) && verifyErrors.length ? `\n${JSON.stringify(verifyErrors)}` : "";
+  const lead = progressed ? "页面操作的总结不是结束。" : "Skill 还没产出。";
+  return `${lead}程序不替你判断来源。read_guide 读完名单。对照目标原文、requests（方法、路径、证据 id、keys、empty、issues_credential、issued）、filled 和 clicked 里的控件名，写三个文件。SKILL.md 从 --- 起行，写 name 和 description，再写一行 ---。要采用的请求用 network_get 打开全文。调用方会执行的命令要带上 keys：来自参数，或命令里先按证据再读。empty 里的键传空。录到的字面值不写进默认参数。没出现在采用请求里的填写不要写进可执行命令。同一子命令写一行，会变的参数写成 <参数名>，跑一次即可。issues_credential 的请求按 auth.local.json 的 credential 在业务请求前重放；issued 里的访问凭证字段写入 headers，刷新凭证按字段名更新 url 查询串。失败或 401 再停止。DANO_AUTH_HEADERS 只覆盖同名头。scripts/client.py 只用 Python 标准库。有读命令就跑读命令再 verify_skill。本场只有写入请求时，写带 --confirm 的命令并直接 verify_skill，不要发明没录到的读接口。${errors}`;
 }
 
 let startOverride = null;
+
+export async function piFacts(host, { takeSnapshot = false } = {}) {
+  if (takeSnapshot && typeof host.browser_snapshot === "function") {
+    await host.browser_snapshot();
+  }
+  const current = typeof host.context === "function" ? await host.context() : {};
+  return {
+    goal: current.goal || {},
+    requests: current.requests || [],
+    filled: current.filled || [],
+    clicked: current.clicked || [],
+    commands: current.commands || [],
+    ran: current.ran || [],
+    snapshot: current.snapshot || null,
+    index: current.index || [],
+  };
+}
 
 export function setStartRecordingPi(fn) {
   startOverride = fn;
@@ -111,6 +139,7 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
   let lastTool = "";
   let progressed = false;
   let continues = 0;
+  let enteredSkill = false;
   session.subscribe?.((event) => {
     const type = String(event?.type || "");
     const assistant = event?.assistantMessageEvent;
@@ -121,13 +150,18 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
       recording?.emitThought?.({ kind: "text", text: assistant.delta, stream: true });
     }
     if (type === "tool_execution_start") {
-      if (SKILL_TOOLS.has(event.toolName)) progressed = true;
+      if (SKILL_TOOLS.has(event.toolName)) {
+        continues = continueCountAfterSkillTool(continues, { skillTool: true, enteredSkill });
+        enteredSkill = true;
+        progressed = true;
+      }
       lastTool = toolLine(event.toolName, event.args);
       logLine(`[pi] 调用 ${lastTool}`);
       recording?.emitThought?.({ kind: "tool", phase: "start", text: lastTool });
     }
     if (type === "tool_execution_end") {
-      const line = `${lastTool || event.toolName || "tool"} ${resultLine(event.result)}`;
+      const name = event.toolName || lastTool || "tool";
+      const line = `${toolLine(name, event.args) || name} ${resultLine(event.result)}`;
       logLine(`[pi] ${line}`);
       recording?.emitThought?.({
         kind: "tool",
@@ -139,8 +173,9 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
   });
   let prompting = null;
   const queued = [];
+  let closed = false;
   async function prompt(text) {
-    if (recording?.finished) return;
+    if (closed || recording?.finished) return;
     if (recording?.paused || prompting) {
       queued.push(text);
       return prompting;
@@ -149,17 +184,18 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
       prompting = session.prompt(text);
       await prompting;
     } catch (error) {
+      if (closed || recording?.finished) return;
       if (!session.isStreaming) throw error;
       await session.steer(text);
     } finally {
       prompting = null;
-      if (recording?.finished) return;
+      if (closed || recording?.finished) return;
       const next = queued.shift();
       if (next) {
         await prompt(next);
         return;
       }
-      if (recording?.paused || session.isStreaming) return;
+      if (recording?.paused) return;
       const follow = nextRecordingPrompt({
         finished: recording?.finished,
         paused: recording?.paused,
@@ -168,20 +204,16 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
         verifyErrors: recording?.verify?.errors,
       });
       progressed = false;
-      if (!follow) {
-        if (recording && !recording.finished && !recording.paused) {
-          recording.emitThought?.({ kind: "text", text: "处理停在当前结果，页面留在录制。" });
-          recording.emit?.();
-        }
-        return;
-      }
+      if (!follow) return;
       continues += 1;
-      const current = typeof host.context === "function" ? await host.context() : {};
-      await prompt(`${follow}\n${JSON.stringify(modelContextPacket(current, { index: true }))}`);
+      logLine(`[pi] 继续 ${continues}`);
+      const current = factsForContinue(await piFacts(host));
+      await prompt(`${follow}\n${JSON.stringify(current)}`);
     }
   }
   const handle = {
     prompt: async (text) => {
+      if (closed || recording?.finished) return;
       const message = text || "人已继续，从当前页面接着做";
       logLine(`[pi] 人：${message.slice(0, 200)}`);
       if (recording?.paused) recording.paused = false;
@@ -190,19 +222,22 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
         await session.steer(message);
         return;
       }
-      continues = 0;
       await prompt(message);
     },
-    dispose: () => session.dispose?.(),
+    dispose: () => {
+      closed = true;
+      if (recording) recording.finished = true;
+      session.dispose?.();
+    },
   };
   const goalText = `${goal.goal_text || ""}\n${goal.page_url || ""}`;
-  const context = typeof host.context === "function" ? await host.context() : {};
+  const facts = await piFacts(host, { takeSnapshot: Boolean(browserSession(recordingId)) });
   const early = recording?.earlySteer || [];
   if (recording) {
     recording.earlySteer = [];
     recording.pi = handle;
   }
-  prompt(`${goalText}\n${JSON.stringify(modelContextPacket(context, { index: true }))}`).catch((error) => {
+  prompt(`${goalText}\n${JSON.stringify(facts)}`).catch((error) => {
     logLine(`[pi] ${error?.message || error}`);
     recording?.emitThought?.({ kind: "text", text: String(error?.message || error) });
   });

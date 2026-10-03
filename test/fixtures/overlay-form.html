@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>overlay form</title>
+</head>
+<body>
+  <input type="search" placeholder="请输入部门名称" aria-label="请输入部门名称" />
+  <button type="button" id="page-submit">提交</button>
+  <button type="button" id="add">新增</button>
+  <dialog id="dlg">
+    <label>标题 <input id="title" aria-label="标题" /></label>
+    <button type="button" id="dlg-submit">提交</button>
+  </dialog>
+  <script>
+    document.getElementById("add").addEventListener("click", () => {
+      setTimeout(() => document.getElementById("dlg").showModal(), 1500);
+    });
+    document.getElementById("dlg-submit").addEventListener("click", () => {
+      const title = document.getElementById("title").value;
+      fetch("/api/items", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      document.getElementById("dlg").close();
+    });
+    document.getElementById("page-submit").addEventListener("click", () => {
+      fetch("/api/other");
+    });
+  </script>
+</body>
+</html>

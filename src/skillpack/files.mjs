@@ -2,11 +2,17 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { recordingDir, skillDir } from "../paths.mjs";
-import { redactSecrets, refreshVault, usableAuthHeaders } from "../auth-vault.mjs";
+import { usableAuthHeaders, refreshVault } from "../auth-vault.mjs";
 import { readTokenRecord, writeAuthLocalFile } from "../token-store.mjs";
 import { originFromUrl } from "../session-store.mjs";
 
 const WRITABLE = new Set(["SKILL.md", "scripts/client.py", "references/api.md"]);
+
+export function skillCommandLines(text) {
+  return String(text || "").split(/\n/).map((line) => line.trim()).filter((line) => (
+    /^python3?\s+scripts\/client\.py\b/.test(line)
+  ));
+}
 
 export function skillIdFor(subsystem, recordingId) {
   const sub = String(subsystem || "app").replace(/[^A-Za-z0-9_-]/g, "") || "app";
@@ -61,27 +67,15 @@ export async function writeSkillFile(recordingId, skillId, relativePath, content
   await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, String(contents ?? ""), "utf8");
   await rememberHandbook(recordingId, dir);
-  return { ok: true, path: file };
+  const out = { ok: true, path: file };
+  if (rel === "SKILL.md") out.commands = skillCommandLines(contents);
+  return out;
 }
 
 export async function readSkillFile(skillId, relativePath) {
   const rel = String(relativePath || "").replaceAll("\\", "/");
-  const file = path.join(skillDir(skillId), rel);
-  if (rel === "config/auth.local.json") {
-    let parsed = {};
-    try {
-      parsed = JSON.parse(await readFile(file, "utf8"));
-    } catch {
-      parsed = {};
-    }
-    return { ok: true, contents: JSON.stringify(redactSecrets(parsed), null, 2) };
-  }
-  if (rel === "config/runtime.json") {
-    const text = await readFile(file, "utf8").catch(() => "");
-    return { ok: true, contents: text };
-  }
   if (!WRITABLE.has(rel)) return { ok: false, error: "frozen_file", writable: [...WRITABLE] };
-  const text = await readFile(file, "utf8");
+  const text = await readFile(path.join(skillDir(skillId), rel), "utf8");
   return { ok: true, contents: text };
 }
 
@@ -94,6 +88,12 @@ export async function writeRuntimeConfig(recording, skillId) {
   };
   await mkdir(path.join(dir, "config"), { recursive: true });
   await writeFile(path.join(dir, "config", "runtime.json"), `${JSON.stringify(runtime, null, 2)}\n`, "utf8");
+  try {
+    const { persistBrowserSession } = await import("../browser/session.mjs");
+    await persistBrowserSession(recording.id);
+  } catch {
+    // 没有打开的浏览器时，vault 里已有的头仍然写出去
+  }
   const vault = await refreshVault(recording.id);
   let headers = usableAuthHeaders(vault.headers);
   if (!Object.keys(headers).length) {

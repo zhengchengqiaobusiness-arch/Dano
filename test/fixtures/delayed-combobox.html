@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>delayed combobox</title>
+</head>
+<body>
+  <input role="combobox" aria-label="部门" aria-autocomplete="list" />
+  <script>
+    document.querySelector("input").addEventListener("input", () => {
+      setTimeout(() => {
+        const list = document.createElement("div");
+        list.setAttribute("role", "listbox");
+        const option = document.createElement("div");
+        option.setAttribute("role", "option");
+        option.textContent = "研发部门";
+        list.append(option);
+        document.body.append(list);
+      }, 1500);
+    });
+  </script>
+</body>
+</html>

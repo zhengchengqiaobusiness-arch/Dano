@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>delayed press</title>
+</head>
+<body>
+  <input aria-label="日期" />
+  <script>
+    document.querySelector("input").addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      setTimeout(() => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "今天";
+        document.body.append(button);
+      }, 1200);
+    });
+  </script>
+</body>
+</html>

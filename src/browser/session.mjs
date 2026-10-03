@@ -34,7 +34,6 @@ export async function openBrowser({ recordingId, url, storageState, viewport }) 
     if (frame !== page.mainFrame()) return;
     state.epoch += 1;
     state.refs.clear();
-    state.controls = [];
     clearTimeout(state.persistTimer);
     state.persistTimer = setTimeout(() => {
       persistBrowserSession(recordingId).catch(() => {});

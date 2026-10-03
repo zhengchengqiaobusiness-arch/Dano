@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>delayed late</title>
+</head>
+<body>
+  <div id="app">外壳</div>
+  <script>
+    setTimeout(() => {
+      document.getElementById("app").innerHTML = '<button type="button">查询</button>';
+    }, 4500);
+  </script>
+</body>
+</html>

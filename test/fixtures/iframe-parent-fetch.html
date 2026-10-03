@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>iframe parent fetch</title>
+</head>
+<body>
+  <h1>外层</h1>
+  <iframe title="inner" srcdoc="<button type='button' id='go'>提交</button><script>document.getElementById('go').onclick=function(){parent.fetch('/api/items?deptId=1')}</script>"></iframe>
+</body>
+</html>

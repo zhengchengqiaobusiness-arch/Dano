@@ -44,45 +44,6 @@ export async function appendGoal(recordingId, key, text) {
   return { ok: true, goal };
 }
 
-function controlName(label) {
-  const text = String(label || "");
-  const named = text.match(/^[a-zA-Z]+ "(?:\\.|[^"])*"/);
-  if (named) return named[0];
-  const placeholder = text.match(/^[a-zA-Z]+ placeholder="(?:\\.|[^"])*"/);
-  if (placeholder) return placeholder[0];
-  return text.trim();
-}
-
-const FIELD_LABEL = /^(?:textbox|searchbox|combobox|spinbutton|slider|checkbox|radio|switch) /;
-
-export function sideChanges(body) {
-  const acted = new Set([...(body?.filled || []), body?.clicked || ""].map(controlName).filter(Boolean));
-  if (!acted.size) return [];
-  const labels = [];
-  for (const item of body?.changed || []) {
-    if (!item || !Object.hasOwn(item, "before")) continue;
-    const label = String(item.label || "").trim();
-    if (!FIELD_LABEL.test(label)) continue;
-    const name = controlName(label);
-    if (!name || acted.has(name)) continue;
-    if (!labels.includes(label)) labels.push(label);
-    if (labels.length >= 20) break;
-  }
-  return labels;
-}
-
-export function appliedValues(body) {
-  const rows = [...(body?.filled_value || []), ...(body?.focused_value || [])];
-  const out = [];
-  for (const item of rows) {
-    const label = String(item?.label || "");
-    const value = String(item?.value ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
-    if (!label || !value) continue;
-    out.push({ label, value, ...(item?.popup ? { popup: String(item.popup) } : {}), ...(item?.row ? { row: String(item.row) } : {}) });
-  }
-  return out;
-}
-
 export async function appendEvidence(recordingId, record) {
   const id = String(record.id || `ev_${randomUUID().replaceAll("-", "")}`);
   const body = record.body === undefined ? null : record.body;
@@ -97,11 +58,6 @@ export async function appendEvidence(recordingId, record) {
   };
   if (record.ok !== undefined) index.ok = record.ok;
   if (record.argv) index.argv = record.argv;
-  if (record.action_id) index.action_id = record.action_id;
-  const applied = appliedValues(body);
-  if (applied.length) index.filled_value = applied;
-  const side = sideChanges(body);
-  if (side.length) index.also_changed = side;
   await mkdir(path.dirname(blobFile(recordingId, id)), { recursive: true });
   await writeFile(blobFile(recordingId, id), JSON.stringify({ ...record, id, body }));
   await mkdir(recordingDir(recordingId), { recursive: true });

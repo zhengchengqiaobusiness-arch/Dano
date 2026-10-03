@@ -1,4 +1,4 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { Type } from "@sinclair/typebox";
@@ -8,37 +8,36 @@ import { appendEvidence, getEvidence, listEvidence, appendGoal, readGoal } from 
 import { runAction } from "../browser/actions.mjs";
 import { persistBrowserSession } from "../browser/session.mjs";
 import { takeSnapshot } from "../browser/snapshot.mjs";
-import { getNetwork, labelAction, listNetwork, listScripts, requestKeyIndex, scriptExcerpts } from "../browser/network.mjs";
-import { readSkillFile, skillIdFor, writeSkillFile } from "../skillpack/files.mjs";
-import { actionEvidenceSummary, authBlocksRun, commandAuthFailed, filledLabels, finishSkill } from "../skillpack/verify.mjs";
-import { GUIDE_NAMES, guideText, guidesFor } from "./guides.mjs";
-import { credentialShape, presentToModel, readAuthVault } from "../auth-vault.mjs";
+import { getNetwork, listNetwork, requestKeyIndex } from "../browser/network.mjs";
+import { readSkillFile, skillCommandLines, skillIdFor, writeRuntimeConfig, writeSkillFile } from "../skillpack/files.mjs";
+import { actionEvidenceSummary, clickedLabels, filledLabels, finishSkill } from "../skillpack/verify.mjs";
+import { GUIDE_NAMES, guideBody } from "./guides.mjs";
 import { logLine } from "../log.mjs";
 
 const GUIDE_FILES = {
-  "skill-contract.md": path.join(packageRoot(), "src", "agent", "skill-contract.md"),
   "skill-generator-auth-and-token.md": path.join(docDir(), "skill-generator-auth-and-token.md"),
   "skill-generator-live-options.md": path.join(docDir(), "skill-generator-live-options.md"),
   "skill-generator-ask-user-question-guide.md": path.join(docDir(), "skill-generator-ask-user-question-guide.md"),
-  "skill-generator-workflow.md": path.join(docDir(), "skill-generator-workflow.md"),
+  "writing-for-agents.md": path.join(packageRoot(), "skill", "writing-for-agents", "SKILL.md"),
+  "writing-for-agents-mechanics.md": path.join(packageRoot(), "skill", "writing-for-agents", "SKILL-MECHANICS.md"),
 };
 
 const TOOL_SPECS = [
   { name: "browser_open", description: "打开入口同源的地址。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
-  { name: "browser_snapshot", description: "读取当前页快照。每一行是这个控件的事实。ref 整段照抄。", parameters: { type: "object", properties: {} } },
-    { name: "browser_act", description: "对最近一次快照里的 ref 做 open、click、fill、fill_fields、press、select、upload、screenshot。ref 整段照抄 fN:eN@数字。返回 clicked、requests、changed、filled_value、snapshot。用这份快照，不要为同一次操作再 snapshot。requests 为空表示这一下没有 xhr/fetch。写字段前对要采用的 id 调用 network_get。", parameters: { type: "object", properties: { action: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, key: { type: "string" }, url: { type: "string" }, file_path: { type: "string" }, fields: { type: "array" } }, required: ["action"] } },
+  { name: "browser_snapshot", description: "读取当前页面的无障碍树。ref 在树节点上，整段照抄 fN:eN@数字。", parameters: { type: "object", properties: {} } },
+  { name: "browser_act", description: "ref 整段照抄最近一次 snapshot 树里的 fN:eN@数字。@ 后数字对不上就是过期，用返回的新树。同名控件看它在树的哪一层，不要请求程序挑第一个。goal_exact 只是名字或列名出现在目标里的项，不是替你点。下拉分两次 click。返回里的 clicked、requests 和 snapshot 是这一下的结果。requests 为空就是这一下没有 xhr/fetch。返回 same_column 时那是这一列的格子。返回 uploaded 表示文件已经写入，采用 requests。返回 needs_upload 时只对同一 ref 调用 upload。填写用 fill。", parameters: { type: "object", properties: { action: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, fields: { type: "array" }, key: { type: "string" }, file_path: { type: "string" } }, required: ["action"] } },
   { name: "browser_screenshot", description: "把当前画面作为图像送回。", parameters: { type: "object", properties: { ref: { type: "string" }, as_image: { type: "boolean" } } } },
-  { name: "network_list", description: "列出 xhr/fetch 索引。scripts 是已加载的脚本路径，不是业务请求。", parameters: { type: "object", properties: { after_id: { type: "string" }, action_id: { type: "string" } } } },
+  { name: "network_list", description: "列出 xhr/fetch 索引。", parameters: { type: "object", properties: { after_id: { type: "string" }, action_id: { type: "string" } } } },
   { name: "network_get", description: "按 id 读取一条请求的全文。body_missing 表示没有正文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
   { name: "evidence_get", description: "按 id 读取一条证据全文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
-  { name: "read_page_asset", description: "按 network_list 里 scripts 的 path 读取已加载的脚本。不是业务请求。脚本较长时再传 find，用请求里的键名取附近片段。全文在 evidence_id。", parameters: { type: "object", properties: { url: { type: "string" }, find: { type: "string" } }, required: ["url"] } },
-  { name: "read_guide", description: "按索引读，先读 skill-contract.md。本场没有 CONTRACT。", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
+  { name: "read_page_asset", description: "读取本场已捕获、与入口同源的 javascript 响应。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
+  { name: "read_guide", description: "写 Skill 前读取一份文档。name 必须是 names 里的文件名：skill-generator-auth-and-token.md、skill-generator-live-options.md、skill-generator-ask-user-question-guide.md、writing-for-agents.md、writing-for-agents-mechanics.md。鉴权、提问、活选项和写作方法都从这里读，写进 SKILL.md、scripts/client.py、references/api.md。本场没有 CONTRACT.json 和 flow.py。", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
   { name: "assist", description: "登录或验证码挡住时调用。这次调用会停住，直到人在预览里处理完并确认。返回里的 snapshot 才是确认后的当前页，从那张快照接着做。", parameters: { type: "object", properties: { reason: { type: "string" } }, required: ["reason"] } },
   { name: "append_goal", description: "只填充目标里仍为空的键，写入原句。", parameters: { type: "object", properties: { key: { type: "string" }, text: { type: "string" } }, required: ["key", "text"] } },
   { name: "write_skill_file", description: "只写 SKILL.md、scripts/client.py、references/api.md。", parameters: { type: "object", properties: { relative_path: { type: "string" }, contents: { type: "string" } }, required: ["relative_path", "contents"] } },
-  { name: "read_skill_file", description: "读取已写的 Skill 文件。config/auth.local.json 和 config/runtime.json 可以读，头的值和查询串里的凭证是空的。", parameters: { type: "object", properties: { relative_path: { type: "string" } }, required: ["relative_path"] } },
+  { name: "read_skill_file", description: "读取已写的 Skill 文件。", parameters: { type: "object", properties: { relative_path: { type: "string" } }, required: ["relative_path"] } },
   { name: "run_skill_command", description: "在 Skill 目录执行 python scripts/client.py。argv 是字符串数组，例如 [\"python\", \"scripts/client.py\", \"list\"]。", parameters: { type: "object", properties: { argv: { type: "array", items: { type: "string" } } }, required: ["argv"] } },
-  { name: "verify_skill", description: "校验三份文件是否引用了证据里的 path，以及这些 path 的键是否写在引用它们的函数里。返回 requests 和 filled。", parameters: { type: "object", properties: {} } },
+  { name: "verify_skill", description: "结构校验：三份文件在不在、手册有没有被改写、脚本是否引用证据 path、采用请求的键是否出现在客户端文本里。有读命令就要跑过。本场只有写入请求且 SKILL.md 已有 --confirm 命令时，不要求再发明或跑一条读接口。不判断字段来源对不对。返回 requests 和 filled。", parameters: { type: "object", properties: {} } },
 ];
 
 function parseStructured(value) {
@@ -61,21 +60,30 @@ function coerceArgs(args, schema) {
   return next;
 }
 
+function snapshotForModel(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return snapshot;
+  const out = {};
+  if (snapshot.evidence_id) out.evidence_id = snapshot.evidence_id;
+  if (snapshot.epoch !== undefined) out.epoch = snapshot.epoch;
+  if (snapshot.text !== undefined) out.text = snapshot.text;
+  return out;
+}
+
+function payloadForModel(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const next = { ...raw };
+  if (next.snapshot) next.snapshot = snapshotForModel(next.snapshot);
+  if (Array.isArray(next.refs) && next.text !== undefined) delete next.refs;
+  return next;
+}
+
 function toolText(payload) {
-  return { content: [{ type: "text", text: JSON.stringify(payload) }], details: payload };
+  const body = payloadForModel(payload);
+  return { content: [{ type: "text", text: JSON.stringify(body) }], details: body };
 }
 
 export function toolNames() {
   return TOOL_SPECS.map((spec) => spec.name);
-}
-
-export function snapshotFromEvidence(blob) {
-  const body = blob?.body && typeof blob.body === "object" ? blob.body : null;
-  const nested = typeof body?.snapshot?.text === "string" ? body.snapshot.text : "";
-  const direct = typeof body?.text === "string" ? body.text : "";
-  const text = nested || direct;
-  if (!text) return null;
-  return { evidence_id: String(blob?.id || ""), text };
 }
 
 export function hostTools(recording) {
@@ -83,13 +91,12 @@ export function hostTools(recording) {
   const skillId = () => recording.skillId || skillIdFor(recording.subsystem, id);
   const tools = {
     async browser_open(args) {
-      const result = await runAction(id, { action: "open", url: args.url });
-      if (result?.action_id) labelAction(id, result.action_id, "open");
-      await appendEvidence(id, { kind: "action", summary: "open", action_id: result?.action_id, body: result, body_missing: false });
+      const result = payloadForModel(await runAction(id, { action: "open", url: args.url }));
+      await appendEvidence(id, { kind: "action", summary: "open", body: result, body_missing: false });
       return result;
     },
     async browser_snapshot() {
-      const snapshot = await takeSnapshot(id);
+      const snapshot = snapshotForModel(await takeSnapshot(id));
       const saved = await appendEvidence(id, { kind: "snapshot", summary: "snapshot", body: snapshot, body_missing: false });
       return { ...snapshot, evidence_id: saved.id };
     },
@@ -102,10 +109,9 @@ export function hostTools(recording) {
           }
         }
       }
-      const result = await runAction(id, args);
+      const result = payloadForModel(await runAction(id, args));
       const summary = actionEvidenceSummary(args.action, result);
-      if (result?.action_id) labelAction(id, result.action_id, summary);
-      await appendEvidence(id, { kind: "action", summary, action_id: result?.action_id, body: result, body_missing: false });
+      await appendEvidence(id, { kind: "action", summary, body: result, body_missing: false });
       return result;
     },
     async browser_screenshot(args) {
@@ -116,64 +122,30 @@ export function hostTools(recording) {
       return { ...result, as_image: true };
     },
     async network_list(args) {
-      return { items: listNetwork(id, args || {}), scripts: listScripts(id) };
+      return { items: listNetwork(id, args || {}) };
     },
     async network_get(args) {
       const item = getNetwork(id, args.id);
       if (!item) return { ok: false, error: "missing" };
-      await appendEvidence(id, { kind: "read", summary: item.id, body_missing: true });
-      return presentToModel(item, await readAuthVault(id));
+      return item;
     },
     async evidence_get(args) {
-      const item = await getEvidence(id, args.id);
-      if (item?.id) await appendEvidence(id, { kind: "read", summary: item.id, body_missing: true });
-      return presentToModel(item, await readAuthVault(id));
+      return getEvidence(id, args.id);
     },
     async read_page_asset(args) {
       const origin = new URL(recording.startUrl).origin;
       const target = String(args.url || "");
-      let parsed = null;
-      try {
-        parsed = new URL(target, origin);
-      } catch {
-        parsed = null;
-      }
-      const full = listScripts(id).map((row) => getNetwork(id, row.id)).find((row) => {
-        if (!row) return false;
-        if (row.url === target || row.path === target) return true;
-        return parsed ? parsed.pathname === row.path && parsed.origin === new URL(row.url).origin : false;
-      });
-      if (!full || full.body_missing) {
-        if (parsed && parsed.origin !== origin && target.startsWith("http")) return { ok: false, error: "origin_denied" };
-        return { ok: false, body_missing: true };
-      }
+      if (!target.startsWith(origin)) return { ok: false, error: "origin_denied" };
+      const rows = listNetwork(id, {});
+      const full = rows.map((row) => getNetwork(id, row.id)).find((row) => row && row.url === target && /javascript/i.test(row.content_type || ""));
+      if (!full || full.body_missing) return { ok: false, body_missing: true };
       const saved = await appendEvidence(id, { kind: "asset", summary: target, body: full.response_body, body_missing: false });
-      const body = String(full.response_body || "");
-      const find = String(args.find || "");
-      if (find) {
-        const excerpts = scriptExcerpts(body, find);
-        return {
-          ok: true,
-          evidence_id: saved.id,
-          body_bytes: Buffer.byteLength(body),
-          excerpts,
-          ...(excerpts.length ? {} : { hint: "脚本里没有这段文字。全文在 evidence_id。" }),
-        };
-      }
-      if (body.length > 20000) {
-        return {
-          ok: true,
-          evidence_id: saved.id,
-          body_bytes: Buffer.byteLength(body),
-          hint: "脚本较长。再调用一次，find 传请求里的键名，返回附近片段。全文在 evidence_id。",
-        };
-      }
-      return { ok: true, evidence_id: saved.id, body };
+      return { ok: true, evidence_id: saved.id, body: full.response_body };
     },
     async read_guide(args) {
       const name = path.basename(String(args.name || ""));
       if (!GUIDE_FILES[name]) return { ok: false, error: "unknown_guide", names: GUIDE_NAMES };
-      const text = guideText(name, await readFile(GUIDE_FILES[name], "utf8"));
+      const text = guideBody(name) || await readFile(GUIDE_FILES[name], "utf8");
       const saved = await appendEvidence(id, { kind: "guide", summary: name, body: name, body_missing: false });
       const scope = "成品只有 SKILL.md、scripts/client.py、references/api.md。鉴权、提问和活选项写进这三份。";
       return { ok: true, name, evidence_id: saved.id, text: `${scope}\n\n${text}` };
@@ -214,14 +186,9 @@ export function hostTools(recording) {
       if (!["python", "python3"].includes(argv[0]) || argv[1] !== "scripts/client.py") {
         return { ok: false, error: "command_rejected", argv: ["python", "scripts/client.py"] };
       }
-      const cwd = skillPath(skillId());
-      const authFile = path.join(cwd, "config", "auth.local.json");
-      const scriptFile = path.join(cwd, "scripts", "client.py");
-      const stamp = await stat(authFile).then((info) => String(info.mtimeMs), () => "missing");
-      const scriptStamp = await stat(scriptFile).then((info) => String(info.mtimeMs), () => "missing");
-      if (authBlocksRun(recording.authBlocked, stamp, scriptStamp, recording.authBlockedScript)) {
-        return { ok: false, error: "auth_expired", hint: "账号未登录或凭证失效。停止调用，等人更新凭证后再继续" };
-      }
+      recording.skillId = skillId();
+      await writeRuntimeConfig(recording, recording.skillId);
+      const cwd = skillPath(recording.skillId);
       const result = await new Promise((resolve) => {
         const child = spawn(argv[0], argv.slice(1), {
           cwd,
@@ -245,13 +212,9 @@ export function hostTools(recording) {
           resolve({ code: 127, stdout, stderr: error.message });
         });
       });
-      const authFailed = commandAuthFailed(`${result.stdout}\n${result.stderr}`);
-      const ok = result.code === 0 && !authFailed;
-      recording.authBlocked = authFailed ? stamp : "";
-      recording.authBlockedScript = authFailed ? scriptStamp : "";
       const saved = await appendEvidence(id, {
         kind: "verify",
-        ok,
+        ok: result.code === 0,
         argv,
         stdout: result.stdout,
         stderr: result.stderr,
@@ -259,14 +222,7 @@ export function hostTools(recording) {
         body: result.stdout,
         body_missing: false,
       });
-      return {
-        ok,
-        evidence_id: saved.id,
-        code: result.code,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        ...(authFailed ? { error: "auth_expired", hint: "账号未登录或凭证失效。停止调用，等人更新凭证后再继续" } : {}),
-      };
+      return { ok: result.code === 0, evidence_id: saved.id, code: result.code, stdout: result.stdout, stderr: result.stderr };
     },
     async verify_skill() {
       recording.skillId = skillId();
@@ -280,31 +236,56 @@ export function hostTools(recording) {
     },
     async context() {
       const goal = await readGoal(id).catch(() => ({}));
-      const index = await listEvidence(id, { limit: 30 });
       const evidence = await listEvidence(id, { limit: 0 });
-      const snaps = await listEvidence(id, { kinds: ["snapshot"], limit: 1 });
-      let snapshot = snaps[0] ? snapshotFromEvidence(await getEvidence(id, snaps[0].id)) : null;
-      if (!snapshot) {
-        const actions = await listEvidence(id, { kinds: ["action"], limit: 0 });
-        for (let at = actions.length - 1; at >= 0; at -= 1) {
-          const blob = await getEvidence(id, actions[at].id).catch(() => null);
-          snapshot = snapshotFromEvidence(blob);
-          if (snapshot) break;
-        }
+      const snapshot = await latestSnapshotFact(id, evidence);
+      const requests = requestKeyIndex(id, { actionLinked: true });
+      const requestIds = new Set(requests.map((row) => row.id));
+      const index = evidence.filter((row) => row.kind !== "network" || requestIds.has(row.id)).slice(-30);
+      let commands = [];
+      try {
+        const skill = await readSkillFile(skillId(), "SKILL.md");
+        if (skill?.ok) commands = skillCommandLines(skill.contents);
+      } catch {
+        commands = [];
       }
-      const authFile = credentialShape(await readAuthVault(id).catch(() => ({})));
-      const filledValue = evidence.flatMap((row) => (Array.isArray(row.filled_value) ? row.filled_value : [])).slice(-40);
-      const alsoChanged = evidence.flatMap((row) => (
-        Array.isArray(row.also_changed) && row.also_changed.length
-          ? [{ summary: row.summary || "", controls: row.also_changed }]
-          : []
-      )).slice(-40);
-      const requests = requestKeyIndex(id);
-      const filled = filledLabels(evidence);
-      return { goal, snapshot, index, requests, guides: guidesFor(requests, filled), filled, ...(filledValue.length ? { filled_value: filledValue } : {}), ...(alsoChanged.length ? { also_changed: alsoChanged } : {}), ...(authFile ? { auth_file: authFile } : {}) };
+      const ran = evidence
+        .filter((row) => row.kind === "verify")
+        .map((row) => row.summary || (Array.isArray(row.argv) ? row.argv.join(" ") : ""))
+        .filter(Boolean);
+      return {
+        goal,
+        requests,
+        filled: filledLabels(evidence),
+        clicked: clickedLabels(evidence),
+        snapshot,
+        index,
+        commands,
+        ran,
+      };
     },
   };
   return tools;
+}
+
+function snapshotNode(body) {
+  if (!body || typeof body !== "object") return null;
+  const node = body.snapshot && typeof body.snapshot.text === "string" ? body.snapshot : body;
+  const text = String(node.text || "");
+  if (!text) return null;
+  return { epoch: node.epoch ?? 0, text };
+}
+
+async function latestSnapshotFact(recordingId, evidence) {
+  for (let i = (evidence || []).length - 1; i >= 0; i -= 1) {
+    const row = evidence[i];
+    if (row.kind !== "snapshot" && row.kind !== "action") continue;
+    const blob = await getEvidence(recordingId, row.id).catch(() => null);
+    const nested = blob?.body && typeof blob.body === "object" ? blob.body : blob;
+    const snap = snapshotNode(nested);
+    if (!snap) continue;
+    return { evidence_id: row.id, epoch: snap.epoch, text: snap.text };
+  }
+  return null;
 }
 
 export function wrapHostTools(host) {

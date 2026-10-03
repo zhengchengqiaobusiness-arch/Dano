@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>sort header</title>
+</head>
+<body>
+  <table>
+    <thead>
+      <tr>
+        <th>Count</th>
+        <th>Done</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><button type="button">12</button></td>
+        <td><button type="button">3</button></td>
+      </tr>
+    </tbody>
+  </table>
+  <script>
+    document.querySelector("th").addEventListener("click", () => {
+      fetch("/api/sort?col=Count");
+    });
+  </script>
+</body>
+</html>

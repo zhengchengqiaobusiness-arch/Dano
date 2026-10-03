@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>query page</title>
+</head>
+<body>
+  <h1>记录</h1>
+  <button type="button" id="query">查询</button>
+  <script>
+    document.getElementById("query").addEventListener("click", () => {
+      setTimeout(() => fetch("/api/items?deptId=1"), 120);
+    });
+  </script>
+</body>
+</html>

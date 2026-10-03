@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>boot and query</title>
+</head>
+<body>
+  <h1>记录</h1>
+  <button type="button" id="query">查询</button>
+  <script>
+    fetch("/api/boot");
+    setInterval(() => fetch("/api/poll"), 250);
+    document.getElementById("query").addEventListener("click", () => {
+      fetch("/api/items?deptId=1");
+    });
+  </script>
+</body>
+</html>

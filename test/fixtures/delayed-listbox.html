@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>delayed listbox</title>
+</head>
+<body>
+  <button type="button" id="dept">部门</button>
+  <script>
+    document.getElementById("dept").addEventListener("click", () => {
+      setTimeout(() => {
+        const list = document.createElement("div");
+        list.setAttribute("role", "listbox");
+        const option = document.createElement("div");
+        option.setAttribute("role", "option");
+        option.textContent = "研发部门";
+        list.append(option);
+        document.body.append(list);
+      }, 1500);
+    });
+  </script>
+</body>
+</html>
