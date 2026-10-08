@@ -27,6 +27,23 @@ and HTTP 200 containing an invalid identity. It checks the server diagnostic,
 browser error projection, absence of partial Login Sessions, and exclusion of
 synthetic authorization codes, client secrets, tokens, and profile data from logs.
 
+## Validation
+
+- OAuth HTTP callback and allowlisted diagnostics: 96 tests passed.
+- `pnpm run check`: passed, including zero TypeScript/Svelte diagnostics and
+  the product/memory release manifest version check.
+- `pnpm run build`: passed, with the existing frontend chunk-size warning.
+- The first full `pnpm test` run encountered timeouts in existing provider Skill
+  and user-runtime isolation tests. The provider Skill file passed on a separate
+  run. User-runtime isolation with one worker and 30-second test/hook limits
+  finished with nine passed and two timed out tests. It installs runtime npm
+  dependencies while testing isolated users.
+- A baseline comparison temporarily restored both OAuth source files exactly
+  from `upstream/main` and ran the `binds protected tools` isolation case. It
+  also hit the default five-second test and ten-second cleanup timeouts. The
+  changed files were restored byte-for-byte afterward. The full suite is not
+  claimed green, and the baseline timeout is not an OAuth regression finding.
+
 ## Historical incident remains unconfirmed
 
 A read-only inspection of the currently running production `dano-app-1` logs on
