@@ -43,6 +43,39 @@ function emptyFromQuery(query) {
   return [...new URLSearchParams(text).entries()].filter(([, value]) => value === "").map(([key]) => key);
 }
 
+export function responseKeyPreview(body, cap = 24) {
+  const keys = [];
+  const seen = new Set();
+  let parsed = body;
+  if (typeof body === "string") {
+    if (Buffer.byteLength(body) > 32768) return ["_omitted"];
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return [];
+    }
+  }
+  if (!parsed || typeof parsed !== "object") return [];
+  const queue = [{ value: parsed, prefix: "" }];
+  while (queue.length && keys.length < cap) {
+    const { value, prefix } = queue.shift();
+    if (Array.isArray(value)) {
+      if (value.length) queue.push({ value: value[0], prefix: prefix ? `${prefix}[]` : "[]" });
+      continue;
+    }
+    if (!value || typeof value !== "object") continue;
+    for (const [key, item] of Object.entries(value)) {
+      if (key.startsWith("_") || keys.length >= cap) continue;
+      const next = prefix ? `${prefix}.${key}` : key;
+      if (seen.has(next)) continue;
+      seen.add(next);
+      keys.push(next);
+      if (item && typeof item === "object") queue.push({ value: item, prefix: next });
+    }
+  }
+  return keys;
+}
+
 export function requestIndexRow(row) {
   const keys = new Set([
     ...keysFromPostData(row.post_data ?? row.body?.post_data),
@@ -106,7 +139,7 @@ export function windowsForPath(text, path) {
   return windows;
 }
 
-export function citationErrors(skillText, requests, file = "") {
+export function citationErrors(skillText, requests, file = "", { requireKeys = true } = {}) {
   const errors = [];
   const seen = new Set();
   const push = (error) => {
@@ -122,6 +155,7 @@ export function citationErrors(skillText, requests, file = "") {
     const hit = [...knownPaths].some((path) => path === cited || path.endsWith(cited) || cited.endsWith(path));
     if (!hit) push({ code: "path_not_in_evidence", path: cited, file });
   }
+  if (!requireKeys) return errors;
   for (const row of rows) {
     if (!row.path || !text.includes(row.path)) continue;
     const scope = windowsForPath(text, row.path).join("\n");

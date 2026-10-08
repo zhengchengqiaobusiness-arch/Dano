@@ -68,6 +68,8 @@ export function actionEvidenceSummary(action, result) {
   if (result?.uploaded) return `upload:${result.clicked || "file"}`;
   const names = Array.isArray(result?.filled) ? result.filled.filter(Boolean) : [];
   if (names.length) return `${action}:${names.join("|")}`;
+  if (action === "click" && result?.clicked) return `click:${result.clicked}`;
+  if (result?.actor === "human") return "manual_click";
   return action;
 }
 
@@ -82,6 +84,37 @@ export function filledLabels(evidence) {
     }
   }
   return labels;
+}
+
+export function clickedLabels(evidence) {
+  const labels = [];
+  for (const row of evidence || []) {
+    if (row.kind !== "action") continue;
+    const summary = String(row.summary || "");
+    if (summary.startsWith("click:") && summary.length > 6) labels.push(summary.slice(6));
+    else if (summary === "manual_click" || row.body?.actor === "human") labels.push("actor=human");
+  }
+  return labels;
+}
+
+export function writeOnlySkill(skillMd, clientText, requests) {
+  const lines = String(skillMd || "").split(/\n/).map((line) => line.trim()).filter((line) => (
+    /^python3?\s+scripts\/client\.py\b/.test(line)
+  ));
+  if (!lines.length) return false;
+  const recordedWrite = (requests || []).some((row) => /^(POST|PUT|PATCH|DELETE)$/i.test(row.method || ""));
+  if (!recordedWrite) return false;
+  const reads = lines.filter((line) => (
+    !line.includes("--confirm")
+    && !commandWrites(line, clientText)
+    && !writesRecordedPath(line, clientText, requests)
+  ));
+  const writes = lines.filter((line) => (
+    line.includes("--confirm")
+    || commandWrites(line, clientText)
+    || writesRecordedPath(line, clientText, requests)
+  ));
+  return writes.length > 0 && reads.length === 0;
 }
 
 function sameCommand(left, right) {
@@ -134,27 +167,12 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   }
   const skillMd = texts["SKILL.md"] || "";
   if (skillMd && !/^---\n[\s\S]*?\bname:\s*\S+/m.test(skillMd)) {
-    errors.push({ code: "not_invocable", file: "SKILL.md", hint: "开头写 name 和 description，调用方靠 description 启用" });
+    errors.push({ code: "not_invocable", file: "SKILL.md", hint: "开头写 name 和 description，写清调用方何时启用、参数怎么传，不要写成页面点击步骤" });
   }
   if (/disable-model-invocation:\s*true/.test(skillMd)) {
     errors.push({ code: "not_invocable", file: "SKILL.md", hint: "不要写 disable-model-invocation，否则调用方的智能体不会启用" });
   }
   const reads = readCommands(skillMd);
-  const businessReads = reads.filter((line) => !/^python3?\s+scripts\/client\.py\s+show-config\s*$/.test(line));
-  if (citedPaths(texts["scripts/client.py"] || "").length && !businessReads.length) {
-    errors.push({
-      code: "command_not_run",
-      file: "SKILL.md",
-      hint: "show-config 只检查配置。再写一条打到证据路径的读命令，并用相同 argv 跑 run_skill_command",
-    });
-  }
-  if (!reads.length && skillMd) {
-    errors.push({
-      code: "command_not_run",
-      file: "SKILL.md",
-      hint: "在 SKILL.md 写一行以 python scripts/client.py 开头的读命令，再用相同 argv 调用 run_skill_command",
-    });
-  }
   const failed = evidence.filter((row) => row.kind === "verify" && row.ok === false);
   const requests = [];
   const requestsForWrites = [];
@@ -166,6 +184,22 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     if (body.path || body.post_data) requests.push(requestIndexRow({ ...body, id: row.id }));
   }
   const clientText = texts["scripts/client.py"] || "";
+  const writeOnly = writeOnlySkill(skillMd, clientText, requestsForWrites);
+  const businessReads = reads.filter((line) => !/^python3?\s+scripts\/client\.py\s+show-config\s*$/.test(line));
+  if (!writeOnly && citedPaths(clientText).length && !businessReads.length) {
+    errors.push({
+      code: "command_not_run",
+      file: "SKILL.md",
+      hint: "show-config 只检查配置。目标含读时再写一条打到证据路径的读命令，并用相同 argv 跑 run_skill_command。目标只要求写入时不要发明 GET。",
+    });
+  }
+  if (!writeOnly && !reads.length && skillMd) {
+    errors.push({
+      code: "command_not_run",
+      file: "SKILL.md",
+      hint: "目标含读时，在 SKILL.md 写一行以 python scripts/client.py 开头的读命令，再用相同 argv 调用 run_skill_command。目标只要求写入时，写带 --confirm 的写命令即可，不要发明 GET。",
+    });
+  }
   if (clientText.trim()) {
     try {
       const probed = await nonStdlibImports(clientText);
@@ -230,7 +264,7 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     });
   }
   errors.push(...citationErrors(clientText, requests, "scripts/client.py"));
-  errors.push(...citationErrors(texts["references/api.md"] || "", requests, "references/api.md"));
+  errors.push(...citationErrors(texts["references/api.md"] || "", requests, "references/api.md", { requireKeys: false }));
   const actionRows = evidence.filter((row) => row.kind === "action");
   const uploads = actionRows.filter((row) => String(row.summary || "").startsWith("upload:"));
   if (actionRows.some((row) => row.summary === "needs_upload") && !uploads.length) {

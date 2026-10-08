@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+<body>
+  <button id="open" type="button">打开</button>
+  <button id="behind" type="button">被挡住</button>
+  <div id="mask" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.35)">
+    <div role="dialog" aria-modal="true" aria-label="新建" style="position:absolute;inset:40px;background:#fff;padding:24px">
+      <label>标题<input id="title" /></label>
+      <button id="ok" type="button">确定</button>
+    </div>
+  </div>
+  <script>
+    document.querySelector("#open").addEventListener("click", () => {
+      document.querySelector("#mask").style.display = "block";
+    });
+    document.querySelector("#ok").addEventListener("click", () => {
+      document.querySelector("#mask").style.display = "none";
+      fetch("/api/save", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: document.querySelector("#title").value }) });
+    });
+  </script>
+</body>
+</html>

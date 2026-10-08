@@ -255,3 +255,31 @@ test("a script that imports outside the standard library cannot be called", asyn
   const allowed = await verifySkill(dir, shape.id, shape);
   assert.equal(allowed.errors.some((item) => item.code === "import_not_available"), false);
 });
+
+test("a write-only skill is not forced to invent a GET", async () => {
+  await useData();
+  const shape = { id: "rec_verify_writeonly", tenant: "", subsystem: "app", skillId: "app.rec_verify_writeonly", startUrl: "http://127.0.0.1/" };
+  const dir = skillDir(shape.skillId);
+  await mkdir(path.join(dir, "scripts"), { recursive: true });
+  await mkdir(path.join(dir, "references"), { recursive: true });
+  await mkdir(path.join(dir, "config"), { recursive: true });
+  await writeFile(path.join(dir, "SKILL.md"), "---\nname: save-item\ndescription: 调用方保存一条记录\n---\npython scripts/client.py save --confirm\n");
+  await writeFile(path.join(dir, "scripts/client.py"), "def save():\n    method = \"POST\"\n    path = \"/api/save\"\n    body[\"title\"] = args.title\n");
+  await writeFile(path.join(dir, "references/api.md"), "## 字段\n- page_name: 标题\n- evidence_ids: req_save\n");
+  await writeFile(path.join(dir, "config/runtime.json"), "{}\n");
+  await writeFile(path.join(dir, "config/auth.local.json"), "{\"headers\":{}}\n");
+  await appendEvidence(shape.id, {
+    id: "req_save",
+    kind: "network",
+    summary: "POST /api/save",
+    body: {
+      method: "POST",
+      path: "/api/save",
+      post_data: JSON.stringify({ title: "hello" }),
+      response_body: JSON.stringify({ data: 1 }),
+    },
+  });
+  const result = await verifySkill(dir, shape.id, shape);
+  assert.equal(result.errors.some((item) => item.code === "command_not_run"), false);
+  assert.equal(result.errors.some((item) => item.code === "follow_get_missing"), false);
+});

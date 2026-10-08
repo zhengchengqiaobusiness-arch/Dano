@@ -9,10 +9,11 @@ import { fileURLToPath } from "node:url";
 import { createApp, listen } from "../src/server.mjs";
 import { setStartRecordingPi } from "../src/agent/pi-session.mjs";
 import { skillDir } from "../src/paths.mjs";
+import { GUIDE_NAMES } from "../src/agent/guides.mjs";
 
 const fixtureDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 
-test("fake pi writes the skill and leaves it unchanged", async () => {
+test("fake pi writes the skill and leaves it unchanged", { timeout: 60000 }, async () => {
   process.env.CABP_DATA = await mkdtemp(path.join(os.tmpdir(), "cabp-api-"));
   let saves = 0;
   const site = http.createServer(async (req, res) => {
@@ -33,8 +34,8 @@ test("fake pi writes the skill and leaves it unchanged", async () => {
     const fake = {
       async prompt() {
         const snap = await tools.browser_snapshot();
-        const inner = snap.text.split(/\n/).filter((line) => line.includes("ref=f1:") && line.includes("button"));
-        const ref = inner[1].match(/ref=(f1:e\d+)/)[1];
+        const inner = snap.text.split(/\n/).filter((line) => /\[ref=f1:/.test(line) && /button/i.test(line));
+        const ref = (inner[1].match(/\[ref=(f1:[^\]]+)\]/) || inner[1].match(/ref=(f1:e\d+@\d+)/))[1];
         await tools.browser_act({ action: "click", ref });
         const started = Date.now();
         let hit = null;
@@ -45,7 +46,8 @@ test("fake pi writes the skill and leaves it unchanged", async () => {
           await new Promise((resolve) => setTimeout(resolve, 100));
         }
         const full = await tools.network_get({ id: hit.id });
-        written = "保留整段目标\npython scripts/client.py list\n";
+        for (const name of GUIDE_NAMES) await tools.read_guide({ name });
+        written = "---\nname: sample-list\ndescription: 调用方列出并保存\n---\npython scripts/client.py list\n";
         const api = [
           "## 字段",
           "- page_name: page",

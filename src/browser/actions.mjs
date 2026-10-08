@@ -2,8 +2,8 @@ import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { originFromUrl } from "../session-store.mjs";
-import { browserSession, withPage } from "./session.mjs";
-import { locatorFor, sameColumnRefs, takeSnapshot } from "./snapshot.mjs";
+import { browserSession, raceWall, withPage } from "./session.mjs";
+import { locatorFor, takeSnapshot, yamlFingerprint } from "./snapshot.mjs";
 import { beginAction, endAction, listNetwork, waitForAction } from "./network.mjs";
 import { logLine } from "../log.mjs";
 
@@ -13,6 +13,7 @@ const PROBE_PNG = Buffer.from(
 );
 
 const ACTIONS = new Set(["open", "snapshot", "click", "fill", "fill_fields", "press", "select", "upload", "screenshot"]);
+export const ACT_WALL_MS = 15000;
 
 async function readBack(locator, text) {
   const aria = await locator.getAttribute("aria-valuenow");
@@ -31,7 +32,7 @@ async function readBack(locator, text) {
 }
 
 async function stale(recordingId) {
-  const snapshot = await takeSnapshot(recordingId);
+  const snapshot = await takeSnapshot(recordingId, { budgetMs: 2500 });
   return { ok: false, error: "stale_ref", snapshot };
 }
 
@@ -51,7 +52,7 @@ function armChooser(page) {
     resolveChooser = resolve;
   });
   page.on("filechooser", onChooser);
-  timer = setTimeout(() => finish(null), 8000);
+  timer = setTimeout(() => finish(null), 1500);
   return {
     promise,
     stop() {
@@ -60,8 +61,27 @@ function armChooser(page) {
   };
 }
 
+function pointerBlocked(error) {
+  return /intercepts pointer|obscures|subtree intercepts/i.test(String(error?.message || ""));
+}
+
+function clickUnreachable(error) {
+  return pointerBlocked(error) || /not visible|outside of the viewport|Timeout/i.test(String(error?.message || ""));
+}
+
+async function snapshotAfter(recordingId, budgetMs = 3000) {
+  return takeSnapshot(recordingId, { budgetMs });
+}
+
 export function runAction(recordingId, input) {
-  return withPage(recordingId, () => perform(recordingId, input));
+  return raceWall(
+    withPage(recordingId, () => perform(recordingId, input)),
+    ACT_WALL_MS,
+    async () => {
+      const snapshot = await takeSnapshot(recordingId, { budgetMs: 2000 }).catch(() => ({ epoch: 0, text: "", refs: [] }));
+      return { ok: false, error: "act_timeout", snapshot };
+    },
+  );
 }
 
 async function perform(recordingId, input) {
@@ -74,13 +94,13 @@ async function perform(recordingId, input) {
   if (action === "open") {
     const url = String(input.url || "");
     if (originFromUrl(url) !== state.origin) {
-      const snapshot = await takeSnapshot(recordingId);
+      const snapshot = await snapshotAfter(recordingId);
       return { ok: false, error: "origin_denied", snapshot };
     }
     await state.page.goto(url, { waitUntil: "domcontentloaded" });
-    return { ok: true, snapshot: await takeSnapshot(recordingId) };
+    return { ok: true, snapshot: await snapshotAfter(recordingId) };
   }
-  if (action === "snapshot") return { ok: true, snapshot: await takeSnapshot(recordingId) };
+  if (action === "snapshot") return { ok: true, snapshot: await snapshotAfter(recordingId, 8000) };
   if (action === "screenshot") {
     const target = input.ref ? locatorFor(recordingId, input.ref)?.locator : state.page;
     if (input.ref && !target) return stale(recordingId);
@@ -97,7 +117,7 @@ async function perform(recordingId, input) {
   }
   const hit = locatorFor(recordingId, input.ref);
   const frame = hit?.frame || null;
-  const actionId = beginAction(recordingId, frame);
+  const actionId = beginAction(recordingId, frame, { anyFrame: true });
   const requestsDuring = () => listNetwork(recordingId, { action_id: actionId }).map((row) => ({
     id: row.id,
     method: row.method,
@@ -110,17 +130,17 @@ async function perform(recordingId, input) {
       const filled = [];
       for (const field of fields) {
         if (!field || typeof field.ref !== "string" || typeof field.text !== "string") {
-          return { ok: false, error: "value_not_applied", ref: field?.ref || "", snapshot: await takeSnapshot(recordingId) };
+          return { ok: false, error: "value_not_applied", ref: field?.ref || "", filled, snapshot: await snapshotAfter(recordingId) };
         }
         const item = locatorFor(recordingId, field.ref);
-        if (!item) return { ...(await stale(recordingId)), ref: field.ref };
+        if (!item) return { ...(await stale(recordingId)), ref: field.ref, filled };
         await item.locator.fill(field.text, { timeout: 2000 });
         if (!(await readBack(item.locator, field.text))) {
-          return { ok: false, error: "value_not_applied", ref: field.ref, snapshot: await takeSnapshot(recordingId) };
+          return { ok: false, error: "value_not_applied", ref: field.ref, filled, snapshot: await snapshotAfter(recordingId) };
         }
         if (item.label) filled.push(item.label);
       }
-      return { ok: true, filled, snapshot: await takeSnapshot(recordingId) };
+      return { ok: true, filled, snapshot: await snapshotAfter(recordingId) };
     }
     if (!hit) {
       logLine(`[browser] ${action} ref=${input.ref || ""} stale`);
@@ -132,12 +152,24 @@ async function perform(recordingId, input) {
         ok: false,
         error: "needs_upload",
         ref: input.ref,
-        hint: "文件选择还开着。对打开它的那个 ref 调用 upload。不要点关闭、取消，也不要改去提交。",
+        hint: "文件选择还开着。对打开它的那个 ref 调用 upload。",
       };
     }
     if (action === "click") {
       state.agentClick = true;
       await hit.locator.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {});
+      try {
+        await hit.locator.click({ trial: true, timeout: 2000 });
+      } catch (error) {
+        if (pointerBlocked(error)) {
+          return {
+            ok: false,
+            error: "behind_overlay",
+            clicked: hit.label || "",
+            snapshot: await snapshotAfter(recordingId),
+          };
+        }
+      }
       const chooserArm = armChooser(state.page);
       let chooser = null;
       try {
@@ -149,9 +181,17 @@ async function perform(recordingId, input) {
         ]);
         if (!chooser) {
           chooserArm.stop();
+          if (clickUnreachable(error)) {
+            return {
+              ok: false,
+              error: "behind_overlay",
+              clicked: hit.label || "",
+              snapshot: await snapshotAfter(recordingId),
+            };
+          }
           const message = String(error?.message || "click_failed").split("\n")[0];
           logLine(`[browser] click failed ${message}`);
-          return { ok: false, error: message, requests: requestsDuring(), snapshot: await takeSnapshot(recordingId) };
+          return { ok: false, error: message, requests: requestsDuring(), snapshot: await snapshotAfter(recordingId) };
         }
       }
       if (!chooser) {
@@ -161,33 +201,6 @@ async function perform(recordingId, input) {
         ]);
       }
       chooserArm.stop();
-      if (!chooser) {
-        const dialog = state.page.locator("[role=dialog]").last();
-        const dialogInput = (await dialog.count().catch(() => 0))
-          ? ((await dialog.locator("input[type=file]").count().catch(() => 0))
-            ? dialog.locator("input[type=file]").last()
-            : state.page.locator("input[type=file]").last())
-          : null;
-        if (dialogInput && await dialogInput.count().catch(() => 0)) {
-          const dir = path.join(recordingDir(recordingId), "uploads");
-          await mkdir(dir, { recursive: true });
-          const filePath = path.join(dir, "attachment.png");
-          await writeFile(filePath, PROBE_PNG);
-          await dialogInput.setInputFiles(filePath).catch(() => {});
-          await waitForAction(recordingId, actionId);
-          const requests = requestsDuring();
-          if (requests.length) {
-            return {
-              ok: true,
-              uploaded: true,
-              clicked: hit.label || "",
-              requests,
-              snapshot: await takeSnapshot(recordingId),
-              hint: "对话框里的文件已写入。采用 requests。不要点关闭。",
-            };
-          }
-        }
-      }
       if (chooser) {
         state.pendingFileChooser = null;
         const dir = path.join(recordingDir(recordingId), "uploads");
@@ -202,7 +215,7 @@ async function perform(recordingId, input) {
             ok: false,
             error: "needs_upload",
             ref: input.ref,
-            hint: `文件没有写入：${String(error?.message || error).split("\n")[0]}。对同一 ref 调用 upload，不要点关闭。`,
+            hint: `文件没有写入：${String(error?.message || error).split("\n")[0]}。对同一 ref 调用 upload。`,
           };
         }
         await waitForAction(recordingId, actionId);
@@ -213,8 +226,7 @@ async function perform(recordingId, input) {
           uploaded: true,
           clicked: hit.label || "",
           requests,
-          snapshot: await takeSnapshot(recordingId),
-          hint: "文件已写入这次选择。采用 requests 里的上传请求写进附件。不要再点关闭。",
+          snapshot: await snapshotAfter(recordingId),
         };
       }
     }
@@ -222,10 +234,10 @@ async function perform(recordingId, input) {
       try {
         await hit.locator.fill(String(input.text ?? ""), { timeout: 2000 });
       } catch {
-        return { ok: false, error: "value_not_applied", snapshot: await takeSnapshot(recordingId) };
+        return { ok: false, error: "value_not_applied", snapshot: await snapshotAfter(recordingId) };
       }
       if (!(await readBack(hit.locator, String(input.text ?? "")))) {
-        return { ok: false, error: "value_not_applied", snapshot: await takeSnapshot(recordingId) };
+        return { ok: false, error: "value_not_applied", snapshot: await snapshotAfter(recordingId) };
       }
     }
     if (action === "press") await hit.locator.press(String(input.key || input.text || ""));
@@ -248,16 +260,20 @@ async function perform(recordingId, input) {
     if (action === "click" || action === "upload" || action === "fill" || action === "select") {
       await waitForAction(recordingId, actionId);
     }
-    const snapshot = await takeSnapshot(recordingId);
+    const prevKey = state.lastYamlKey || "";
+    const snapshot = await snapshotAfter(recordingId);
     const requests = requestsDuring();
-    const sameColumn = requests.length ? [] : sameColumnRefs(snapshot.text, hit.label);
+    const key = yamlFingerprint(snapshot.text);
+    state.lastYamlKey = key;
+    const unchanged = action === "click" && key === prevKey && !requests.length;
+    state.pageStall = unchanged ? (state.pageStall || 0) + 1 : 0;
     return action === "click"
       ? {
           ok: true,
           clicked: hit.label || "",
           requests,
           snapshot,
-          ...(sameColumn.length ? { same_column: sameColumn } : {}),
+          ...(state.pageStall >= 2 ? { page_unchanged: true } : {}),
         }
       : { ok: true, filled, requests, snapshot };
   } finally {

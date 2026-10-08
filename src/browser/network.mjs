@@ -2,8 +2,11 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { appendEvidence } from "../evidence/store.mjs";
-import { requestIndexRow } from "../skillpack/request-keys.mjs";
+import { requestIndexRow, responseKeyPreview } from "../skillpack/request-keys.mjs";
 import { noteLoginBody, noteRequestHeaders } from "../auth-vault.mjs";
+
+const BODY_OMIT_BYTES = 16384;
+const KEY_PARSE_BYTES = 32768;
 
 const NOISE = /sockjs|websocket|favicon\.ico/i;
 const bags = new Map();
@@ -105,7 +108,54 @@ export function attachNetwork(recordingId, context) {
   });
 }
 
-export function waitForAction(recordingId, actionId, timeout = 800) {
+function responseKeysOf(row) {
+  if (row._responseKeys) return row._responseKeys;
+  const body = row.response_body;
+  if (body == null || row.body_missing) {
+    row._responseKeys = [];
+    return row._responseKeys;
+  }
+  if (Buffer.byteLength(String(body)) > KEY_PARSE_BYTES) {
+    row._responseKeys = ["_omitted"];
+    return row._responseKeys;
+  }
+  row._responseKeys = responseKeyPreview(body);
+  return row._responseKeys;
+}
+
+export function compactNetworkIndex(rows) {
+  return (rows || []).map((row) => ({
+    id: row.id,
+    method: row.method,
+    path: row.path,
+    status: row.status,
+    action_id: row.action_id || "",
+    keys: row.keys || [],
+    ...(row.response_keys?.length ? { response_keys: row.response_keys } : {}),
+    ...(row.body_missing ? { body_missing: true } : {}),
+    ...(row.issues_credential ? { issues_credential: true } : {}),
+    ...(row.empty ? { empty: row.empty } : {}),
+  }));
+}
+
+export function networkBodyForModel(item) {
+  if (!item) return { ok: false, error: "missing" };
+  const body = item.response_body;
+  const bytes = body == null ? 0 : Buffer.byteLength(String(body));
+  if (bytes > BODY_OMIT_BYTES) {
+    const { response_body: _drop, ...rest } = item;
+    return {
+      ...rest,
+      response_body_omitted: true,
+      response_body_bytes: bytes,
+      response_keys: responseKeyPreview(body),
+      hint: "正文过大已省略。用 evidence_get 同 id 取全文。",
+    };
+  }
+  return item;
+}
+
+export function waitForAction(recordingId, actionId, timeout = 1500) {
   const state = bag(recordingId);
   const started = Date.now();
   return new Promise((resolve) => {
@@ -127,6 +177,7 @@ export function listNetwork(recordingId, { after_id = "", action_id = "" } = {})
   if (action_id) rows = rows.filter((row) => row.action_id === action_id);
   return rows.map((row) => {
     const index = requestIndexRow(row);
+    const responseKeys = responseKeysOf(row);
     return {
       id: row.id,
       method: row.method,
@@ -136,6 +187,7 @@ export function listNetwork(recordingId, { after_id = "", action_id = "" } = {})
       body_missing: row.body_missing,
       action_id: row.action_id,
       keys: index.keys,
+      ...(responseKeys.length ? { response_keys: responseKeys } : {}),
       ...(index.empty ? { empty: index.empty } : {}),
       ...(index.issues_credential ? { issues_credential: true } : {}),
     };

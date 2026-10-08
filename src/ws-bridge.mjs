@@ -1,11 +1,47 @@
 import { WebSocketServer } from "ws";
 import { appendEvidence } from "./evidence/store.mjs";
-import { browserSession, captureFrame, closeBrowser, getPage, openBrowser, withPage } from "./browser/session.mjs";
-import { beginAction, endAction, listNetwork, waitForAction } from "./browser/network.mjs";
+import { browserSession, captureFrame, closeBrowser, getPage, openBrowser, withoutPageLock, withPage } from "./browser/session.mjs";
+import { beginAction, compactNetworkIndex, endAction, listNetwork, waitForAction } from "./browser/network.mjs";
 import { loadStorageState, saveStorageState } from "./session-store.mjs";
-import { createRecording, emit, persist, snapshotMessage } from "./session.mjs";
+import { createRecording, emit, getRecording, persist, snapshotMessage } from "./session.mjs";
 import { hostTools } from "./agent/tools.mjs";
 import { startRecordingPi as defaultStart } from "./agent/pi-session.mjs";
+
+function recordingIsLive(recording) {
+  return Boolean(recording && !recording.finished && recording.status !== "stopped");
+}
+
+function attachPreview(recording, ws, send) {
+  clearTimeout(recording.detachTimer);
+  recording.detachTimer = null;
+  recording.previewSocket = ws;
+  recording.emitThought = (thought) => send({ type: "thought", ...thought });
+  recording.emit = () => {
+    send(snapshotMessage(recording));
+    persist(recording);
+  };
+}
+
+function scheduleDetach(recording) {
+  clearTimeout(recording.detachTimer);
+  recording.detachTimer = setTimeout(() => {
+    if (recording.previewSocket) return;
+    recording.finished = true;
+    recording.status = "stopped";
+    recording.pi?.dispose?.();
+    closeBrowser(recording.id);
+  }, 2500);
+}
+
+async function steerAfterHumanAct(recording) {
+  if (!recording?.pi || !recordingIsLive(recording) || recording.paused) return;
+  const now = Date.now();
+  if (now - (recording.lastHumanSteerAt || 0) < 2500) return;
+  recording.lastHumanSteerAt = now;
+  const listed = compactNetworkIndex(listNetwork(recording.id));
+  const text = `人在预览里操作了。actor=human。先 browser_snapshot 再接着做。\n${JSON.stringify({ listed })}`;
+  recording.pi.prompt(text).catch(() => {});
+}
 
 async function applyPointer(recording, event, send) {
   const page = getPage(recording.id);
@@ -34,7 +70,7 @@ async function applyPointer(recording, event, send) {
       await appendEvidence(recording.id, {
         kind: "action",
         summary: "manual_click",
-        body: { ok: true, requests },
+        body: { ok: true, actor: "human", requests },
         body_missing: false,
       });
       recording.emitThought?.({
@@ -93,13 +129,19 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
         return;
       }
       if (message.type === "start") {
+        const existingId = String(message.recording_id || message.run_id || "");
+        const existing = existingId ? getRecording(existingId) : null;
+        if (existing && recordingIsLive(existing) && getPage(existing.id)) {
+          recording = existing;
+          attachPreview(recording, ws, send);
+          await pushFrame();
+          frameTimer = setInterval(pushFrame, 400);
+          send(snapshotMessage(recording));
+          return;
+        }
         const stored = message.storage_state || await loadStorageState(message.start_url);
         recording = await createRecording(message);
-        recording.emitThought = (thought) => send({ type: "thought", ...thought });
-        recording.emit = () => {
-          send(snapshotMessage(recording));
-          persist(recording);
-        };
+        attachPreview(recording, ws, send);
         try {
           await openBrowser({
             recordingId: recording.id,
@@ -168,10 +210,14 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
       }
       if (message.type === "input") {
         try {
-          await withPage(recording.id, () => applyPointer(recording, message.event || {}, send));
+          await withoutPageLock(recording.id, () => applyPointer(recording, message.event || {}, send));
         } catch (error) {
           send({ type: "input_error", detail: error.message });
           return;
+        }
+        const kind = String(message.event?.kind || "");
+        if (kind === "pointer_up" || kind === "text" || kind === "key") {
+          steerAfterHumanAct(recording);
         }
         setTimeout(pushFrame, 100);
         return;
@@ -202,6 +248,8 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
         return;
       }
       if (message.type === "abort" || message.type === "stop_pi" || message.type === "cancel") {
+        clearTimeout(recording.detachTimer);
+        recording.previewSocket = null;
         recording.finished = true;
         if (typeof recording.releaseAssist === "function") {
           const release = recording.releaseAssist;
@@ -220,6 +268,11 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
     ws.on("close", () => {
       clearInterval(frameTimer);
       if (!recording) return;
+      if (recording.previewSocket === ws) recording.previewSocket = null;
+      if (recordingIsLive(recording)) {
+        scheduleDetach(recording);
+        return;
+      }
       recording.finished = true;
       if (typeof recording.releaseAssist === "function") {
         const release = recording.releaseAssist;

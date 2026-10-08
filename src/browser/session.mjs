@@ -49,12 +49,44 @@ export function getPage(recordingId) {
 }
 
 const pageLocks = new Map();
+export const PAGE_LOCK_MS = 15000;
 
-export function withPage(recordingId, fn) {
+export function raceWall(promise, ms, fallback) {
+  let timer;
+  const raced = Promise.race([
+    Promise.resolve(promise).then(
+      (value) => ({ done: true, value }),
+      (error) => ({ done: true, error }),
+    ).finally(() => clearTimeout(timer)),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ done: false }), Math.max(1, Number(ms) || PAGE_LOCK_MS));
+    }),
+  ]);
+  return raced.then((hit) => {
+    if (hit?.done) {
+      if (hit.error) throw hit.error;
+      return hit.value;
+    }
+    return typeof fallback === "function" ? fallback() : fallback;
+  });
+}
+
+export function withPage(recordingId, fn, { lockMs = PAGE_LOCK_MS } = {}) {
   const prev = pageLocks.get(recordingId) || Promise.resolve();
   const run = prev.then(() => fn(), () => fn());
-  pageLocks.set(recordingId, run.then(() => {}, () => {}));
+  let timer;
+  const hold = Promise.race([
+    run.then(() => {}, () => {}).finally(() => clearTimeout(timer)),
+    new Promise((resolve) => {
+      timer = setTimeout(resolve, Math.max(1, Number(lockMs) || PAGE_LOCK_MS));
+    }),
+  ]);
+  pageLocks.set(recordingId, hold);
   return run;
+}
+
+export function withoutPageLock(recordingId, fn) {
+  return Promise.resolve().then(fn);
 }
 
 export async function persistBrowserSession(recordingId) {

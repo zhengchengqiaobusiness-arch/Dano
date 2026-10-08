@@ -42,11 +42,25 @@ function resultLine(result) {
 const SKILL_TOOLS = new Set(["write_skill_file", "run_skill_command", "verify_skill"]);
 const MAX_SKILL_CONTINUES = 8;
 
+export function factsForContinue(context) {
+  const snapshot = context?.snapshot;
+  const text = snapshot?.body?.text || snapshot?.text || "";
+  return {
+    goal: context?.goal || {},
+    listed: context?.listed || [],
+    clicked: context?.clicked || [],
+    filled: context?.filled || [],
+    snapshot: String(text).slice(0, 12000),
+  };
+}
+
 export function nextRecordingPrompt({ finished, paused, progressed, continues, verifyErrors }) {
   if (finished || paused || continues >= MAX_SKILL_CONTINUES) return null;
   const errors = Array.isArray(verifyErrors) && verifyErrors.length ? `\n${JSON.stringify(verifyErrors)}` : "";
-  const lead = progressed ? "页面操作的总结不是结束。" : "Skill 还没产出。";
-  return `${lead}read_guide 读完名单。对照目标原文、requests（方法、路径、证据 id、keys、empty、issues_credential）和 filled 里的控件名，写三个文件。要采用的请求用 network_get 打开全文。调用方会执行的命令要带上 keys：来自参数，或命令里先按证据再读。empty 里的键传空。录到的字面值不写进默认参数。filled 里每个控件名在 SKILL.md 各占一行必填。issues_credential 的请求按 auth.local.json 的 credential 在业务请求前重放，失败或 401 再停止。DANO_AUTH_HEADERS 只覆盖同名头。scripts/client.py 只用 Python 标准库。跑读命令，再 verify_skill。${errors}`;
+  const lead = progressed
+    ? "页面操作的总结不是结束。对照 listed（本场全部 xhr/fetch 索引）和目标原文写三文件。正文过大时 network_get 会省略，用 evidence_get 同 id。成品必须可调用。目标只要求写入时不要发明 GET。filled 里的控件名不是调用方必填清单。"
+    : "Skill 还没产出。";
+  return `${lead}read_guide 读完名单。要采用的请求打开全文。来源标签和命令行谁填必须一致。当前账号、部门、权限从 listed 已录请求取出再填，不要冻成字面量。empty 里的键传空。issues_credential 的请求按 auth.local.json 的 credential 在业务请求前重放，失败或 401 再停止。DANO_AUTH_HEADERS 只覆盖同名头。scripts/client.py 只用 Python 标准库。跑读命令（若目标含读），再 verify_skill。${errors}`;
 }
 
 let startOverride = null;
@@ -153,7 +167,7 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
       if (!follow) return;
       continues += 1;
       const current = typeof host.context === "function" ? await host.context() : {};
-      await prompt(`${follow}\n${JSON.stringify({ goal: current.goal || {}, requests: current.requests || [], filled: current.filled || [] })}`);
+      await prompt(`${follow}\n${JSON.stringify(factsForContinue(current))}`);
     }
   }
   const handle = {
@@ -177,7 +191,7 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
     recording.earlySteer = [];
     recording.pi = handle;
   }
-  prompt(`${goalText}\n${JSON.stringify({ snapshot: context.snapshot, index: context.index, requests: context.requests || [], filled: context.filled || [] })}`).catch((error) => {
+  prompt(`${goalText}\n${JSON.stringify(factsForContinue(context))}`).catch((error) => {
     logLine(`[pi] ${error?.message || error}`);
     recording?.emitThought?.({ kind: "text", text: String(error?.message || error) });
   });

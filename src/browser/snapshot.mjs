@@ -1,17 +1,31 @@
 import { browserSession } from "./session.mjs";
 import { readGoal } from "../evidence/store.mjs";
 
+const OVERLAY_ROLE = /^(dialog|alertdialog|listbox|menu|tooltip)\b/i;
+const ROW_ROLE = /^row\b/i;
+const CELL_ROLE = /^(cell|gridcell|button|link|textbox)\b/i;
+
 function frameKey(frame) {
   const parent = frame.parentFrame();
   const parentId = parent?._guid || parent?.url() || "";
   return `${parentId}\n${frame.url()}`;
 }
 
+function indentOf(line) {
+  const match = String(line || "").match(/^(\s*)/);
+  return match ? match[1].length : 0;
+}
+
+function unwrapLine(line) {
+  let raw = String(line || "").replace(/^\s*-\s*/, "").trim();
+  if (raw.startsWith("'") && raw.endsWith("'")) raw = raw.slice(1, -1);
+  return raw;
+}
+
 function parseNodes(yaml) {
   const nodes = [];
   for (const line of String(yaml || "").split(/\n/)) {
-    let raw = line.replace(/^\s*-\s*/, "").trim();
-    if (raw.startsWith("'") && raw.endsWith("'")) raw = raw.slice(1, -1);
+    const raw = unwrapLine(line);
     const ref = raw.match(/\[ref=([^\]]+)\]/);
     const role = raw.match(/^([a-zA-Z]+)/);
     if (!ref || !role) continue;
@@ -21,6 +35,7 @@ function parseNodes(yaml) {
       role: role[1].toLowerCase(),
       name: named ? named[1].replace(/\\"/g, '"') : (trailing ? trailing[1].trim() : ""),
       ariaRef: ref[1],
+      line: String(line || ""),
     });
   }
   return annotateColumns(nodes);
@@ -39,15 +54,21 @@ export function sameColumnRefs(snapshotText, headerLabel) {
   if (!label.startsWith("columnheader")) return [];
   const name = (label.match(/"([^"]+)"/) || [])[1] || "";
   if (name.length < 2) return [];
-  const needle = ` ${name} ref=`;
   const refs = [];
   for (const line of String(snapshotText || "").split("\n")) {
-    const at = line.lastIndexOf(needle);
-    if (at < 0) continue;
-    const ref = line.slice(at + needle.length).trim();
+    if (/columnheader/i.test(line) || !line.includes(name)) continue;
+    const ref = publishedRef(line);
     if (ref) refs.push(ref);
   }
   return refs.slice(0, 8);
+}
+
+export function publishedRef(line) {
+  const raw = String(line || "");
+  const bracket = raw.match(/\[ref=([^\]]+)\]/);
+  if (bracket) return bracket[1];
+  const bare = raw.match(/\bref=(f\d+:e\d+@\d+)/i);
+  return bare ? bare[1] : "";
 }
 
 export function annotateColumns(nodes) {
@@ -79,7 +100,94 @@ export function annotateColumns(nodes) {
   return nodes;
 }
 
-export async function takeSnapshot(recordingId) {
+export function overlayExactLines(yaml) {
+  const lines = String(yaml || "").split("\n");
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const raw = unwrapLine(lines[i]);
+    if (OVERLAY_ROLE.test(raw) && /\[ref=/.test(lines[i])) {
+      const base = indentOf(lines[i]);
+      out.push(lines[i]);
+      i += 1;
+      while (i < lines.length && indentOf(lines[i]) > base) {
+        if (/\[ref=/.test(lines[i])) out.push(lines[i]);
+        i += 1;
+      }
+      continue;
+    }
+    i += 1;
+  }
+  return out.slice(0, 80);
+}
+
+function rowFactsFromYaml(yaml) {
+  const lines = String(yaml || "").split("\n");
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const raw = unwrapLine(line);
+    if (ROW_ROLE.test(raw) && /\[ref=/.test(line)) {
+      const base = indentOf(line);
+      const cells = [];
+      let j = i + 1;
+      while (j < lines.length && indentOf(lines[j]) > base) {
+        const cell = unwrapLine(lines[j]);
+        if (CELL_ROLE.test(cell) && /\[ref=/.test(lines[j])) cells.push(lines[j].trim());
+        j += 1;
+      }
+      if (cells.length) out.push(`- ${raw} :: ${cells.join(" | ")}`);
+      i = j;
+      continue;
+    }
+    i += 1;
+  }
+  return out.slice(0, 40);
+}
+
+export function yamlFingerprint(text) {
+  return String(text || "")
+    .replace(/^epoch \d+ snap \d+\n/, "")
+    .replace(/@\d+/g, "@");
+}
+
+function rewriteYaml(yaml, frame, frameId, snap, epoch, refs) {
+  const lines = [];
+  for (const line of String(yaml || "").split("\n")) {
+    const next = line.replace(/\[ref=([^\]]+)\]/g, (_, aria) => {
+      const ref = `${frameId}:${aria}@${snap}`;
+      const raw = unwrapLine(line);
+      const named = raw.match(/^[a-zA-Z]+ "((?:\\.|[^"])*)"/);
+      const role = (raw.match(/^([a-zA-Z]+)/) || [])[1] || "";
+      const label = named ? `${role} "${named[1].replace(/\\"/g, '"')}"` : role;
+      refs.set(ref, {
+        locator: frame.locator(`aria-ref=${aria}`),
+        epoch,
+        snap,
+        frame,
+        label,
+      });
+      return `[ref=${ref}]`;
+    });
+    lines.push(next);
+  }
+  return lines.join("\n");
+}
+
+async function ariaYaml(frame, budgetMs) {
+  const wait = Math.max(400, Number(budgetMs) || 8000);
+  try {
+    return await Promise.race([
+      frame.locator("body").ariaSnapshot({ mode: "ai", timeout: wait }),
+      new Promise((resolve) => setTimeout(() => resolve(""), wait)),
+    ]);
+  } catch {
+    return "";
+  }
+}
+
+export async function takeSnapshot(recordingId, { budgetMs = 8000 } = {}) {
   const state = browserSession(recordingId);
   if (!state) return { epoch: 0, text: "", refs: [] };
   const frames = state.page.frames();
@@ -97,42 +205,43 @@ export async function takeSnapshot(recordingId) {
   state.snap = (state.snap || 0) + 1;
   const lines = [`epoch ${state.epoch} snap ${state.snap}`];
   const exactNodes = [];
+  const overlay = [];
+  const rows = [];
   const refs = [];
+  const perFrame = Math.max(800, Math.floor((Number(budgetMs) || 8000) / Math.max(1, ordered.length)));
   for (let index = 0; index < ordered.length; index += 1) {
     const frame = ordered[index];
     const frameId = `f${index}`;
     lines.push(`frame ${frameId} ${frame.url()}`);
-    let yaml = "";
-    try {
-      yaml = await frame.locator("body").ariaSnapshot({ mode: "ai" });
-    } catch {
-      yaml = "";
-    }
-    for (const node of parseNodes(yaml)) {
-      const ref = `${frameId}:${node.ariaRef}@${state.snap}`;
-      const label = node.name ? `${node.role} "${node.name}"` : node.role;
-      const column = node.column ? ` ${node.column}` : "";
-      const shown = `${label}${column}`;
-      state.refs.set(ref, {
-        locator: frame.locator(`aria-ref=${node.ariaRef}`),
-        epoch: state.epoch,
-        snap: state.snap,
-        frame,
-        label: shown,
+    const yaml = await ariaYaml(frame, perFrame);
+    const rewritten = rewriteYaml(yaml, frame, frameId, state.snap, state.epoch, state.refs);
+    overlay.push(...overlayExactLines(rewritten));
+    rows.push(...rowFactsFromYaml(rewritten));
+    for (const node of parseNodes(rewritten)) {
+      const shown = node.column ? `${node.role}${node.name ? ` "${node.name}"` : ""} ${node.column}` : (node.name ? `${node.role} "${node.name}"` : node.role);
+      exactNodes.push({
+        role: node.role,
+        name: node.name || "",
+        column: node.column || "",
+        shown,
+        ref: node.ariaRef,
       });
-      lines.push(`- ${shown} ref=${ref}`);
-      exactNodes.push({ role: node.role, name: node.name || "", column: node.column || "", shown, ref });
-      refs.push(ref);
+      refs.push(node.ariaRef);
     }
+    if (rewritten) lines.push(rewritten);
   }
-  const exact = goalExactLines(exactNodes, goalText).map((node) => `- ${node.shown} ref=${node.ref}`);
-  if (exact.length) lines.splice(1, 0, "goal_exact", ...exact);
+  const exact = goalExactLines(exactNodes, goalText).map((node) => `- ${node.shown} [ref=${node.ref}]`);
+  const lookup = [];
+  if (exact.length) lookup.push("goal_exact", ...exact);
+  if (overlay.length) lookup.push("overlay_exact", ...overlay.map((line) => line.trimStart()));
+  if (rows.length) lookup.push("row_facts", ...rows);
+  if (lookup.length) lines.splice(1, 0, ...lookup);
   return { epoch: state.epoch, text: lines.join("\n"), refs };
 }
 
 export function locatorFor(recordingId, ref) {
   const state = browserSession(recordingId);
-  const raw = String(ref || "").trim();
+  let raw = String(ref || "").trim().replace(/^\[ref=/, "").replace(/\]$/, "");
   let key = /^e\d+$/i.test(raw) ? `f0:${raw}` : raw;
   if (/^f\d+:e\d+$/i.test(key)) key = `${key}@${state.snap}`;
   const hit = state?.refs.get(key);

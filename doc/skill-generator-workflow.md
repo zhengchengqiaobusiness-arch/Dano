@@ -1,47 +1,32 @@
-# 办理流程：OA Skill 生成指南
+# 办理流程：可调用三文件 Skill
 
-本文档供负责核对消费者 Skill 的模型阅读。一个消费者 Skill 是本页办理生命周期，不是能力点目录。
+成品只有 `SKILL.md`、`scripts/client.py`、`references/api.md`。没有 `CONTRACT.json`、`flow.py`。调用方执行手册里的 `python scripts/client.py …` 行。
 
-对照公开 Skill 市场的常见形态：可单步，默认整段跑完。
+## 谁做什么
 
-可执行包由运输层从录制合同五块投影。Skill 4 不准重写 `scripts/flow.py` / `scripts/runtime.py` / `references/CONTRACT.json`。
+- 代码运输当前快照树、clicked、listed（全部 xhr/fetch 索引）、请求全文。
+- PI 对着目标原文、当前树、listed 和全文决定点哪个 ref、每个字段谁填、值从哪条证据来。
+- 本指南和另外五份指南是方法。不要把某一页的按钮名、path 写进方法。
 
-## 默认路线
+## 字段来源
 
-唯一输入是合同五块：`capabilities` / `steps` / `links` / `capability_relations` / `unresolved`。禁止只扫 `capabilities[]`。
+每个写入键必须标明来源，且和命令行谁填一致：
 
-1. 用 `capability_relations` 和已确认 `links` 连成最长默认办理链，`route_id=default`。
-2. 只有 relation、没有值流：仍是主路线。交接点停问，不准猜传值，不准拆成两个 Skill。
-3. 都没有：按 `capabilities[]` 顺序做人手交接主路线，**仍然要有能跑的 default**。
-4. 每个能力另留原子路线，只服务「用户意图对上该能力 name / intent」。禁止为某个业务口令写死 capability_id。
+1. 调用方填写
+2. listed 里已录请求再读（当前账号、部门、权限、默认值）
+3. 上一步响应
+4. 系统计算
+5. 固定协议常量
+6. 空（empty 里的键传空）
+7. 运行时配置
 
-`CONTRACT.json` 必须有 `routes[]`。合同里有 ≥2 个能力时，必须有一条多步默认路线。这些由运输层写出；你只核对，不要另编一份。
+禁止把录制当时的字面量冻成默认。页面上填过的框不等于调用方必填。系统自动带的、当前账号身份、只读展示不要写成调用方参数。
 
-## 冻结入口
+## 命令
 
-```text
-python3 scripts/flow.py --route default --input-json '{...}' --confirm
-python3 scripts/flow.py --list-options <capability_id> <field>
-```
-
-- `--route` 选择路线；缺省即 default。
-- 已确认 links 自动带值；无绑定停问。
-- 写步骤必须 `confirm:true + formIds[]`，执行时加 `--confirm`。
-- 任一步失败即停，不得跳过写操作或用查询结果假装办理完成。
-- 只认 `client.http_json(query=, body=)`。禁止发明 `client.request`。
-
-## `SKILL.md`「选择工作流」
-
-第一行必须是默认完整办理。后面才是原子行。
-
-禁止成品出现：
-
-- 「每次只执行一项」
-- 「不得自行串联」
-- 「一页面对应一个 Skill」
-
-「组合与交接规则」只允许三种：原子 / 已确认绑定 / 人手交接。绑定空、歧义、类型或基数不对就停止自动串联。
-
-## 路线文档
-
-每条路线一份 `references/routes/<route-id>.md`：何时用、步骤、自动带入、停问点、是否要确认。不要把 capability_id 当用户可见名称。运输层已写好，不要覆盖成更瘦的版本。
+- 每个可执行命令在 `references/api.md` 指向证据 id。没有证据 id 的命令不要写进 `SKILL.md`。
+- 同一 path 若新增和修改条件不同，写成两个命令。
+- 只有存在绑定才把上一步的值传入下一步。前一步失败就停。
+- 目标含读：把读命令真的跑一遍。
+- 目标只要求写入：不要发明 GET。写命令只在页面上已经发生过那次请求时才标已验证。
+- 未解决只写 `body_missing`，或证据 id 不在 listed。其余继续查到可调用为止。
