@@ -205,11 +205,13 @@ API 健康检查不能代替真实登录验收。使用受控浏览器完成以�
 | `SELF_SIGNED_CERT_IN_CHAIN` | 把签发 OA 证书的 CA 加入容器信任链并重建容器；不要设置全局跳过 TLS 校验 |
 | refresh 失败 | 确认 OA Client 启用 `refresh_token`、refresh token 未过期且固定 Header/Client 认证方式仍正确 |
 
-回调诊断的 `stage` 区分 `provider_exchange`（授权码交换及首次身份读取）、
-`credential_encryption`、`credential_validation`（发布会话前再次校验身份）、
+回调诊断的 `stage` 区分 `provider_exchange`（授权码交换）、
+`credential_encryption`、`credential_validation`（首次身份读取或发布会话前再次校验身份）、
 `session_persistence`、`anonymous_transfer` 和 `session_rotation`。
 `elapsedMs` 是本次回调进入处理后到失败的总耗时。`unclassified` 表示异常没有可安全输出的已知错误码，
 不等于未知阶段或已经排除该阶段。诊断不会重试授权码或放宽身份校验。
+首次身份接口返回 401 同样归类为 `provider_identity_invalid`；503、超时等仍归类为
+`provider_unavailable`。这些分类说明已观测的失败路径，不能单独证明历史生产故障的原因。
 
 `/api/auth/current` 返回当前认证状态，并携带上一次回调的一次性 `loginError.code`。
 HTTP 200 表示状态读取成功，不表示此前的登录成功；已有有效会话也可能携带一次新的登录失败。

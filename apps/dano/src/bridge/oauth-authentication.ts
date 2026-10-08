@@ -18,6 +18,7 @@ import { BRIDGE_LOGIN_ERROR_CODES, LOGIN_NEW_CHAT_QUERY_PARAM } from "../../type
 import { ensureSafeDirectory } from "./safe-directory.js";
 import {
   OAuthProviderContractError,
+  OAuthProviderIdentityError,
   type ExternalIdentity,
   type OAuthProviderAdapter,
   type ProviderCredential,
@@ -849,6 +850,9 @@ async function handleCallback(
       options.sessionAbsoluteTtlMs,
     );
   } catch (error) {
+    if (stage === "provider_exchange" && error instanceof OAuthProviderIdentityError) {
+      stage = "credential_validation";
+    }
     reportOAuthLoginFailure(stage, error, performance.now() - startedAt);
     const code = classifyOAuthLoginFailure(stage, error);
     const authErrorId = await writeAuthError(

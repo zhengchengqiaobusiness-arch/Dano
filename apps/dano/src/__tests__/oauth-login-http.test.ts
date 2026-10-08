@@ -1905,6 +1905,51 @@ describe("OAuth authentication over HTTP", () => {
     expect(exchanges).toBe(0);
   });
 
+  it.each([
+    { identityTransport: "bearer-get" as const, status: 401, expectedCode: "provider_identity_invalid" },
+    { identityTransport: "bearer-get" as const, status: 503, expectedCode: "provider_unavailable" },
+    { identityTransport: "bearer-get" as const, status: 200, expectedCode: "provider_identity_invalid" },
+    { identityTransport: "token-introspection" as const, status: 401, expectedCode: "provider_identity_invalid" },
+    { identityTransport: "token-introspection" as const, status: 503, expectedCode: "provider_unavailable" },
+    { identityTransport: "token-introspection" as const, status: 200, expectedCode: "provider_identity_invalid" },
+  ])("attributes first $identityTransport identity HTTP $status failure to validation", async ({ identityTransport, status, expectedCode }) => {
+    const diagnostic = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fakeProvider = await startFakeProvider({
+      identityStatus: status,
+      introspectionStatus: status,
+      identity: { message: "private profile", access_token: "private-token" },
+      introspectionResponse: status === 200
+        ? { active: true, message: "private profile" }
+        : { error: status === 401 ? "invalid_token" : "server_error", error_description: "private detail" },
+    });
+    const provider = createOAuth2ProviderAdapter({
+      issuer: fakeProvider.origin,
+      authorizationEndpoint: `${fakeProvider.origin}/authorize`,
+      tokenEndpoint: `${fakeProvider.origin}/token`,
+      identityEndpoint: `${fakeProvider.origin}/${identityTransport === "bearer-get" ? "identity" : "introspect"}`,
+      identityTransport,
+      clientId: "private-client", clientSecret: "private-secret", scope: "profile",
+      allowInsecureRequests: true,
+    });
+    const { origin, runtimeRootPath } = await startOAuthServer(provider);
+    const started = await fetch(`${origin}/api/auth/login`, { redirect: "manual" });
+    const state = new URL(started.headers.get("location")!).searchParams.get("state")!;
+    const callback = await fetch(`${origin}/api/auth/callback?code=private-code&state=${state}`, {
+      headers: { Cookie: cookieFrom(started, "dano_oauth_flow") }, redirect: "manual",
+    });
+    expect(callback.status).toBe(303);
+    const current = await fetch(`${origin}/api/auth/current`, {
+      headers: { Cookie: cookieFrom(callback, "dano_auth_error") },
+    });
+    expect(await current.json()).toEqual({ status: "anonymous", loginError: { code: expectedCode } });
+    expect(diagnostic).toHaveBeenCalledExactlyOnceWith("OAuth login failed", expect.objectContaining({
+      stage: "credential_validation", elapsedMs: expect.any(Number),
+      ...(status === 200 ? { errorCode: "provider_identity_invalid" } : { httpStatus: status }),
+    }));
+    expect(JSON.stringify(diagnostic.mock.calls)).not.toMatch(/private-|fake-access-token|fake-refresh-token|state=|code=/);
+    expect(fs.readdirSync(path.join(runtimeRootPath, "auth", "login-sessions"))).toEqual([]);
+  });
+
   it("leaves no partial state after an invalid code", async () => {
     const diagnostic = vi.spyOn(console, "warn").mockImplementation(() => {});
     const setup = {

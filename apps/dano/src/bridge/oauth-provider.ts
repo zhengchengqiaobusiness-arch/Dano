@@ -7,11 +7,21 @@ export interface ExternalIdentity {
   readonly avatarUrl?: string;
 }
 
-export class OAuthProviderContractError extends Error {
+// Marks identity failures inside the combined code-exchange adapter operation.
+// Keep the original cause for allowlisted diagnostics, never expose its text.
+export class OAuthProviderIdentityError extends Error {
+  constructor(options?: ErrorOptions) {
+    super("Provider identity validation failed", options);
+    this.name = "OAuthProviderIdentityError";
+  }
+}
+
+export class OAuthProviderContractError extends OAuthProviderIdentityError {
   readonly code = "provider_identity_invalid" as const;
 
   constructor() {
-    super("Provider identity response does not match the configured contract");
+    super();
+    this.message = "Provider identity response does not match the configured contract";
     this.name = "OAuthProviderContractError";
   }
 }
@@ -202,10 +212,13 @@ export function createOAuth2ProviderAdapter(
           { expectedState: state },
         ),
       );
-      const identity = await resolveIdentity(
-        tokens.access_token,
-        tokens.token_type,
-      );
+      let identity: ExternalIdentity;
+      try {
+        identity = await resolveIdentity(tokens.access_token, tokens.token_type);
+      } catch (error) {
+        if (error instanceof OAuthProviderIdentityError) throw error;
+        throw new OAuthProviderIdentityError({ cause: error });
+      }
       const expiresIn = tokens.expiresIn();
       return {
         identity,
