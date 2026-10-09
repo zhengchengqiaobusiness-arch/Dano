@@ -79,16 +79,15 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 - For browser validation, use the Codex in-app Browser against the relevant flow. Use another browser surface only when the user explicitly requests it or the in-app Browser cannot exercise the required flow.
 - Do not add or run repository scripts that launch system Chrome or Chromium headlessly for browser acceptance. Keep deterministic logic and component behavior in Vitest, and use the Codex in-app Browser for rendered interaction and visual evidence.
 - When browser validation temporarily changes the theme, record the initial theme before testing and restore it before handoff. Do not leave a test theme preference in the user's browser, including when the current UI does not expose the theme selector.
-- 完成修改后，可按上述 Local development lifecycle 启动本地开发服务器测试。需要容器的测试在生产主机的隔离测试环境执行，不再使用本地 Podman 测试。
-- 生产主机上的容器测试使用独立容器、运行数据和回环端口，保留现有生产服务及相邻服务；测试授权不等于切换生产部署或修改宿主机全局安全配置的授权。
+- 用户要求“生产环境验收”或“直接部署，再验收”时，先合入已完成代码验证的修复，更新指定服务器上的现有 Dano 服务，再通过该服务的现有网址完成验收。环境用途以用户说明为准；文档中的“生产”名称不额外增加隔离环境或审批步骤。
+- 容器验收在用户指定的服务器执行。仅在用户明确要求隔离验收时建立独立容器、数据和回环入口；本地 Podman 也仅用于用户明确要求的本地验收。保留目标服务的数据、凭据及相邻服务。
 - For container/deploy/runtime/Heimdall/bash/upload validation, `smoke:deploy` alone is not enough. Also verify in a browser: plain text chat, image upload with model read/description, and a model-triggered `bash ls` tool call.
-- After container tests, stop and remove only this run's test containers, temporary images/tags and unreferenced build layers; keep reusable base images and production data.
+- 直接部署验收后保留目标服务运行。隔离验收完成后仅清理本轮明确创建的临时容器、镜像、数据和隧道，保留可复用基础镜像及现有服务数据。
 
 ### 镜像验收入口、上传与审批
 
-- 本地或 SSH 隧道访问的隔离镜像验收统一使用 `http://localhost:18710` 和
-  `https://localhost:18711`，只绑定回环地址；重建镜像或容器时保持浏览器入口不变。
-  本约定不改变开发服务器和生产服务的端口。
+- 直接部署验收使用目标服务现有网址、TLS 和 OA 客户端配置。需要真实 OA 登录时先复用既有接入，不因验收默认新增临时 OAuth 客户端。
+- 用户明确要求隔离验收时，本地或 SSH 隧道入口默认使用 `http://localhost:18710` 和 `https://localhost:18711`，只绑定回环地址。已有 OAuth 回调或端口约束需要其他入口时，说明原因并复用合适的既有配置；固定端口不是新增认证配置的理由。
 - 本机 HTTPS 验收复用 `~/.local/share/dano/localhost-tls/localhost.pem`
   和 `localhost-key.pem`，由同目录已信任的 `rootCA.pem` 签发；证书、私钥和
   CA 均为持久资产，排除在临时验收清理之外。启动前验证有效期、localhost SAN

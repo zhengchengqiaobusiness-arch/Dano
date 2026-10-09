@@ -1,11 +1,13 @@
 ---
 name: dano-podman-browser-acceptance
-description: Deploy Dano locally through its real Podman/Compose release path and complete API, SSE, OAuth, upload, model-tool, and Codex in-app Browser acceptance. Use when a user asks to deploy or test Dano locally with Podman, validate shipped container/runtime behavior, connect a local Dano stack to an external OAuth/OA provider, diagnose a container-only authentication failure, or leave a verified local stack running for hands-on testing.
+description: Complete real browser acceptance for an explicitly requested isolated Dano container deployment, or for local Podman when the user explicitly requests it. For server deployment followed by acceptance at the existing service URL, use dano-production-deploy.
 ---
 
 # Dano Podman Browser Acceptance
 
 Use the shipped container path and real browser behavior as the authority. Do not substitute unit tests, fake providers, `curl`, or `smoke:deploy` for a required browser/provider release gate.
+
+Select the target and acceptance mode from the root `AGENTS.md`. Use this workflow only when the user requests an isolated stack or local Podman. Direct server deployment acceptance follows `dano-production-deploy` and uses the existing service URL and OA client.
 
 ## Establish the acceptance contract
 
@@ -16,8 +18,8 @@ Use the shipped container path and real browser behavior as the authority. Do no
 
 ## Prepare an isolated deployment
 
-1. Verify the Podman machine, current containers, occupied ports, and available disk before mutation.
-2. Create a dedicated run root with `mktemp -d` under `/private/tmp`. Place generated certificates, Compose overrides, and temporary env files there. Never use the checkout as `DANO_RUNTIME_DIR` or workspace.
+1. Verify the requested host's container engine, current containers, occupied ports, and available disk before mutation. Inspect the Podman machine only for explicitly requested local Podman.
+2. Create a dedicated run root on that host with `mktemp -d`. Place temporary Compose overrides and env files there, and reuse existing suitable certificates. Never use the checkout as `DANO_RUNTIME_DIR` or workspace.
    On macOS, do **not** mount a host path under `/private/tmp` or `/Users` as `DANO_RUNTIME_DIR` when Heimdall/bash acceptance is required. Podman exposes it through virtiofs, where Bubblewrap cannot safely remount a deep per-User workspace. Use a uniquely named Podman volume for runtime data, record its exact name, and remove only that volume during cleanup. Keep secrets and generated certificates in the run root as read-only mounts.
 3. Set secret-bearing files to mode `0600`. Do not print, commit, or place real provider addresses, Client Secrets, tokens, cookies, raw User IDs, or private payloads in issues, PRs, fixtures, command output, or browser evidence.
 4. Build the real image from the current source with a unique temporary tag. Start it through the repository Compose/deploy path, not an approximate `podman run` command.

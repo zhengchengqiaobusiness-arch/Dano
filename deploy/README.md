@@ -1090,13 +1090,17 @@ Compose network; the bind-mounted runtime directory remains intact.
 The app container listens on `8080`; nginx publishes only the ports selected by
 `DANO_EXPOSURE_MODE`.
 
-### Full Local Podman Acceptance
+### Full Deployed Container Acceptance
 
 For changes that affect model runtime, uploads, Heimdall, bash, container
 permissions, or runtime directories, `smoke:deploy` is not enough. Run this
-minimum acceptance sequence against the Podman Compose deployment:
+minimum acceptance sequence against the user's requested deployment. A direct
+server deployment request updates the existing service, uses its existing URL,
+TLS and OAuth client, and leaves it running after acceptance. Create an isolated
+stack only when requested; local Podman also requires an explicit local request.
+See the root `AGENTS.md` for the acceptance-mode contract.
 
-1. Build and start the image with Podman Compose.
+1. Build and start the image through the target's Compose deployment path.
 2. Run `smoke:deploy` against nginx.
    For exposure-mode changes, also run the isolated four-mode acceptance against
    the current prebuilt image. It generates a disposable self-signed certificate
@@ -1214,7 +1218,8 @@ minimum acceptance sequence against the Podman Compose deployment:
    ```
 7. Confirm the app container still runs as `node`, Heimdall is the expected
    package version, and `bwrap` can enter the Runtime Workspace.
-8. Stop the Compose stack and remove temporary Dano test images/layers.
+8. Leave a directly deployed service running. For an explicitly requested
+   isolated stack, stop and remove only this run's temporary resources.
 
 ### Local Podman Notes
 
