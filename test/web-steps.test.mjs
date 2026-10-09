@@ -11,4 +11,10 @@ test("web has three steps and no capability page", async () => {
   assert.match(html, /Skill 目录/);
   assert.equal(html.includes("能力结果"), false);
   assert.equal(html.includes("产出 Skill"), false);
+  const recorder = await readFile(path.join(packageRoot(), "frontend", "src", "components", "PageRecorder.tsx"), "utf8");
+  assert.equal(recorder.includes("校验未通过"), false);
+  assert.equal(recorder.includes("需要 token"), false);
+  assert.match(recorder, /录制中/);
+  assert.match(recorder, /Skill 产出完毕/);
+  assert.match(recorder, /产出失败/);
 });

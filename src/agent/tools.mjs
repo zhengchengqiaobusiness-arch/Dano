@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { Type } from "@sinclair/typebox";
@@ -9,7 +9,8 @@ import { runAction } from "../browser/actions.mjs";
 import { persistBrowserSession, withPage } from "../browser/session.mjs";
 import { takeSnapshot } from "../browser/snapshot.mjs";
 import { compactNetworkIndex, getNetwork, listNetwork, networkBodyForModel, requestKeyIndex } from "../browser/network.mjs";
-import { readSkillFile, skillIdFor, writeSkillFile } from "../skillpack/files.mjs";
+import { applyVerifyToRecording } from "../session.mjs";
+import { readSkillFile, skillIdFor, writeRuntimeConfig, writeSkillFile } from "../skillpack/files.mjs";
 import { actionEvidenceSummary, clickedLabels, filledLabels, finishSkill } from "../skillpack/verify.mjs";
 import { GUIDE_NAMES, guideBody } from "./guides.mjs";
 import { logLine } from "../log.mjs";
@@ -26,7 +27,7 @@ const GUIDE_FILES = {
 const TOOL_SPECS = [
   { name: "browser_open", description: "打开入口同源的地址。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
   { name: "browser_snapshot", description: "读取当前页面快照树。只点树里的 [ref=fN:eN@数字]。goal_exact / overlay_exact / row_facts 是查找表，不是点击清单。", parameters: { type: "object", properties: {} } },
-  { name: "browser_act", description: "ref 整段照抄最近一次 snapshot 树里的 [ref=fN:eN@数字]。@ 后数字对不上就重新 snapshot，只点新树。同名不要挑第一个。没有 ref 就停。返回 clicked、requests、snapshot。requests 空只说明这一下没有 xhr/fetch。behind_overlay 时先看 overlay_exact。page_unchanged 时换 ref。uploaded 表示文件已写入。needs_upload 时对同一 ref 调用 upload。填写用 fill 或 fill_fields。", parameters: { type: "object", properties: { action: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, fields: { type: "array" }, key: { type: "string" }, file_path: { type: "string" } }, required: ["action"] } },
+  { name: "browser_act", description: "ref 整段照抄最近一次 snapshot 树里的 [ref=fN:eN@数字]。@ 后数字对不上就重新 snapshot，只点新树。同名不要挑第一个。没有 ref 就停。不要并行多次 browser_act。同一张树上要改多格，用一次 fill_fields。返回 clicked、requests、snapshot。requests 空只说明这一下没有 xhr/fetch。in_overlay 表示点的是 overlay_exact 里的控件；layer_idle 表示这层动了但没有 xhr。needs_click 表示这一格不能直接填，先 click 同一个 ref 再填。behind_overlay 时先看 overlay_exact。弹层开着时先读 overlay_exact 和这一下的 requests；还没采用请求就不要点会关掉这层的控件。page_unchanged 时换 ref。uploaded 表示文件已写入。needs_upload 时对同一 ref 调用 upload。", parameters: { type: "object", properties: { action: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, fields: { type: "array" }, key: { type: "string" }, file_path: { type: "string" } }, required: ["action"] } },
   { name: "browser_screenshot", description: "把当前画面作为图像送回。", parameters: { type: "object", properties: { ref: { type: "string" }, as_image: { type: "boolean" } } } },
   { name: "network_list", description: "列出本场全部 xhr/fetch 索引（id/method/path/keys/response_keys）。写字段时看这份 listed，不要只看点击口袋。", parameters: { type: "object", properties: { after_id: { type: "string" }, action_id: { type: "string" } } } },
   { name: "network_get", description: "按 id 读取一条请求。正文过大则省略并给出 response_keys，用 evidence_get 同 id 取全文。body_missing 表示没有正文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
@@ -37,7 +38,7 @@ const TOOL_SPECS = [
   { name: "append_goal", description: "只填充目标里仍为空的键，写入原句。", parameters: { type: "object", properties: { key: { type: "string" }, text: { type: "string" } }, required: ["key", "text"] } },
   { name: "write_skill_file", description: "只写 SKILL.md、scripts/client.py、references/api.md。", parameters: { type: "object", properties: { relative_path: { type: "string" }, contents: { type: "string" } }, required: ["relative_path", "contents"] } },
   { name: "read_skill_file", description: "读取已写的 Skill 文件。", parameters: { type: "object", properties: { relative_path: { type: "string" } }, required: ["relative_path"] } },
-  { name: "run_skill_command", description: "在 Skill 目录执行 python scripts/client.py。argv 是字符串数组，例如 [\"python\", \"scripts/client.py\", \"list\"]。", parameters: { type: "object", properties: { argv: { type: "array", items: { type: "string" } } }, required: ["argv"] } },
+  { name: "run_skill_command", description: "在 Skill 目录执行 python scripts/client.py。argv 是字符串数组，例如 [\"python\", \"scripts/client.py\", \"list\"]。先写出 scripts/client.py 再跑；文件不在会返回 missing_file。", parameters: { type: "object", properties: { argv: { type: "array", items: { type: "string" } } }, required: ["argv"] } },
   { name: "verify_skill", description: "校验三文件结构：文件在、可调用、读命令已跑、引用 path 在证据里、引用 path 的函数写了该请求的键。不判断字段该谁填，不要求只写目标发明 GET。返回 listed 用的 requests 和 filled。", parameters: { type: "object", properties: {} } },
 ];
 
@@ -127,6 +128,9 @@ export function hostTools(recording) {
     },
     async read_guide(args) {
       const name = path.basename(String(args.name || ""));
+      if (!name || name === "index") {
+        return { ok: true, names: GUIDE_NAMES, hint: "逐个 read_guide 这些 name" };
+      }
       if (!GUIDE_FILES[name]) return { ok: false, error: "unknown_guide", names: GUIDE_NAMES };
       const text = guideBody(name) || await readFile(GUIDE_FILES[name], "utf8");
       const saved = await appendEvidence(id, { kind: "guide", summary: name, body: name, body_missing: false });
@@ -157,6 +161,7 @@ export function hostTools(recording) {
     },
     async write_skill_file(args) {
       recording.skillId = skillId();
+      await writeRuntimeConfig(recording, recording.skillId);
       return writeSkillFile(id, recording.skillId, args.relative_path, args.contents);
     },
     async read_skill_file(args) {
@@ -169,11 +174,23 @@ export function hostTools(recording) {
       if (!["python", "python3"].includes(argv[0]) || argv[1] !== "scripts/client.py") {
         return { ok: false, error: "command_rejected", argv: ["python", "scripts/client.py"] };
       }
-      const cwd = skillPath(skillId());
+      recording.skillId = skillId();
+      await writeRuntimeConfig(recording, recording.skillId);
+      const cwd = skillPath(recording.skillId);
+      try {
+        await access(path.join(cwd, "scripts", "client.py"));
+      } catch {
+        return { ok: false, error: "missing_file", path: "scripts/client.py" };
+      }
+      const authFile = path.join(cwd, "config", "auth.local.json");
       const result = await new Promise((resolve) => {
         const child = spawn(argv[0], argv.slice(1), {
           cwd,
-          env: { ...process.env, CABP_AUTH_FILE: path.join(cwd, "config", "auth.local.json") },
+          env: {
+            ...process.env,
+            CABP_AUTH_FILE: authFile,
+            DANO_AUTH_FILE: authFile,
+          },
           shell: false,
         });
         let stdout = "";
@@ -208,10 +225,7 @@ export function hostTools(recording) {
     async verify_skill() {
       recording.skillId = skillId();
       const verify = await finishSkill(recording);
-      recording.verify = verify;
-      recording.status = verify.status;
-      recording.skillDir = skillPath(recording.skillId);
-      recording.finished = verify.status === "skill_ready" || verify.status === "skill_written_needs_auth";
+      applyVerifyToRecording(recording, verify, skillPath(recording.skillId));
       recording.emit?.();
       return verify;
     },

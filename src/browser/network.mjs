@@ -3,7 +3,7 @@ import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { appendEvidence } from "../evidence/store.mjs";
 import { requestIndexRow, responseKeyPreview } from "../skillpack/request-keys.mjs";
-import { noteLoginBody, noteRequestHeaders } from "../auth-vault.mjs";
+import { noteLoginBody, noteRequestHeaders, pickCredentialHeaders } from "../auth-vault.mjs";
 
 const BODY_OMIT_BYTES = 16384;
 const KEY_PARSE_BYTES = 32768;
@@ -35,7 +35,8 @@ export function attachNetwork(recordingId, context) {
     const type = request.resourceType();
     if (type !== "xhr" && type !== "fetch") return;
     if (NOISE.test(request.url())) return;
-    noteRequestHeaders(recordingId, request.headers());
+    const requestHeaders = request.headers();
+    noteRequestHeaders(recordingId, requestHeaders);
     state.seq += 1;
     const id = `req_${state.items.length + 1}`;
     const started = Date.now();
@@ -46,6 +47,7 @@ export function attachNetwork(recordingId, context) {
       path: new URL(request.url()).pathname,
       query: new URL(request.url()).search.replace(/^\?/, ""),
       post_data: request.postData() || "",
+      request_headers: pickCredentialHeaders(requestHeaders),
       status: 0,
       response_body: null,
       body_missing: true,
@@ -76,7 +78,7 @@ export function attachNetwork(recordingId, context) {
     try {
       item.response_body = await response.text();
       item.body_missing = false;
-      noteLoginBody(recordingId, item.response_body, { method: item.method, url: item.url });
+      noteLoginBody(recordingId, item.response_body, { method: item.method, url: item.url, headers: item.request_headers });
     } catch {
       item.response_body = null;
       item.body_missing = true;

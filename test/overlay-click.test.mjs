@@ -63,3 +63,39 @@ test("an open dialog is published as overlay_exact and later clicks use the curr
     await new Promise((resolve) => site.server.close(resolve));
   }
 });
+
+test("a readonly control returns needs_click instead of filling", { timeout: 60000 }, async () => {
+  const site = await serve();
+  const id = "rec_overlay_readonly";
+  try {
+    await openBrowser({ recordingId: id, url: site.url, storageState: null, viewport: { width: 900, height: 700 } });
+    const first = await takeSnapshot(id, { budgetMs: 4000 });
+    const period = publishedRef(lineWith(first.text, "周期"));
+    assert.ok(period);
+    const filled = await runAction(id, { action: "fill", ref: period, text: "2026-02-01" });
+    assert.equal(filled.ok, false);
+    assert.equal(filled.error, "needs_click");
+  } finally {
+    await closeBrowser(id);
+    await new Promise((resolve) => site.server.close(resolve));
+  }
+});
+
+test("a click inside overlay_exact with no xhr is returned as layer_idle", { timeout: 60000 }, async () => {
+  const site = await serve();
+  const id = "rec_overlay_idle";
+  try {
+    await openBrowser({ recordingId: id, url: site.url, storageState: null, viewport: { width: 900, height: 700 } });
+    const first = await takeSnapshot(id, { budgetMs: 4000 });
+    const opened = await runAction(id, { action: "click", ref: publishedRef(lineWith(first.text, "打开")) });
+    const cancelRef = publishedRef(lineWith(opened.snapshot.text, "取消"));
+    const idle = await runAction(id, { action: "click", ref: cancelRef });
+    assert.equal(idle.ok, true);
+    assert.equal(idle.in_overlay, true);
+    assert.equal(idle.layer_idle, true);
+    assert.equal((idle.requests || []).length, 0);
+  } finally {
+    await closeBrowser(id);
+    await new Promise((resolve) => site.server.close(resolve));
+  }
+});

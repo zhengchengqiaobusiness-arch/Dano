@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { citationErrors, keysFromPostData, requestIndexRow } from "../src/skillpack/request-keys.mjs";
+import { citationErrors, citedPaths, keysFromPostData, requestIndexRow } from "../src/skillpack/request-keys.mjs";
 
 const body = {
   creator: "1",
@@ -55,6 +55,37 @@ test("empty values and a credential-issuing response stay facts on the request",
   const plain = requestIndexRow({ id: "req_1", method: "GET", path: "/list", response_body: JSON.stringify({ data: { id: 1 } }) });
   assert.equal(plain.issues_credential, undefined);
   assert.equal(plain.empty, undefined);
+});
+
+test("numeric type codes are not treated as API paths, and a path constant counts inside the function that uses it", () => {
+  assert.equal(citedPaths("python scripts/client.py statistics --report-type <1|2|3>\nREPORT_TYPE = {\"1\": 1, \"2\": 2, \"3\": 3}\n1/2/3").some((path) => path === "/2/3"), false);
+  assert.equal(citedPaths("roles = row.get(\"dept\")\n# leftover /dept/roles in a comment\n").some((path) => path === "/dept/roles"), false);
+  const client = [
+    "STATS = \"/api/stats\"",
+    "def other():",
+    "    return row.get(\"zone\")",
+    "",
+    "def run():",
+    "    request(STATS)",
+    "    params[\"deptId\"] = args.dept_id",
+  ].join("\n");
+  const cited = citationErrors(client, [{ id: "req_1", method: "GET", path: "/api/stats", keys: ["deptId"] }], "scripts/client.py");
+  assert.equal(cited.some((item) => item.code === "key_not_written"), false);
+});
+
+test("a helper called from the path function counts as writing its keys", () => {
+  const requests = [{ id: "req_1", method: "POST", path: "/api/save", keys: ["attachments[].fileName", "title"] }];
+  const client = [
+    "def attach_of(name):",
+    "    return {\"fileName\": name, \"filePath\": name}",
+    "",
+    "def save():",
+    "    url = \"/api/save\"",
+    "    body[\"title\"] = args.title",
+    "    body[\"attachments\"] = [attach_of(item)]",
+  ].join("\n");
+  const cited = citationErrors(client, requests, "scripts/client.py");
+  assert.equal(cited.some((item) => item.code === "key_not_written"), false);
 });
 
 test("a key in another function does not satisfy the function that sends the path", () => {

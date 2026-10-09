@@ -589,18 +589,18 @@ function historySkillName(item: RecordingResultSummary) {
 }
 
 const STATUS_LABELS: Record<WorkflowStatus, string> = {
-  idle: "等待开始",
+  idle: "录制中",
   recording: "录制中",
-  processing: "分析中",
-  waiting_operator: "等待确认",
-  editable: "能力草稿待处理",
-  published: "Skill 已写好",
-  cancelled: "分析已终止",
-  failed: "处理失败",
-  skill_ready: "Skill 已写好",
-  skill_written_needs_auth: "需要 token",
-  verify_failed: "校验未通过",
-  stopped: "已停止",
+  processing: "录制中",
+  waiting_operator: "录制中",
+  editable: "录制中",
+  published: "Skill 产出完毕",
+  cancelled: "产出失败",
+  failed: "产出失败",
+  skill_ready: "Skill 产出完毕",
+  skill_written_needs_auth: "Skill 产出完毕",
+  verify_failed: "产出失败",
+  stopped: "产出失败",
 };
 
 const ACTIVITY_STATUS: Record<string, { label: string; color?: string }> = {
@@ -666,14 +666,14 @@ function dedupeAnalysisActivities(activities: WorkflowActivity[]) {
 }
 
 function analysisStatusView(status: WorkflowStatus, cancelling: boolean, _snapshot: WorkflowSnapshot | null) {
-  if (cancelling && status !== "cancelled") return { color: "warning" as const, label: "正在终止" };
-  if (status === "cancelled") return { color: "default" as const, label: "已终止" };
-  if (status === "published") return { color: "success" as const, label: "Skill 已写好" };
-  if (status === "failed") return { color: "error" as const, label: "失败" };
-  if (status === "waiting_operator") return { color: "warning" as const, label: "需要确认" };
-  if (status === "processing") return { color: "processing" as const, label: "分析中" };
-  if (status === "editable") return { color: "default" as const, label: "能力草稿待处理" };
-  return { color: "default" as const, label: STATUS_LABELS[status] };
+  if (cancelling && status !== "cancelled") return { color: "warning" as const, label: "录制中" };
+  if (status === "skill_ready" || status === "published" || status === "skill_written_needs_auth") {
+    return { color: "success" as const, label: "Skill 产出完毕" };
+  }
+  if (status === "failed" || status === "verify_failed" || status === "stopped" || status === "cancelled") {
+    return { color: "error" as const, label: "产出失败" };
+  }
+  return { color: "processing" as const, label: "录制中" };
 }
 
 function isStageSevenProgress(progress?: { step?: string; round?: number } | null) {
@@ -2200,6 +2200,8 @@ export default function PageRecorder({
   function steerPlaceholder() {
     if (canSteerPi()) return "发指示，例如：继续搜、去点新增";
     if (keepRecording && (status === "recording" || connecting)) return "正在重连，稍候即可发送指示";
+    if (status === "skill_ready") return "Skill 产出完毕";
+    if (status === "failed") return "产出失败，无法发送指示";
     return "未连接或录制已结束，暂时无法发送指示";
   }
 

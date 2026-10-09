@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import path from "node:path";
 import { packageRoot } from "../src/paths.mjs";
-import { overlayExactLines, yamlFingerprint } from "../src/browser/snapshot.mjs";
+import { overlayExactLines, overlayHasRef, yamlFingerprint } from "../src/browser/snapshot.mjs";
 import { compactNetworkIndex, networkBodyForModel } from "../src/browser/network.mjs";
 import { responseKeyPreview } from "../src/skillpack/request-keys.mjs";
 import { writeOnlySkill } from "../src/skillpack/verify.mjs";
@@ -17,9 +17,16 @@ test("the method does not ban number cells or treat filled controls as caller-re
   assert.match(prompt, /不要发明 GET/);
   assert.match(prompt, /actor=human/);
   assert.match(prompt, /查找表/);
+  assert.match(prompt, /fill_fields/);
+  assert.match(prompt, /必须以 --- 包住/);
+  assert.match(prompt, /关掉这层/);
+  assert.match(prompt, /layer_idle/);
+  assert.match(prompt, /needs_click/);
+  assert.match(prompt, /credential\.headers/);
   assert.doesNotMatch(prompt, /不点旁边只有数字/);
   assert.doesNotMatch(prompt, /各占一行必填/);
   assert.doesNotMatch(prompt, /same_column/);
+  assert.doesNotMatch(prompt, /禁止.*取消|不要点取消/);
 });
 
 test("overlay lines stay a lookup from the tree, including numeric cells in a row", () => {
@@ -39,6 +46,9 @@ test("overlay lines stay a lookup from the tree, including numeric cells in a ro
   assert.equal(overlay.some((line) => line.includes("打开")), false);
   assert.match(yaml, /cell "18"/);
   assert.notEqual(yamlFingerprint(yaml), yamlFingerprint(`${yaml}\n- button "x" [ref=f0:e9@1]`));
+  const published = ["overlay_exact", ...overlay, "frame f0 http://127.0.0.1/"].join("\n");
+  assert.equal(overlayHasRef(published, "f0:e4@1"), true);
+  assert.equal(overlayHasRef(published, "f0:e1@1"), false);
 });
 
 test("listed is an index, large bodies are omitted whole, write-only skills do not invent GET", () => {

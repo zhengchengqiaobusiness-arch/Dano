@@ -5,7 +5,7 @@ import { listEvidence, getEvidence } from "../evidence/store.mjs";
 import { handbookChanged, writeRuntimeConfig } from "./files.mjs";
 import { hasCredentialHeaders } from "../auth-vault.mjs";
 import { upsertCatalog } from "./catalog.mjs";
-import { requestIndexRow, citationErrors, citedPaths } from "./request-keys.mjs";
+import { requestIndexRow, citationErrors, citedPaths, windowsForPath } from "./request-keys.mjs";
 import { nonStdlibImports } from "./stdlib-imports.mjs";
 import { GUIDE_NAMES } from "../agent/guides.mjs";
 
@@ -37,12 +37,12 @@ function subcommand(line) {
 function writesRecordedPath(line, clientText, requests) {
   const sub = subcommand(line);
   if (!sub) return false;
+  const token = sub.replaceAll("-", "_");
+  const named = new RegExp(`\\b${sub.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b|\\b${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
   for (const row of requests || []) {
     if (!/^(POST|PUT|PATCH|DELETE)$/i.test(row.method || "")) continue;
-    const at = String(clientText || "").indexOf(row.path || "");
-    if (at < 0) continue;
-    const near = String(clientText).slice(Math.max(0, at - 1800), at + String(row.path || "").length);
-    if (near.includes(sub) || near.includes(sub.replaceAll("-", "_"))) return true;
+    if (!String(clientText || "").includes(row.path || "")) continue;
+    if (windowsForPath(clientText, row.path).some((block) => named.test(block))) return true;
   }
   return false;
 }
@@ -50,13 +50,12 @@ function writesRecordedPath(line, clientText, requests) {
 function commandWrites(line, clientText) {
   const sub = subcommand(line);
   if (!sub || sub === "show-config") return false;
-  const needle = sub.replaceAll("-", "_");
-  const at = clientText.indexOf(needle);
-  const alt = clientText.indexOf(sub);
-  const pos = at >= 0 ? at : alt;
-  if (pos < 0) return false;
-  const window = clientText.slice(pos, pos + 2500).split(/\ndef |\nasync def /)[0];
-  return /method\s*=\s*["'](POST|PUT|PATCH|DELETE)["']/i.test(window);
+  const token = sub.replaceAll("-", "_");
+  const named = new RegExp(`(?:^|\\n)(?:async )?def\\s+(?:cmd_)?${token}\\b`);
+  const blocks = String(clientText || "").split(/(?=\n(?:async )?def )/);
+  const hit = blocks.find((block) => named.test(block) || new RegExp(`add_parser\\(["']${sub.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']\\)`).test(block));
+  if (!hit) return false;
+  return /(?:method\s*=\s*["'](POST|PUT|PATCH|DELETE)["']|\b(?:POST|PUT|PATCH|DELETE)\b.*["']\/)/i.test(hit);
 }
 
 function isTemplate(line) {
@@ -118,8 +117,23 @@ export function writeOnlySkill(skillMd, clientText, requests) {
 }
 
 function sameCommand(left, right) {
-  const norm = (line) => String(line).trim().replace(/^python3\b/, "python");
+  const norm = (line) => String(line).trim().replace(/\r/g, "").replace(/^python3\b/, "python");
   return norm(left) === norm(right);
+}
+
+export function authStoppedOutput(output) {
+  const text = String(output || "");
+  if (/AuthExpired|缺少鉴权|没有鉴权|请提供 token|账号未登录|\b401\b/.test(text)) return true;
+  return /\b400\b/.test(text) && /refresh|token|令牌|credential/i.test(text);
+}
+
+function latestVerifyByCommand(verifyRows) {
+  const map = new Map();
+  for (const row of verifyRows || []) {
+    const key = subcommand((row.argv || []).join(" ")) || (row.argv || []).join(" ");
+    map.set(key, row);
+  }
+  return [...map.values()];
 }
 
 function readCommands(skillMd) {
@@ -167,13 +181,12 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   }
   const skillMd = texts["SKILL.md"] || "";
   if (skillMd && !/^---\n[\s\S]*?\bname:\s*\S+/m.test(skillMd)) {
-    errors.push({ code: "not_invocable", file: "SKILL.md", hint: "开头写 name 和 description，写清调用方何时启用、参数怎么传，不要写成页面点击步骤" });
+    errors.push({ code: "not_invocable", file: "SKILL.md", hint: "SKILL.md 必须以 --- 开头的 YAML 包住 name 和 description，再写正文。调用方靠这段启用，不要写成页面点击步骤" });
   }
   if (/disable-model-invocation:\s*true/.test(skillMd)) {
     errors.push({ code: "not_invocable", file: "SKILL.md", hint: "不要写 disable-model-invocation，否则调用方的智能体不会启用" });
   }
   const reads = readCommands(skillMd);
-  const failed = evidence.filter((row) => row.kind === "verify" && row.ok === false);
   const requests = [];
   const requestsForWrites = [];
   for (const row of evidence.filter((item) => item.kind === "network")) {
@@ -240,7 +253,7 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
       }
       const blob = await getEvidence(recordingId, row.id).catch(() => null);
       const output = `${blob?.stdout || ""}\n${blob?.stderr || ""}`;
-      if (/AuthExpired|缺少鉴权|没有鉴权|请提供 token|账号未登录|\b401\b/.test(output)) {
+      if (authStoppedOutput(output)) {
         ran = true;
         break;
       }
@@ -277,10 +290,11 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
       errors.push({ code: "attachment_unresolved", hint: "upload 没有发出请求。附件要跟着这次请求写进提交正文，不能省略" });
     }
   }
-  for (const row of failed) {
+  for (const row of latestVerifyByCommand(verifyRows)) {
+    if (row.ok === true) continue;
     const blob = await getEvidence(recordingId, row.id).catch(() => null);
     const text = `${blob?.stdout || ""} ${blob?.stderr || ""}`;
-    if (/\b401\b/.test(text)) errors.push({ code: "auth_expired" });
+    if (authStoppedOutput(text)) errors.push({ code: "auth_expired" });
   }
   let headers = {};
   try {
@@ -298,10 +312,10 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   }
   errors.length = 0;
   errors.push(...unique);
+  const authOnly = errors.length > 0 && errors.every((item) => item.code === "auth_expired");
   let status = "verify_failed";
   if (!errors.length && hasCredentialHeaders(headers)) status = "skill_ready";
-  else if (!errors.length) status = "skill_written_needs_auth";
-  if (errors.some((item) => item.code === "auth_expired")) status = "verify_failed";
+  else if (!errors.length || authOnly) status = "skill_written_needs_auth";
   const verify = { ok: status !== "verify_failed", status, errors, requests, filled: filledLabels(evidence) };
   if (status === "skill_ready" || status === "skill_written_needs_auth") {
     await upsertCatalog({ ...recording, id: recordingId, skillId: recording.skillId, status, skillDir: dir });

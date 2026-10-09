@@ -65,7 +65,7 @@ test("iframe refs do not click the wrong submit", { timeout: 60000 }, async () =
     const box = innerClick.snapshot.text.split(/\n/).find((line) => line.includes("textbox") && /\[ref=/.test(line));
     const inputRef = publishedRef(box, "f0");
     const filled = await runAction(id, { action: "fill", ref: inputRef, text: "changed" });
-    assert.equal(filled.error, "value_not_applied");
+    assert.ok(filled.error === "value_not_applied" || filled.error === "needs_click");
     const nodeLine = filled.snapshot.text.split(/\n/).find((line) => line.includes("节点甲") && /\[ref=/.test(line));
     const nodeRef = publishedRef(nodeLine, "f0");
     const nodeClick = await runAction(id, { action: "click", ref: nodeRef });

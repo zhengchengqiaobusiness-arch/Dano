@@ -109,14 +109,14 @@ test("fake pi writes the skill and leaves it unchanged", { timeout: 60000 }, asy
   }));
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
-    const done = messages.find((item) => item.snapshot?.status === "skill_written_needs_auth");
+    const done = messages.find((item) => item.snapshot?.status === "skill_ready");
     if (done) break;
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   assert.ok(messages.some((item) => item.type === "frame" && item.data));
   const snap = messages.find((item) => item.type === "snapshot");
   assert.match(snap.snapshot.run_id, /^rec_/);
-  const finalSnap = [...messages].reverse().find((item) => item.snapshot?.status === "skill_written_needs_auth");
+  const finalSnap = [...messages].reverse().find((item) => item.snapshot?.status === "skill_ready");
   assert.ok(finalSnap);
   const file = await readFile(path.join(skillDir(`app.${snap.snapshot.run_id}`), "SKILL.md"), "utf8");
   assert.equal(file, written);

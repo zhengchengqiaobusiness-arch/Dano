@@ -160,9 +160,9 @@
           const banner = document.querySelector("#assist");
           banner.hidden = !reason;
           banner.textContent = reason;
-          document.querySelector("#resume").hidden = snap.status !== "waiting_operator";
+          document.querySelector("#resume").hidden = !snap.assist?.reason;
           document.querySelector("#skill_dir").textContent = snap.skill_dir || "";
-          if (snap.status === "skill_ready" || snap.status === "skill_written_needs_auth" || snap.status === "verify_failed" || snap.status === "stopped") {
+          if (snap.status === "skill_ready" || snap.status === "failed") {
             document.querySelector("#live").hidden = true;
           }
         }

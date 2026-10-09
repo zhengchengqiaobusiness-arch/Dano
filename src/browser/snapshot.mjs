@@ -100,6 +100,18 @@ export function annotateColumns(nodes) {
   return nodes;
 }
 
+export function overlayHasRef(snapshotText, ref) {
+  const raw = String(ref || "").trim().replace(/^\[ref=/, "").replace(/\]$/, "");
+  if (!raw) return false;
+  const text = String(snapshotText || "");
+  const start = text.search(/(?:^|\n)overlay_exact\n/);
+  if (start < 0) return false;
+  const from = text.slice(start);
+  const end = from.search(/\n(?:goal_exact|row_facts|frame )\b/);
+  const block = end < 0 ? from : from.slice(0, end);
+  return block.includes(`[ref=${raw}]`) || block.includes(raw);
+}
+
 export function overlayExactLines(yaml) {
   const lines = String(yaml || "").split("\n");
   const out = [];
@@ -152,15 +164,27 @@ export function yamlFingerprint(text) {
     .replace(/@\d+/g, "@");
 }
 
+function ancestorName(lines, index) {
+  const base = indentOf(lines[index]);
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (indentOf(lines[i]) >= base) continue;
+    const named = unwrapLine(lines[i]).match(/^[a-zA-Z]+ "((?:\\.|[^"])*)"/);
+    return named ? named[1].replace(/\\"/g, '"') : "";
+  }
+  return "";
+}
+
 function rewriteYaml(yaml, frame, frameId, snap, epoch, refs) {
+  const source = String(yaml || "").split("\n");
   const lines = [];
-  for (const line of String(yaml || "").split("\n")) {
+  source.forEach((line, index) => {
     const next = line.replace(/\[ref=([^\]]+)\]/g, (_, aria) => {
       const ref = `${frameId}:${aria}@${snap}`;
       const raw = unwrapLine(line);
       const named = raw.match(/^[a-zA-Z]+ "((?:\\.|[^"])*)"/);
       const role = (raw.match(/^([a-zA-Z]+)/) || [])[1] || "";
-      const label = named ? `${role} "${named[1].replace(/\\"/g, '"')}"` : role;
+      const parent = named ? "" : ancestorName(source, index);
+      const label = named ? `${role} "${named[1].replace(/\\"/g, '"')}"` : (parent ? `${role} in "${parent}"` : role);
       refs.set(ref, {
         locator: frame.locator(`aria-ref=${aria}`),
         epoch,
@@ -171,7 +195,7 @@ function rewriteYaml(yaml, frame, frameId, snap, epoch, refs) {
       return `[ref=${ref}]`;
     });
     lines.push(next);
-  }
+  });
   return lines.join("\n");
 }
 
@@ -236,7 +260,9 @@ export async function takeSnapshot(recordingId, { budgetMs = 8000 } = {}) {
   if (overlay.length) lookup.push("overlay_exact", ...overlay.map((line) => line.trimStart()));
   if (rows.length) lookup.push("row_facts", ...rows);
   if (lookup.length) lines.splice(1, 0, ...lookup);
-  return { epoch: state.epoch, text: lines.join("\n"), refs };
+  const snapshot = { epoch: state.epoch, text: lines.join("\n"), refs };
+  state.lastPublished = snapshot;
+  return snapshot;
 }
 
 export function locatorFor(recordingId, ref) {

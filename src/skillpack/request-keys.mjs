@@ -105,12 +105,28 @@ export function requestIndexRow(row) {
   };
 }
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export function citedPaths(text) {
   const found = new Set();
-  const pattern = /\/(?:[A-Za-z0-9_{}-]+\/)+[A-Za-z0-9_{}.-]+/g;
-  for (const match of String(text || "").matchAll(pattern)) {
-    if (/^\/(?:usr|bin|home|etc|tmp|var|opt|proc|sys)\//.test(match[0])) continue;
-    found.add(match[0]);
+  const add = (raw) => {
+    const value = String(raw || "").replace(/\/+$/, "") || "/";
+    if (/^\/(?:usr|bin|home|etc|tmp|var|opt|proc|sys)(?:\/|$)/.test(value)) return;
+    const parts = value.split("/").filter(Boolean);
+    if (parts.length < 2 || !parts.some((part) => /[A-Za-z]/.test(part))) return;
+    found.add(value);
+  };
+  const source = String(text || "");
+  for (const match of source.matchAll(/["'`](\/(?:[A-Za-z0-9_{}-]+\/)+[A-Za-z0-9_{}.-]+)["'`]/g)) add(match[1]);
+  for (const match of source.matchAll(/\b(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+(\/(?:[A-Za-z0-9_{}-]+\/)+[A-Za-z0-9_{}.-]+)/gi)) add(match[1]);
+  for (const match of source.matchAll(/https?:\/\/[^\s"'`]+/gi)) {
+    try {
+      add(new URL(match[0]).pathname);
+    } catch {
+      // 不是 URL
+    }
   }
   return [...found];
 }
@@ -136,7 +152,24 @@ export function windowsForPath(text, path) {
     windows.push(source.slice(start < 0 ? 0 : start, end));
     from = at + path.length;
   }
-  return windows;
+  const aliases = [];
+  const assign = new RegExp(`([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*["']${escapeRegex(path)}["']`, "g");
+  for (const match of source.matchAll(assign)) aliases.push(match[1]);
+  const defs = new Map();
+  for (const block of source.split(/(?=\n(?:async )?def )/)) {
+    if (!/(?:^|\n)(?:async )?def /.test(block)) continue;
+    const name = (block.match(/(?:^|\n)(?:async )?def\s+([A-Za-z_][A-Za-z0-9_]*)/) || [])[1];
+    if (name) defs.set(name, block);
+    if (aliases.some((alias) => new RegExp(`\\b${escapeRegex(alias)}\\b`).test(block))) windows.push(block);
+  }
+  const extra = [];
+  for (const window of windows) {
+    for (const [name, block] of defs) {
+      if (window.includes(`def ${name}`)) continue;
+      if (new RegExp(`\\b${escapeRegex(name)}\\s*\\(`).test(window)) extra.push(block);
+    }
+  }
+  return [...windows, ...extra];
 }
 
 export function citationErrors(skillText, requests, file = "", { requireKeys = true } = {}) {

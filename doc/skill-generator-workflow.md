@@ -1,6 +1,6 @@
 # 办理流程：可调用三文件 Skill
 
-成品只有 `SKILL.md`、`scripts/client.py`、`references/api.md`。没有 `CONTRACT.json`、`flow.py`。调用方执行手册里的 `python scripts/client.py …` 行。
+成品只有 `SKILL.md`、`scripts/client.py`、`references/api.md`。没有 `CONTRACT.json`、`flow.py`。调用方执行手册里的 `python scripts/client.py …` 行。`SKILL.md` 必须以 `---` 包住 `name` 和 `description`。
 
 ## 谁做什么
 

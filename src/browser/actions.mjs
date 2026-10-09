@@ -3,7 +3,7 @@ import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { originFromUrl } from "../session-store.mjs";
 import { browserSession, raceWall, withPage } from "./session.mjs";
-import { locatorFor, takeSnapshot, yamlFingerprint } from "./snapshot.mjs";
+import { locatorFor, overlayHasRef, takeSnapshot, yamlFingerprint } from "./snapshot.mjs";
 import { beginAction, endAction, listNetwork, waitForAction } from "./network.mjs";
 import { logLine } from "../log.mjs";
 
@@ -34,6 +34,12 @@ async function readBack(locator, text) {
 async function stale(recordingId) {
   const snapshot = await takeSnapshot(recordingId, { budgetMs: 2500 });
   return { ok: false, error: "stale_ref", snapshot };
+}
+
+async function needsClick(locator) {
+  const readonly = await locator.getAttribute("readonly").catch(() => null);
+  const aria = await locator.getAttribute("aria-readonly").catch(() => null);
+  return readonly != null || aria === "true";
 }
 
 function armChooser(page) {
@@ -134,13 +140,22 @@ async function perform(recordingId, input) {
         }
         const item = locatorFor(recordingId, field.ref);
         if (!item) return { ...(await stale(recordingId)), ref: field.ref, filled };
+        if (await needsClick(item.locator)) {
+          return {
+            ok: false,
+            error: "needs_click",
+            ref: field.ref,
+            filled,
+            snapshot: state.lastPublished || await snapshotAfter(recordingId),
+          };
+        }
         await item.locator.fill(field.text, { timeout: 2000 });
         if (!(await readBack(item.locator, field.text))) {
           return { ok: false, error: "value_not_applied", ref: field.ref, filled, snapshot: await snapshotAfter(recordingId) };
         }
         if (item.label) filled.push(item.label);
       }
-      return { ok: true, filled, snapshot: await snapshotAfter(recordingId) };
+      return { ok: true, filled, snapshot: state.lastPublished || await snapshotAfter(recordingId) };
     }
     if (!hit) {
       logLine(`[browser] ${action} ref=${input.ref || ""} stale`);
@@ -231,6 +246,14 @@ async function perform(recordingId, input) {
       }
     }
     if (action === "fill") {
+      if (await needsClick(hit.locator)) {
+        return {
+          ok: false,
+          error: "needs_click",
+          ref: input.ref,
+          snapshot: state.lastPublished || await snapshotAfter(recordingId),
+        };
+      }
       try {
         await hit.locator.fill(String(input.text ?? ""), { timeout: 2000 });
       } catch {
@@ -260,19 +283,32 @@ async function perform(recordingId, input) {
     if (action === "click" || action === "upload" || action === "fill" || action === "select") {
       await waitForAction(recordingId, actionId);
     }
+    const requests = requestsDuring();
+    if (action === "fill" || action === "select") {
+      return {
+        ok: true,
+        filled,
+        requests,
+        snapshot: state.lastPublished || await snapshotAfter(recordingId),
+      };
+    }
+    const beforeSnap = state.lastPublished;
     const prevKey = state.lastYamlKey || "";
     const snapshot = await snapshotAfter(recordingId);
-    const requests = requestsDuring();
     const key = yamlFingerprint(snapshot.text);
     state.lastYamlKey = key;
     const unchanged = action === "click" && key === prevKey && !requests.length;
     state.pageStall = unchanged ? (state.pageStall || 0) + 1 : 0;
+    const inOverlay = action === "click" && overlayHasRef(beforeSnap?.text, input.ref);
+    const layerIdle = inOverlay && !requests.length;
     return action === "click"
       ? {
           ok: true,
           clicked: hit.label || "",
           requests,
           snapshot,
+          ...(inOverlay ? { in_overlay: true } : {}),
+          ...(layerIdle ? { layer_idle: true } : {}),
           ...(state.pageStall >= 2 ? { page_unchanged: true } : {}),
         }
       : { ok: true, filled, requests, snapshot };

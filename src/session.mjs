@@ -38,6 +38,25 @@ export async function createRecording(fields) {
   return recording;
 }
 
+export function publicSessionStatus(recording) {
+  const raw = String(recording?.status || "recording");
+  if (raw === "skill_ready" || raw === "skill_written_needs_auth") return "skill_ready";
+  if (raw === "failed" || raw === "stopped" || raw === "verify_failed") return "failed";
+  return "recording";
+}
+
+export function applyVerifyToRecording(recording, verify, skillDirPath = "") {
+  recording.verify = verify;
+  if (skillDirPath) recording.skillDir = skillDirPath;
+  if (verify?.status === "skill_ready" || verify?.status === "skill_written_needs_auth") {
+    recording.status = "skill_ready";
+    recording.finished = true;
+    return;
+  }
+  recording.status = "recording";
+  recording.finished = false;
+}
+
 export function snapshotMessage(recording) {
   recording.revision += 1;
   return {
@@ -47,7 +66,7 @@ export function snapshotMessage(recording) {
       action: "",
       title: recording.title,
       revision: recording.revision,
-      status: recording.status,
+      status: publicSessionStatus(recording),
       progress: { step: "capturing", label: "" },
       capture_frozen: false,
       draft: null,
@@ -94,7 +113,7 @@ export async function loadRecording(id) {
 
 export async function exportSkill(id, outDir) {
   const recording = await loadRecording(id);
-  if (!recording || recording.status !== "skill_ready") {
+  if (!recording || publicSessionStatus(recording) !== "skill_ready") {
     return { status: "not_ready", verify: recording?.verify || null };
   }
   const source = recording.skillDir || skillDir(recording.skillId);

@@ -7,6 +7,8 @@ import { writeSkillFile } from "../src/skillpack/files.mjs";
 import { actionEvidenceSummary, verifySkill } from "../src/skillpack/verify.mjs";
 import { skillDir } from "../src/paths.mjs";
 import { appendEvidence } from "../src/evidence/store.mjs";
+import { GUIDE_NAMES } from "../src/agent/guides.mjs";
+import { applyVerifyToRecording, publicSessionStatus } from "../src/session.mjs";
 
 const recording = { id: "rec_verify", tenant: "", subsystem: "app", skillId: "app.rec_verify", startUrl: "http://127.0.0.1/" };
 
@@ -282,4 +284,114 @@ test("a write-only skill is not forced to invent a GET", async () => {
   const result = await verifySkill(dir, shape.id, shape);
   assert.equal(result.errors.some((item) => item.code === "command_not_run"), false);
   assert.equal(result.errors.some((item) => item.code === "follow_get_missing"), false);
+});
+
+async function seedGuides(recordingId) {
+  for (const name of GUIDE_NAMES) {
+    await appendEvidence(recordingId, { kind: "guide", summary: name, body: name });
+  }
+}
+
+test("a later successful run is not auth_expired, and a GET subcommand is not a write because its name sits near a POST path", async () => {
+  await useData();
+  const shape = { id: "rec_verify_auth_latest", tenant: "", subsystem: "app", skillId: "app.rec_verify_auth_latest", startUrl: "http://127.0.0.1/" };
+  const dir = skillDir(shape.skillId);
+  await mkdir(path.join(dir, "scripts"), { recursive: true });
+  await mkdir(path.join(dir, "references"), { recursive: true });
+  await mkdir(path.join(dir, "config"), { recursive: true });
+  await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\npython scripts/client.py whoami\npython scripts/client.py statistics\n");
+  await writeFile(path.join(dir, "scripts/client.py"), [
+    "STATS = \"/api/stats\"",
+    "SAVE = \"/api/save\"",
+    "def cmd_whoami():",
+    "    return True",
+    "def cmd_statistics():",
+    "    request(STATS)",
+    "    params[\"deptId\"] = args.dept_id",
+    "def cmd_submit():",
+    "    request(SAVE)",
+    "    body[\"title\"] = args.title",
+    "credential = auth['credential']",
+  ].join("\n"));
+  await writeFile(path.join(dir, "references/api.md"), "");
+  await writeFile(path.join(dir, "config/runtime.json"), "{}\n");
+  await writeFile(path.join(dir, "config/auth.local.json"), "{\"headers\":{\"Authorization\":\"Bearer tok\"}}\n");
+  await seedGuides(shape.id);
+  await appendEvidence(shape.id, {
+    kind: "network",
+    summary: "POST /api/save",
+    body: { method: "POST", path: "/api/save", post_data: JSON.stringify({ title: "a" }), response_body: JSON.stringify({ data: { accessToken: "abc12345", refreshToken: "ref12345" } }) },
+  });
+  await appendEvidence(shape.id, {
+    kind: "network",
+    summary: "GET /api/stats",
+    body: { method: "GET", path: "/api/stats", query: "deptId=1" },
+  });
+  await appendEvidence(shape.id, {
+    kind: "verify",
+    ok: false,
+    argv: ["python", "scripts/client.py", "whoami"],
+    stdout: "401 账号未登录",
+  });
+  await appendEvidence(shape.id, {
+    kind: "verify",
+    ok: true,
+    argv: ["python", "scripts/client.py", "whoami"],
+  });
+  await appendEvidence(shape.id, {
+    kind: "verify",
+    ok: true,
+    argv: ["python", "scripts/client.py", "statistics"],
+  });
+  const result = await verifySkill(dir, shape.id, shape);
+  assert.equal(result.errors.some((item) => item.code === "auth_expired"), false);
+  assert.equal(result.errors.some((item) => item.code === "command_not_run"), false);
+  assert.equal(result.status, "skill_ready");
+});
+
+test("only the latest auth stop is auth_expired and does not fail the structure", async () => {
+  await useData();
+  const shape = { id: "rec_verify_auth_stop", tenant: "", subsystem: "app", skillId: "app.rec_verify_auth_stop", startUrl: "http://127.0.0.1/" };
+  const dir = skillDir(shape.skillId);
+  await mkdir(path.join(dir, "scripts"), { recursive: true });
+  await mkdir(path.join(dir, "references"), { recursive: true });
+  await mkdir(path.join(dir, "config"), { recursive: true });
+  await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\npython scripts/client.py whoami\n");
+  await writeFile(path.join(dir, "scripts/client.py"), "credential = auth['credential']\n");
+  await writeFile(path.join(dir, "references/api.md"), "");
+  await writeFile(path.join(dir, "config/runtime.json"), "{}\n");
+  await writeFile(path.join(dir, "config/auth.local.json"), "{\"headers\":{\"Authorization\":\"Bearer tok\"}}\n");
+  await seedGuides(shape.id);
+  await appendEvidence(shape.id, {
+    kind: "network",
+    summary: "POST /session/refresh",
+    body: { method: "POST", path: "/session/refresh", response_body: JSON.stringify({ data: { accessToken: "abc12345", refreshToken: "ref12345" } }) },
+  });
+  await appendEvidence(shape.id, {
+    kind: "verify",
+    ok: true,
+    argv: ["python", "scripts/client.py", "whoami"],
+  });
+  await appendEvidence(shape.id, {
+    kind: "verify",
+    ok: false,
+    argv: ["python", "scripts/client.py", "whoami"],
+    stdout: "{\"ok\": false, \"error\": \"refresh-token failed: 400 无效的刷新令牌\"}",
+  });
+  const result = await verifySkill(dir, shape.id, shape);
+  assert.equal(result.errors.some((item) => item.code === "command_not_run"), false);
+  assert.ok(result.errors.every((item) => item.code === "auth_expired"));
+  assert.equal(result.status, "skill_written_needs_auth");
+  const rec = { status: "recording", finished: false, verify: null, skillDir: "" };
+  applyVerifyToRecording(rec, result, dir);
+  assert.equal(rec.status, "skill_ready");
+  assert.equal(rec.finished, true);
+  assert.equal(publicSessionStatus(rec), "skill_ready");
+  const failed = { status: "recording", finished: false };
+  applyVerifyToRecording(failed, { status: "verify_failed", errors: [{ code: "command_not_run" }] });
+  assert.equal(failed.status, "recording");
+  assert.equal(failed.finished, false);
+  assert.equal(publicSessionStatus(failed), "recording");
+  assert.equal(publicSessionStatus({ status: "verify_failed" }), "failed");
+  assert.equal(publicSessionStatus({ status: "waiting_operator" }), "recording");
 });

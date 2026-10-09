@@ -23,12 +23,13 @@ function resultLine(result) {
       return `失败 ${codes}`.slice(0, 500);
     }
     if (body?.ok === false) {
-      const extra = [body.error, ...(body.names || []), ...(body.writable || [])].filter(Boolean).join(" ");
+      const extra = [body.error, body.stderr, body.stdout, ...(body.names || []), ...(body.writable || [])].filter(Boolean).join(" ");
       return `失败 ${extra}`.slice(0, 500);
     }
     if (body?.ok === true && body.clicked) {
       const quiet = Array.isArray(body.requests) && body.requests.length === 0 ? " 无请求" : "";
-      return `完成 ${body.clicked}${quiet}`;
+      const layer = body.layer_idle ? " 层无请求" : "";
+      return `完成 ${body.clicked}${quiet}${layer}`;
     }
     if (body?.ok === true) return "完成";
     if (Array.isArray(body?.refs)) return `完成 refs=${body.refs.length}`;
@@ -57,10 +58,16 @@ export function factsForContinue(context) {
 export function nextRecordingPrompt({ finished, paused, progressed, continues, verifyErrors }) {
   if (finished || paused || continues >= MAX_SKILL_CONTINUES) return null;
   const errors = Array.isArray(verifyErrors) && verifyErrors.length ? `\n${JSON.stringify(verifyErrors)}` : "";
+  if (Array.isArray(verifyErrors) && verifyErrors.length) {
+    if (verifyErrors.every((item) => item.code === "auth_expired")) {
+      return `三文件已写出。鉴权过期，不要改脚本猜 token，不要 assist。更新 config/auth.local.json 的 credential 后再 run_skill_command。${errors}`;
+    }
+    return `校验失败。只改 SKILL.md、scripts/client.py、references/api.md，再 run_skill_command。不要 browser_open 本地路径。SKILL.md 必须以 --- 包住 name 和 description。引用 path 的那个函数里要写出请求键名。${errors}`;
+  }
   const lead = progressed
     ? "页面操作的总结不是结束。对照 listed（本场全部 xhr/fetch 索引）和目标原文写三文件。正文过大时 network_get 会省略，用 evidence_get 同 id。成品必须可调用。目标只要求写入时不要发明 GET。filled 里的控件名不是调用方必填清单。"
     : "Skill 还没产出。";
-  return `${lead}read_guide 读完名单。要采用的请求打开全文。来源标签和命令行谁填必须一致。当前账号、部门、权限从 listed 已录请求取出再填，不要冻成字面量。empty 里的键传空。issues_credential 的请求按 auth.local.json 的 credential 在业务请求前重放，失败或 401 再停止。DANO_AUTH_HEADERS 只覆盖同名头。scripts/client.py 只用 Python 标准库。跑读命令（若目标含读），再 verify_skill。${errors}`;
+  return `${lead}read_guide 读完名单。要采用的请求打开全文。来源标签和命令行谁填必须一致。当前账号、部门、权限从 listed 已录请求取出再填，不要冻成字面量。empty 里的键传空。issues_credential 的请求按 auth.local.json 的 credential 在业务请求前重放，带上 credential.headers，失败或 401 再停止。DANO_AUTH_HEADERS 只覆盖同名头。scripts/client.py 只用 Python 标准库。跑读命令（若目标含读），再 verify_skill。${errors}`;
 }
 
 let startOverride = null;
@@ -164,7 +171,14 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
         verifyErrors: recording?.verify?.errors,
       });
       progressed = false;
-      if (!follow) return;
+      if (!follow) {
+        if (recording && !recording.finished && !recording.paused && continues >= MAX_SKILL_CONTINUES) {
+          recording.status = "failed";
+          recording.finished = true;
+          recording.emit?.();
+        }
+        return;
+      }
       continues += 1;
       const current = typeof host.context === "function" ? await host.context() : {};
       await prompt(`${follow}\n${JSON.stringify(factsForContinue(current))}`);

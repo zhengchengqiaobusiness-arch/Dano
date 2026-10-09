@@ -8,7 +8,7 @@ import { hostTools } from "./agent/tools.mjs";
 import { startRecordingPi as defaultStart } from "./agent/pi-session.mjs";
 
 function recordingIsLive(recording) {
-  return Boolean(recording && !recording.finished && recording.status !== "stopped");
+  return Boolean(recording && !recording.finished && recording.status !== "stopped" && recording.status !== "failed");
 }
 
 function attachPreview(recording, ws, send) {

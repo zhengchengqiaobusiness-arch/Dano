@@ -56,6 +56,9 @@ export async function writeAuthLocalFile(packageDir, headers, credential = null)
   const payload = { headers: usableAuthHeaders(headers) };
   if (credential?.url && credential?.method) {
     payload.credential = { method: String(credential.method), url: String(credential.url) };
+    if (credential.refresh_token) payload.credential.refresh_token = String(credential.refresh_token);
+    const replay = usableAuthHeaders(credential.headers);
+    if (Object.keys(replay).length) payload.credential.headers = replay;
   }
   await writeFile(target, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   return target;

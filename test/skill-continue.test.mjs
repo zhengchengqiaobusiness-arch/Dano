@@ -16,4 +16,11 @@ test("a finished page turn continues until the skill is verified", () => {
   assert.equal(nextRecordingPrompt({ finished: false, paused: true, progressed: false, continues: 0 }), null);
   assert.ok(nextRecordingPrompt({ finished: false, paused: false, progressed: true, continues: 4, verifyErrors: [] }));
   assert.equal(nextRecordingPrompt({ finished: false, paused: false, progressed: false, continues: 8 }), null);
+  const failed = nextRecordingPrompt({ finished: false, paused: false, progressed: true, continues: 2, verifyErrors: [{ code: "not_invocable", file: "SKILL.md" }] });
+  assert.match(failed, /只改/);
+  assert.match(failed, /不要 browser_open 本地路径/);
+  const expired = nextRecordingPrompt({ finished: false, paused: false, progressed: true, continues: 2, verifyErrors: [{ code: "auth_expired" }] });
+  assert.match(expired, /鉴权过期/);
+  assert.match(expired, /不要 assist/);
+  assert.equal(nextRecordingPrompt({ finished: false, paused: false, progressed: true, continues: 8, verifyErrors: [{ code: "command_not_run" }] }), null);
 });
