@@ -53,9 +53,19 @@ test("an open dialog is published as overlay_exact and later clicks use the curr
     const emptyTitle = (opened.overlay_fields || []).find((row) => String(row.name || "").includes("标题"));
     assert.ok(emptyTitle);
     assert.equal(emptyTitle.empty, true);
+    assert.equal(emptyTitle.required, true);
+    assert.ok((opened.required_empty_overlay || []).some((name) => String(name).includes("标题")));
+    assert.match(opened.snapshot.text, /col "/);
     const emptyCat = (opened.overlay_fields || []).find((row) => String(row.name || "").includes("分类"));
     assert.ok(emptyCat);
     assert.equal(emptyCat.empty, true);
+    const emptyDuty = (opened.overlay_fields || []).find((row) => String(row.name || "").includes("职能清单") || String(row.column || "").includes("职能清单"));
+    assert.ok(emptyDuty);
+    assert.equal(emptyDuty.required, true);
+    const emptySystem = (opened.overlay_fields || []).find((row) => String(row.name || "").includes("所属系统"));
+    assert.ok(emptySystem);
+    assert.equal(emptySystem.empty, true);
+    assert.equal(emptySystem.required, false);
     const blocked = await runAction(id, { action: "click", ref: publishedRef(lineWith(opened.snapshot.text, "被挡住")) });
     const tree = blocked.snapshot?.text || opened.snapshot.text;
     assert.match(tree, /确定/);
@@ -71,6 +81,7 @@ test("an open dialog is published as overlay_exact and later clicks use the curr
       assert.match(String(titleFact.value || ""), /hello/);
       assert.equal((afterFill.empty_overlay || []).some((name) => String(name).includes("标题")), false);
       assert.equal((afterFill.empty_overlay || []).some((name) => String(name).includes("分类")), true);
+      assert.equal((afterFill.empty_overlay || []).some((name) => String(name).includes("所属系统")), true);
     }
     const latest = afterFill.snapshot?.text || tree;
     const ok = await runAction(id, { action: "click", ref: publishedRef(lineWith(latest, "确定")) });

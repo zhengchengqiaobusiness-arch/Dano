@@ -3,7 +3,10 @@ import { issuedCredential } from "../auth-vault.mjs";
 export function bodyKeyPaths(value, prefix = "", out = new Set(), empty = null) {
   if (Array.isArray(value)) {
     const next = prefix ? `${prefix}[]` : "[]";
-    if (empty && !value.length) empty.add(next);
+    if (empty && !value.length) {
+      empty.add(next);
+      if (prefix) empty.add(prefix);
+    }
     for (const item of value) bodyKeyPaths(item, next, out, empty);
     return out;
   }
@@ -159,7 +162,9 @@ export function windowsForPath(text, path) {
   }
   const aliases = [];
   const assign = new RegExp(`([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*["']${escapeRegex(path)}["']`, "g");
-  for (const match of source.matchAll(assign)) aliases.push(match[1]);
+  for (const match of source.matchAll(assign)) {
+    if (!/^(path|url|uri|route|endpoint|method)$/i.test(match[1])) aliases.push(match[1]);
+  }
   const defs = new Map();
   for (const block of source.split(/(?=\n(?:async )?def )/)) {
     if (!/(?:^|\n)(?:async )?def /.test(block)) continue;

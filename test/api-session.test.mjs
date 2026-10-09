@@ -125,6 +125,11 @@ test("fake pi writes the skill and leaves it unchanged", { timeout: 60000 }, asy
   assert.match(source, /createAgentSession/);
   assert.match(source, /session\.prompt/);
   } finally {
+    try {
+      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "abort" }));
+    } catch {
+      // 套接字已关
+    }
     ws?.close();
     await new Promise((resolve) => server.close(resolve));
     await new Promise((resolve) => site.close(resolve));

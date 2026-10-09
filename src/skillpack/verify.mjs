@@ -96,10 +96,46 @@ export function clickedLabels(evidence) {
   return labels;
 }
 
+function asCommandLine(raw) {
+  return String(raw || "")
+    .trim()
+    .replace(/^[-*\d.)]+\s+/, "")
+    .replace(/^`+|`+$/g, "")
+    .trim()
+    .replace(/^python3\b/, "python")
+    .replace(/\s+/g, " ");
+}
+
+function realSubcommand(line) {
+  const sub = (String(line).match(/scripts\/client\.py\s+(\S+)/) || [])[1] || "";
+  return /^[a-z][a-z0-9-]*$/.test(sub);
+}
+
+export function skillCommandLines(skillMd) {
+  const found = [];
+  const seen = new Set();
+  const add = (raw) => {
+    const line = asCommandLine(raw);
+    if (!/^python\s+scripts\/client\.py\b/.test(line) || !realSubcommand(line) || seen.has(line)) return;
+    seen.add(line);
+    found.push(line);
+  };
+  for (const line of String(skillMd || "").split(/\n/)) {
+    const trimmed = line.trim();
+    add(trimmed);
+    if (trimmed.includes("|")) {
+      for (const cell of trimmed.split("|")) add(cell);
+    }
+  }
+  return found;
+}
+
+function readCommands(skillMd) {
+  return skillCommandLines(skillMd).filter((line) => !line.includes("--confirm"));
+}
+
 export function writeOnlySkill(skillMd, clientText, requests) {
-  const lines = String(skillMd || "").split(/\n/).map((line) => line.trim()).filter((line) => (
-    /^python3?\s+scripts\/client\.py\b/.test(line)
-  ));
+  const lines = skillCommandLines(skillMd);
   if (!lines.length) return false;
   const recordedWrite = (requests || []).some((row) => /^(POST|PUT|PATCH|DELETE)$/i.test(row.method || ""));
   if (!recordedWrite) return false;
@@ -149,11 +185,6 @@ function latestVerifyByCommand(verifyRows) {
   return [...map.values()];
 }
 
-function readCommands(skillMd) {
-  return skillMd.split(/\n/).map((line) => line.trim()).filter((line) => (
-    /^python3?\s+scripts\/client\.py\b/.test(line) && !line.includes("--confirm")
-  ));
-}
 
 function idsOf(value) {
   return String(value || "").split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
@@ -216,14 +247,14 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     errors.push({
       code: "command_not_run",
       file: "SKILL.md",
-      hint: "show-config 只检查配置。目标含读时再写一条打到证据路径的读命令，并用相同 argv 跑 run_skill_command。目标只要求写入时不要发明 GET。",
+      hint: "show-config 只检查配置。目标含读时再写一条打到证据路径的读命令（行首或表格单元格），并用相同 argv 或同名子命令跑 run_skill_command。目标只要求写入时不要发明 GET。",
     });
   }
   if (!writeOnly && !reads.length && skillMd) {
     errors.push({
       code: "command_not_run",
       file: "SKILL.md",
-      hint: "目标含读时，在 SKILL.md 写一行以 python scripts/client.py 开头的读命令，再用相同 argv 调用 run_skill_command。目标只要求写入时，写带 --confirm 的写命令即可，不要发明 GET。",
+      hint: "目标含读时，在 SKILL.md 写读命令（行首或表格单元格里的 python scripts/client.py），再用相同 argv 或同名子命令调用 run_skill_command。目标只要求写入时，写带 --confirm 的写命令即可，不要发明 GET。",
     });
   }
   if (clientText.trim()) {
@@ -262,8 +293,8 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
         command: line,
         file: "SKILL.md",
         hint: isTemplate(line)
-          ? "这一行是说明。用真实参数跑同名子命令即可，不要把尖括号原样当参数"
-          : "run_skill_command 的 argv 用空格拼起来要等于这一行。没有鉴权而停止可以；其它失败要先改到能跑",
+          ? "这一行是说明（含表格单元格）。用真实参数跑同名子命令即可，不要把尖括号原样当参数"
+          : "run_skill_command 的 argv 用空格拼起来要等于这一行（含表格里抽出的命令）。没有鉴权而停止可以；其它失败要先改到能跑",
       });
       continue;
     }

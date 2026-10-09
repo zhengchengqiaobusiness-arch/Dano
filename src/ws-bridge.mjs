@@ -2,11 +2,12 @@ import { WebSocketServer } from "ws";
 import { appendEvidence } from "./evidence/store.mjs";
 import { browserSession, captureFrame, closeBrowser, getPage, openBrowser, withoutPageLock, withPage } from "./browser/session.mjs";
 import { beginAction, compactNetworkIndex, endAction, listNetwork, waitForAction } from "./browser/network.mjs";
-import { overlayControlFacts, takeSnapshot } from "./browser/snapshot.mjs";
+import { overlayControlFacts, overlayFactLists, takeSnapshot } from "./browser/snapshot.mjs";
 import { loadStorageState, saveStorageState } from "./session-store.mjs";
 import { createRecording, emit, getRecording, persist, snapshotMessage } from "./session.mjs";
 import { hostTools } from "./agent/tools.mjs";
 import { startRecordingPi as defaultStart } from "./agent/pi-session.mjs";
+import { armIdleTimer, HUMAN_STEER_IDLE_MS, PREVIEW_DETACH_MS } from "./idle-timer.mjs";
 
 function recordingIsLive(recording) {
   return Boolean(recording && !recording.finished && recording.status !== "stopped" && recording.status !== "failed");
@@ -24,21 +25,24 @@ function attachPreview(recording, ws, send) {
 }
 
 function scheduleDetach(recording) {
-  clearTimeout(recording.detachTimer);
-  recording.detachTimer = setTimeout(() => {
+  armIdleTimer(recording, "detachTimer", PREVIEW_DETACH_MS, () => {
     if (recording.previewSocket) return;
     recording.finished = true;
     recording.status = "stopped";
     recording.pi?.dispose?.();
     closeBrowser(recording.id);
-  }, 2500);
+  });
+}
+
+function scheduleHumanSteer(recording) {
+  armIdleTimer(recording, "humanSteerTimer", HUMAN_STEER_IDLE_MS, () => {
+    steerAfterHumanAct(recording);
+  });
 }
 
 async function steerAfterHumanAct(recording) {
   if (!recording?.pi || !recordingIsLive(recording) || recording.paused) return;
-  const now = Date.now();
-  if (now - (recording.lastHumanSteerAt || 0) < 2500) return;
-  recording.lastHumanSteerAt = now;
+  if (!browserSession(recording.id)) return;
   const listed = compactNetworkIndex(listNetwork(recording.id));
   let overlay_fields = [];
   try {
@@ -47,8 +51,8 @@ async function steerAfterHumanAct(recording) {
   } catch {
     overlay_fields = [];
   }
-  const empty_overlay = overlay_fields.filter((row) => row.empty).map((row) => row.name || row.role);
-  const text = `人在预览里操作了。actor=human。先 browser_snapshot 再接着做。\n${JSON.stringify({ listed, overlay_fields, empty_overlay })}`;
+  const facts = overlayFactLists(overlay_fields);
+  const text = `人在预览里操作了。actor=human。先 browser_snapshot 再接着做。\n${JSON.stringify({ listed, ...facts })}`;
   recording.pi.prompt(text).catch(() => {});
 }
 
@@ -220,7 +224,7 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
         }
         const kind = String(message.event?.kind || "");
         if (kind === "pointer_up" || kind === "text" || kind === "key") {
-          steerAfterHumanAct(recording);
+          scheduleHumanSteer(recording);
         }
         setTimeout(pushFrame, 100);
         return;

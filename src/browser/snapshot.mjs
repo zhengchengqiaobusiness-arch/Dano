@@ -30,23 +30,29 @@ function parseNodes(yaml) {
     const role = raw.match(/^([a-zA-Z]+)/);
     if (!ref || !role) continue;
     const named = raw.match(/^[a-zA-Z]+ "((?:\\.|[^"])*)"/);
+    const col = raw.match(/\scol "((?:\\.|[^"])*)"/);
     const trailing = raw.match(/\]:\s*(.+)$/);
     nodes.push({
       role: role[1].toLowerCase(),
       name: named ? named[1].replace(/\\"/g, '"') : (trailing ? trailing[1].trim() : ""),
+      column: col ? col[1].replace(/\\"/g, '"') : "",
       ariaRef: ref[1],
+      indent: indentOf(line),
       line: String(line || ""),
     });
   }
   return annotateColumns(nodes);
 }
 
-export function goalExactLines(nodes, goalText) {
+export function goalExactLines(nodes, goalText, overlayRefs = []) {
   const goal = String(goalText || "");
   const inGoal = (value) => String(value || "").length >= 2 && goal.includes(value);
   const hits = (nodes || []).filter((node) => inGoal(node.name) || inGoal(node.column));
   const covered = new Set(hits.map((node) => node.column).filter(Boolean));
-  return hits.filter((node) => !(node.role === "columnheader" && covered.has(node.name)));
+  const overlay = new Set((overlayRefs || []).map((ref) => String(ref || "")));
+  return hits
+    .filter((node) => !(node.role === "columnheader" && covered.has(node.name)))
+    .sort((a, b) => Number(overlay.has(b.ref || b.ariaRef)) - Number(overlay.has(a.ref || a.ariaRef)));
 }
 
 export function sameColumnRefs(snapshotText, headerLabel) {
@@ -75,7 +81,14 @@ export function annotateColumns(nodes) {
   const headers = [];
   let column = 0;
   let readingHeaders = true;
+  let cellIndent = -1;
+  let cellColumn = "";
   for (const node of nodes) {
+    const indent = Number(node.indent || 0);
+    if (cellIndent >= 0 && indent <= cellIndent) {
+      cellIndent = -1;
+      cellColumn = "";
+    }
     if (node.role === "columnheader") {
       if (!readingHeaders) {
         headers.length = 0;
@@ -87,15 +100,21 @@ export function annotateColumns(nodes) {
     }
     if (node.role === "row" || node.role === "rowgroup") {
       column = 0;
+      cellIndent = -1;
+      cellColumn = "";
       if (headers.length) readingHeaders = false;
       continue;
     }
     if ((node.role === "cell" || node.role === "gridcell") && headers.length) {
       readingHeaders = false;
-      node.column = headers[column] || "";
+      node.column = headers[column] || node.column || "";
+      cellIndent = indent;
+      cellColumn = node.column;
       column += 1;
       if (column >= headers.length) column = 0;
+      continue;
     }
+    if (cellColumn && indent > cellIndent) node.column = cellColumn;
   }
   return nodes;
 }
@@ -201,7 +220,35 @@ function rewriteYaml(yaml, frame, frameId, snap, epoch, refs) {
     });
     lines.push(next);
   });
-  return lines.join("\n");
+  const rewritten = lines.join("\n");
+  applyColumnLabels(rewritten, refs);
+  return withColumnMarks(rewritten);
+}
+
+function applyColumnLabels(yaml, refs) {
+  for (const node of parseNodes(yaml)) {
+    if (!node.column) continue;
+    const hit = refs.get(node.ariaRef);
+    if (!hit) continue;
+    if (String(hit.label || "").includes(node.column)) continue;
+    hit.label = hit.label ? `${hit.label} col "${node.column}"` : `col "${node.column}"`;
+  }
+}
+
+export function withColumnMarks(yaml) {
+  const source = String(yaml || "").split("\n");
+  const columns = new Map();
+  for (const node of parseNodes(source.join("\n"))) {
+    if (node.column && node.ariaRef) columns.set(node.ariaRef, node.column);
+  }
+  return source.map((line) => {
+    const ref = publishedRef(line);
+    const column = columns.get(ref);
+    if (!column) return line;
+    const mark = `col "${String(column).replace(/"/g, '\\"')}"`;
+    if (line.includes(mark)) return line;
+    return line.replace(/\[ref=/, `${mark} [ref=`);
+  }).join("\n");
 }
 
 async function ariaYaml(frame, budgetMs) {
@@ -247,7 +294,7 @@ export async function takeSnapshot(recordingId, { budgetMs = 8000 } = {}) {
     overlay.push(...overlayExactLines(rewritten));
     rows.push(...rowFactsFromYaml(rewritten));
     for (const node of parseNodes(rewritten)) {
-      const shown = node.column ? `${node.role}${node.name ? ` "${node.name}"` : ""} ${node.column}` : (node.name ? `${node.role} "${node.name}"` : node.role);
+      const shown = node.column ? `${node.role}${node.name ? ` "${node.name}"` : ""} col "${node.column}"` : (node.name ? `${node.role} "${node.name}"` : node.role);
       exactNodes.push({
         role: node.role,
         name: node.name || "",
@@ -259,7 +306,8 @@ export async function takeSnapshot(recordingId, { budgetMs = 8000 } = {}) {
     }
     if (rewritten) lines.push(rewritten);
   }
-  const exact = goalExactLines(exactNodes, goalText).map((node) => `- ${node.shown} [ref=${node.ref}]`);
+  const overlayRefs = overlay.map((line) => publishedRef(line)).filter(Boolean);
+  const exact = goalExactLines(exactNodes, goalText, overlayRefs).map((node) => `- ${node.shown} [ref=${node.ref}]`);
   const lookup = [];
   if (exact.length) lookup.push("goal_exact", ...exact);
   if (overlay.length) lookup.push("overlay_exact", ...overlay.map((line) => line.trimStart()));
@@ -272,11 +320,39 @@ export async function takeSnapshot(recordingId, { budgetMs = 8000 } = {}) {
 
 const VALUE_ROLES = /^(textbox|searchbox|combobox|spinbutton|checkbox|radio|slider|listbox)$/i;
 
-export function controlLooksEmpty(value, placeholder = "") {
+export function controlLooksEmpty(value, placeholder = "", ...names) {
   const v = String(value ?? "").trim();
   if (!v) return true;
   const mark = String(placeholder || "").trim();
-  return Boolean(mark) && v === mark;
+  if (mark && v === mark) return true;
+  return names.some((name) => {
+    const label = String(name || "").trim();
+    return Boolean(label) && v === label;
+  });
+}
+
+export function markRequired(ariaRequired, htmlRequired, ...labels) {
+  if (htmlRequired) return true;
+  const aria = String(ariaRequired ?? "").trim().toLowerCase();
+  if (aria === "true") return true;
+  if (aria === "false") return false;
+  return labels.some((label) => /\*/.test(String(label || "")));
+}
+
+export function markReadonly(ariaReadonly, htmlReadonly, ariaDisabled) {
+  if (htmlReadonly) return true;
+  const aria = String(ariaReadonly ?? "").trim().toLowerCase();
+  if (aria === "true") return true;
+  return String(ariaDisabled ?? "").trim().toLowerCase() === "true";
+}
+
+export function overlayFactLists(overlay_fields) {
+  const rows = Array.isArray(overlay_fields) ? overlay_fields : [];
+  return {
+    overlay_fields: rows,
+    empty_overlay: rows.filter((row) => row.empty).map((row) => row.name || row.role),
+    required_empty_overlay: rows.filter((row) => row.empty && row.required).map((row) => row.name || row.role),
+  };
 }
 
 async function placeholderOf(locator) {
@@ -286,11 +362,12 @@ async function placeholderOf(locator) {
   return aria ? String(aria) : "";
 }
 
-async function overlayValueControl(locator, role) {
+async function overlayValueControl(locator, role, named) {
   if (VALUE_ROLES.test(role)) return true;
   const haspopup = await locator.getAttribute("aria-haspopup").catch(() => null);
   const expanded = await locator.getAttribute("aria-expanded").catch(() => null);
-  return haspopup != null || expanded != null;
+  if (haspopup != null || expanded != null) return true;
+  return /^generic$/i.test(role) && Boolean(named);
 }
 
 async function readControlValue(locator) {
@@ -322,19 +399,29 @@ export async function overlayControlFacts(recordingId) {
     const role = (raw.match(/^([a-zA-Z]+)/) || [])[1] || "";
     const ref = publishedRef(line);
     if (!ref) continue;
+    const named = raw.match(/^[a-zA-Z]+ "((?:\\.|[^"])*)"/);
+    const col = raw.match(/\scol "((?:\\.|[^"])*)"/);
+    const label = named ? named[1].replace(/\\"/g, '"') : "";
+    const column = col ? col[1].replace(/\\"/g, '"') : "";
     const hit = locatorFor(recordingId, ref);
     if (!hit) continue;
-    if (!(await overlayValueControl(hit.locator, role))) continue;
+    if (!(await overlayValueControl(hit.locator, role, label))) continue;
     const read = await readControlValue(hit.locator);
-    const named = raw.match(/^[a-zA-Z]+ "((?:\\.|[^"])*)"/);
-    const label = named ? named[1].replace(/\\"/g, '"') : "";
+    const ariaRequired = await hit.locator.getAttribute("aria-required").catch(() => null);
+    const htmlRequired = await hit.locator.evaluate((el) => Boolean(el.required)).catch(() => false);
+    const ariaReadonly = await hit.locator.getAttribute("aria-readonly").catch(() => null);
+    const htmlReadonly = await hit.locator.evaluate((el) => Boolean(el.readOnly)).catch(() => false);
+    const ariaDisabled = await hit.locator.getAttribute("aria-disabled").catch(() => null);
     facts.push({
       ref,
       role: role.toLowerCase(),
       name: hit.label || label || role,
       value: read.value,
       ...(read.placeholder ? { placeholder: read.placeholder } : {}),
-      empty: controlLooksEmpty(read.value, read.placeholder),
+      ...(column ? { column } : {}),
+      empty: controlLooksEmpty(read.value, read.placeholder, label, column),
+      required: markRequired(ariaRequired, htmlRequired, label, column, hit.label),
+      readonly: markReadonly(ariaReadonly, htmlReadonly, ariaDisabled),
     });
     if (facts.length >= 40) break;
   }

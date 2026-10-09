@@ -1,9 +1,9 @@
-import { writeFile, mkdir } from "node:fs/promises";
+import { writeFile, mkdir, access } from "node:fs/promises";
 import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { originFromUrl } from "../session-store.mjs";
 import { browserSession, raceWall, withPage } from "./session.mjs";
-import { locatorFor, overlayControlFacts, overlayHasRef, takeSnapshot, yamlFingerprint } from "./snapshot.mjs";
+import { locatorFor, overlayControlFacts, overlayFactLists, overlayHasRef, takeSnapshot, yamlFingerprint } from "./snapshot.mjs";
 import { beginAction, endAction, listNetwork, waitForAction } from "./network.mjs";
 import { logLine } from "../log.mjs";
 
@@ -75,7 +75,10 @@ function clickUnreachable(error) {
   return pointerBlocked(error) || /not visible|outside of the viewport|Timeout/i.test(String(error?.message || ""));
 }
 
-async function snapshotAfter(recordingId, budgetMs = 3000) {
+async function snapshotAfter(recordingId, budgetMs = 3000, { retryEmpty = false } = {}) {
+  const snapshot = await takeSnapshot(recordingId, { budgetMs });
+  if (!retryEmpty || (snapshot?.refs || []).length) return snapshot;
+  await new Promise((resolve) => setTimeout(resolve, 800));
   return takeSnapshot(recordingId, { budgetMs });
 }
 
@@ -84,11 +87,7 @@ async function withOverlayFacts(recordingId, result) {
   try {
     const overlay_fields = await overlayControlFacts(recordingId);
     if (!overlay_fields.length) return result;
-    return {
-      ...result,
-      overlay_fields,
-      empty_overlay: overlay_fields.filter((row) => row.empty).map((row) => row.name || row.role),
-    };
+    return { ...result, ...overlayFactLists(overlay_fields) };
   } catch {
     return result;
   }
@@ -119,7 +118,7 @@ async function perform(recordingId, input) {
       return { ok: false, error: "origin_denied", snapshot };
     }
     await state.page.goto(url, { waitUntil: "domcontentloaded" });
-    return { ok: true, snapshot: await snapshotAfter(recordingId) };
+    return { ok: true, snapshot: await snapshotAfter(recordingId, 8000, { retryEmpty: true }) };
   }
   if (action === "snapshot") return { ok: true, snapshot: await snapshotAfter(recordingId, 8000) };
   if (action === "screenshot") {
@@ -291,11 +290,32 @@ async function perform(recordingId, input) {
       await mkdir(dir, { recursive: true });
       const filePath = String(input.file_path || "").trim() || path.join(dir, "attachment.png");
       if (!input.file_path) await writeFile(filePath, PROBE_PNG);
-      if (state.pendingFileChooser) {
-        await state.pendingFileChooser.setFiles(filePath);
-        state.pendingFileChooser = null;
-      } else {
-        await hit.locator.setInputFiles(filePath);
+      else {
+        try {
+          await access(filePath);
+        } catch {
+          return { ok: false, error: "file_not_found", ref: input.ref, snapshot: state.lastPublished || await snapshotAfter(recordingId) };
+        }
+      }
+      try {
+        if (state.pendingFileChooser) {
+          await state.pendingFileChooser.setFiles(filePath);
+          state.pendingFileChooser = null;
+        } else {
+          await hit.locator.setInputFiles(filePath);
+        }
+      } catch (error) {
+        const message = String(error?.message || error);
+        if (/not an HTMLInputElement|setInputFiles/i.test(message)) {
+          return {
+            ok: false,
+            error: "needs_upload",
+            ref: input.ref,
+            hint: "这一格不是文件框。先 click 打开选择器，再对返回 needs_upload 的那个 ref 调用 upload。不要编一个不存在的路径。",
+            snapshot: state.lastPublished || await snapshotAfter(recordingId),
+          };
+        }
+        return { ok: false, error: message.split("\n")[0], snapshot: await snapshotAfter(recordingId) };
       }
       filled = [hit.label || ""].filter(Boolean);
     }

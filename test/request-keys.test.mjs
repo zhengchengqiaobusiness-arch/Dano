@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { citationErrors, citedPaths, keysFromPostData, requestIndexRow } from "../src/skillpack/request-keys.mjs";
+import { citationErrors, citedPaths, keysFromPostData, requestIndexRow, windowsForPath } from "../src/skillpack/request-keys.mjs";
 
 const body = {
   creator: "1",
@@ -50,6 +50,7 @@ test("empty values and a credential-issuing response stay facts on the request",
   });
   assert.ok(row.empty.includes("companyId"));
   assert.ok(row.empty.includes("items[]"));
+  assert.ok(row.empty.includes("items"));
   assert.ok(row.empty.includes("deptId"));
   assert.equal(row.empty.includes("title"), false);
   assert.equal(row.issues_credential, true);
@@ -86,6 +87,21 @@ test("numeric type codes are not treated as API paths, and a path constant count
   ].join("\n");
   const fromPreamble = citationErrors(preamble, [{ id: "req_1", method: "POST", path: "/api/save", keys: ["title"] }], "scripts/client.py");
   assert.equal(fromPreamble.some((item) => item.code === "key_not_written"), false);
+});
+
+test("a local path variable is not an alias for every other command", () => {
+  const client = [
+    "def save():",
+    '    path = "/save"',
+    '    method = "POST"',
+    "",
+    "def list():",
+    '    path = "/list"',
+    '    method = "GET"',
+  ].join("\n");
+  const windows = windowsForPath(client, "/save").join("\n");
+  assert.match(windows, /def save/);
+  assert.equal(/def list/.test(windows), false);
 });
 
 test("a helper called from the path function counts as writing its keys", () => {

@@ -8,7 +8,7 @@ import { compactNetworkIndex, networkBodyForModel } from "../src/browser/network
 import { responseKeyPreview } from "../src/skillpack/request-keys.mjs";
 import { writeOnlySkill } from "../src/skillpack/verify.mjs";
 import { raceWall, withPage } from "../src/browser/session.mjs";
-import { packedAuthAssist } from "../src/agent/tools.mjs";
+import { packedAuthAssist, sessionAssistBlocked } from "../src/agent/tools.mjs";
 
 test("the method does not ban number cells or treat filled controls as caller-required", async () => {
   const prompt = await readFile(path.join(packageRoot(), "src", "agent", "prompt.md"), "utf8");
@@ -26,10 +26,21 @@ test("the method does not ban number cells or treat filled controls as caller-re
   assert.match(prompt, /credential\.headers/);
   assert.match(prompt, /overlay_fields/);
   assert.match(prompt, /不要把凭证写进对话/);
+  assert.match(prompt, /嵌套数组/);
+  assert.match(prompt, /占位字/);
+  assert.match(prompt, /必填空/);
+  assert.match(prompt, /argparse/);
+  assert.match(prompt, /冻成空数组/);
+  assert.match(prompt, /DANO_BASE_URL/);
+  assert.match(prompt, /表格单元格/);
+  assert.match(prompt, /no_browser/);
+  assert.match(prompt, /不要抢点/);
   assert.doesNotMatch(prompt, /不点旁边只有数字/);
   assert.doesNotMatch(prompt, /各占一行必填/);
   assert.doesNotMatch(prompt, /same_column/);
   assert.doesNotMatch(prompt, /禁止.*取消|不要点取消/);
+  assert.doesNotMatch(prompt, /所属系统/);
+  assert.doesNotMatch(prompt, /tenant-id|tenant_id/);
 });
 
 test("a displayed placeholder is still an empty overlay fact", () => {
@@ -37,11 +48,16 @@ test("a displayed placeholder is still an empty overlay fact", () => {
   assert.equal(controlLooksEmpty("   "), true);
   assert.equal(controlLooksEmpty("请选择", "请选择"), true);
   assert.equal(controlLooksEmpty("甲", "请选择"), false);
+  assert.equal(controlLooksEmpty("请选择所属系统", "", "请选择所属系统"), true);
+  assert.equal(controlLooksEmpty("已选系统", "", "请选择所属系统"), false);
 });
 
 test("assist for a packed token is rejected, page login is not", () => {
   assert.equal(packedAuthAssist('请在预览里更新 config/auth.local.json 的 headers.Authorization'), true);
   assert.equal(packedAuthAssist("登录页被验证码挡住"), false);
+  assert.equal(sessionAssistBlocked("浏览器会话已断开（browser_open 返回 no_browser"), true);
+  assert.equal(sessionAssistBlocked("origin_denied"), true);
+  assert.equal(sessionAssistBlocked("登录页被验证码挡住"), false);
 });
 
 test("overlay lines stay a lookup from the tree, including numeric cells in a row", () => {
@@ -88,6 +104,11 @@ test("listed is an index, large bodies are omitted whole, write-only skills do n
   const client = 'def save():\n    method = "POST"\n    path = "/save"\n';
   assert.equal(writeOnlySkill(skill, client, [{ method: "POST", path: "/save" }]), true);
   assert.equal(writeOnlySkill("python scripts/client.py list\n", client, [{ method: "GET", path: "/list" }]), false);
+  assert.equal(writeOnlySkill(
+    "---\nname: save\n---\npython scripts/client.py save --confirm\n| 列表 | python scripts/client.py list --id <a> |\n",
+    `${client}\ndef list():\n    method = "GET"\n    path = "/list"\n`,
+    [{ method: "POST", path: "/save" }],
+  ), false);
 });
 
 test("a hung page lock is released so a later turn can run", async () => {

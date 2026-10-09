@@ -32,15 +32,18 @@ export function resultLine(result) {
       const extra = [body.error, body.stderr, body.stdout, ...(body.names || []), ...(body.writable || [])].filter(Boolean).join(" ");
       return `失败 ${extra}`.slice(0, 500);
     }
+    const requiredEmpty = Array.isArray(body.required_empty_overlay) && body.required_empty_overlay.length
+      ? ` 必填空=${body.required_empty_overlay.slice(0, 8).join("|")}`
+      : "";
     const empty = Array.isArray(body.empty_overlay) && body.empty_overlay.length
       ? ` 空=${body.empty_overlay.slice(0, 8).join("|")}`
       : "";
     if (body?.ok === true && body.clicked) {
       const quiet = Array.isArray(body.requests) && body.requests.length === 0 ? " 无请求" : "";
       const layer = body.layer_idle ? " 层无请求" : "";
-      return `完成 ${body.clicked}${quiet}${layer}${empty}`;
+      return `完成 ${body.clicked}${quiet}${layer}${requiredEmpty}${empty}`;
     }
-    if (body?.ok === true && empty) return `完成${empty}`;
+    if (body?.ok === true && (requiredEmpty || empty)) return `完成${requiredEmpty}${empty}`;
     if (body?.ok === true) return "完成";
     if (Array.isArray(body?.refs)) return `完成 refs=${body.refs.length}`;
     if (body?.image_in_conversation) return "完成 图像";
@@ -63,6 +66,7 @@ export function factsForContinue(context) {
     filled: context?.filled || [],
     overlay_fields: Array.isArray(context?.overlay_fields) ? context.overlay_fields.slice(0, 40) : [],
     empty_overlay: Array.isArray(context?.empty_overlay) ? context.empty_overlay.slice(0, 20) : [],
+    required_empty_overlay: Array.isArray(context?.required_empty_overlay) ? context.required_empty_overlay.slice(0, 20) : [],
     snapshot: String(text).slice(0, 12000),
   };
 }
@@ -94,7 +98,7 @@ export function nextRecordingPrompt({ finished, paused, progressed, continues, v
     return `校验失败。只改 SKILL.md、scripts/client.py、references/api.md，再 run_skill_command。不要 browser_open 本地路径。SKILL.md 必须以 --- 包住 name 和 description。引用 path 的那个函数里要写出请求键名。${errors}`;
   }
   const lead = progressed
-    ? "页面操作的总结不是结束。对照 listed（本场全部 xhr/fetch 索引）、empty_overlay 和目标原文写三文件。正文过大时 network_get 会省略，用 evidence_get 同 id。成品必须可调用。目标只要求写入时不要发明 GET。filled 里的控件名不是调用方必填清单。"
+    ? "页面操作的总结不是结束。对照 listed（本场全部 xhr/fetch 索引）、empty_overlay、required_empty_overlay、overlay_fields 和目标原文写三文件。问句覆盖 overlay 里调用方填的控件和 adopted 请求的每一个键；嵌套数组保持为行，不要压成一个字符串。listed 某键这次 empty/[] 只说明这次传了空，同场另有选项请求则再读，不要冻成空数组。手册必填必须和 argparse 一致。SKILL.md 里出现的每一条读命令（含表格）都要跑。正文过大时 network_get 会省略，用 evidence_get 同 id。成品必须可调用。目标只要求写入时不要发明 GET。filled 里的控件名不是调用方必填清单。"
     : "Skill 还没产出。";
   return `${lead}read_guide 读完名单。要采用的请求打开全文。来源标签和命令行谁填必须一致。当前账号、部门、权限从 listed 已录请求取出再填，不要冻成字面量。empty 里的键传空。issues_credential 的请求按 auth.local.json 的 credential 在业务请求前重放，带上 credential.headers，失败或 401 再停止。DANO_AUTH_HEADERS 只覆盖同名头。scripts/client.py 只用 Python 标准库。跑读命令（若目标含读），再 verify_skill。${errors}`;
 }

@@ -6,13 +6,14 @@
 
 `config/runtime.json`：`tenant`、`subsystem`、`base_url`。不准写密钥、cookie、password、JWT。
 
-`config/auth.local.json` 形状是 `{ "headers": { ... }, "credential": { ... } }`。真实头由导出写入。运行命令时用 Skill 根目录这份文件；`DANO_AUTH_FILE` / `CABP_AUTH_FILE` 指向它。不要把证据里的 token 写进三文件。
+`config/auth.local.json` 形状是 `{ "headers": { ... }, "credential": { ... } }`。`headers` 一定有；`credential` 只有在证据里存在可重放的签发请求时才有 `url` 和 `method`。真实头由导出写入。运行命令时用 Skill 根目录这份文件；`DANO_AUTH_FILE` / `CABP_AUTH_FILE` 指向它。不要把证据里的 token 写进三文件。不要因为缺少 `credential` 对象而退出。
 
 ## client 读序
 
 1. 若设置了环境变量 `DANO_AUTH_HEADERS`（JSON 对象），用它覆盖同名本地头
 2. 其余头用包内 `config/auth.local.json` 的 `headers`
-3. 两者都没有则抛 `AuthExpired`，停止，要求提供 token
+3. 两者都没有则抛 `AuthExpired`，停止
+4. 只有 `credential.url` 和 `credential.method` 时才重放签发请求；没有这两项就直接用 headers 打业务接口
 
 `show-config` 只打印 tenant / subsystem / base_url / 是否已有鉴权头，不打印头的值。
 

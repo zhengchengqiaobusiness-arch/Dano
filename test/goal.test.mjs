@@ -45,6 +45,7 @@ test("start keeps the goal text verbatim", async () => {
   const stored = await readGoal(runId);
   assert.equal(stored.goal_text, goal);
   assert.notEqual(stored.goal_text, "query");
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "abort" }));
   ws.close();
   await new Promise((resolve) => server.close(resolve));
   await new Promise((resolve) => site.close(resolve));

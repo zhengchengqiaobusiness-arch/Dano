@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { writeSkillFile } from "../src/skillpack/files.mjs";
-import { actionEvidenceSummary, verifySkill } from "../src/skillpack/verify.mjs";
+import { actionEvidenceSummary, skillCommandLines, verifySkill } from "../src/skillpack/verify.mjs";
 import { skillDir } from "../src/paths.mjs";
 import { appendEvidence } from "../src/evidence/store.mjs";
 import { GUIDE_NAMES } from "../src/agent/guides.mjs";
@@ -294,6 +294,65 @@ test("a GET command listed in the module docstring is still a read that must be 
   });
   const result = await verifySkill(dir, shape.id, shape);
   assert.ok(result.errors.some((item) => item.code === "command_not_run" && String(item.command || "").includes("departments")));
+});
+
+test("a handbook sentence is not a command to run", () => {
+  const md = [
+    "---",
+    "name: sample",
+    "---",
+    "所有命令通过 `python scripts/client.py <子命令> [参数]` 调用。",
+    "python scripts/client.py depts",
+  ].join("\n");
+  const lines = skillCommandLines(md);
+  assert.deepEqual(lines, ["python scripts/client.py depts"]);
+  assert.equal(lines.some((line) => line.includes("子命令")), false);
+});
+
+test("a read command in a handbook table still must be run", async () => {
+  await useData();
+  const shape = { id: "rec_verify_table_read", tenant: "", subsystem: "app", skillId: "app.rec_verify_table_read", startUrl: "http://127.0.0.1/" };
+  const dir = skillDir(shape.skillId);
+  await mkdir(path.join(dir, "scripts"), { recursive: true });
+  await mkdir(path.join(dir, "references"), { recursive: true });
+  await mkdir(path.join(dir, "config"), { recursive: true });
+  const handbook = [
+    "---",
+    "name: sample",
+    "description: sample",
+    "---",
+    "python scripts/client.py bm-list",
+    "| 列表 | python scripts/client.py list --id <部门id> |",
+  ].join("\n");
+  assert.ok(skillCommandLines(handbook).some((line) => line.includes("list --id")));
+  await writeFile(path.join(dir, "SKILL.md"), `${handbook}\n`);
+  await writeFile(path.join(dir, "scripts/client.py"), [
+    "def cmd_bm_list():",
+    '    call("GET", "/api/bm")',
+    "def cmd_list():",
+    '    call("GET", "/api/list")',
+  ].join("\n"));
+  await writeFile(path.join(dir, "references/api.md"), "");
+  await writeFile(path.join(dir, "config/runtime.json"), "{}\n");
+  await writeFile(path.join(dir, "config/auth.local.json"), "{\"headers\":{}}\n");
+  await seedGuides(shape.id);
+  await appendEvidence(shape.id, {
+    kind: "network",
+    summary: "GET /api/bm",
+    body: { method: "GET", path: "/api/bm" },
+  });
+  await appendEvidence(shape.id, {
+    kind: "network",
+    summary: "GET /api/list",
+    body: { method: "GET", path: "/api/list" },
+  });
+  await appendEvidence(shape.id, {
+    kind: "verify",
+    ok: true,
+    argv: ["python", "scripts/client.py", "bm-list"],
+  });
+  const result = await verifySkill(dir, shape.id, shape);
+  assert.ok(result.errors.some((item) => item.code === "command_not_run" && String(item.command || "").includes("list --id")));
 });
 
 test("a write-only skill is not forced to invent a GET", async () => {
