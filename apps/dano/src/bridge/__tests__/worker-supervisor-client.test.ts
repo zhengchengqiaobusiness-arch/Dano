@@ -41,9 +41,20 @@ function harness() {
     startupTimeoutMs: 1000, operationTimeoutMs: 1000 });
   const server = serveWorkerSupervisor(pool, root, { maxConcurrentOperations: 8, maxMessageBytes: 4096 });
   cleanup.push(async () => { client.close(); await server.close(); });
-  return { client, factory, host };
+  return { client, factory, host, pool };
 }
 const user = (id: string) => ({ user: { id }, folderPath: `/users/${id}` });
+
+it("prepares a resolved user's workspace over IPC without acquiring a worker", async () => {
+  const { client, factory, pool } = harness();
+  const prepare = vi.spyOn(pool, "prepare").mockResolvedValue(undefined);
+  await client.prepareWorkspace(user("alice"), "/users/alice/workspaces/default");
+  expect(prepare).toHaveBeenCalledWith("alice", "/users/alice/workspaces/default");
+  expect(factory).not.toHaveBeenCalled();
+  await expect(client.prepareWorkspace(user("alice"), "/users/bob/workspaces/default")).rejects.toThrow("OWNER_MISMATCH");
+  await expect(client.prepareWorkspace(user("alice"), "/users/alice/workspaces/default/nested")).rejects.toThrow("OWNER_MISMATCH");
+  expect(prepare).toHaveBeenCalledOnce();
+});
 
 it("binds profiles to server users, shares startup, and refuses foreign workspaces", async () => {
   const { client, factory } = harness();

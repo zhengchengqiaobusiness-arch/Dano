@@ -1,6 +1,6 @@
 {
   "name": "@dano/dano",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "description": "Dano P0 web LLM chat",
   "type": "module",
@@ -22,6 +22,8 @@
     "deploy:ps": "node scripts/deploy-compose.mjs ps",
     "deploy:system-prompt": "node scripts/deploy-system-prompt.mjs",
     "deploy:release": "node scripts/deploy-release.mjs",
+    "deploy:prepare-build": "node scripts/deploy-build-context.mjs",
+    "deploy:check-upload-access": "node scripts/check-upload-workspace-access.mjs",
     "deploy:stop": "node scripts/deploy-compose.mjs stop",
     "deploy:up": "node scripts/deploy-compose.mjs up",
     "deploy:check-bash": "node scripts/check-bash-acceptance.mjs",

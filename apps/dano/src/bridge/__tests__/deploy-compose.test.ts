@@ -224,11 +224,26 @@ appendFileSync(process.env.DANO_COMMAND_LOG, "smoke\\n");
   writeFileSync(
     join(fakeBin, "git"),
     `#!/usr/bin/env node
-import { cpSync } from "node:fs";
+import { cpSync, readdirSync, lstatSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { join } from "node:path";
 const args = process.argv.slice(2);
 if (process.env.DANO_FAKE_GIT_REJECT_FILTER && args.includes("--filter=blob:none")) process.exit(129);
 if (args[0] === "rev-parse") console.log("a".repeat(40));
 if (args[0] === "clone") cpSync(process.env.DANO_FAKE_REPO, args.at(-1), { recursive: true });
+if (args[0] === "ls-tree") {
+  function walk(directory, prefix = "") {
+    for (const name of readdirSync(directory)) {
+      const file = join(directory, name), relative = prefix + name, stat = lstatSync(file);
+      if (stat.isDirectory()) walk(file, relative + "/");
+      else {
+        const data = readFileSync(file), blob = createHash("sha1").update("blob " + data.length + "\\0").update(data).digest("hex");
+        process.stdout.write(((stat.mode & 0o111) ? "100755" : "100644") + " blob " + blob + "\\t" + relative + "\\0");
+      }
+    }
+  }
+  walk(process.cwd());
+}
 `,
   );
   writeFileSync(
@@ -1198,6 +1213,8 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     );
     expect(JSON.parse(logLines[0])).toEqual([
       "build",
+      "--label",
+      `org.opencontainers.image.revision=${"a".repeat(40)}`,
       "--build-arg",
       "NPM_REGISTRY=https://mirrors.cloud.tencent.com/npm/",
       "-t",
@@ -1231,7 +1248,11 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
       "--user", "0:0", "--entrypoint", "node", "app",
       "./dist/server/bridge/sandbox-preflight.js",
     ]);
-    expect(JSON.parse(logLines[4])).toEqual([
+    expect(JSON.parse(logLines[4]).slice(-6)).toEqual([
+      "--user", "0:0", "--entrypoint", "node", "app",
+      "./dist/server/bridge/login-transfer-preflight.js",
+    ]);
+    expect(JSON.parse(logLines[5])).toEqual([
       "compose",
       "-f",
       "docker-compose.yml",
@@ -1251,8 +1272,8 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
       "--expected-product-name",
       "源码助手",
     ]);
-    expect(JSON.parse(logLines[5]).slice(-4)).toEqual(["./deploy/system-prompt.mjs", "check", "--expected-product-name", "源码助手"]);
-    expect(JSON.parse(logLines[6])).toEqual([
+    expect(JSON.parse(logLines[6]).slice(-4)).toEqual(["./deploy/system-prompt.mjs", "check", "--expected-product-name", "源码助手"]);
+    expect(JSON.parse(logLines[7])).toEqual([
       "compose",
       "-f",
       "docker-compose.yml",
@@ -1266,7 +1287,7 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
       "app",
       "nginx",
     ]);
-    expect(logLines[7]).toBe("smoke");
+    expect(logLines[8]).toBe("smoke");
   });
 
   it("initializes Dano-owned OAuth credential encryption before the production gate", () => {

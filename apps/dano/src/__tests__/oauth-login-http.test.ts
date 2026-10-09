@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAnonymousUserContextResolver } from "../bridge/anonymous-user-context.js";
+import { oauthUserId } from "../bridge/oauth-user-id.js";
 import {
   createOAuthAuthentication,
   type OAuthAuthenticationOptions,
@@ -19,7 +20,7 @@ import {
   type ClientMessage,
   type ServerMessage,
 } from "../bridge/types.js";
-import { startDanoServer, type DanoServerController } from "../server.js";
+import { startDanoServer, type DanoServerController, type StartDanoServerOptions } from "../server.js";
 
 const controllers: DanoServerController[] = [];
 const authentications: Array<{ dispose(): Promise<void> }> = [];
@@ -63,6 +64,7 @@ async function startOAuthServer(
     intervalMs: number;
     now: () => number;
   },
+  services: Pick<StartDanoServerOptions, "prepareWorkspaceForUser"> = {},
 ) {
   const runtimeRootPath =
     existingRuntimeRootPath ??
@@ -101,6 +103,7 @@ async function startOAuthServer(
     },
     {
       captureSigint: false,
+      ...services,
       userContextResolver: anonymousUsers,
       ...(anonymousCleanup
         ? {
@@ -1283,6 +1286,34 @@ describe("OAuth authentication over HTTP", () => {
     );
 
     expect(cookieFrom(callback, "dano_login")).toMatch(/^dano_login=/);
+  });
+
+  it("prepares a cold target during the OAuth callback before committing an anonymous upload", async () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "dano-cold-oauth-target-"))); runtimeRoots.push(root);
+    const targetId = oauthUserId("cold-target");
+    const workspace = path.join(root, "users", targetId, "workspaces", "default");
+    fs.mkdirSync(path.join(workspace, "uploads"), { recursive: true });
+    fs.writeFileSync(path.join(workspace, "uploads", "existing.txt"), "preserved");
+    const prepare = vi.fn(async (context, directory: string) => {
+      expect(context.user.id).toBe(targetId);
+      expect(directory).toBe(workspace);
+      expect(fs.readdirSync(path.join(directory, "uploads"))).toEqual(["existing.txt"]);
+    });
+    const { origin } = await startOAuthServer(successfulProvider("cold-target", "fixture-token"), root, {}, undefined,
+      { prepareWorkspaceForUser: prepare });
+    const anonymous = await fetch(`${origin}/api/clients`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const client = await anonymous.json() as TestBridgeClient;
+    const cookie = cookieFrom(anonymous, "dano_guest");
+    const uploaded = await uploadProjectFile(origin, client, cookie, "cold.txt", "synthetic cold upload");
+    const started = await fetch(`${origin}/api/auth/login`, { headers: { Cookie: cookie }, redirect: "manual" });
+    const state = new URL(started.headers.get("location")!).searchParams.get("state")!;
+    const callback = await fetch(`${origin}/api/auth/callback?code=fixture&state=${state}`, { headers: { Cookie: cookie }, redirect: "manual" });
+    const login = cookieFrom(callback, "dano_login");
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(fs.readFileSync(path.join(workspace, "uploads", path.basename(uploaded.path)), "utf8")).toBe("synthetic cold upload");
+    expect(fs.readFileSync(path.join(workspace, "uploads", "existing.txt"), "utf8")).toBe("preserved");
+    const current = await fetch(`${origin}/api/auth/current`, { headers: { Cookie: login } });
+    expect(await current.json()).toMatchObject({ status: "authenticated" });
   });
 
   it("atomically transfers only the callback-bound Anonymous User data before login", async () => {

@@ -50,6 +50,7 @@ export async function runProtectedHost(): Promise<number> {
     const { runDanoMain } = await import("../main.js");
     const protectedToolsForUser = (context: Parameters<typeof client.profile>[0]) => client.profile(context, profile);
     const code = await runDanoMain({ signal: stopped.signal,
+      prepareWorkspaceForUser: (context, workspace) => client.prepareWorkspace(context, workspace),
       protectedToolsForUser: memory ? withUserMemory(protectedToolsForUser, memory.services) : protectedToolsForUser });
     return searchFailed ? 1 : code;
   } finally {

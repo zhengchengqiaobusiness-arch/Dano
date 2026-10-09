@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { preflightProductIdentity } from "./deploy-product-identity.mjs";
+import { prepareBuildContext } from "./deploy-build-context.mjs";
 import { acquireDeploymentLock } from "./deploy-lock.mjs";
 import { resolveDeploymentExposure } from "./deploy-exposure.mjs";
 import {
@@ -164,11 +165,14 @@ try {
   buildDir = mkdtempSync(join(buildParent, "dano-build-"));
   cloneRepo(repoUrl, buildDir);
   run("git", ["checkout", gitRef], { cwd: buildDir });
+  const context = prepareBuildContext(buildDir);
+  console.log(JSON.stringify({ buildContext: context }));
   const identity = await preflightProductIdentity(buildDir, deployDir);
   console.log(JSON.stringify(identity));
   const expectedNameArgs = ["--expected-product-name", identity.productName];
   run(composeBin, [
     "build",
+    "--label", `org.opencontainers.image.revision=${context.targetSha}`,
     "--build-arg",
     `NPM_REGISTRY=${npmRegistry}`,
     ...(aptMirror ? ["--build-arg", `DANO_APT_MIRROR=${aptMirror}`] : []),
@@ -237,6 +241,10 @@ try {
     "docker-compose.exposure.yml", ...productNameArgs(), "--env-file", ".env",
     "run", "--rm", "--no-deps", "--user", "0:0", "--entrypoint", "node", "app",
     "./dist/server/bridge/sandbox-preflight.js"], { cwd: deployDir });
+  run(composeBin, [...composeArgs, "-f", "docker-compose.yml", "-f",
+    "docker-compose.exposure.yml", ...productNameArgs(), "--env-file", ".env",
+    "run", "--rm", "--no-deps", "--user", "0:0", "--entrypoint", "node", "app",
+    "./dist/server/bridge/login-transfer-preflight.js"], { cwd: deployDir });
 
   removeEnvFileValues(envPath, [
     "DANO_AUTH_JWT_SECRET",

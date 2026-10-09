@@ -43,6 +43,7 @@ export interface StartDanoServerOptions {
   anonymousUserCleanup?: { idleTtlMs: number; intervalMs: number };
   /** Trusted launcher composition; identities come only from the server resolver. */
   protectedToolsForUser?: UserRuntimeRegistryOptions["protectedToolsForUser"];
+  prepareWorkspaceForUser?: UserRuntimeRegistryOptions["prepareWorkspaceForUser"];
 }
 
 export interface DanoServerController {
@@ -59,7 +60,7 @@ export async function startDanoServer(
   config: BridgeConfig,
   options: StartDanoServerOptions = {},
 ): Promise<DanoServerController> {
-  if (options.protectedToolsForUser && !options.userContextResolver) {
+  if ((options.protectedToolsForUser || options.prepareWorkspaceForUser) && !options.userContextResolver) {
     throw new Error("PROTECTED_TOOLS_USER_CONTEXT_REQUIRED");
   }
   const eventBus = new BridgeEventBus(config);
@@ -73,7 +74,8 @@ export async function startDanoServer(
             danoConfig: options.danoConfig,
             credentialBroker: options.credentialBroker,
           }),
-        { sessionsRootPath: options.sessionsRootPath, protectedToolsForUser: options.protectedToolsForUser },
+        { sessionsRootPath: options.sessionsRootPath, protectedToolsForUser: options.protectedToolsForUser,
+          prepareWorkspaceForUser: options.prepareWorkspaceForUser },
       )
     : undefined;
   const backend = userRuntimeRegistry

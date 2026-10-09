@@ -6,14 +6,14 @@ export interface SupervisorRpcLimits {
   maxConcurrentOperations: number;
   maxMessageBytes: number;
 }
-type Supervisor = Pick<WorkerSupervisor, "acquire" | "use" | "release" | "retire" | "close">;
+type Supervisor = Pick<WorkerSupervisor, "prepare" | "acquire" | "use" | "release" | "retire" | "close">;
 interface Lease { owner: string; value: SupervisedWorker }
 const validId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(value);
 const validOwner = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value);
 
 /** The dedicated IPC channel belongs to the trusted HTTP host. User ownership
  * comes from its authenticated UserContext, never a browser/tool argument.
- * The root endpoint only selects existing worker executors; it never evaluates
+ * The root endpoint prepares owned workspaces or selects worker executors; it never evaluates
  * commands, imports modules, or accepts environment/UID/config overrides. */
 export function serveWorkerSupervisor(supervisor: Supervisor, channel: WorkerBrokerChannel,
   limits: SupervisorRpcLimits): { close(): Promise<void> } {
@@ -50,6 +50,11 @@ export function serveWorkerSupervisor(supervisor: Supervisor, channel: WorkerBro
   };
   const dispatch = async (request: Record<string, unknown>, signal: AbortSignal) => {
     const owner = request.owner;
+    if (request.type === "prepare") {
+      if (!validOwner(owner) || typeof request.workspace !== "string" || releasing.has(owner)) throw new Error();
+      await supervisor.prepare(owner, request.workspace);
+      return null;
+    }
     if (request.type === "acquire") {
       if (!validOwner(owner) || typeof request.workspace !== "string" || releasing.has(owner)) throw new Error();
       const value = await supervisor.acquire(owner, request.workspace);

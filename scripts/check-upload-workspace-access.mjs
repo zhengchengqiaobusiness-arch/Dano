@@ -10,6 +10,9 @@ import { promisify } from "node:util";
 // real provisioning and real unprivileged processes, never mocked UID/GID checks.
 assert.equal(process.platform, "linux");
 assert.equal(process.getuid(), 0);
+const testMask = process.env.DANO_TEST_UMASK ?? "022";
+assert.ok(["022", "077"].includes(testMask));
+const originalMask = process.umask(parseInt(testMask, 8));
 const modulePath = process.argv[2] ?? resolve(import.meta.dirname, "../apps/dano/dist/server/bridge/worker-workspace.js");
 const { provisionWorkerWorkspace, WorkerIdentityRegistry } = await import(pathToFileURL(modulePath));
 const hostUid = 1000, hostGid = 1000;
@@ -20,7 +23,7 @@ const run = (uid, gid, code, ...args) => promisify(execFile)("setpriv",
     "--input-type=module", "-e", code, ...args], { timeout: 10000 });
 try {
   await chown(root, hostUid, hostGid); await chmod(root, 0o755);
-  await mkdir(usersRoot); await chown(usersRoot, hostUid, hostGid);
+  await mkdir(usersRoot); await chown(usersRoot, hostUid, hostGid); await chmod(usersRoot, 0o755);
   await mkdir(hostStateRoot, { mode: 0o700 }); await chown(hostStateRoot, hostUid, hostGid);
   const identities = new WorkerIdentityRegistry({ directory: join(root, "identities"),
     hostUid, hostGid, firstUid: 20000, firstGid: 20000, count: 10, lockTimeoutMs: 1000 });
@@ -116,4 +119,6 @@ try {
   }
   console.log(JSON.stringify({ uploadWorkspaceAccess: "passed", cases: ["legacy", "worker-created", "fresh"],
     checks: ["host-without-groups", "upload-rename-preview-cleanup", "private-upload-repair", "model-read-write", "restart", "cross-user-denial", "symlink-denial", "hardlink-denial", "foreign-owner-denial"] }));
-} finally { await rm(root, { recursive: true, force: true }); }
+} finally { await rm(root, { recursive: true, force: true }); process.umask(originalMask); }
+const { checkLoginTransferAccess } = await import(pathToFileURL(join(resolve(modulePath, ".."), "login-transfer-preflight.js")));
+await checkLoginTransferAccess();

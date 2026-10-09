@@ -1,5 +1,6 @@
 import { expect, it, vi } from "vitest";
 import { WorkerSupervisor, type SupervisedWorker, type WorkerSupervisorOptions } from "../worker-supervisor.js";
+import * as workspaceProvisioning from "../worker-workspace.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -18,6 +19,44 @@ function supervisor(factory: (owner: string, workspace: string) => Promise<Super
   // Injected factory replaces privileged Linux provisioning in lifecycle tests.
   return new WorkerSupervisor({ maxWorkers } as WorkerSupervisorOptions, factory);
 }
+
+it("prepares without starting a worker and serializes acquisition against preparation", async () => {
+  const entered = deferred<void>(), finished = deferred<void>();
+  const provision = vi.spyOn(workspaceProvisioning, "provisionWorkerWorkspace").mockImplementation(async () => {
+    entered.resolve(); await finished.promise; return {} as never;
+  });
+  const factory = vi.fn(async (_owner: string, workspace: string) => lease(workspace));
+  const pool = new WorkerSupervisor({ maxWorkers: 1, broker: { hostUid: 1234, hostGid: 1235 } } as WorkerSupervisorOptions, factory);
+  try {
+    const pending = pool.prepare("alice", "/users/alice/workspaces/default");
+    await entered.promise;
+    expect(pool.prepare("alice", "/users/alice/workspaces/default")).toBe(pending);
+    const acquiring = pool.acquire("alice", "/users/alice/workspaces/default");
+    expect(factory).not.toHaveBeenCalled();
+    finished.resolve(); await pending; await acquiring;
+    expect(provision).toHaveBeenCalledWith(expect.objectContaining({ userId: "alice", hostUid: 1234, hostGid: 1235 }));
+    expect(factory).toHaveBeenCalledOnce();
+  } finally { finished.resolve(); await pool.close(); provision.mockRestore(); }
+});
+
+it("refuses preparation while a worker is active and waits for preparation at close", async () => {
+  const provision = vi.spyOn(workspaceProvisioning, "provisionWorkerWorkspace").mockResolvedValue({} as never);
+  const entered = deferred<void>(), finish = deferred<void>();
+  const pool = new WorkerSupervisor({ maxWorkers: 1, broker: { hostUid: 1000, hostGid: 1000 } } as WorkerSupervisorOptions,
+    async (_owner, workspace) => lease(workspace));
+  try {
+    const operation = pool.use("alice", "/users/alice/workspaces/default", async () => { entered.resolve(); await finish.promise; });
+    await entered.promise;
+    await expect(pool.prepare("alice", "/users/alice/workspaces/default")).rejects.toThrow("BUSY");
+    expect(provision).not.toHaveBeenCalled(); finish.resolve(); await operation;
+    const preparing = deferred<void>(); provision.mockImplementation(async () => { await preparing.promise; return {} as never; });
+    const pending = pool.prepare("alice", "/users/alice/workspaces/default");
+    await vi.waitFor(() => expect(provision).toHaveBeenCalledOnce());
+    let closed = false; const closing = pool.close().then(() => { closed = true; });
+    await Promise.resolve(); expect(closed).toBe(false);
+    preparing.resolve(); await Promise.all([pending, closing]);
+  } finally { finish.resolve(); await pool.close(); provision.mockRestore(); }
+});
 
 it("shares pending startup per owner/workspace and counts starts toward capacity", async () => {
   const start = deferred<SupervisedWorker>();

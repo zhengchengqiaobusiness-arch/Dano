@@ -36,9 +36,10 @@ export class WorkerSupervisor {
   readonly #retirements = new Map<string, Promise<void>>();
   readonly #releases = new Map<string, Promise<void>>();
   readonly #releasingSlots = new Set<Slot>();
+  readonly #preparations = new Map<string, { ownerId: string; promise: Promise<void> }>();
   #clock = 0;
 
-  constructor(options: WorkerSupervisorOptions, factory?: Factory) {
+  constructor(private readonly options: WorkerSupervisorOptions, factory?: Factory) {
     if (!Number.isSafeInteger(options.maxWorkers) || options.maxWorkers <= 0) throw new Error("INVALID_WORKER_SUPERVISOR_LIMIT");
     this.#maxWorkers = options.maxWorkers;
     this.#factory = factory ?? (async (ownerId, workspace) => {
@@ -54,13 +55,40 @@ export class WorkerSupervisor {
     });
   }
 
-  async acquire(ownerId: string, workspace: string): Promise<SupervisedWorker> {
+  #assertOwner(ownerId: string, workspace: string): void {
     if (typeof ownerId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(ownerId)
       || typeof workspace !== "string" || !isAbsolute(workspace)) throw new Error("INVALID_WORKER_OWNER_REQUEST");
     if (this.#closed || this.#retired.has(ownerId)) throw new Error("WORKER_SUPERVISOR_CLOSED");
     if (this.#releases.has(ownerId)) throw new Error("WORKER_SUPERVISOR_RELEASING");
+  }
+
+  /** Prepare managed permissions through the same root authority as startup,
+   * without consuming a worker slot or launching a model/backend. */
+  prepare(ownerId: string, workspace: string): Promise<void> {
+    this.#assertOwner(ownerId, workspace);
+    const canonical = resolve(workspace), key = JSON.stringify([ownerId, canonical]);
+    const previous = this.#preparations.get(key);
+    if (previous) return previous.promise;
+    const pending = { ownerId, promise: Promise.resolve().then(async () => {
+      const slot = this.#slots.get(key);
+      if (slot) await slot.creating;
+      this.#assertOwner(ownerId, canonical);
+      if (this.#slots.get(key)?.active) throw new Error("WORKER_SUPERVISOR_BUSY");
+      await provisionWorkerWorkspace({ usersRoot: this.options.usersRoot,
+        hostStateRoot: this.options.hostStateRoot, identities: this.options.identities,
+        hostUid: this.options.broker.hostUid, hostGid: this.options.broker.hostGid,
+        userId: ownerId, workspace: canonical, trustedReadPaths: this.options.trustedReadPaths });
+    }).finally(() => { if (this.#preparations.get(key) === pending) this.#preparations.delete(key); }) };
+    this.#preparations.set(key, pending);
+    return pending.promise;
+  }
+
+  async acquire(ownerId: string, workspace: string): Promise<SupervisedWorker> {
+    this.#assertOwner(ownerId, workspace);
     const canonical = resolve(workspace);
     const key = JSON.stringify([ownerId, canonical]);
+    const preparation = this.#preparations.get(key);
+    if (preparation) { await preparation.promise; this.#assertOwner(ownerId, workspace); }
     const existing = this.#slots.get(key);
     if (existing && !existing.cleanup) { existing.used = ++this.#clock; return existing.creating; }
     if (existing?.cleanup) {
@@ -105,7 +133,7 @@ export class WorkerSupervisor {
       const lease = await this.acquire(ownerId, workspace);
       const slot = this.#slots.get(JSON.stringify([ownerId, resolve(workspace)]));
       // Another acquisition may have started eviction before our await resumed.
-      if (!slot || slot.value !== lease || slot.cleanup) continue;
+      if (!slot || slot.value !== lease || slot.cleanup || this.#preparations.has(JSON.stringify([ownerId, resolve(workspace)]))) continue;
       slot.active++;
       try { return await operation(lease); }
       finally { slot.active--; slot.used = ++this.#clock; }
@@ -127,7 +155,9 @@ export class WorkerSupervisor {
     if (previous) return previous;
     const slots = [...this.#slots.entries()].filter(([, slot]) => slot.ownerId === ownerId);
     for (const [key, slot] of slots) { this.#releasingSlots.add(slot); this.#slots.delete(key); }
-    const closing = this.#closeSlots(slots.map(([, slot]) => slot)).then(() => {
+    const preparations = [...this.#preparations.values()].filter(item => item.ownerId === ownerId);
+    const closing = Promise.all([this.#closeSlots(slots.map(([, slot]) => slot)),
+      ...preparations.map(item => item.promise.catch(() => {}))]).then(() => {
       for (const [, slot] of slots) this.#releasingSlots.delete(slot);
       this.#releases.delete(ownerId);
     });
@@ -141,7 +171,8 @@ export class WorkerSupervisor {
     this.#closed = true;
     const slots = [...this.#slots.values()];
     this.#slots.clear();
-    this.#closing = this.#waitForCleanup([this.#closeSlots(slots), ...this.#retirements.values(), ...this.#releases.values()]);
+    this.#closing = this.#waitForCleanup([this.#closeSlots(slots), ...this.#retirements.values(), ...this.#releases.values(),
+      ...[...this.#preparations.values()].map(item => item.promise.catch(() => {}))]);
     return this.#closing;
   }
 

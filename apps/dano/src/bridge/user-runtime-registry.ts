@@ -27,6 +27,8 @@ export type UserBackendFactory = (
 
 export interface UserRuntimeRegistryOptions {
   readonly sessionsRootPath?: string;
+  /** Trusted launcher capability; prepares managed access without starting a backend. */
+  readonly prepareWorkspaceForUser?: (context: UserContext, workspace: string) => Promise<void>;
   readonly protectedToolsForUser?: (context: UserContext, paths: { sessionsRootPath: string }) => Promise<ProtectedSessionTools>;
 }
 
@@ -111,6 +113,19 @@ export class UserRuntimeRegistry {
         "workspaces",
         "default",
       );
+      if (this.options.prepareWorkspaceForUser) {
+        let workspaces: fs.Dirent[];
+        try { workspaces = await fs.promises.readdir(path.join(source.folderPath, "workspaces"), { withFileTypes: true }); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          workspaces = [];
+        }
+        const names = new Set(["default", ...workspaces.filter(entry => entry.isDirectory()).map(entry => entry.name)]);
+        for (const name of names) {
+          await this.options.prepareWorkspaceForUser(target, path.join(target.folderPath, "workspaces", name));
+        }
+        options.assertIdle();
+      }
       const journal = new FileTransferJournal();
       try {
         await mergeDirectory(source.folderPath, target.folderPath, journal, {

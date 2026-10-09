@@ -109,6 +109,14 @@ export class WorkerSupervisorClient {
   }
 
   /** Call only with the server's resolved UserContext and installation-owned paths. */
+  async prepareWorkspace(context: UserContext, workspace: string): Promise<void> {
+    const root = resolve(context.folderPath, "workspaces");
+    const canonical = resolve(workspace);
+    if (resolve(canonical, "..") !== root || canonical === root) throw new Error("WORKER_OWNER_MISMATCH");
+    await this.#request({ type: "prepare", owner: context.user.id, workspace: canonical });
+  }
+
+  /** Call only with the server's resolved UserContext and installation-owned paths. */
   async profile(context: UserContext, paths: Pick<ProtectedSessionTools, "trustedSkillPaths" | "providerPythonModuleDirectory">): Promise<ProtectedSessionTools> {
     const owner = context.user.id;
     const root = resolve(context.folderPath, "workspaces");

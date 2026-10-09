@@ -316,10 +316,30 @@ rejecting symlinks and foreign owners. Legacy content adoption excludes managed
 upload storage. Managed upload files retain host ownership and worker group
 read/write access (`0660`), including existing private files previously adopted
 by that worker. Repair rejects symlinks, hard links and foreign file owners.
+Anonymous login transfer prepares the target's default and incoming named
+workspaces through the trusted supervisor before copying any files, while the
+existing user mutation barrier is held. This preparation uses the same dynamic
+identity and managed-upload rules without starting a backend or worker. It also
+works when the target has only persisted data and no runtime in this process.
+Preparation failures leave ownership uncommitted; transfer failures continue
+to roll back copied files. Safe, idempotent directory permission preparation is
+retained rather than restoring an unsafe uploads mode.
 To verify real Linux UID/GID access, run
 `node scripts/check-upload-workspace-access.mjs` after building the server in a
 disposable root Linux container without production mounts. The check covers
 upload/rename/preview/cleanup, model access, restarts and cross-user denial.
+Run it with `DANO_TEST_UMASK=022` and `DANO_TEST_UMASK=077`. It also invokes the
+built `login-transfer-preflight.js`: real non-root host IPC prepares a cold
+target, migrates synthetic uploads, rejects linked directories and rolls back
+a failed commit, without starting workers. Fixture source readability and
+parent traversal are checked before the transfer assertions.
+
+An image rollback does not restore persistent directory owners or modes. Keep
+the identity pool and runtime data intact; validate managed upload access under
+the effective host/worker identities before accepting the rollback. If a rollback
+image predates the managed-upload contract, use a compatible accepted image or
+a reviewed, narrowly scoped repair through the same privileged authority. Do
+not recursively chown users or copy old runtime data over current sessions.
 
 The per-User tool process loads only protected, fixed Pi/Heimdall code. It permits
 the installed setuid Bubblewrap to initialize namespaces; Bubblewrap then sets
@@ -1265,6 +1285,30 @@ DANO_GIT_REF=main \
 pnpm run deploy:release
 ```
 
+Release Build verifies each tracked file against the selected Git tree before
+building and normalizes source directories/files/executables to 0755/0644/0755.
+The container build records the exact revision in its OCI label. Dirty, untracked,
+ignored, linked or special-file contexts fail before production replacement.
+For a manual build, clone into a disposable directory and run:
+
+```bash
+node scripts/deploy-build-context.mjs prepare <disposable-checkout> <full-commit-sha>
+```
+
+The verified archive fallback is:
+
+```bash
+node scripts/deploy-build-context.mjs archive <clean-checkout> <temporary-parent> <full-commit-sha>
+```
+
+Build from the returned directory with
+`--label org.opencontainers.image.revision=<full-commit-sha>` and retain the receipt.
+The archive helper uses Git's tree, extracts without preserving owner/mode and
+verifies content before setting permissions. Remove only its returned temporary
+directory after acceptance. Never pass runtime data or the deploy-control
+directory to a build-context helper, and never use permission-preserving root
+tar extraction as a substitute.
+
 Dependency installs use `https://mirrors.cloud.tencent.com/npm/` by default.
 Set `NPM_REGISTRY` to use npmjs.org or a private registry for a release build.
 If the builder cannot reach the base Debian apt source, set `DANO_APT_MIRROR`
@@ -1283,15 +1327,10 @@ DANO_IMAGE=dano-app:local docker compose \
 
 `scripts/deploy-compose.mjs` uses the same `--no-build` path.
 
-如果绕过 `scripts/deploy-release.mjs` 手动运行 Compose，需要确认持久化运行目录
-可被容器内 `node` 用户写入：
-
-```bash
-mkdir -p /opt/dano/runtime-data
-chown -R 1000:1000 /opt/dano/runtime-data
-```
-
-全新 release 部署会自动处理这一步。
+手动 Compose 启动也使用统一容器入口，由 supervisor 按配置的 host/worker
+身份准备具名目录。复用现有运行数据时必须保留 worker 的持久化属主和身份池，
+不能对运行目录执行递归 chown。全新 Release Build 只准备运行根目录；用户目录
+及受管理 uploads 的权限由受控的工作区准备操作处理。
 
 The Dockerfile intentionally uses `node:22-bookworm-slim` instead of
 `node:22-alpine`. On the CentOS 7 publish host

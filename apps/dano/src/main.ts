@@ -1027,6 +1027,7 @@ function migrateHeimdallRuntimeSettings(path: string): void {
 /** Installed supervisor entrypoint injection; never loaded from user config. */
 export interface DanoMainServices {
   protectedToolsForUser?: StartDanoServerOptions["protectedToolsForUser"];
+  prepareWorkspaceForUser?: StartDanoServerOptions["prepareWorkspaceForUser"];
   signal?: AbortSignal;
 }
 
@@ -1117,6 +1118,7 @@ async function runDanoServer(
       authHttpHandler: oauthAuthentication,
       credentialBroker,
       protectedToolsForUser: services.protectedToolsForUser,
+      prepareWorkspaceForUser: services.prepareWorkspaceForUser,
       onShutdown: () => resolveStopped?.(),
     });
   } catch (error) {

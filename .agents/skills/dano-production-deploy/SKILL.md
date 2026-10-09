@@ -99,6 +99,8 @@ Require exit zero and record its JSON `productName`, `source`, and `targetSha` i
 
 Build from the proven target checkout and current Dockerfile. Prefer a no-cache build for production updates. Pass registry selection only through the current supported build arguments; follow the Dockerfile's current npm and Debian apt mirror order exactly. Do not patch mirrors on the server or inject secrets into build arguments or logs.
 
+Prepare every disposable Git build checkout with `node scripts/deploy-build-context.mjs prepare <checkout> <target_sha>` before building. The helper verifies tracked content against the exact Git tree and sets directories/files/executables to 0755/0644/0755, rejecting dirty/untracked/ignored inputs, links and special files. `deploy:release` calls this gate automatically. When a verified Git archive is required, use `node scripts/deploy-build-context.mjs archive <clean-checkout> <temporary-parent> <target_sha>`; use its returned directory and SHA for the build manifest and remove only that directory afterward. Do not use a permission-preserving root tar extraction or run this helper on runtime/deploy-control directories. Include the exact revision OCI label when building manually.
+
 Capture the build exit status and structured stage results without returning raw output that may contain credentials. Reject a pre-existing target tag unless its image ID and proven provenance already match this exact run. Then verify inside the built image:
 
 - root package version equals the release manifest;
@@ -173,6 +175,7 @@ Complete all of these on the new deployment:
 5. Inspect the Dano page console and confirm there are no deployment-related errors or warnings.
 6. When SYSTEM/productName changes or this run repairs prompt drift, create a new session and ask for the assistant identity. Verify that the answer uses the effective product name and contains no `{产品名称}`.
 7. Execute any PR-specific UI/mobile acceptance in addition to this baseline, preserving necessary screenshots or browser evidence.
+8. For workspace-permission/auth changes, upload the fixed synthetic image as an Anonymous User, log in to an existing provider user whose persisted workspace has not initialized in this app process, and verify identity, transcript/attachment preservation, model read and logout. Use only isolated acceptance data to establish old managed-upload metadata; never alter a production user's permissions merely to set up a test. Run the built login-transfer preflight in a disposable root container first.
 
 If a previously working step fails, inspect the final URL, TLS state, active tab, browser-control connection, visible DOM, model chain, network requests, loaded static assets, container state, and safe structured diagnostics. Recover and retry the same path. Do not lower the bar or silently replace it with API checks. If in-app Browser access is unavailable or any item remains incomplete, deployment acceptance is incomplete.
 
@@ -190,6 +193,8 @@ End the run in exactly one reported state: `accepted`, `rolled back`, or `held p
 ## Phase 9: Cleanup and rollback discipline
 
 Keep the previous image until every acceptance item passes. If a release regression is confirmed, restore the previous `DANO_IMAGE` and saved repository-managed deploy config, run the minimal Compose recreate for Dano app/nginx, and repeat health checks. Do not roll back runtime data or user config unless a release-specific migration explicitly requires and documents it.
+
+Image rollback does not undo persistent permission metadata. Check managed upload access with the rollback image's effective host/worker identity contract, including anonymous attachment transfer. A rollback image predating the managed-upload repair may fail on old worker-owned directories; choose a compatible accepted image or perform only a reviewed repair through the same trusted provisioning authority. Never compensate with recursive chown/chmod, 0777, root HTTP execution or disabling isolation.
 
 After success:
 

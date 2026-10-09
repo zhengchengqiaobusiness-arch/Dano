@@ -15,6 +15,51 @@ afterEach(() => {
 });
 
 describe("UserRuntimeRegistry owner transfer", () => {
+  it("prepares a cold target before copying uploads without starting its backend", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-cold-transfer-"));
+    runtimeRoots.push(root);
+    const source = userContext(root, "anonymous-source");
+    const target = userContext(root, "authenticated-target");
+    const workspace = path.join(target.folderPath, "workspaces", "default");
+    const file = path.join("uploads", `${"a".repeat(64)}.txt`);
+    writeText(path.join(source.folderPath, "workspaces", "default", file), "synthetic upload");
+    const backend = vi.fn(async () => { throw new Error("must not start backend"); });
+    const prepareWorkspaceForUser = vi.fn(async (context: UserContext, directory: string) => {
+      expect(context).toBe(target);
+      expect(directory).toBe(workspace);
+      expect(fs.existsSync(path.join(workspace, file))).toBe(false);
+    });
+    const registry = new UserRuntimeRegistry(backend, { prepareWorkspaceForUser });
+    const idle = vi.fn();
+    await registry.transferOwnership(source, target, {
+      assertIdle: idle,
+      async commitOwnership() {
+        expect(prepareWorkspaceForUser).toHaveBeenCalledOnce();
+        expect(idle).toHaveBeenCalledTimes(2);
+        expect(fs.readFileSync(path.join(workspace, file), "utf8")).toBe("synthetic upload");
+      },
+    });
+    expect(backend).not.toHaveBeenCalled();
+    await registry.dispose();
+  });
+
+  it("does not copy or commit when target preparation fails", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-unsafe-transfer-"));
+    runtimeRoots.push(root);
+    const source = userContext(root, "anonymous-source"), target = userContext(root, "target");
+    writeText(path.join(source.folderPath, "preferences", "keep.txt"), "retained");
+    const registry = new UserRuntimeRegistry(async () => { throw new Error("unused"); }, {
+      prepareWorkspaceForUser: async () => { throw new Error("UNSAFE_WORKER_WORKSPACE"); },
+    });
+    const commitOwnership = vi.fn(async () => {});
+    await expect(registry.transferOwnership(source, target, { assertIdle() {}, commitOwnership }))
+      .rejects.toThrow("UNSAFE_WORKER_WORKSPACE");
+    expect(commitOwnership).not.toHaveBeenCalled();
+    expect(fs.existsSync(target.folderPath)).toBe(false);
+    expect(fs.readFileSync(path.join(source.folderPath, "preferences", "keep.txt"), "utf8")).toBe("retained");
+    await registry.dispose();
+  });
+
   it("keeps a newly transferred protected session root private for collection", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-private-session-transfer-"));
     runtimeRoots.push(root);
