@@ -7,11 +7,12 @@ import { packageRoot, docDir, skillDir as skillPath } from "../paths.mjs";
 import { appendEvidence, getEvidence, listEvidence, appendGoal, readGoal } from "../evidence/store.mjs";
 import { runAction } from "../browser/actions.mjs";
 import { persistBrowserSession, withPage } from "../browser/session.mjs";
-import { takeSnapshot } from "../browser/snapshot.mjs";
+import { overlayControlFacts, takeSnapshot } from "../browser/snapshot.mjs";
 import { compactNetworkIndex, getNetwork, listNetwork, networkBodyForModel, requestKeyIndex } from "../browser/network.mjs";
 import { applyVerifyToRecording } from "../session.mjs";
 import { readSkillFile, skillIdFor, writeRuntimeConfig, writeSkillFile } from "../skillpack/files.mjs";
-import { actionEvidenceSummary, clickedLabels, filledLabels, finishSkill } from "../skillpack/verify.mjs";
+import { actionEvidenceSummary, authStoppedOutput, clickedLabels, filledLabels, finishSkill } from "../skillpack/verify.mjs";
+import { redactSecrets } from "../auth-vault.mjs";
 import { GUIDE_NAMES, guideBody } from "./guides.mjs";
 import { logLine } from "../log.mjs";
 
@@ -27,14 +28,14 @@ const GUIDE_FILES = {
 const TOOL_SPECS = [
   { name: "browser_open", description: "打开入口同源的地址。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
   { name: "browser_snapshot", description: "读取当前页面快照树。只点树里的 [ref=fN:eN@数字]。goal_exact / overlay_exact / row_facts 是查找表，不是点击清单。", parameters: { type: "object", properties: {} } },
-  { name: "browser_act", description: "ref 整段照抄最近一次 snapshot 树里的 [ref=fN:eN@数字]。@ 后数字对不上就重新 snapshot，只点新树。同名不要挑第一个。没有 ref 就停。不要并行多次 browser_act。同一张树上要改多格，用一次 fill_fields。返回 clicked、requests、snapshot。requests 空只说明这一下没有 xhr/fetch。in_overlay 表示点的是 overlay_exact 里的控件；layer_idle 表示这层动了但没有 xhr。needs_click 表示这一格不能直接填，先 click 同一个 ref 再填。behind_overlay 时先看 overlay_exact。弹层开着时先读 overlay_exact 和这一下的 requests；还没采用请求就不要点会关掉这层的控件。page_unchanged 时换 ref。uploaded 表示文件已写入。needs_upload 时对同一 ref 调用 upload。", parameters: { type: "object", properties: { action: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, fields: { type: "array" }, key: { type: "string" }, file_path: { type: "string" } }, required: ["action"] } },
+  { name: "browser_act", description: "ref 整段照抄最近一次 snapshot 树里的 [ref=fN:eN@数字]。@ 后数字对不上就重新 snapshot，只点新树。同名不要挑第一个。没有 ref 就停。不要并行多次 browser_act。同一张树上要改多格，用一次 fill_fields。返回 clicked、requests、snapshot。requests 空只说明这一下没有 xhr/fetch。overlay_fields 是当前层控件实值，empty 表示空；对照目标决定还要不要填，不要只看 filled。in_overlay 表示点的是 overlay_exact 里的控件；layer_idle 表示这层动了但没有 xhr。needs_click 表示这一格不能直接填，先 click 同一个 ref 再填。behind_overlay 时先看 overlay_exact。弹层开着时先读 overlay_exact 和这一下的 requests；还没采用请求就不要点会关掉这层的控件。page_unchanged 时换 ref。uploaded 表示文件已写入。needs_upload 时对同一 ref 调用 upload。", parameters: { type: "object", properties: { action: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, fields: { type: "array" }, key: { type: "string" }, file_path: { type: "string" } }, required: ["action"] } },
   { name: "browser_screenshot", description: "把当前画面作为图像送回。", parameters: { type: "object", properties: { ref: { type: "string" }, as_image: { type: "boolean" } } } },
   { name: "network_list", description: "列出本场全部 xhr/fetch 索引（id/method/path/keys/response_keys）。写字段时看这份 listed，不要只看点击口袋。", parameters: { type: "object", properties: { after_id: { type: "string" }, action_id: { type: "string" } } } },
   { name: "network_get", description: "按 id 读取一条请求。正文过大则省略并给出 response_keys，用 evidence_get 同 id 取全文。body_missing 表示没有正文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
   { name: "evidence_get", description: "按 id 读取一条证据全文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
   { name: "read_page_asset", description: "读取本场已捕获、与入口同源的 javascript 响应。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
   { name: "read_guide", description: "写 Skill 前读取一份文档。name 见返回的 names。鉴权、提问、活选项和写作方法都从这里读，写进 SKILL.md、scripts/client.py、references/api.md。本场没有 CONTRACT.json 和 flow.py。", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
-  { name: "assist", description: "登录或验证码挡住时调用。这次调用会停住，直到人在预览里处理完并确认。返回里的 snapshot 才是确认后的当前页，从那张快照接着做。", parameters: { type: "object", properties: { reason: { type: "string" } }, required: ["reason"] } },
+  { name: "assist", description: "当前页被登录框或验证码挡住时调用。run_skill_command 的 401 或打包凭证过期不要调用。这次调用会停住，直到人在预览里处理完并确认。返回里的 snapshot 才是确认后的当前页，从那张快照接着做。", parameters: { type: "object", properties: { reason: { type: "string" } }, required: ["reason"] } },
   { name: "append_goal", description: "只填充目标里仍为空的键，写入原句。", parameters: { type: "object", properties: { key: { type: "string" }, text: { type: "string" } }, required: ["key", "text"] } },
   { name: "write_skill_file", description: "只写 SKILL.md、scripts/client.py、references/api.md。", parameters: { type: "object", properties: { relative_path: { type: "string" }, contents: { type: "string" } }, required: ["relative_path", "contents"] } },
   { name: "read_skill_file", description: "读取已写的 Skill 文件。", parameters: { type: "object", properties: { relative_path: { type: "string" } }, required: ["relative_path"] } },
@@ -63,7 +64,41 @@ function coerceArgs(args, schema) {
 }
 
 function toolText(payload) {
-  return { content: [{ type: "text", text: JSON.stringify(payload) }], details: payload };
+  return { content: [{ type: "text", text: redactSecrets(JSON.stringify(payload)) }], details: payload };
+}
+
+export function packedAuthAssist(reason) {
+  return /auth\.local\.json|headers\.Authorization|DANO_AUTH|从请求头复制/i.test(String(reason || ""));
+}
+
+function spawnClient(argv, cwd, authFile) {
+  return new Promise((resolve) => {
+    const child = spawn(argv[0], argv.slice(1), {
+      cwd,
+      env: {
+        ...process.env,
+        CABP_AUTH_FILE: authFile,
+        DANO_AUTH_FILE: authFile,
+      },
+      shell: false,
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve({ code: 124, stdout, stderr: `${stderr}\ntimeout` });
+    }, 30000);
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code: code ?? 1, stdout, stderr });
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ code: 127, stdout, stderr: error.message });
+    });
+  });
 }
 
 export function toolNames() {
@@ -128,7 +163,7 @@ export function hostTools(recording) {
     },
     async read_guide(args) {
       const name = path.basename(String(args.name || ""));
-      if (!name || name === "index") {
+      if (!name || name === "index" || name === "names" || name === "list") {
         return { ok: true, names: GUIDE_NAMES, hint: "逐个 read_guide 这些 name" };
       }
       if (!GUIDE_FILES[name]) return { ok: false, error: "unknown_guide", names: GUIDE_NAMES };
@@ -138,6 +173,18 @@ export function hostTools(recording) {
       return { ok: true, name, evidence_id: saved.id, text: `${scope}\n\n${text}` };
     },
     async assist(args) {
+      if (packedAuthAssist(args.reason)) {
+        recording.skillId = skillId();
+        await persistBrowserSession(id).catch(() => null);
+        await writeRuntimeConfig(recording, recording.skillId);
+        const snapshot = await tools.browser_snapshot();
+        return {
+          ok: false,
+          error: "assist_not_for_packed_auth",
+          hint: "打包凭证过期不要 assist，不要把凭证写进对话。继续写三文件；读命令 401 标 auth_expired。",
+          snapshot,
+        };
+      }
       recording.paused = true;
       recording.status = "waiting_operator";
       recording.assistReason = String(args.reason || "");
@@ -183,33 +230,13 @@ export function hostTools(recording) {
         return { ok: false, error: "missing_file", path: "scripts/client.py" };
       }
       const authFile = path.join(cwd, "config", "auth.local.json");
-      const result = await new Promise((resolve) => {
-        const child = spawn(argv[0], argv.slice(1), {
-          cwd,
-          env: {
-            ...process.env,
-            CABP_AUTH_FILE: authFile,
-            DANO_AUTH_FILE: authFile,
-          },
-          shell: false,
-        });
-        let stdout = "";
-        let stderr = "";
-        const timer = setTimeout(() => {
-          child.kill();
-          resolve({ code: 124, stdout, stderr: `${stderr}\ntimeout` });
-        }, 30000);
-        child.stdout.on("data", (chunk) => { stdout += chunk; });
-        child.stderr.on("data", (chunk) => { stderr += chunk; });
-        child.on("close", (code) => {
-          clearTimeout(timer);
-          resolve({ code: code ?? 1, stdout, stderr });
-        });
-        child.on("error", (error) => {
-          clearTimeout(timer);
-          resolve({ code: 127, stdout, stderr: error.message });
-        });
-      });
+      let result = await spawnClient(argv, cwd, authFile);
+      if (result.code !== 0 && authStoppedOutput(`${result.stdout}\n${result.stderr}`)) {
+        await persistBrowserSession(id).catch(() => null);
+        await writeRuntimeConfig(recording, recording.skillId);
+        result = await spawnClient(argv, cwd, authFile);
+        result.repacked = true;
+      }
       const saved = await appendEvidence(id, {
         kind: "verify",
         ok: result.code === 0,
@@ -220,6 +247,17 @@ export function hostTools(recording) {
         body: result.stdout,
         body_missing: false,
       });
+      if (result.code !== 0 && authStoppedOutput(`${result.stdout}\n${result.stderr}`)) {
+        return {
+          ok: false,
+          error: "auth_expired",
+          hint: "打包凭证过期。不要 assist，不要把凭证写进对话。继续写三文件，读命令失败可以停止。",
+          evidence_id: saved.id,
+          code: result.code,
+          stdout: redactSecrets(result.stdout),
+          stderr: redactSecrets(result.stderr),
+        };
+      }
       return { ok: result.code === 0, evidence_id: saved.id, code: result.code, stdout: result.stdout, stderr: result.stderr };
     },
     async verify_skill() {
@@ -236,6 +274,12 @@ export function hostTools(recording) {
       const snaps = await listEvidence(id, { kinds: ["snapshot"], limit: 1 });
       let snapshot = null;
       if (snaps[0]) snapshot = await getEvidence(id, snaps[0].id);
+      let overlay_fields = [];
+      try {
+        overlay_fields = await overlayControlFacts(id);
+      } catch {
+        overlay_fields = [];
+      }
       return {
         goal,
         snapshot,
@@ -244,6 +288,8 @@ export function hostTools(recording) {
         requests: requestKeyIndex(id),
         clicked: clickedLabels(evidence),
         filled: filledLabels(evidence),
+        overlay_fields,
+        empty_overlay: overlay_fields.filter((row) => row.empty).map((row) => row.name || row.role),
       };
     },
   };
@@ -263,7 +309,8 @@ export function wrapHostTools(host) {
       logLine(`[cabp] 开始 ${spec.name} ${argText}`);
       const raw = await host[spec.name](spec.name === "browser_screenshot" ? { ...args, as_image: true } : args);
       const requests = Array.isArray(raw?.requests) ? raw.requests.map((row) => `${row.method || ""} ${row.path || ""} ${row.status || ""}`.trim()).join(" | ") : "";
-      logLine(`[cabp] 结束 ${spec.name} ${Date.now() - started}ms ok=${raw?.ok !== false} error=${raw?.error || ""} clicked=${raw?.clicked || ""} uploaded=${Boolean(raw?.uploaded)} filled=${(raw?.filled || []).join("|")} requests=${requests}`);
+      const empty = Array.isArray(raw?.empty_overlay) && raw.empty_overlay.length ? ` empty=${raw.empty_overlay.join("|")}` : "";
+      logLine(`[cabp] 结束 ${spec.name} ${Date.now() - started}ms ok=${raw?.ok !== false} error=${raw?.error || ""} clicked=${raw?.clicked || ""} uploaded=${Boolean(raw?.uploaded)} filled=${(raw?.filled || []).join("|")}${empty} requests=${requests}`);
       if (raw?.__image && raw.data && (args.as_image === true || raw.as_image === true)) {
         return {
           content: [

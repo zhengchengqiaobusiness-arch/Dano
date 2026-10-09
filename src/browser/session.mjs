@@ -1,8 +1,17 @@
-import { headersFromStorageState, writeAuthVault } from "../auth-vault.mjs";
+import { headersFromStorageState, mergePackedHeaders, writeAuthVault } from "../auth-vault.mjs";
 import { originFromUrl, saveStorageState } from "../session-store.mjs";
-import { attachNetwork } from "./network.mjs";
+import { attachCredentialCapture, attachNetwork, latestCredentialHeaders } from "./network.mjs";
 
 const sessions = new Map();
+
+export const DESKTOP_VIEWPORT = { width: 1440, height: 900 };
+
+export function desktopViewport(raw) {
+  const width = Math.round(Number(raw?.width) || 0);
+  const height = Math.round(Number(raw?.height) || 0);
+  if (width >= 1280 && height >= 720) return { width, height };
+  return { ...DESKTOP_VIEWPORT };
+}
 
 export function browserSession(recordingId) {
   return sessions.get(recordingId) || null;
@@ -11,13 +20,14 @@ export function browserSession(recordingId) {
 export async function openBrowser({ recordingId, url, storageState, viewport }) {
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({ headless: true });
-  const size = viewport?.width && viewport?.height ? viewport : { width: 1440, height: 900 };
+  const size = desktopViewport(viewport);
   const scale = 1;
   const contextOptions = { viewport: size, deviceScaleFactor: scale };
   if (storageState) contextOptions.storageState = storageState;
   const context = await browser.newContext(contextOptions);
   attachNetwork(recordingId, context);
   const page = await context.newPage();
+  attachCredentialCapture(recordingId, context, page);
   const state = {
     browser, context, page, viewport: size,
     origin: originFromUrl(url),
@@ -95,7 +105,7 @@ export async function persistBrowserSession(recordingId) {
   try {
     const saved = await state.context.storageState();
     const url = state.page?.url?.() || state.origin;
-    const headers = headersFromStorageState(saved);
+    const headers = mergePackedHeaders(headersFromStorageState(saved), latestCredentialHeaders(recordingId));
     if (Object.keys(headers).length) await writeAuthVault(recordingId, headers);
     return await saveStorageState(url, saved);
   } catch {

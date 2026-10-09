@@ -16,7 +16,7 @@ export function isSealedHeaderValue(value) {
   return text.startsWith("[sealed:") || text.includes("****");
 }
 
-const CREDENTIAL_HEADERS = new Set(["authorization", "tenant-id", "cookie", "x-token", "x-access-token"]);
+const CREDENTIAL_HEADERS = new Set(["authorization", "tenant-id", "cookie", "x-token", "x-access-token", "token"]);
 
 export function usableAuthHeaders(raw) {
   const headers = {};
@@ -76,6 +76,22 @@ function unwrapStorageValue(raw) {
   return text;
 }
 
+export function redactSecrets(text) {
+  return String(text || "")
+    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/(Authorization["']?\s*[:=]\s*["']?)(\S+)/gi, "$1[redacted]")
+    .replace(/((?:refresh[_-]?token)["']?\s*[:=]\s*["']?)(\S+)/gi, "$1[redacted]");
+}
+
+function looksLikeAccessToken(name, value) {
+  if (/tenant/i.test(name) || /refresh/i.test(name)) return false;
+  if (!/(token|auth|jwt|authorization|access)/i.test(name)) return false;
+  const text = String(value || "").trim();
+  if (text.length < 16 || text.length > 512) return false;
+  if (text.startsWith("{") || text.startsWith("[")) return false;
+  return /^(Bearer\s+)?[\w.+\-/=!]+$/i.test(text);
+}
+
 export function headersFromStorageState(state) {
   const headers = {};
   const origins = Array.isArray(state?.origins) ? state.origins : [];
@@ -85,10 +101,8 @@ export function headersFromStorageState(state) {
       const name = String(row?.name || "");
       const value = unwrapStorageValue(row?.value);
       if (!value || isSealedHeaderValue(value)) continue;
-      if (/^(ACCESS_TOKEN|Admin-Token|token)$/i.test(name) || /access_token/i.test(name)) {
-        headers.Authorization = asAuthorization(value);
-      }
       if (/^tenantId$|^tenant-id$|^TENANT_ID$/i.test(name)) headers["Tenant-Id"] = value;
+      if (looksLikeAccessToken(name, value)) headers.Authorization = asAuthorization(value);
     }
   }
   return usableAuthHeaders(headers);
@@ -135,9 +149,19 @@ export function issuedCredential(raw) {
 export function pickCredentialHeaders(raw) {
   const picked = {};
   for (const [key, value] of Object.entries(raw || {})) {
-    if (CREDENTIAL_HEADERS.has(String(key).toLowerCase())) picked[key] = value;
+    const lower = String(key).toLowerCase();
+    if (CREDENTIAL_HEADERS.has(lower) || /(token|auth|tenant|session)/i.test(lower)) picked[key] = value;
   }
   return usableAuthHeaders(picked);
+}
+
+export function mergePackedHeaders(vaultHeaders, liveHeaders) {
+  const live = usableAuthHeaders(liveHeaders);
+  const vault = usableAuthHeaders(vaultHeaders);
+  if (!Object.keys(live).length) return vault;
+  const out = { ...vault, ...live };
+  if (!Object.hasOwn(live, "Authorization")) delete out.Authorization;
+  return usableAuthHeaders(out);
 }
 
 export function replayHeaders(credential, vaultHeaders) {
@@ -209,8 +233,9 @@ export async function writeAuthVault(recordingId, headers, extra = {}) {
   const file = vaultPath(recordingId);
   await mkdir(path.dirname(file), { recursive: true });
   const previous = await readAuthVault(recordingId);
+  const incoming = usableAuthHeaders(headers);
   const payload = {
-    headers: { ...usableAuthHeaders(previous.headers), ...usableAuthHeaders(headers) },
+    headers: Object.keys(incoming).length ? mergePackedHeaders(previous.headers, incoming) : usableAuthHeaders(previous.headers),
   };
   const credential = credentialRecord(extra.credential, previous) || previous.credential;
   if (credential?.url && credential?.method) payload.credential = credential;

@@ -16,7 +16,7 @@
 
 `show-config` 只打印 tenant / subsystem / base_url / 是否已有鉴权头，不打印头的值。
 
-HTTP 401，或响应声明账号未登录，同样抛 `AuthExpired`。
+HTTP 401，或响应声明账号未登录，同样抛 `AuthExpired`。这是打包凭证问题，不要当登录页去 assist，不要把凭证写进对话。
 
 ## 签发访问凭证的请求
 

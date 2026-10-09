@@ -3,7 +3,7 @@ import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { originFromUrl } from "../session-store.mjs";
 import { browserSession, raceWall, withPage } from "./session.mjs";
-import { locatorFor, overlayHasRef, takeSnapshot, yamlFingerprint } from "./snapshot.mjs";
+import { locatorFor, overlayControlFacts, overlayHasRef, takeSnapshot, yamlFingerprint } from "./snapshot.mjs";
 import { beginAction, endAction, listNetwork, waitForAction } from "./network.mjs";
 import { logLine } from "../log.mjs";
 
@@ -77,6 +77,21 @@ function clickUnreachable(error) {
 
 async function snapshotAfter(recordingId, budgetMs = 3000) {
   return takeSnapshot(recordingId, { budgetMs });
+}
+
+async function withOverlayFacts(recordingId, result) {
+  if (!result) return result;
+  try {
+    const overlay_fields = await overlayControlFacts(recordingId);
+    if (!overlay_fields.length) return result;
+    return {
+      ...result,
+      overlay_fields,
+      empty_overlay: overlay_fields.filter((row) => row.empty).map((row) => row.name || row.role),
+    };
+  } catch {
+    return result;
+  }
 }
 
 export function runAction(recordingId, input) {
@@ -155,7 +170,11 @@ async function perform(recordingId, input) {
         }
         if (item.label) filled.push(item.label);
       }
-      return { ok: true, filled, snapshot: state.lastPublished || await snapshotAfter(recordingId) };
+      return withOverlayFacts(recordingId, {
+        ok: true,
+        filled,
+        snapshot: state.lastPublished || await snapshotAfter(recordingId),
+      });
     }
     if (!hit) {
       logLine(`[browser] ${action} ref=${input.ref || ""} stale`);
@@ -285,12 +304,12 @@ async function perform(recordingId, input) {
     }
     const requests = requestsDuring();
     if (action === "fill" || action === "select") {
-      return {
+      return withOverlayFacts(recordingId, {
         ok: true,
         filled,
         requests,
         snapshot: state.lastPublished || await snapshotAfter(recordingId),
-      };
+      });
     }
     const beforeSnap = state.lastPublished;
     const prevKey = state.lastYamlKey || "";
@@ -302,7 +321,7 @@ async function perform(recordingId, input) {
     const inOverlay = action === "click" && overlayHasRef(beforeSnap?.text, input.ref);
     const layerIdle = inOverlay && !requests.length;
     return action === "click"
-      ? {
+      ? withOverlayFacts(recordingId, {
           ok: true,
           clicked: hit.label || "",
           requests,
@@ -310,7 +329,7 @@ async function perform(recordingId, input) {
           ...(inOverlay ? { in_overlay: true } : {}),
           ...(layerIdle ? { layer_idle: true } : {}),
           ...(state.pageStall >= 2 ? { page_unchanged: true } : {}),
-        }
+        })
       : { ok: true, filled, requests, snapshot };
   } finally {
     state.agentClick = false;

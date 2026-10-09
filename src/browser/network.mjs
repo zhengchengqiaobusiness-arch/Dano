@@ -3,7 +3,7 @@ import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { appendEvidence } from "../evidence/store.mjs";
 import { requestIndexRow, responseKeyPreview } from "../skillpack/request-keys.mjs";
-import { noteLoginBody, noteRequestHeaders, pickCredentialHeaders } from "../auth-vault.mjs";
+import { mergePackedHeaders, noteLoginBody, noteRequestHeaders, pickCredentialHeaders, usableAuthHeaders } from "../auth-vault.mjs";
 
 const BODY_OMIT_BYTES = 16384;
 const KEY_PARSE_BYTES = 32768;
@@ -63,6 +63,31 @@ export function attachNetwork(recordingId, context) {
     }
     state.items.push(item);
     request._cabpId = id;
+    const applyHeaders = (raw) => {
+      const merged = { ...requestHeaders, ...(raw && typeof raw === "object" ? raw : {}) };
+      item.request_headers = mergePackedHeaders(item.request_headers, pickCredentialHeaders(merged));
+      noteRequestHeaders(recordingId, merged);
+    };
+    Promise.resolve().then(async () => {
+      try {
+        if (typeof request.headersArray === "function") {
+          const rows = await request.headersArray();
+          const obj = {};
+          for (const row of rows || []) {
+            if (row?.name) obj[row.name] = row.value;
+          }
+          applyHeaders(obj);
+        }
+      } catch {
+        // headersArray 不是所有协议都有
+      }
+      try {
+        const all = typeof request.allHeaders === "function" ? await request.allHeaders() : {};
+        applyHeaders(all);
+      } catch {
+        // allHeaders 可能被浏览器藏掉
+      }
+    });
   });
   context.on("response", async (response) => {
     const request = response.request();
@@ -198,6 +223,56 @@ export function listNetwork(recordingId, { after_id = "", action_id = "" } = {})
 
 export function requestKeyIndex(recordingId) {
   return bag(recordingId).items.map((row) => requestIndexRow(row));
+}
+
+function requestAuthFailed(item) {
+  if (Number(item?.status) === 401) return true;
+  if (Number(item?.status) >= 400) return true;
+  const body = String(item?.response_body || "").slice(0, 800);
+  return /"code"\s*:\s*401\b/.test(body) || /账号已经超时|请重新登录|未登录/.test(body);
+}
+
+function applyCredentialHeaders(state, headers) {
+  const usable = pickCredentialHeaders(headers);
+  if (!Object.keys(usable).length) return;
+  state.cdpHeaders = mergePackedHeaders(state.cdpHeaders, usable);
+  const now = Date.now();
+  for (let i = state.items.length - 1; i >= 0; i -= 1) {
+    const item = state.items[i];
+    if (item.ended_at && now - item.ended_at > 4000) continue;
+    item.request_headers = mergePackedHeaders(item.request_headers, usable);
+    return;
+  }
+}
+
+export function latestCredentialHeaders(recordingId) {
+  const state = bag(recordingId);
+  const items = state.items;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (requestAuthFailed(items[i])) continue;
+    const headers = usableAuthHeaders(items[i].request_headers);
+    if (Object.keys(headers).length) return headers;
+  }
+  return usableAuthHeaders(state.cdpHeaders);
+}
+
+export function attachCredentialCapture(recordingId, context, page) {
+  if (!context || !page || typeof context.newCDPSession !== "function") return;
+  const state = bag(recordingId);
+  context.newCDPSession(page).then(async (session) => {
+    await session.send("Network.enable");
+    session.on("Network.requestWillBeSent", (params) => {
+      const kind = String(params?.type || "");
+      if (kind && kind !== "XHR" && kind !== "Fetch") return;
+      if (NOISE.test(params?.request?.url || "")) return;
+      applyCredentialHeaders(state, params?.request?.headers);
+      noteRequestHeaders(recordingId, params?.request?.headers);
+    });
+    session.on("Network.requestWillBeSentExtraInfo", (params) => {
+      applyCredentialHeaders(state, params?.headers);
+      noteRequestHeaders(recordingId, params?.headers);
+    });
+  }).catch(() => {});
 }
 
 export function getNetwork(recordingId, id) {

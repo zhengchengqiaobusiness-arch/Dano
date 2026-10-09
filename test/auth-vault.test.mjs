@@ -3,7 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { issuedCredential, noteLoginBody, readAuthVault, rollCredentialUrl, writeAuthVault } from "../src/auth-vault.mjs";
+import { headersFromStorageState, issuedCredential, mergePackedHeaders, noteLoginBody, readAuthVault, redactSecrets, rollCredentialUrl, writeAuthVault } from "../src/auth-vault.mjs";
 import { writeAuthLocalFile } from "../src/token-store.mjs";
 import { writeRuntimeConfig } from "../src/skillpack/files.mjs";
 
@@ -66,4 +66,42 @@ test("a later credential response rolls the unused refresh into the packed url, 
   const packed = JSON.parse(await readFile(path.join(process.env.CABP_DATA, "skills", "app.rec_roll", "config", "auth.local.json"), "utf8"));
   assert.match(packed.credential.url, /refreshToken=ref-new/);
   assert.equal(packed.credential.refresh_token, "ref-new");
+});
+
+test("storage tokens and live-looking keys become Authorization, and secrets are redacted", () => {
+  const headers = headersFromStorageState({
+    origins: [{
+      origin: "http://example.test",
+      localStorage: [
+        { name: "user-token", value: "DPORTAL02026062310283464700000101427125!abc" },
+        { name: "tenantId", value: "9" },
+        { name: "profile", value: "{\"id\":1}" },
+      ],
+    }],
+  });
+  assert.match(headers.Authorization, /^Bearer /);
+  assert.equal(headers["Tenant-Id"], "9");
+  const redacted = redactSecrets('Authorization: Bearer abcdefghijklmnop reason=config/auth.local.json');
+  assert.doesNotMatch(redacted, /abcdefghijklmnop/);
+  assert.match(redacted, /\[redacted\]/);
+});
+
+test("live cookie-only headers drop a leftover vault Authorization", async () => {
+  const packed = mergePackedHeaders(
+    { Authorization: "Bearer stale-token-value-here", Cookie: "token=old" },
+    { Cookie: "token=live-session" },
+  );
+  assert.equal(packed.Authorization, undefined);
+  assert.match(packed.Cookie, /live-session/);
+  const withLiveAuth = mergePackedHeaders(
+    { Authorization: "Bearer stale-token-value-here" },
+    { Authorization: "Bearer fresh-token-value-here" },
+  );
+  assert.match(withLiveAuth.Authorization, /fresh-token-value-here/);
+  process.env.CABP_DATA = await mkdtemp(path.join(os.tmpdir(), "cabp-auth-merge-"));
+  await writeAuthVault("rec_merge", { Authorization: "Bearer stale-token-value-here", Cookie: "token=old" });
+  await writeAuthVault("rec_merge", { Cookie: "token=live-session" });
+  const vault = await readAuthVault("rec_merge");
+  assert.equal(vault.headers.Authorization, undefined);
+  assert.match(vault.headers.Cookie, /live-session/);
 });

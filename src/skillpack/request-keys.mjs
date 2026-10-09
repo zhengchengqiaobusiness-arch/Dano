@@ -145,11 +145,16 @@ export function windowsForPath(text, path) {
     const at = source.indexOf(path, from);
     if (at < 0) break;
     const before = source.slice(0, at);
-    const start = Math.max(before.lastIndexOf("\ndef "), before.lastIndexOf("\nasync def "));
+    let start = Math.max(before.lastIndexOf("\ndef "), before.lastIndexOf("\nasync def "));
+    if (start < 0 && /^(?:async )?def /.test(before)) start = 0;
     const rest = source.slice(at + 1);
     const endRel = rest.search(/\ndef |\nasync def /);
     const end = endRel < 0 ? source.length : at + 1 + endRel;
-    windows.push(source.slice(start < 0 ? 0 : start, end));
+    if (start >= 0) windows.push(source.slice(start, end));
+    else if (!/\ndef |\nasync def /.test(source)) {
+      windows.push(source);
+      break;
+    }
     from = at + path.length;
   }
   const aliases = [];
@@ -185,7 +190,12 @@ export function citationErrors(skillText, requests, file = "", { requireKeys = t
   const rows = Array.isArray(requests) ? requests : [];
   const knownPaths = new Set(rows.map((row) => row.path).filter(Boolean));
   for (const cited of citedPaths(text)) {
-    const hit = [...knownPaths].some((path) => path === cited || path.endsWith(cited) || cited.endsWith(path));
+    const hit = [...knownPaths].some((path) => (
+      path === cited
+      || path.endsWith(cited)
+      || cited.endsWith(path)
+      || path.startsWith(`${cited}/`)
+    ));
     if (!hit) push({ code: "path_not_in_evidence", path: cited, file });
   }
   if (!requireKeys) return errors;

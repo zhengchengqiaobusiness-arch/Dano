@@ -2,6 +2,7 @@ import { WebSocketServer } from "ws";
 import { appendEvidence } from "./evidence/store.mjs";
 import { browserSession, captureFrame, closeBrowser, getPage, openBrowser, withoutPageLock, withPage } from "./browser/session.mjs";
 import { beginAction, compactNetworkIndex, endAction, listNetwork, waitForAction } from "./browser/network.mjs";
+import { overlayControlFacts, takeSnapshot } from "./browser/snapshot.mjs";
 import { loadStorageState, saveStorageState } from "./session-store.mjs";
 import { createRecording, emit, getRecording, persist, snapshotMessage } from "./session.mjs";
 import { hostTools } from "./agent/tools.mjs";
@@ -39,7 +40,15 @@ async function steerAfterHumanAct(recording) {
   if (now - (recording.lastHumanSteerAt || 0) < 2500) return;
   recording.lastHumanSteerAt = now;
   const listed = compactNetworkIndex(listNetwork(recording.id));
-  const text = `人在预览里操作了。actor=human。先 browser_snapshot 再接着做。\n${JSON.stringify({ listed })}`;
+  let overlay_fields = [];
+  try {
+    await withPage(recording.id, () => takeSnapshot(recording.id, { budgetMs: 2000 }));
+    overlay_fields = await overlayControlFacts(recording.id);
+  } catch {
+    overlay_fields = [];
+  }
+  const empty_overlay = overlay_fields.filter((row) => row.empty).map((row) => row.name || row.role);
+  const text = `人在预览里操作了。actor=human。先 browser_snapshot 再接着做。\n${JSON.stringify({ listed, overlay_fields, empty_overlay })}`;
   recording.pi.prompt(text).catch(() => {});
 }
 
@@ -199,12 +208,6 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
         return;
       }
       if (message.type === "viewport") {
-        const page = getPage(recording.id);
-        const width = Math.round(Number(message.width) || 0);
-        const height = Math.round(Number(message.height) || 0);
-        if (page && width >= 320 && height >= 240) {
-          await withPage(recording.id, () => page.setViewportSize({ width, height }).catch(() => {}));
-        }
         setTimeout(pushFrame, 50);
         return;
       }

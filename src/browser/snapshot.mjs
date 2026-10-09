@@ -183,8 +183,13 @@ function rewriteYaml(yaml, frame, frameId, snap, epoch, refs) {
       const raw = unwrapLine(line);
       const named = raw.match(/^[a-zA-Z]+ "((?:\\.|[^"])*)"/);
       const role = (raw.match(/^([a-zA-Z]+)/) || [])[1] || "";
-      const parent = named ? "" : ancestorName(source, index);
-      const label = named ? `${role} "${named[1].replace(/\\"/g, '"')}"` : (parent ? `${role} in "${parent}"` : role);
+      const parent = ancestorName(source, index);
+      const text = named ? named[1].replace(/\\"/g, '"') : "";
+      const label = text && parent
+        ? `${role} "${text}" in "${parent}"`
+        : text
+          ? `${role} "${text}"`
+          : (parent ? `${role} in "${parent}"` : role);
       refs.set(ref, {
         locator: frame.locator(`aria-ref=${aria}`),
         epoch,
@@ -263,6 +268,77 @@ export async function takeSnapshot(recordingId, { budgetMs = 8000 } = {}) {
   const snapshot = { epoch: state.epoch, text: lines.join("\n"), refs };
   state.lastPublished = snapshot;
   return snapshot;
+}
+
+const VALUE_ROLES = /^(textbox|searchbox|combobox|spinbutton|checkbox|radio|slider|listbox)$/i;
+
+export function controlLooksEmpty(value, placeholder = "") {
+  const v = String(value ?? "").trim();
+  if (!v) return true;
+  const mark = String(placeholder || "").trim();
+  return Boolean(mark) && v === mark;
+}
+
+async function placeholderOf(locator) {
+  const named = await locator.getAttribute("placeholder").catch(() => null);
+  if (named) return String(named);
+  const aria = await locator.getAttribute("aria-placeholder").catch(() => null);
+  return aria ? String(aria) : "";
+}
+
+async function overlayValueControl(locator, role) {
+  if (VALUE_ROLES.test(role)) return true;
+  const haspopup = await locator.getAttribute("aria-haspopup").catch(() => null);
+  const expanded = await locator.getAttribute("aria-expanded").catch(() => null);
+  return haspopup != null || expanded != null;
+}
+
+async function readControlValue(locator) {
+  const placeholder = await placeholderOf(locator);
+  const aria = await locator.getAttribute("aria-valuenow").catch(() => null);
+  if (aria != null) return { value: String(aria), placeholder };
+  const checked = await locator.getAttribute("aria-checked").catch(() => null);
+  if (checked != null) return { value: checked, placeholder };
+  try {
+    return { value: String(await locator.inputValue()), placeholder };
+  } catch {
+    const attr = await locator.getAttribute("value").catch(() => null);
+    if (attr != null) return { value: String(attr), placeholder };
+    return { value: String(await locator.innerText().catch(() => "")).trim(), placeholder };
+  }
+}
+
+export async function overlayControlFacts(recordingId) {
+  const state = browserSession(recordingId);
+  const published = String(state?.lastPublished?.text || "");
+  const start = published.search(/(?:^|\n)overlay_exact\n/);
+  if (start < 0) return [];
+  const from = published.slice(start);
+  const end = from.search(/\n(?:goal_exact|row_facts|frame )\b/);
+  const block = (end < 0 ? from : from.slice(0, end)).split("\n").slice(1);
+  const facts = [];
+  for (const line of block) {
+    const raw = unwrapLine(line);
+    const role = (raw.match(/^([a-zA-Z]+)/) || [])[1] || "";
+    const ref = publishedRef(line);
+    if (!ref) continue;
+    const hit = locatorFor(recordingId, ref);
+    if (!hit) continue;
+    if (!(await overlayValueControl(hit.locator, role))) continue;
+    const read = await readControlValue(hit.locator);
+    const named = raw.match(/^[a-zA-Z]+ "((?:\\.|[^"])*)"/);
+    const label = named ? named[1].replace(/\\"/g, '"') : "";
+    facts.push({
+      ref,
+      role: role.toLowerCase(),
+      name: hit.label || label || role,
+      value: read.value,
+      ...(read.placeholder ? { placeholder: read.placeholder } : {}),
+      empty: controlLooksEmpty(read.value, read.placeholder),
+    });
+    if (facts.length >= 40) break;
+  }
+  return facts;
 }
 
 export function locatorFor(recordingId, ref) {

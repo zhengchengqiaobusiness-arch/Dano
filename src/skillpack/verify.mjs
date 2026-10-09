@@ -38,11 +38,11 @@ function writesRecordedPath(line, clientText, requests) {
   const sub = subcommand(line);
   if (!sub) return false;
   const token = sub.replaceAll("-", "_");
-  const named = new RegExp(`\\b${sub.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b|\\b${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+  const impl = new RegExp(`(?:^|\\n)(?:async )?def\\s+(?:cmd_)?${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
   for (const row of requests || []) {
     if (!/^(POST|PUT|PATCH|DELETE)$/i.test(row.method || "")) continue;
     if (!String(clientText || "").includes(row.path || "")) continue;
-    if (windowsForPath(clientText, row.path).some((block) => named.test(block))) return true;
+    if (windowsForPath(clientText, row.path).some((block) => impl.test(block))) return true;
   }
   return false;
 }
@@ -125,6 +125,19 @@ export function authStoppedOutput(output) {
   const text = String(output || "");
   if (/AuthExpired|缺少鉴权|没有鉴权|请提供 token|账号未登录|\b401\b/.test(text)) return true;
   return /\b400\b/.test(text) && /refresh|token|令牌|credential/i.test(text);
+}
+
+export function scriptCrashOutput(output) {
+  const text = String(output || "");
+  if (authStoppedOutput(text)) return false;
+  return /Traceback \(most recent call last\)/.test(text);
+}
+
+function latestMatchingRun(verifyRows, line) {
+  const runs = isTemplate(line)
+    ? (verifyRows || []).filter((item) => subcommand((item.argv || []).join(" ")) === subcommand(line))
+    : (verifyRows || []).filter((item) => sameCommand((item.argv || []).join(" "), line));
+  return runs.at(-1) || null;
 }
 
 function latestVerifyByCommand(verifyRows) {
@@ -242,23 +255,8 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   const mustRun = reads.filter((line) => !commandWrites(line, clientText) && !writesRecordedPath(line, clientText, requestsForWrites));
   const verifyRows = evidence.filter((item) => item.kind === "verify");
   for (const line of mustRun) {
-    let ran = false;
-    const runs = isTemplate(line)
-      ? verifyRows.filter((item) => subcommand((item.argv || []).join(" ")) === subcommand(line))
-      : verifyRows.filter((item) => sameCommand((item.argv || []).join(" "), line));
-    for (const row of runs) {
-      if (row.ok === true) {
-        ran = true;
-        break;
-      }
-      const blob = await getEvidence(recordingId, row.id).catch(() => null);
-      const output = `${blob?.stdout || ""}\n${blob?.stderr || ""}`;
-      if (authStoppedOutput(output)) {
-        ran = true;
-        break;
-      }
-    }
-    if (!ran) {
+    const row = latestMatchingRun(verifyRows, line);
+    if (!row) {
       errors.push({
         code: "command_not_run",
         command: line,
@@ -267,7 +265,23 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
           ? "这一行是说明。用真实参数跑同名子命令即可，不要把尖括号原样当参数"
           : "run_skill_command 的 argv 用空格拼起来要等于这一行。没有鉴权而停止可以；其它失败要先改到能跑",
       });
+      continue;
     }
+    if (row.ok === true) continue;
+    const blob = await getEvidence(recordingId, row.id).catch(() => null);
+    const output = `${blob?.stdout || ""}\n${blob?.stderr || ""}`;
+    if (authStoppedOutput(output)) continue;
+    const crashed = scriptCrashOutput(output);
+    errors.push({
+      code: crashed ? "not_invocable" : "command_not_run",
+      command: line,
+      file: crashed ? "scripts/client.py" : "SKILL.md",
+      hint: crashed
+        ? "最新一次 run_skill_command 在发请求前崩溃。先改到能启动再跑。"
+        : (isTemplate(line)
+          ? "这一行是说明。用真实参数跑同名子命令即可，不要把尖括号原样当参数"
+          : "run_skill_command 的 argv 用空格拼起来要等于这一行。没有鉴权而停止可以；其它失败要先改到能跑"),
+    });
   }
   if (requests.some((item) => item.issues_credential) && !clientText.includes("credential")) {
     errors.push({

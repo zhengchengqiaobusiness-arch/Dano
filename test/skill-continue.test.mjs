@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { nextRecordingPrompt } from "../src/agent/pi-session.mjs";
+import { factsForContinue, nextRecordingPrompt, resultLine } from "../src/agent/pi-session.mjs";
 
 test("a finished page turn continues until the skill is verified", () => {
   const again = nextRecordingPrompt({ finished: false, paused: false, progressed: false, continues: 0 });
@@ -20,7 +20,25 @@ test("a finished page turn continues until the skill is verified", () => {
   assert.match(failed, /只改/);
   assert.match(failed, /不要 browser_open 本地路径/);
   const expired = nextRecordingPrompt({ finished: false, paused: false, progressed: true, continues: 2, verifyErrors: [{ code: "auth_expired" }] });
-  assert.match(expired, /鉴权过期/);
+  assert.match(expired, /打包凭证过期/);
   assert.match(expired, /不要 assist/);
+  assert.match(expired, /不要把凭证写进对话/);
+  assert.doesNotMatch(expired, /更新 config\/auth\.local\.json/);
+  const line = resultLine({
+    content: [{ type: "text", text: JSON.stringify({ ok: true, status: "skill_written_needs_auth", errors: [{ code: "auth_expired" }] }) }],
+  });
+  assert.match(line, /完成/);
+  assert.doesNotMatch(line, /^失败/);
+  const emptyLine = resultLine({
+    content: [{ type: "text", text: JSON.stringify({ ok: true, filled: ["a"], empty_overlay: ["联系人", "所属系统"] }) }],
+  });
+  assert.match(emptyLine, /空=/);
+  const facts = factsForContinue({
+    listed: [{ id: "req_1" }],
+    overlay_fields: [{ name: "分类", empty: true }],
+    empty_overlay: ["分类"],
+  });
+  assert.equal(facts.empty_overlay[0], "分类");
+  assert.equal(facts.overlay_fields[0].empty, true);
   assert.equal(nextRecordingPrompt({ finished: false, paused: false, progressed: true, continues: 8, verifyErrors: [{ code: "command_not_run" }] }), null);
 });

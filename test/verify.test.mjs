@@ -258,6 +258,44 @@ test("a script that imports outside the standard library cannot be called", asyn
   assert.equal(allowed.errors.some((item) => item.code === "import_not_available"), false);
 });
 
+test("a GET command listed in the module docstring is still a read that must be run", async () => {
+  await useData();
+  const shape = { id: "rec_verify_docstring_read", tenant: "", subsystem: "app", skillId: "app.rec_verify_docstring_read", startUrl: "http://127.0.0.1/" };
+  const dir = skillDir(shape.skillId);
+  await mkdir(path.join(dir, "scripts"), { recursive: true });
+  await mkdir(path.join(dir, "references"), { recursive: true });
+  await mkdir(path.join(dir, "config"), { recursive: true });
+  await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\npython scripts/client.py departments\npython scripts/client.py create --confirm\n");
+  await writeFile(path.join(dir, "scripts/client.py"), [
+    '"""python scripts/client.py departments',
+    "python scripts/client.py create",
+    '"""',
+    'PATH_LIST = "/api/list"',
+    'PATH_SAVE = "/api/save"',
+    "def cmd_departments():",
+    '    call("GET", PATH_LIST)',
+    "def cmd_create():",
+    '    call("POST", PATH_SAVE)',
+    '    body["title"] = args.title',
+  ].join("\n"));
+  await writeFile(path.join(dir, "references/api.md"), "");
+  await writeFile(path.join(dir, "config/runtime.json"), "{}\n");
+  await writeFile(path.join(dir, "config/auth.local.json"), "{\"headers\":{\"Authorization\":\"Bearer tok\"}}\n");
+  await seedGuides(shape.id);
+  await appendEvidence(shape.id, {
+    kind: "network",
+    summary: "GET /api/list",
+    body: { method: "GET", path: "/api/list", query: "t=1" },
+  });
+  await appendEvidence(shape.id, {
+    kind: "network",
+    summary: "POST /api/save",
+    body: { method: "POST", path: "/api/save", post_data: JSON.stringify({ title: "a" }) },
+  });
+  const result = await verifySkill(dir, shape.id, shape);
+  assert.ok(result.errors.some((item) => item.code === "command_not_run" && String(item.command || "").includes("departments")));
+});
+
 test("a write-only skill is not forced to invent a GET", async () => {
   await useData();
   const shape = { id: "rec_verify_writeonly", tenant: "", subsystem: "app", skillId: "app.rec_verify_writeonly", startUrl: "http://127.0.0.1/" };
@@ -394,4 +432,35 @@ test("only the latest auth stop is auth_expired and does not fail the structure"
   assert.equal(publicSessionStatus(failed), "recording");
   assert.equal(publicSessionStatus({ status: "verify_failed" }), "failed");
   assert.equal(publicSessionStatus({ status: "waiting_operator" }), "recording");
+});
+
+test("a later script crash is not_invocable even if an earlier run stopped on 401", async () => {
+  await useData();
+  const shape = { id: "rec_verify_crash_latest", tenant: "", subsystem: "app", skillId: "app.rec_verify_crash_latest", startUrl: "http://127.0.0.1/" };
+  const dir = skillDir(shape.skillId);
+  await mkdir(path.join(dir, "scripts"), { recursive: true });
+  await mkdir(path.join(dir, "references"), { recursive: true });
+  await mkdir(path.join(dir, "config"), { recursive: true });
+  await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\npython scripts/client.py departments\n");
+  await writeFile(path.join(dir, "scripts/client.py"), "credential = auth['credential']\n");
+  await writeFile(path.join(dir, "references/api.md"), "");
+  await writeFile(path.join(dir, "config/runtime.json"), "{}\n");
+  await writeFile(path.join(dir, "config/auth.local.json"), "{\"headers\":{\"Authorization\":\"Bearer tok\"}}\n");
+  await seedGuides(shape.id);
+  await appendEvidence(shape.id, {
+    kind: "verify",
+    ok: false,
+    argv: ["python", "scripts/client.py", "departments"],
+    stdout: "{\"msg\": \"您的账号已经超时，请重新登录\", \"code\": 401}",
+  });
+  await appendEvidence(shape.id, {
+    kind: "verify",
+    ok: false,
+    argv: ["python", "scripts/client.py", "departments"],
+    stderr: "Traceback (most recent call last):\n  File \"scripts/client.py\", line 1, in <module>\nAttributeError: 'Namespace' object has no attribute 'func'",
+  });
+  const result = await verifySkill(dir, shape.id, shape);
+  assert.ok(result.errors.some((item) => item.code === "not_invocable"));
+  assert.equal(result.errors.some((item) => item.code === "auth_expired"), false);
+  assert.equal(result.status, "verify_failed");
 });

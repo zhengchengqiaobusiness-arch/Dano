@@ -733,6 +733,8 @@ function sanitizePublicThoughtText(raw: string) {
   text = text.replace(/\bcontrol_in_app_browser\b/gi, "正在操作页面");
   text = text.replace(/\bread_evidence_(?:delta|item)\b/gi, "正在查看记录");
   text = text.replace(/https?:\/\/\S+/g, "").replace(/\s+/g, " ").trim();
+  text = text.replace(/Bearer\s+\S+/gi, "Bearer [redacted]");
+  text = text.replace(/(Authorization["']?\s*[:=]\s*["']?)(\S+)/gi, "$1[redacted]");
   return text;
 }
 
@@ -838,8 +840,6 @@ export default function PageRecorder({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const previewHostRef = useRef<HTMLDivElement | null>(null);
-  const lastViewportRef = useRef("");
-  const viewportTimerRef = useRef<number | null>(null);
   const startHostGenRef = useRef(0);
   const keyboardRef = useRef<HTMLInputElement | null>(null);
   const latestFrameRef = useRef<{ seq: number; src: string; meta: FrameMeta } | null>(null);
@@ -1183,36 +1183,6 @@ export default function PageRecorder({
   }, [connected, status]);
 
   useEffect(() => {
-    if (!connected || !pageInteractive(status)) return undefined;
-    let cancelled = false;
-    let observer: ResizeObserver | null = null;
-    const notify = () => {
-      if (viewportTimerRef.current !== null) window.clearTimeout(viewportTimerRef.current);
-      viewportTimerRef.current = window.setTimeout(() => {
-        viewportTimerRef.current = null;
-        sendPreviewViewport();
-      }, 80);
-    };
-    const attach = () => {
-      if (cancelled) return;
-      const host = previewHostRef.current;
-      if (!host) {
-        window.requestAnimationFrame(attach);
-        return;
-      }
-      observer = new ResizeObserver(notify);
-      observer.observe(host);
-      notify();
-    };
-    attach();
-    return () => {
-      cancelled = true;
-      observer?.disconnect();
-      if (viewportTimerRef.current !== null) window.clearTimeout(viewportTimerRef.current);
-    };
-  }, [connected, status, keepRecording, viewStage]);
-
-  useEffect(() => {
     const box = verificationLogRef.current;
     if (!box) return;
     box.scrollTop = box.scrollHeight;
@@ -1331,7 +1301,7 @@ export default function PageRecorder({
         recording_id: recordingId,
         tenant,
         subsystem,
-        viewport: readPreviewViewport(),
+        viewport: recordingViewport(),
       };
       openRecordingSocket(actionRef.current || "");
     }, delay);
@@ -1390,25 +1360,8 @@ export default function PageRecorder({
     return Math.min(2, window.devicePixelRatio || 1);
   }
 
-  function readPreviewViewport() {
-    const host = previewHostRef.current;
-    const width = Math.round(host?.clientWidth || 0);
-    const height = Math.round(host?.clientHeight || 0);
-    return {
-      width: width >= 320 ? width : DESKTOP_VIEWPORT.width,
-      height: height >= 240 ? height : DESKTOP_VIEWPORT.height,
-      devicePixelRatio: previewDeviceScale(),
-    };
-  }
-
-  function sendPreviewViewport() {
-    const size = readPreviewViewport();
-    const key = `${size.width}x${size.height}@${size.devicePixelRatio}`;
-    if (lastViewportRef.current === key) return;
-    const socket = wsRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    lastViewportRef.current = key;
-    socket.send(JSON.stringify({ type: "viewport", ...size }));
+  function recordingViewport() {
+    return { ...DESKTOP_VIEWPORT, devicePixelRatio: 1 };
   }
 
   function beginStartWhenPreviewReady(action: string) {
@@ -1430,8 +1383,7 @@ export default function PageRecorder({
         return;
       }
       const init = socketInitRef.current;
-      if (init) socketInitRef.current = { ...init, viewport: readPreviewViewport() };
-      lastViewportRef.current = "";
+      if (init) socketInitRef.current = { ...init, viewport: recordingViewport() };
       openRecordingSocket(action);
     };
     // 使用 setTimeout 确保在后台也能执行（rAF 在隐藏 webview 中会被暂停）
@@ -1550,7 +1502,6 @@ export default function PageRecorder({
       canvas.dataset.frame = `${imgW}x${imgH}`;
       canvas.dataset.scale = String(Math.round(fit.scale * 1000) / 1000);
       renderedFrameRef.current = frame.seq;
-      sendPreviewViewport();
       setFrameMeta((current) => current.width === width && current.height === height
         ? current
         : { width, height });
@@ -1851,7 +1802,7 @@ export default function PageRecorder({
       storage_state: parseStorageState(storageState),
       resume_action: action,
       machine_verification: machineVerificationRef.current,
-      viewport: readPreviewViewport(),
+      viewport: recordingViewport(),
     };
 
     beginStartWhenPreviewReady(action);

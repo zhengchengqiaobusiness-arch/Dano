@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { recordingDir, skillDir } from "../paths.mjs";
-import { readAuthVault, usableAuthHeaders } from "../auth-vault.mjs";
+import { mergePackedHeaders, readAuthVault, usableAuthHeaders } from "../auth-vault.mjs";
+import { persistBrowserSession } from "../browser/session.mjs";
+import { latestCredentialHeaders } from "../browser/network.mjs";
 import { readTokenRecord, writeAuthLocalFile } from "../token-store.mjs";
 import { originFromUrl } from "../session-store.mjs";
 
@@ -80,8 +82,10 @@ export async function writeRuntimeConfig(recording, skillId) {
   };
   await mkdir(path.join(dir, "config"), { recursive: true });
   await writeFile(path.join(dir, "config", "runtime.json"), `${JSON.stringify(runtime, null, 2)}\n`, "utf8");
+  await persistBrowserSession(recording.id).catch(() => null);
   const vault = await readAuthVault(recording.id);
-  let headers = usableAuthHeaders(vault.headers);
+  const live = latestCredentialHeaders(recording.id);
+  let headers = mergePackedHeaders(vault.headers, live);
   if (!Object.keys(headers).length) {
     const token = await readTokenRecord(recording.tenant, recording.subsystem);
     headers = usableAuthHeaders(token.headers);

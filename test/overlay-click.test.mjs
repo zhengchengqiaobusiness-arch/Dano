@@ -4,11 +4,16 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { closeBrowser, openBrowser } from "../src/browser/session.mjs";
+import { closeBrowser, desktopViewport, DESKTOP_VIEWPORT, openBrowser } from "../src/browser/session.mjs";
 import { takeSnapshot } from "../src/browser/snapshot.mjs";
 import { runAction } from "../src/browser/actions.mjs";
 
 const fixtureDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
+
+test("a preview pane smaller than desktop does not become the page viewport", () => {
+  assert.deepEqual(desktopViewport({ width: 900, height: 600 }), DESKTOP_VIEWPORT);
+  assert.equal(desktopViewport({ width: 1600, height: 900 }).width, 1600);
+});
 
 function publishedRef(line) {
   const match = String(line || "").match(/\[ref=([^\]]+)\]/) || String(line || "").match(/\bref=(f\d+:e\d+@\d+)/);
@@ -45,6 +50,12 @@ test("an open dialog is published as overlay_exact and later clicks use the curr
     const opened = await runAction(id, { action: "click", ref: publishedRef(lineWith(first.text, "打开")) });
     assert.equal(opened.ok, true);
     assert.match(opened.snapshot.text, /overlay_exact|dialog/);
+    const emptyTitle = (opened.overlay_fields || []).find((row) => String(row.name || "").includes("标题"));
+    assert.ok(emptyTitle);
+    assert.equal(emptyTitle.empty, true);
+    const emptyCat = (opened.overlay_fields || []).find((row) => String(row.name || "").includes("分类"));
+    assert.ok(emptyCat);
+    assert.equal(emptyCat.empty, true);
     const blocked = await runAction(id, { action: "click", ref: publishedRef(lineWith(opened.snapshot.text, "被挡住")) });
     const tree = blocked.snapshot?.text || opened.snapshot.text;
     assert.match(tree, /确定/);
@@ -52,6 +63,15 @@ test("an open dialog is published as overlay_exact and later clicks use the curr
     const afterFill = titleRef
       ? await runAction(id, { action: "fill", ref: titleRef, text: "hello" })
       : { ok: true, snapshot: { text: tree } };
+    if (titleRef) {
+      assert.equal(afterFill.ok, true);
+      const titleFact = (afterFill.overlay_fields || []).find((row) => row.ref === titleRef || String(row.name || "").includes("标题"));
+      assert.ok(titleFact);
+      assert.equal(titleFact.empty, false);
+      assert.match(String(titleFact.value || ""), /hello/);
+      assert.equal((afterFill.empty_overlay || []).some((name) => String(name).includes("标题")), false);
+      assert.equal((afterFill.empty_overlay || []).some((name) => String(name).includes("分类")), true);
+    }
     const latest = afterFill.snapshot?.text || tree;
     const ok = await runAction(id, { action: "click", ref: publishedRef(lineWith(latest, "确定")) });
     assert.equal(ok.ok, true);

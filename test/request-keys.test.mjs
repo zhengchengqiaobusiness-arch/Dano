@@ -24,6 +24,8 @@ test("a cited path must exist, and every key of that request must be written", (
   assert.equal(citationErrors("#!/usr/bin/env python3", requests).some((item) => item.code === "path_not_in_evidence"), false);
   const invented = "POST /api/oa/workreport/daily/create";
   assert.ok(citationErrors(invented, requests).some((item) => item.code === "path_not_in_evidence"));
+  const prefix = citationErrors("GET `/admin-api/oa/report`", requests);
+  assert.equal(prefix.some((item) => item.code === "path_not_in_evidence"), false);
   const partial = "/admin-api/oa/report/save title items[].content";
   assert.ok(citationErrors(partial, requests).some((item) => item.code === "key_not_written" && item.key === "creator"));
   const full = ["/admin-api/oa/report/save", ...requests[0].keys].join("\n");
@@ -71,6 +73,19 @@ test("numeric type codes are not treated as API paths, and a path constant count
   ].join("\n");
   const cited = citationErrors(client, [{ id: "req_1", method: "GET", path: "/api/stats", keys: ["deptId"] }], "scripts/client.py");
   assert.equal(cited.some((item) => item.code === "key_not_written"), false);
+  const preamble = [
+    '"""python scripts/client.py departments',
+    "python scripts/client.py create",
+    '"""',
+    'SAVE = "/api/save"',
+    "def cmd_departments():",
+    '    call("GET", "/api/list")',
+    "def cmd_create():",
+    "    request(SAVE)",
+    '    body["title"] = args.title',
+  ].join("\n");
+  const fromPreamble = citationErrors(preamble, [{ id: "req_1", method: "POST", path: "/api/save", keys: ["title"] }], "scripts/client.py");
+  assert.equal(fromPreamble.some((item) => item.code === "key_not_written"), false);
 });
 
 test("a helper called from the path function counts as writing its keys", () => {
