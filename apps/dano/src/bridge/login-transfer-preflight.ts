@@ -25,22 +25,26 @@ async function hostTransfer(root: string, scenario: string): Promise<void> {
   const source = { user: { id: "login-source" }, folderPath: join(root, "users", "login-source") };
   const target = { user: { id: "login-target" }, folderPath: join(root, "users", "login-target") };
   const workspace = join(target.folderPath, "workspaces", "default");
-  let committed = false, preparations = 0;
+  let committed = false, commitAttempted = false, preparations = 0;
   const registry = new UserRuntimeRegistry(async () => { throw new Error("BACKEND_MUST_NOT_START"); }, {
     prepareWorkspaceForUser: async (context, path) => { preparations++; await client.prepareWorkspace(context, path); },
   });
   try {
     assert.equal(await readFile(join(source.folderPath, "workspaces", "default", "uploads", filename), "utf8"), content);
     await access(workspace, constants.X_OK);
-    let failed = false;
+    let failure: unknown;
     try {
       await registry.transferOwnership(source, target, { assertIdle() {}, async commitOwnership() {
+        commitAttempted = true;
+        assert.equal(await readFile(join(workspace, "uploads", filename), "utf8"), content);
         if (scenario === "rollback") throw new Error("SYNTHETIC_COMMIT_FAILURE");
         committed = true;
       } });
-    } catch { failed = true; }
+    } catch (error) { failure = error; }
     assert.equal(preparations, 1);
-    assert.equal(failed, scenario !== "cold"); assert.equal(committed, scenario === "cold");
+    assert.equal(Boolean(failure), scenario !== "cold"); assert.equal(committed, scenario === "cold");
+    assert.equal(commitAttempted, scenario !== "unsafe");
+    if (scenario === "rollback") assert.equal((failure as Error).message, "SYNTHETIC_COMMIT_FAILURE");
     if (scenario === "cold") assert.equal(await readFile(join(workspace, "uploads", filename), "utf8"), content);
     else assert.ok(!(await readdir(join(workspace, "uploads"))).includes(filename));
     assert.equal(await readFile(join(source.folderPath, "workspaces", "default", "uploads", filename), "utf8"), content);
@@ -98,6 +102,11 @@ export async function checkLoginTransferAccess(): Promise<void> {
       } else {
         const metadata = await lstat(uploads);
         assert.equal(metadata.uid, hostUid); assert.equal(metadata.gid, identity.gid); assert.equal(metadata.mode & 0o7777, 0o3770);
+        if (scenario === "cold") execFileSync("setpriv", ["--reuid", String(identity.uid), "--regid", String(identity.gid), "--clear-groups",
+          process.execPath, "--input-type=module", "-e", `
+          import assert from 'node:assert/strict'; import {readFile} from 'node:fs/promises';
+          assert.equal(await readFile(process.argv[1], 'utf8'), process.argv[2]);`, join(uploads, filename), content],
+          { stdio: ["ignore", "pipe", "pipe"] });
         execFileSync("setpriv", ["--reuid", String(peer.uid), "--regid", String(peer.gid), "--clear-groups",
           process.execPath, "--input-type=module", "-e", `
           import assert from 'node:assert/strict'; import {readdir} from 'node:fs/promises';
