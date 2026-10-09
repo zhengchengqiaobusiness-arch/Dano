@@ -2,6 +2,8 @@
 
 本文说明如何为生产 Dano 配置现有 OA 的 OAuth2 登录。所有地址和凭据均使用占位符；实际值只写入生产服务器的 Deploy Control Directory `.env`，不要提交到仓库。
 
+系统管理员使用 agent 首次配置或更换 OA 登录时，参考 [dano-oa-oauth-config skill](./skills/dano-oa-oauth-config/SKILL.md)，按目标 OA 的实际契约填写配置、校验生效并完成真实浏览器验收。
+
 ## 登录链路
 
 ```text
