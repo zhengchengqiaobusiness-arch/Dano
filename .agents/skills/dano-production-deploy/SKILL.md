@@ -33,6 +33,7 @@ Before touching local or remote state, read the current versions of:
 - `deploy/docker-entrypoint.sh`, `deploy/runtime-defaults/*`, `deploy/compose/*`, and `deploy/nginx/*`
 - `scripts/deploy-release.mjs`, `scripts/deploy-compose.mjs`, `scripts/deploy-exposure.mjs`, `scripts/smoke-dano-deploy.mjs`, and relevant acceptance helpers
 - this skill's `scripts/summarize-logs.mjs` and `scripts/summarize-compose-config.mjs` before production log or resolved-Compose diagnostics
+- [remote execution and release decisions](references/execution.md) before preparing SSH scripts; use its runner, failure dispositions and checkpoints throughout this run
 
 The user's current instructions select the environment and acceptance mode; the root `AGENTS.md` records workflow defaults; the current repository defines shipped build/runtime behavior; live read-only inventory defines topology and configuration. Resolve routine workflow differences using that precedence. Pause only the dependent action when a concrete data, credential or service conflict remains unresolved. Prefer repository scripts when they preserve the inventoried environment. Compare `deploy:release` staging behavior with the live layout before using it so environment-owned routing or adjacent-service configuration remains intact.
 
@@ -66,18 +67,22 @@ Use read-only SSH checks first. Confirm:
 - `dano-site` and its `/web/` route are healthy before the update;
 - disk space and Docker disk usage are sufficient for a no-cache build while retaining the rollback image.
 
-Before rollback capture or any production mutation, open one long-lived SSH session and acquire a non-blocking exclusive `flock` on `/var/lock/dano-production-deploy.lock`. Fail closed if another deployment owns the lock. Under the lock, repeat the mutation-relevant inventory—current container/image IDs, Compose services/mounts/networks, deploy-file state, runtime paths, adjacent-service health, and disk capacity—and require it to match the pre-lock inventory. Hold the same file descriptor through source update, build, switch, acceptance disposition, rollback if needed, and cleanup. If the SSH session drops, treat the kernel-released lock as an interrupted deployment: acquire a new lock, repeat the full inventory, and reconcile live state before resuming.
+Run this skill's `scripts/probe-host.sh` as a diagnostic through `scripts/run-remote-script.mjs` first. Its boolean capabilities select supported Git/Compose/Buildx commands and a Node-in-image fallback. Discover container IDs through the inventoried Compose project/service labels. Keep the capability and ownership receipts with the release record.
+
+Before rollback capture or any production mutation, execute the reviewed release script through the file-based runner with kind `mutation`. It acquires the non-blocking exclusive production `flock` on fd 9; fail closed if another deployment owns it. Reuse the inherited descriptor in existing helpers. Under the lock, repeat the mutation-relevant inventory—current container/image IDs, Compose services/mounts/networks, deploy-file state, runtime paths, adjacent-service health, and disk capacity—and reconcile differences by resource responsibility in the execution reference. Hold the same worker and descriptor through source update, build, switch, Browser disposition, rollback if needed, and cleanup. If SSH drops, inspect whether the worker/lock survived, reacquire when available, repeat inventory, and reconcile live state before resuming. A transport or diagnostic error produces an interruption record; rollback follows the explicit acceptance disposition, not a blanket EXIT trap.
 
 ```sh
-exec 9>/var/lock/dano-production-deploy.lock
+# Equivalent lock contract for a reviewed direct non-TTY worker:
+exec 9>>/var/lock/dano-production-deploy.lock
 flock -n 9 || exit 75
+export DANO_DEPLOY_LOCK_FD=9
 ```
 
 After the locked recheck passes, save a root-only on-host rollback copy of the deployment control files that will change, including `.env` if necessary, without displaying their contents. Record the old container/image IDs and exact Compose invocation. Do not copy secrets or runtime data into temporary build directories.
 
-Use structured commands such as `docker inspect --format`, Compose status output, HTTP status/headers, Git status/counts, and filesystem metadata. Keep raw logs on the host. Before each diagnostic log window, record its RFC3339 UTC start. Request Compose logs with `--timestamps --since <window-start>` and pipe them entirely on-host through `scripts/summarize-logs.mjs` with `DANO_DIAGNOSTIC_SINCE` set to the same timestamp. Run the filter inside the current Dano image or another already-present Node image when the host lacks Node. Execute the remote pipeline with `bash -o pipefail`; require the log producer and filter to exit zero, `truncated=false`, and `unscopedLines=0`. Treat `emptyWindow=true` as `no log lines returned`, never as proof of clean logs. Return only the per-service JSON counts. If those counts and structured diagnostics cannot establish the cause, report a safe-diagnostics gap and stop rather than retrieving raw lines.
+Use structured commands such as `docker inspect --format`, Compose status output, HTTP status/headers, Git status/counts, and filesystem metadata. Keep raw logs on the host. Before each diagnostic log window, record its RFC3339 UTC start. Request Compose logs with `--timestamps --since <window-start>` and pipe them entirely on-host through `scripts/summarize-logs.mjs` with `DANO_DIAGNOSTIC_SINCE` set to the same timestamp. After real readiness passes, also set `DANO_DIAGNOSTIC_READINESS` to its recorded timestamp: the filter separates `beforeReadiness` and `afterReadiness`, parses actual HTTP statuses, and counts known reasons and unclassified events. Run it inside an already-present Node image if needed. Require producer/filter exit zero, `truncated=false`, and `unscopedLines=0`. `emptyWindow=true` means no evidence. Return only JSON counts; unexplained categories require safe diagnosis and explicit disposition, never raw off-host lines or automatic rollback from the filter result alone.
 
-Checkpoint: stop if the locked inventory differs from the pre-lock inventory, the live topology differs materially from the current repo, any required mount/volume cannot be explained, adjacent services are already unhealthy, the rollback path is incomplete, or disk capacity cannot safely hold both releases.
+Checkpoint: stop dependent mutations on unexplained inventory/topology/mount changes, new degradation of a running neighbor, an incomplete rollback path or insufficient build/rollback capacity. Preserve explained external changes and already-stopped neighbor baselines; repeat affected gates after shared-route changes.
 
 ## Phase 4: Fast-forward server source
 
@@ -97,7 +102,7 @@ node scripts/deploy-product-identity.mjs /opt/dano/deploy "$target_sha"
 
 Require exit zero and record its JSON `productName`, `source`, and `targetSha` in the release manifest. The command reads only public source config and the managed overlay and reuses the target runtime resolver. On missing/empty/placeholder names, invalid overlays or source mismatch, stop before build and follow the repair steps in `deploy/README.md`. Ask for a name only when missing or ambiguous. Valid configuration proceeds without a question.
 
-Build from the proven target checkout and current Dockerfile. Prefer a no-cache build for production updates. Pass registry selection only through the current supported build arguments; follow the Dockerfile's current npm and Debian apt mirror order exactly. Do not patch mirrors on the server or inject secrets into build arguments or logs.
+Build from the proven target checkout and current Dockerfile. Prefer a no-cache build for production updates. Before starting, apply the execution reference's bounded public-mirror probes and build-space budget; recheck capacity between failed attempts. Pass registry selection only through current supported build arguments and mirror order. Do not patch mirrors on the server or inject secrets into build arguments or logs.
 
 Prepare every disposable Git build checkout with `node scripts/deploy-build-context.mjs prepare <checkout> <target_sha>` before building. The helper verifies tracked content against the exact Git tree and sets directories/files/executables to 0755/0644/0755, rejecting dirty/untracked/ignored inputs, links and special files. `deploy:release` calls this gate automatically. When a verified Git archive is required, use `node scripts/deploy-build-context.mjs archive <clean-checkout> <temporary-parent> <target_sha>`; use its returned directory and SHA for the build manifest and remove only that directory afterward. Do not use a permission-preserving root tar extraction or run this helper on runtime/deploy-control directories. Include the exact revision OCI label when building manually.
 
@@ -111,7 +116,7 @@ Capture the build exit status and structured stage results without returning raw
 
 When the current Dockerfile supplies an OCI revision label, require it to equal the full `target_sha`. Otherwise bind provenance by recording the clean build-context HEAD immediately before the no-cache build, exact immutable tag creation, resulting image ID, package version, and asset inventory as one checkpoint. If this evidence cannot prove the image came from `target_sha`, stop and report that a repository-level OCI revision label is required.
 
-Record the immutable tag and image ID. Do not switch traffic if the image version, assets, source SHA evidence, or structured build results disagree. A cached-looking build or old Vite asset is a build failure until explained and rebuilt.
+Record the immutable tag and image ID. Do not switch traffic if image version, assets, source SHA evidence or structured build results disagree. Cache markers and identical assets alone are not failures; unchanged frontend content can retain its assets. Reuse this run's completed candidate only when its verified context, revision, image ID, version and asset inventory still agree.
 
 ## Phase 6: Stage and switch with Compose
 
@@ -130,11 +135,11 @@ Resolve Compose as JSON entirely on-host and pipe it through `scripts/summarize-
 - every repository-managed nginx template/shared-config mount has a readable content hash matching the target checkout, while TLS/secret material is checked only by mount identity and permissions;
 - no unexpected service, port, volume, or route will be removed.
 
-Immediately before switching traffic, fetch and compare `upstream/main` with `target_sha`. Treat `target_sha` as the release locked by this run. If upstream advanced, restart manifest/build preparation for the new SHA by default; deploy the locked older SHA only with explicit user direction.
+Immediately before each traffic switch, revalidate `upstream/main` against `target_sha` through a successful fetch or authenticated GitHub commit query and record time/channel/SHA. Treat `target_sha` as the release locked by this run. If upstream advanced, restart manifest/build preparation for the new SHA by default; deploy the locked older SHA only with explicit user direction. Complete this network check before mutation; acceptance completion uses the saved target proof.
 
 Under the existing deployment lock, run the new image's `./deploy/system-prompt.mjs sync` followed by `check` through the exact Compose app service and `--entrypoint node`. Include the managed product-name overlay when present. Pass `--expected-product-name "$product_name"` to both commands, taking `product_name` exactly from the preflight JSON (never shell-evaluate JSON). This asserts equality with the actual container resolver before writing or checking SYSTEM. Repeat the same preflight immediately before switching and require all three evidence fields to equal the manifest. Both commands must exit zero before switching; preserve only a restricted on-host SYSTEM rollback copy, and restore it with the previous image if rollback is needed. For a configuration-only name update or drift repair, use `scripts/deploy-system-prompt.mjs` as documented in `deploy/README.md`, passing `DANO_DEPLOY_LOCK_FD=9` when reusing the existing lock. Its machine success still requires browser identity acceptance.
 
-Capture an RFC3339 UTC `switch_timestamp` immediately before Compose mutation. Run Compose `up -d --no-build` for only the Dano app/nginx services required by the current topology. Do not recreate or restart adjacent services. Wait for the app healthcheck and nginx dependency to settle. On failure, collect structured status and log counts scoped to `switch_timestamp`, then either correct the proven cause or execute the recorded rollback.
+Capture an RFC3339 UTC `switch_timestamp` immediately before Compose mutation. Run Compose `up -d --no-build` for only the Dano app/nginx services required by the current topology. Do not recreate or restart adjacent services. Wait for real app health and nginx readiness, then complete machine smoke before recording `readiness_timestamp` or opening the Browser acceptance flow. On failure, collect structured status and scoped counts, classify the failure, then correct the proven cause or execute the recorded rollback.
 
 Checkpoint: the running container image ID must equal the built image ID before acceptance begins.
 
@@ -152,6 +157,8 @@ Run the repository's current deployment smoke script against the production HTTP
 Separately verify both production HTTP and HTTPS behavior for `/` and `/api/health` according to the configured exposure mode, including redirects. Verify `/web/` returns 200 and `dano-site` remains healthy. Confirm Compose/container health and restart counts. Summarize app/nginx logs separately by service from `switch_timestamp`; the gate passes only when the producer/filter checks pass and every nonzero error, warning, timeout, health, permission, sandbox, or HTTP 5xx category has a structured explanation and an explicit non-regression or rollback disposition.
 
 Do not treat smoke success as full acceptance.
+
+Persist its candidate-bound receipt before Browser work. Keep the release worker and lock active while Browser evidence is collected; a failed diagnostic or report export does not invalidate already-verified health by itself.
 
 ## Phase 8: Real production browser acceptance
 
@@ -178,6 +185,8 @@ Complete all of these on the new deployment:
 8. For workspace-permission/auth changes, exercise the deployed service's real flow: upload the fixed synthetic image as an Anonymous User, log in to an existing provider user whose persisted workspace has not initialized in this app process, and verify identity, transcript/attachment preservation, model read and logout. Reuse the existing OA client and callback. Deterministic old-permission and rollback fixtures belong in the built login-transfer preflight with disposable data; do not manufacture those states in an existing user's files. Reuse completed preflight evidence for the same candidate code instead of requiring another isolated service.
 
 If a previously working step fails, inspect the final URL, TLS state, active tab, browser-control connection, visible DOM, model chain, network requests, loaded static assets, container state, and safe structured diagnostics. Recover and retry the same path. Do not lower the bar or silently replace it with API checks. If in-app Browser access is unavailable or any item remains incomplete, deployment acceptance is incomplete.
+
+Resume from recorded candidate-bound checkpoints after a control reconnect. Reuse completed PR-specific proof only for the same image and unaffected session/material scope. A container restart requires fresh machine smoke and current-process Browser text/bash/image proof plus relevant persistence checks; a changed candidate requires its full applicable acceptance again.
 
 Classify incomplete acceptance before leaving the new release live:
 
