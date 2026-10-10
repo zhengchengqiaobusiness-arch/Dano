@@ -16,7 +16,8 @@ const emit = value => console.log(JSON.stringify({ kind: kinds.includes(kind) ? 
 function ssh(command, input = "", timeoutMs) {
   return new Promise(resolve => {
     const child = spawn("ssh", ["-i", join(homedir(), ".ssh/id_rsa"),
-      "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "root@1.15.173.22", command],
+      "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=15",
+      "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "root@1.15.173.22", command],
     { stdio: ["pipe", "pipe", "pipe"] });
     let output = "";
     let overflow = false;

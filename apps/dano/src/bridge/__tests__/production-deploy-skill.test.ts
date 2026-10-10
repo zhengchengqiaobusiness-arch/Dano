@@ -155,7 +155,7 @@ describe("production deployment remote script execution", () => {
     expect(result.receipts.at(-1)).toMatchObject({ kind: "diagnostic", exitCode: 0, disposition: "passed" });
     expect(result.stdout + result.stderr).not.toContain("never-print-this");
     expect(result.calls).toHaveLength(2);
-    for (const call of result.calls) expect(call.slice(0, 7)).toEqual(["-i", join(process.env.HOME!, ".ssh/id_rsa"), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "root@1.15.173.22"]);
+    for (const call of result.calls) expect(call.slice(0, -1)).toEqual(["-i", join(process.env.HOME!, ".ssh/id_rsa"), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "root@1.15.173.22"]);
   });
   it("records a failed diagnostic without running any rollback or forwarding raw errors", () => {
     const f = remoteFixture("printf 'never-print-this' >&2\nexit 7\n");

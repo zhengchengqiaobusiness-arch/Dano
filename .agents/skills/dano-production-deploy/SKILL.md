@@ -12,7 +12,7 @@ Follow the deployment and acceptance mode in the root `AGENTS.md`. A request to 
 - Target only `root@1.15.173.22`. Use this SSH prefix exactly:
 
   ```sh
-  ssh -i ~/.ssh/id_rsa -o BatchMode=yes -o IdentitiesOnly=yes root@1.15.173.22
+  ssh -i ~/.ssh/id_rsa -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 root@1.15.173.22
   ```
 
 - Keep diagnostics structured and allowlisted. Never print, copy off-host, or directly inspect the values of API keys, provider tokens, secret files, `.env`, raw runtime sessions, or user runtime configuration. Use presence, permissions, hashes of non-secret artifacts, redacted status, and repository checkers that emit only acceptance markers.

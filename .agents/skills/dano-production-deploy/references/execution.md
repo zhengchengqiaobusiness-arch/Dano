@@ -21,6 +21,13 @@ stdin closed. Ordinary child stdout/stderr stay on-host. It emits an `uploaded`
 receipt immediately and a `completed` receipt after execution. Retain these
 receipts across context compaction; the directory is a cleanup ownership record.
 
+Both connections use `ConnectTimeout=15`, `ServerAliveInterval=15` and
+`ServerAliveCountMax=3`. OpenSSH detects a lost connection without imposing a
+short runtime limit on a healthy build or Browser wait. Upload additionally has
+a 30-second local bound. An interrupted execution is unconfirmed: the remote
+worker may still hold the lock, so inspect its receipt and ownership before
+resuming. Bound build execution and Browser decision waits inside the payload.
+
 `mutation` and `acceptance` executions acquire the production lock on fd 9 and
 export `DANO_DEPLOY_LOCK_FD=9` for existing helpers. Reuse that descriptor inside
 the payload. Keep the same worker alive through Browser disposition and cleanup;
