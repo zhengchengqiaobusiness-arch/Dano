@@ -22,9 +22,12 @@ export function usableAuthHeaders(raw) {
   const headers = {};
   const source = raw && typeof raw === "object" ? raw.headers || raw : {};
   for (const [key, value] of Object.entries(source || {})) {
-    const name = canonicalHeaderName(key);
+    const rawName = String(key || "").trim();
+    if (!rawName || rawName.startsWith(":")) continue;
+    const name = canonicalHeaderName(rawName);
     const text = String(value ?? "").trim();
-    if (!name || !text || isSealedHeaderValue(text)) continue;
+    if (!name || name.startsWith(":") || !text || isSealedHeaderValue(text)) continue;
+    if (/^(host|content-length|connection|transfer-encoding|accept-encoding)$/i.test(name)) continue;
     headers[name] = /^authorization$/i.test(name) ? asAuthorization(text) || text : text;
   }
   return headers;
@@ -32,6 +35,11 @@ export function usableAuthHeaders(raw) {
 
 export function hasCredentialHeaders(headers) {
   return Object.keys(usableAuthHeaders(headers)).length > 0;
+}
+
+export function hasAccessTokenHeader(headers) {
+  const h = usableAuthHeaders(headers);
+  return Object.keys(h).some((name) => /^(authorization|x-token|x-access-token|token|admin-token)$/i.test(name));
 }
 
 export function asAuthorization(value) {
@@ -160,7 +168,11 @@ export function mergePackedHeaders(vaultHeaders, liveHeaders) {
   const vault = usableAuthHeaders(vaultHeaders);
   if (!Object.keys(live).length) return vault;
   const out = { ...vault, ...live };
-  if (!Object.hasOwn(live, "Authorization")) delete out.Authorization;
+  if (!hasAccessTokenHeader(live) && hasAccessTokenHeader(vault)) {
+    for (const [key, value] of Object.entries(vault)) {
+      if (hasAccessTokenHeader({ [key]: value }) && !Object.hasOwn(live, key)) out[key] = value;
+    }
+  }
   return usableAuthHeaders(out);
 }
 

@@ -4,7 +4,7 @@ import { browserSession, captureFrame, closeBrowser, getPage, openBrowser, witho
 import { beginAction, compactNetworkIndex, endAction, listNetwork, waitForAction } from "./browser/network.mjs";
 import { overlayControlFacts, overlayFactLists, takeSnapshot } from "./browser/snapshot.mjs";
 import { loadStorageState, saveStorageState } from "./session-store.mjs";
-import { createRecording, emit, getRecording, persist, snapshotMessage } from "./session.mjs";
+import { appendSessionThought, createRecording, emit, getRecording, loadRecording, persist, persistThoughts, snapshotMessage } from "./session.mjs";
 import { hostTools } from "./agent/tools.mjs";
 import { startRecordingPi as defaultStart } from "./agent/pi-session.mjs";
 import { armIdleTimer, HUMAN_STEER_IDLE_MS, PREVIEW_DETACH_MS } from "./idle-timer.mjs";
@@ -17,18 +17,26 @@ function attachPreview(recording, ws, send) {
   clearTimeout(recording.detachTimer);
   recording.detachTimer = null;
   recording.previewSocket = ws;
-  recording.emitThought = (thought) => send({ type: "thought", ...thought });
+  recording.emitThought = (thought) => {
+    appendSessionThought(recording, thought);
+    send({ type: "thought", ...thought });
+  };
   recording.emit = () => {
     send(snapshotMessage(recording));
     persist(recording);
   };
+  persistThoughts(recording).catch(() => {});
+  send({ type: "thoughts", items: recording.thoughts || [] });
 }
 
 function scheduleDetach(recording) {
+  recording.emitThought = (thought) => appendSessionThought(recording, thought);
+  persistThoughts(recording).catch(() => {});
   armIdleTimer(recording, "detachTimer", PREVIEW_DETACH_MS, () => {
     if (recording.previewSocket) return;
     recording.finished = true;
     recording.status = "stopped";
+    persistThoughts(recording).catch(() => {});
     recording.pi?.dispose?.();
     closeBrowser(recording.id);
   });
@@ -141,15 +149,21 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
         send({ type: "pong" });
         return;
       }
-      if (message.type === "start") {
+      if (message.type === "attach" || message.type === "start") {
         const existingId = String(message.recording_id || message.run_id || "");
-        const existing = existingId ? getRecording(existingId) : null;
-        if (existing && recordingIsLive(existing) && getPage(existing.id)) {
+        const existing = existingId ? (getRecording(existingId) || await loadRecording(existingId)) : null;
+        if (existing) {
           recording = existing;
           attachPreview(recording, ws, send);
-          await pushFrame();
-          frameTimer = setInterval(pushFrame, 400);
+          if (getPage(recording.id)) {
+            await pushFrame();
+            frameTimer = setInterval(pushFrame, 400);
+          }
           send(snapshotMessage(recording));
+          return;
+        }
+        if (message.type === "attach") {
+          send({ type: "error", detail: "not_started" });
           return;
         }
         const stored = message.storage_state || await loadStorageState(message.start_url);
@@ -267,6 +281,7 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
         const page = getPage(recording.id);
         if (page) await saveStorageState(recording.startUrl, await page.context().storageState());
         recording.status = "stopped";
+        persistThoughts(recording).catch(() => {});
         clearInterval(frameTimer);
         await closeBrowser(recording.id);
         recording.emit();
@@ -276,6 +291,7 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
       clearInterval(frameTimer);
       if (!recording) return;
       if (recording.previewSocket === ws) recording.previewSocket = null;
+      persistThoughts(recording).catch(() => {});
       if (recordingIsLive(recording)) {
         scheduleDetach(recording);
         return;

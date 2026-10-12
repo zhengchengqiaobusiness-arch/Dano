@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   beginFreshRecordingEntry,
+  forgetLiveRecording,
   forgetRecordingResultId,
+  rememberedLiveRecording,
   rememberedRecordingResultId,
+  rememberLiveRecording,
   rememberRecordingResultId,
   selectRecordingResultToResume,
 } from "./recordingResume.ts";
@@ -48,4 +51,25 @@ test("entering Recording V2 from the menu starts on recording setup", () => {
 
   assert.equal(rememberedRecordingResultId(storage), "");
   assert.deepEqual(navigationState, { freshRecordingEntry: true });
+});
+
+test("a live recording id survives reload and is not treated as setup", () => {
+  const values = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+    removeItem: (key: string) => values.delete(key),
+  };
+  rememberLiveRecording(storage, { recordingId: "rec_abc", action: "act_1" });
+  assert.deepEqual(rememberedLiveRecording(storage), { recordingId: "rec_abc", action: "act_1" });
+  assert.equal(rememberedLiveRecording({
+    getItem: () => JSON.stringify({ recordingId: "result-1" }),
+  }), null);
+  forgetLiveRecording(storage);
+  assert.equal(rememberedLiveRecording(storage), null);
+  rememberLiveRecording(storage, { action: "act_1" });
+  assert.deepEqual(rememberedLiveRecording(storage), { action: "act_1" });
+  rememberLiveRecording(storage, { recordingId: "rec_abc" });
+  beginFreshRecordingEntry(storage);
+  assert.equal(rememberedLiveRecording(storage), null);
 });

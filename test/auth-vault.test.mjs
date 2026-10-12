@@ -3,9 +3,12 @@ import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { headersFromStorageState, issuedCredential, mergePackedHeaders, noteLoginBody, readAuthVault, redactSecrets, rollCredentialUrl, writeAuthVault } from "../src/auth-vault.mjs";
+import { headersFromStorageState, issuedCredential, mergePackedHeaders, noteLoginBody, readAuthVault, redactSecrets, rollCredentialUrl, usableAuthHeaders, writeAuthVault } from "../src/auth-vault.mjs";
 import { writeAuthLocalFile } from "../src/token-store.mjs";
-import { writeRuntimeConfig } from "../src/skillpack/files.mjs";
+import { authSpawnEnv, writeRuntimeConfig, writeSkillFile } from "../src/skillpack/files.mjs";
+import { pickLatestCredentialHeaders } from "../src/browser/network.mjs";
+import { authStoppedOutput } from "../src/skillpack/verify.mjs";
+import { resultLine } from "../src/agent/pi-session.mjs";
 
 test("a later header write keeps the credential request, and only the matching query value rolls", async () => {
   process.env.CABP_DATA = await mkdtemp(path.join(os.tmpdir(), "cabp-auth-"));
@@ -68,6 +71,28 @@ test("a later credential response rolls the unused refresh into the packed url, 
   assert.equal(packed.credential.refresh_token, "ref-new");
 });
 
+test("packed headers drop hop-by-hop and http2 pseudo names", () => {
+  const headers = usableAuthHeaders({
+    ":authority": "example.test",
+    ":method": "GET",
+    ":path": "/admin-api/x",
+    ":scheme": "https",
+    host: "example.test",
+    "content-length": "0",
+    connection: "keep-alive",
+    "accept-encoding": "gzip",
+    cookie: "a=1",
+    authorization: "Bearer abcdefghijklmnop",
+  });
+  assert.equal(Object.keys(headers).some((key) => key.startsWith(":")), false);
+  assert.equal(headers.Host, undefined);
+  assert.equal(headers["Content-Length"], undefined);
+  assert.equal(headers.Connection, undefined);
+  assert.equal(headers["Accept-Encoding"], undefined);
+  assert.equal(headers.Cookie, "a=1");
+  assert.match(headers.Authorization, /^Bearer /);
+});
+
 test("storage tokens and live-looking keys become Authorization, and secrets are redacted", () => {
   const headers = headersFromStorageState({
     origins: [{
@@ -86,12 +111,12 @@ test("storage tokens and live-looking keys become Authorization, and secrets are
   assert.match(redacted, /\[redacted\]/);
 });
 
-test("live cookie-only headers drop a leftover vault Authorization", async () => {
+test("live cookie-only headers keep vault access token and update Cookie", async () => {
   const packed = mergePackedHeaders(
     { Authorization: "Bearer stale-token-value-here", Cookie: "token=old" },
     { Cookie: "token=live-session" },
   );
-  assert.equal(packed.Authorization, undefined);
+  assert.match(packed.Authorization, /stale-token-value-here/);
   assert.match(packed.Cookie, /live-session/);
   const withLiveAuth = mergePackedHeaders(
     { Authorization: "Bearer stale-token-value-here" },
@@ -102,6 +127,36 @@ test("live cookie-only headers drop a leftover vault Authorization", async () =>
   await writeAuthVault("rec_merge", { Authorization: "Bearer stale-token-value-here", Cookie: "token=old" });
   await writeAuthVault("rec_merge", { Cookie: "token=live-session" });
   const vault = await readAuthVault("rec_merge");
-  assert.equal(vault.headers.Authorization, undefined);
+  assert.match(vault.headers.Authorization, /stale-token-value-here/);
   assert.match(vault.headers.Cookie, /live-session/);
+});
+
+test("later cookie-only requests do not hide a prior access token", () => {
+  const headers = pickLatestCredentialHeaders([
+    { request_headers: { Authorization: "Bearer live-token-value-here", Cookie: "a=1" }, status: 200 },
+    { request_headers: { Cookie: "a=2" }, status: 200 },
+  ], {});
+  assert.match(headers.Authorization, /live-token-value-here/);
+  assert.match(headers.Cookie, /a=1/);
+});
+
+test("missing packed headers counts as auth stop, and api.md path headings are rejected before write", async () => {
+  assert.equal(authStoppedOutput('{"ok": false, "error": "凭证缺失：config/auth.local.json 的 headers 里没有 Authorization"}'), true);
+  assert.equal(authStoppedOutput("AuthExpired"), true);
+  process.env.CABP_DATA = await mkdtemp(path.join(os.tmpdir(), "cabp-auth-write-"));
+  const rejected = await writeSkillFile("rec_headings", "app.rec_headings", "references/api.md", "## 1. 部门树\nGET /admin-api/system/dept/simple-list\n");
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.error, "not_invocable");
+  assert.match(rejected.hint, /字段/);
+  const line = resultLine({
+    content: [{ type: "text", text: JSON.stringify(rejected) }],
+  });
+  assert.match(line, /失败/);
+  assert.match(line, /字段/);
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cabp-auth-env-"));
+  await writeAuthLocalFile(dir, { Authorization: "Bearer packed-token-value-here", Cookie: "sid=1" });
+  const env = authSpawnEnv(path.join(dir, "config", "auth.local.json"));
+  const overlay = JSON.parse(env.DANO_AUTH_HEADERS);
+  assert.match(overlay.Authorization, /packed-token-value-here/);
+  assert.equal(overlay.Cookie, "sid=1");
 });

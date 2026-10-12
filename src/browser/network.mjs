@@ -3,7 +3,7 @@ import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { appendEvidence } from "../evidence/store.mjs";
 import { requestIndexRow, responseKeyPreview } from "../skillpack/request-keys.mjs";
-import { mergePackedHeaders, noteLoginBody, noteRequestHeaders, pickCredentialHeaders, usableAuthHeaders } from "../auth-vault.mjs";
+import { hasAccessTokenHeader, mergePackedHeaders, noteLoginBody, noteRequestHeaders, pickCredentialHeaders, usableAuthHeaders } from "../auth-vault.mjs";
 
 const BODY_OMIT_BYTES = 16384;
 const KEY_PARSE_BYTES = 32768;
@@ -245,15 +245,21 @@ function applyCredentialHeaders(state, headers) {
   }
 }
 
-export function latestCredentialHeaders(recordingId) {
-  const state = bag(recordingId);
-  const items = state.items;
-  for (let i = items.length - 1; i >= 0; i -= 1) {
+export function pickLatestCredentialHeaders(items, cdpHeaders) {
+  let fallback = usableAuthHeaders(cdpHeaders);
+  for (let i = (items || []).length - 1; i >= 0; i -= 1) {
     if (requestAuthFailed(items[i])) continue;
     const headers = usableAuthHeaders(items[i].request_headers);
-    if (Object.keys(headers).length) return headers;
+    if (!Object.keys(headers).length) continue;
+    if (hasAccessTokenHeader(headers)) return headers;
+    if (!hasAccessTokenHeader(fallback)) fallback = headers;
   }
-  return usableAuthHeaders(state.cdpHeaders);
+  return fallback;
+}
+
+export function latestCredentialHeaders(recordingId) {
+  const state = bag(recordingId);
+  return pickLatestCredentialHeaders(state.items, state.cdpHeaders);
 }
 
 export function attachCredentialCapture(recordingId, context, page) {

@@ -1,7 +1,12 @@
 import { browserSession } from "./session.mjs";
 import { readGoal } from "../evidence/store.mjs";
 
-const OVERLAY_ROLE = /^(dialog|alertdialog|listbox|menu|tooltip)\b/i;
+const OVERLAY_ROOT = /^(dialog|alertdialog|listbox|menu|tooltip)\b/i;
+const OVERLAY_MODAL = /^(dialog|alertdialog)\b/i;
+const CHROME_LANDMARK = /^(navigation|banner|contentinfo|complementary)$/i;
+const PAGE_CHROME = /^(navigation|banner|contentinfo)$/i;
+const VALUE_ROLES = /^(textbox|searchbox|combobox|spinbutton|checkbox|radio|slider|listbox)$/i;
+const NOT_VALUE_ROLE = /^(menuitem|menu|navigation|banner|complementary|link|heading|listitem|option|tab|treeitem|columnheader|row)$/i;
 const ROW_ROLE = /^row\b/i;
 const CELL_ROLE = /^(cell|gridcell|button|link|textbox)\b/i;
 
@@ -119,37 +124,87 @@ export function annotateColumns(nodes) {
   return nodes;
 }
 
+export function overlayExactBlock(snapshotText) {
+  const text = String(snapshotText || "");
+  const start = text.search(/(?:^|\n)overlay_exact\n/);
+  if (start < 0) return "";
+  const from = text.slice(start);
+  const end = from.search(/\n(?:goal_exact|row_facts|frame )\b/);
+  return (end < 0 ? from : from.slice(0, end)).split("\n").slice(0, 160).join("\n");
+}
+
 export function overlayHasRef(snapshotText, ref) {
   const raw = String(ref || "").trim().replace(/^\[ref=/, "").replace(/\]$/, "");
   if (!raw) return false;
-  const text = String(snapshotText || "");
-  const start = text.search(/(?:^|\n)overlay_exact\n/);
-  if (start < 0) return false;
-  const from = text.slice(start);
-  const end = from.search(/\n(?:goal_exact|row_facts|frame )\b/);
-  const block = end < 0 ? from : from.slice(0, end);
+  const block = overlayExactBlock(snapshotText);
   return block.includes(`[ref=${raw}]`) || block.includes(raw);
+}
+
+export function stripSnapshotDecorators(yaml) {
+  return String(yaml || "").replace(/\s*\[cursor=[^\]]+\]/g, "");
+}
+
+function ancestorRoles(lines, index) {
+  const roles = [];
+  let depth = indentOf(lines[index]);
+  for (let i = index - 1; i >= 0 && depth > 0; i -= 1) {
+    const ind = indentOf(lines[i]);
+    if (ind >= depth) continue;
+    depth = ind;
+    const role = (unwrapLine(lines[i]).match(/^([a-zA-Z]+)/) || [])[1];
+    if (role) roles.push(role.toLowerCase());
+  }
+  return roles;
+}
+
+function takeOverlaySubtree(lines, start) {
+  const out = [lines[start]];
+  const base = indentOf(lines[start]);
+  let i = start + 1;
+  while (i < lines.length && indentOf(lines[i]) > base) {
+    if (/\[ref=/.test(lines[i])) out.push(lines[i]);
+    i += 1;
+  }
+  return { lines: out, next: i };
+}
+
+function valueControlLines(lines) {
+  const out = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!/\[ref=/.test(lines[i])) continue;
+    const role = ((unwrapLine(lines[i]).match(/^([a-zA-Z]+)/) || [])[1] || "");
+    if (!VALUE_ROLES.test(role)) continue;
+    if (ancestorRoles(lines, i).some((item) => PAGE_CHROME.test(item))) continue;
+    out.push(lines[i]);
+    if (out.length >= 160) break;
+  }
+  return out;
 }
 
 export function overlayExactLines(yaml) {
   const lines = String(yaml || "").split("\n");
-  const out = [];
+  const modals = [];
+  const popups = [];
   let i = 0;
   while (i < lines.length) {
     const raw = unwrapLine(lines[i]);
-    if (OVERLAY_ROLE.test(raw) && /\[ref=/.test(lines[i])) {
-      const base = indentOf(lines[i]);
-      out.push(lines[i]);
-      i += 1;
-      while (i < lines.length && indentOf(lines[i]) > base) {
-        if (/\[ref=/.test(lines[i])) out.push(lines[i]);
-        i += 1;
+    if (OVERLAY_ROOT.test(raw) && /\[ref=/.test(lines[i])) {
+      const role = ((raw.match(/^([a-zA-Z]+)/) || [])[1] || "").toLowerCase();
+      const chrome = ancestorRoles(lines, i).some((item) => CHROME_LANDMARK.test(item));
+      const taken = takeOverlaySubtree(lines, i);
+      if (role === "menu" && chrome) {
+        i = taken.next;
+        continue;
       }
+      if (OVERLAY_MODAL.test(role)) modals.push(...taken.lines);
+      else popups.push(...taken.lines);
+      i = taken.next;
       continue;
     }
     i += 1;
   }
-  return out.slice(0, 80);
+  const overlay = (modals.length ? [...modals, ...popups] : popups).slice(0, 160);
+  return overlay.length ? overlay : valueControlLines(lines);
 }
 
 function rowFactsFromYaml(yaml) {
@@ -183,18 +238,21 @@ export function yamlFingerprint(text) {
     .replace(/@\d+/g, "@");
 }
 
-function ancestorName(lines, index) {
-  const base = indentOf(lines[index]);
-  for (let i = index - 1; i >= 0; i -= 1) {
-    if (indentOf(lines[i]) >= base) continue;
+export function nearestNamedAncestor(yaml, index) {
+  const lines = Array.isArray(yaml) ? yaml : String(yaml || "").split("\n");
+  let depth = indentOf(lines[index]);
+  for (let i = index - 1; i >= 0 && depth > 0; i -= 1) {
+    const ind = indentOf(lines[i]);
+    if (ind >= depth) continue;
+    depth = ind;
     const named = unwrapLine(lines[i]).match(/^[a-zA-Z]+ "((?:\\.|[^"])*)"/);
-    return named ? named[1].replace(/\\"/g, '"') : "";
+    if (named) return named[1].replace(/\\"/g, '"');
   }
   return "";
 }
 
 function rewriteYaml(yaml, frame, frameId, snap, epoch, refs) {
-  const source = String(yaml || "").split("\n");
+  const source = stripSnapshotDecorators(yaml).split("\n");
   const lines = [];
   source.forEach((line, index) => {
     const next = line.replace(/\[ref=([^\]]+)\]/g, (_, aria) => {
@@ -202,7 +260,7 @@ function rewriteYaml(yaml, frame, frameId, snap, epoch, refs) {
       const raw = unwrapLine(line);
       const named = raw.match(/^[a-zA-Z]+ "((?:\\.|[^"])*)"/);
       const role = (raw.match(/^([a-zA-Z]+)/) || [])[1] || "";
-      const parent = ancestorName(source, index);
+      const parent = nearestNamedAncestor(source, index);
       const text = named ? named[1].replace(/\\"/g, '"') : "";
       const label = text && parent
         ? `${role} "${text}" in "${parent}"`
@@ -265,7 +323,7 @@ async function ariaYaml(frame, budgetMs) {
 
 export async function takeSnapshot(recordingId, { budgetMs = 8000 } = {}) {
   const state = browserSession(recordingId);
-  if (!state) return { epoch: 0, text: "", refs: [] };
+  if (!state) return { ok: false, error: "no_browser", epoch: 0, text: "", refs: [] };
   const frames = state.page.frames();
   const main = state.page.mainFrame();
   const rest = frames.filter((frame) => frame !== main).sort((a, b) => frameKey(a).localeCompare(frameKey(b)));
@@ -307,7 +365,16 @@ export async function takeSnapshot(recordingId, { budgetMs = 8000 } = {}) {
     if (rewritten) lines.push(rewritten);
   }
   const overlayRefs = overlay.map((line) => publishedRef(line)).filter(Boolean);
-  const exact = goalExactLines(exactNodes, goalText, overlayRefs).map((node) => `- ${node.shown} [ref=${node.ref}]`);
+  const hits = goalExactLines(exactNodes, goalText, overlayRefs);
+  state.seenGoalNames = Array.isArray(state.seenGoalNames) ? state.seenGoalNames : [];
+  for (const node of hits) {
+    for (const raw of [node.name, node.column]) {
+      const name = String(raw || "").trim();
+      if (name.length < 2 || /^\d+(\.\d+)?%?$/.test(name)) continue;
+      if (!state.seenGoalNames.includes(name)) state.seenGoalNames.push(name);
+    }
+  }
+  const exact = hits.map((node) => `- ${node.shown} [ref=${node.ref}]`);
   const lookup = [];
   if (exact.length) lookup.push("goal_exact", ...exact);
   if (overlay.length) lookup.push("overlay_exact", ...overlay.map((line) => line.trimStart()));
@@ -318,16 +385,17 @@ export async function takeSnapshot(recordingId, { budgetMs = 8000 } = {}) {
   return snapshot;
 }
 
-const VALUE_ROLES = /^(textbox|searchbox|combobox|spinbutton|checkbox|radio|slider|listbox)$/i;
+const UNFILLED_PROMPT = /^(请选|请输入|请填写|请填入|placeholder)/i;
 
 export function controlLooksEmpty(value, placeholder = "", ...names) {
   const v = String(value ?? "").trim();
   if (!v) return true;
   const mark = String(placeholder || "").trim();
   if (mark && v === mark) return true;
+  if (UNFILLED_PROMPT.test(v)) return true;
   return names.some((name) => {
     const label = String(name || "").trim();
-    return Boolean(label) && v === label;
+    return Boolean(label) && v === label && UNFILLED_PROMPT.test(label);
   });
 }
 
@@ -346,86 +414,123 @@ export function markReadonly(ariaReadonly, htmlReadonly, ariaDisabled) {
   return String(ariaDisabled ?? "").trim().toLowerCase() === "true";
 }
 
+export function overlayAlignRows(fields) {
+  return (Array.isArray(fields) ? fields : []).map((row) => ({
+    ref: row.ref || "",
+    role: row.role || "",
+    name: row.name || "",
+    column: row.column || "",
+    value: row.value ?? "",
+    input: row.input || "",
+    empty: Boolean(row.empty),
+    required: Boolean(row.required),
+    readonly: Boolean(row.readonly),
+  }));
+}
+
 export function overlayFactLists(overlay_fields) {
-  const rows = Array.isArray(overlay_fields) ? overlay_fields : [];
+  const rows = overlayAlignRows(overlay_fields);
+  const editable = rows.filter((row) => !row.readonly);
   return {
     overlay_fields: rows,
+    overlay_editable: editable,
     empty_overlay: rows.filter((row) => row.empty).map((row) => row.name || row.role),
     required_empty_overlay: rows.filter((row) => row.empty && row.required).map((row) => row.name || row.role),
   };
 }
 
-async function placeholderOf(locator) {
-  const named = await locator.getAttribute("placeholder").catch(() => null);
-  if (named) return String(named);
-  const aria = await locator.getAttribute("aria-placeholder").catch(() => null);
-  return aria ? String(aria) : "";
-}
-
-async function overlayValueControl(locator, role, named) {
-  if (VALUE_ROLES.test(role)) return true;
-  const haspopup = await locator.getAttribute("aria-haspopup").catch(() => null);
-  const expanded = await locator.getAttribute("aria-expanded").catch(() => null);
-  if (haspopup != null || expanded != null) return true;
-  return /^generic$/i.test(role) && Boolean(named);
-}
-
-async function readControlValue(locator) {
-  const placeholder = await placeholderOf(locator);
-  const aria = await locator.getAttribute("aria-valuenow").catch(() => null);
-  if (aria != null) return { value: String(aria), placeholder };
-  const checked = await locator.getAttribute("aria-checked").catch(() => null);
-  if (checked != null) return { value: checked, placeholder };
+async function readControlFact(locator, meta) {
   try {
-    return { value: String(await locator.inputValue()), placeholder };
+    return await locator.evaluate((node, info) => {
+      const el = node instanceof Element ? node : null;
+      if (!el) return { skip: true };
+      const nested = el.matches("input,select,textarea") ? el : el.querySelector("input,select,textarea");
+      const native = el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT"
+        || el.getAttribute("contenteditable") === "true"
+        || Boolean(nested && (nested.tagName === "INPUT" || nested.tagName === "TEXTAREA" || nested.tagName === "SELECT"));
+      const haspopup = el.getAttribute("aria-haspopup");
+      const expanded = el.getAttribute("aria-expanded");
+      if (!info.valueRole && !native && haspopup == null && expanded == null && !info.genericNamed) return { skip: true };
+      let input = "";
+      if (nested instanceof HTMLSelectElement) input = "select";
+      else if (nested instanceof HTMLTextAreaElement) input = "textarea";
+      else if (nested instanceof HTMLInputElement) input = nested.type || "text";
+      const placeholder = el.getAttribute("placeholder")
+        || el.getAttribute("aria-placeholder")
+        || (nested && nested.getAttribute("placeholder"))
+        || "";
+      let value = "";
+      if (el.getAttribute("aria-valuenow") != null) value = String(el.getAttribute("aria-valuenow"));
+      else if (el.getAttribute("aria-checked") != null) value = String(el.getAttribute("aria-checked"));
+      else if (nested && "value" in nested) value = String(nested.value ?? "");
+      else value = String(el.innerText || "").trim();
+      return {
+        skip: false,
+        value,
+        placeholder,
+        input,
+        ariaRequired: el.getAttribute("aria-required"),
+        htmlRequired: Boolean(el.required),
+        ariaReadonly: el.getAttribute("aria-readonly"),
+        htmlReadonly: Boolean(el.readOnly),
+        ariaDisabled: el.getAttribute("aria-disabled"),
+      };
+    }, meta);
   } catch {
-    const attr = await locator.getAttribute("value").catch(() => null);
-    if (attr != null) return { value: String(attr), placeholder };
-    return { value: String(await locator.innerText().catch(() => "")).trim(), placeholder };
+    return { skip: true };
   }
 }
 
 export async function overlayControlFacts(recordingId) {
   const state = browserSession(recordingId);
   const published = String(state?.lastPublished?.text || "");
-  const start = published.search(/(?:^|\n)overlay_exact\n/);
-  if (start < 0) return [];
-  const from = published.slice(start);
-  const end = from.search(/\n(?:goal_exact|row_facts|frame )\b/);
-  const block = (end < 0 ? from : from.slice(0, end)).split("\n").slice(1);
-  const facts = [];
+  const block = overlayExactBlock(published).split("\n").filter((line) => line && !/^overlay_exact\s*$/.test(line.trim()));
+  const jobs = [];
   for (const line of block) {
     const raw = unwrapLine(line);
     const role = (raw.match(/^([a-zA-Z]+)/) || [])[1] || "";
     const ref = publishedRef(line);
-    if (!ref) continue;
+    if (!ref || NOT_VALUE_ROLE.test(role)) continue;
     const named = raw.match(/^[a-zA-Z]+ "((?:\\.|[^"])*)"/);
     const col = raw.match(/\scol "((?:\\.|[^"])*)"/);
     const label = named ? named[1].replace(/\\"/g, '"') : "";
     const column = col ? col[1].replace(/\\"/g, '"') : "";
     const hit = locatorFor(recordingId, ref);
     if (!hit) continue;
-    if (!(await overlayValueControl(hit.locator, role, label))) continue;
-    const read = await readControlValue(hit.locator);
-    const ariaRequired = await hit.locator.getAttribute("aria-required").catch(() => null);
-    const htmlRequired = await hit.locator.evaluate((el) => Boolean(el.required)).catch(() => false);
-    const ariaReadonly = await hit.locator.getAttribute("aria-readonly").catch(() => null);
-    const htmlReadonly = await hit.locator.evaluate((el) => Boolean(el.readOnly)).catch(() => false);
-    const ariaDisabled = await hit.locator.getAttribute("aria-disabled").catch(() => null);
-    facts.push({
+    jobs.push({
       ref,
       role: role.toLowerCase(),
+      label,
+      column,
       name: hit.label || label || role,
-      value: read.value,
-      ...(read.placeholder ? { placeholder: read.placeholder } : {}),
-      ...(column ? { column } : {}),
-      empty: controlLooksEmpty(read.value, read.placeholder, label, column),
-      required: markRequired(ariaRequired, htmlRequired, label, column, hit.label),
-      readonly: markReadonly(ariaReadonly, htmlReadonly, ariaDisabled),
+      locator: hit.locator,
     });
-    if (facts.length >= 40) break;
+    if (jobs.length >= 160) break;
   }
-  return facts;
+  const rows = [];
+  for (let i = 0; i < jobs.length; i += 24) {
+    const part = await Promise.all(jobs.slice(i, i + 24).map(async (job) => {
+      const raw = await readControlFact(job.locator, {
+        valueRole: VALUE_ROLES.test(job.role),
+        genericNamed: job.role === "generic" && Boolean(job.label),
+      });
+      if (!raw || raw.skip) return null;
+      return {
+        ref: job.ref,
+        role: job.role,
+        name: job.name,
+        value: raw.value,
+        ...(raw.placeholder ? { placeholder: raw.placeholder } : {}),
+        ...(job.column ? { column: job.column } : {}),
+        ...(raw.input ? { input: raw.input } : {}),
+        empty: controlLooksEmpty(raw.value, raw.placeholder, job.label, job.column),
+        required: markRequired(raw.ariaRequired, raw.htmlRequired, job.label, job.column, job.name),
+        readonly: markReadonly(raw.ariaReadonly, raw.htmlReadonly, raw.ariaDisabled),
+      };
+    }));
+    for (const row of part) if (row) rows.push(row);
+  }
+  return rows.slice(0, 160);
 }
 
 export function locatorFor(recordingId, ref) {

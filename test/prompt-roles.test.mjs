@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
+import os from "node:os";
 import test from "node:test";
 import path from "node:path";
 import { packageRoot } from "../src/paths.mjs";
-import { controlLooksEmpty, overlayExactLines, overlayHasRef, yamlFingerprint } from "../src/browser/snapshot.mjs";
+import { controlLooksEmpty, goalExactLines, nearestNamedAncestor, overlayExactLines, overlayHasRef, stripSnapshotDecorators, yamlFingerprint } from "../src/browser/snapshot.mjs";
 import { compactNetworkIndex, networkBodyForModel } from "../src/browser/network.mjs";
 import { responseKeyPreview } from "../src/skillpack/request-keys.mjs";
 import { writeOnlySkill } from "../src/skillpack/verify.mjs";
 import { raceWall, withPage } from "../src/browser/session.mjs";
-import { packedAuthAssist, sessionAssistBlocked } from "../src/agent/tools.mjs";
+import { GUIDE_NAMES } from "../src/agent/guides.mjs";
+import { hostTools, packedAuthAssist, sessionAssistBlocked } from "../src/agent/tools.mjs";
+import { listEvidence } from "../src/evidence/store.mjs";
 
 test("the method does not ban number cells or treat filled controls as caller-required", async () => {
   const prompt = await readFile(path.join(packageRoot(), "src", "agent", "prompt.md"), "utf8");
@@ -35,12 +38,33 @@ test("the method does not ban number cells or treat filled controls as caller-re
   assert.match(prompt, /表格单元格/);
   assert.match(prompt, /no_browser/);
   assert.match(prompt, /不要抢点/);
+  assert.match(prompt, /overlay_editable/);
+  assert.match(prompt, /没有则是树上非 chrome/);
+  assert.match(prompt, /python3/);
+  assert.match(prompt, /questions\[\]/);
+  assert.match(prompt, /dateFormat/);
+  assert.match(prompt, /goal_named_unclicked/);
+  assert.match(prompt, /也不要 write_skill_file/);
+  assert.match(prompt, /不要 dataSource/);
+  assert.match(prompt, /formIds/);
+  assert.match(prompt, /不要 browser_open/);
+  assert.match(prompt, /set_defaults\(func=/);
+  assert.match(prompt, /不要写死源站/);
+  assert.match(prompt, /listed_write_keys/);
+  assert.match(prompt, /指针样式不是能不能点的依据/);
+  assert.match(prompt, /只有 auth\.local\.json 的 credential 同时有 url 和 method 时才重放/);
+  assert.match(prompt, /不要只认某一个键名/);
+  assert.match(prompt, /仍写完三文件/);
+  assert.doesNotMatch(prompt, /失败或 401 停止/);
   assert.doesNotMatch(prompt, /不点旁边只有数字/);
   assert.doesNotMatch(prompt, /各占一行必填/);
   assert.doesNotMatch(prompt, /same_column/);
   assert.doesNotMatch(prompt, /禁止.*取消|不要点取消/);
   assert.doesNotMatch(prompt, /所属系统/);
   assert.doesNotMatch(prompt, /tenant-id|tenant_id/);
+  assert.doesNotMatch(prompt, /都可以点/);
+  assert.doesNotMatch(prompt, /打开弹层已带上/);
+  assert.doesNotMatch(prompt, /页面已有值若 listed/);
 });
 
 test("a displayed placeholder is still an empty overlay fact", () => {
@@ -50,6 +74,7 @@ test("a displayed placeholder is still an empty overlay fact", () => {
   assert.equal(controlLooksEmpty("甲", "请选择"), false);
   assert.equal(controlLooksEmpty("请选择所属系统", "", "请选择所属系统"), true);
   assert.equal(controlLooksEmpty("已选系统", "", "请选择所属系统"), false);
+  assert.equal(controlLooksEmpty("已选甲", "", "已选甲"), false);
 });
 
 test("assist for a packed token is rejected, page login is not", () => {
@@ -58,6 +83,68 @@ test("assist for a packed token is rejected, page login is not", () => {
   assert.equal(sessionAssistBlocked("浏览器会话已断开（browser_open 返回 no_browser"), true);
   assert.equal(sessionAssistBlocked("origin_denied"), true);
   assert.equal(sessionAssistBlocked("登录页被验证码挡住"), false);
+});
+
+test("goal lookup keeps table cells whose column is named in the goal, with or without a pointer cursor", () => {
+  const hits = goalExactLines([
+    { role: "cell", name: "7", column: "应填数量", ariaRef: "f0:e10@1" },
+    { role: "cell", name: "31", column: "已填数量", ariaRef: "f0:e11@1" },
+    { role: "cell", name: "2", column: "未填数量", ariaRef: "f0:e12@1" },
+    { role: "button", name: "导出", column: "", ariaRef: "f0:e13@1" },
+  ], "点应填数量、已填数量、未填数量列里的数字");
+  assert.ok(hits.some((node) => node.ariaRef === "f0:e10@1"));
+  assert.ok(hits.some((node) => node.ariaRef === "f0:e11@1"));
+  assert.ok(hits.some((node) => node.ariaRef === "f0:e12@1"));
+  assert.equal(hits.some((node) => node.name === "导出"), false);
+});
+
+test("pointer cursor is not published, and a page menu is not the overlay when a dialog is open", () => {
+  const raw = '- generic "下载" [ref=f0:e1@1] [cursor=pointer]';
+  assert.equal(stripSnapshotDecorators(raw).includes("cursor="), false);
+  const yaml = [
+    '- navigation [ref=f0:e1@1]:',
+    '  - menu [ref=f0:e2@1]:',
+    '    - menuitem "首页" [ref=f0:e3@1] [cursor=pointer]',
+    '- textbox "列表筛选" [ref=f0:e9@1]',
+    '- dialog "新建" [ref=f0:e4@1]:',
+    '  - textbox "标题" [ref=f0:e5@1]',
+    '  - button "确定" [ref=f0:e6@1]',
+  ].join("\n");
+  const overlay = overlayExactLines(yaml);
+  assert.ok(overlay.some((line) => line.includes("标题")));
+  assert.equal(overlay.some((line) => line.includes("首页")), false);
+  assert.equal(overlay.some((line) => line.includes("列表筛选")), false);
+  const dropdown = overlayExactLines([
+    '- button "打开" [ref=f0:e1@1]',
+    '- menu [ref=f0:e2@1]:',
+    '  - menuitem "甲" [ref=f0:e3@1]',
+  ].join("\n"));
+  assert.ok(dropdown.some((line) => line.includes("甲")));
+});
+
+test("without a dialog, overlay_exact is the page value controls, not chrome or buttons", () => {
+  const yaml = [
+    '- navigation [ref=f0:e1@1]:',
+    '  - searchbox "站内搜索" [ref=f0:e2@1]',
+    '- main [ref=f0:e3@1]:',
+    '  - textbox "标题" [ref=f0:e4@1]',
+    '  - combobox "分类" [ref=f0:e5@1]',
+    '  - button "提交" [ref=f0:e6@1]',
+    '  - complementary [ref=f0:e7@1]:',
+    '    - textbox "侧栏备注" [ref=f0:e8@1]',
+  ].join("\n");
+  const overlay = overlayExactLines(yaml);
+  assert.ok(overlay.some((line) => line.includes("标题")));
+  assert.ok(overlay.some((line) => line.includes("分类")));
+  assert.ok(overlay.some((line) => line.includes("侧栏备注")));
+  assert.equal(overlay.some((line) => line.includes("站内搜索")), false);
+  assert.equal(overlay.some((line) => line.includes("提交")), false);
+  const unnamed = [
+    '- tabpanel "日报" [ref=f0:e1@1]:',
+    '  - generic [ref=f0:e2@1]:',
+    '    - generic [ref=f0:e3@1]',
+  ].join("\n").split("\n");
+  assert.equal(nearestNamedAncestor(unnamed, 2), "日报");
 });
 
 test("overlay lines stay a lookup from the tree, including numeric cells in a row", () => {
@@ -122,4 +209,19 @@ test("a hung page lock is released so a later turn can run", async () => {
   assert.equal(timed.error, "act_timeout");
   releaseHung();
   await hung;
+});
+
+test("read_guide all records every method file", async () => {
+  process.env.CABP_DATA = await mkdtemp(path.join(os.tmpdir(), "cabp-guide-"));
+  const tools = hostTools({ id: "rec_guides", subsystem: "app", emit() {} });
+  const listed = await tools.read_guide({ name: "all" });
+  assert.equal(listed.ok, true);
+  assert.equal(listed.evidence_ids.length, GUIDE_NAMES.length);
+  for (const name of GUIDE_NAMES) assert.match(listed.text, new RegExp(name.replaceAll(".", "\\.")));
+  const evidence = await listEvidence("rec_guides", { limit: 0 });
+  const summaries = new Set(evidence.filter((row) => row.kind === "guide").map((row) => row.summary));
+  for (const name of GUIDE_NAMES) assert.ok(summaries.has(name), name);
+  const unknown = await tools.read_guide({ name: "nope.md" });
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.error, "unknown_guide");
 });

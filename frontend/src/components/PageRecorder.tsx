@@ -65,7 +65,9 @@ import { historyLifecycleView } from "../api/skillLifecycle";
 import { applyExportedCatalog, notifySkillCatalogChanged } from "../api/skillCatalog";
 import {
   forgetRecordingResultId,
+  rememberedLiveRecording,
   rememberedRecordingResultId,
+  rememberLiveRecording,
   rememberRecordingResultId,
   selectRecordingResultToResume,
 } from "../api/recordingResume";
@@ -811,8 +813,9 @@ export default function PageRecorder({
   const [localValues, setLocalValues] = useState<Record<string, unknown>>({});
   const [localCapabilityStepIds, setLocalCapabilityStepIds] = useState<Record<string, string[]>>({});
   const [editingResult, setEditingResult] = useState(false);
-  const [viewStage, setViewStage] = useState(0);
-  const [keepRecording, setKeepRecording] = useState(false);
+  const liveAtBoot = useRef(typeof sessionStorage === "undefined" ? null : rememberedLiveRecording(sessionStorage));
+  const [viewStage, setViewStage] = useState(liveAtBoot.current ? 1 : 0);
+  const [keepRecording, setKeepRecording] = useState(Boolean(liveAtBoot.current));
   const [keepResult, setKeepResult] = useState(false);
   const [resumeOnly, setResumeOnly] = useState(false);
   const [thoughts, setThoughts] = useState<ThoughtChunk[]>([]);
@@ -994,22 +997,9 @@ export default function PageRecorder({
   }, [viewStage, historyOpen]);
 
   function isUsefulRecorderThought(chunk: ThoughtChunk) {
-    if (chunk.kind === "tool" || chunk.kind === "thinking") return true;
+    if (chunk.kind === "tool") return Boolean(String(chunk.text || "").trim());
     if (chunk.kind === "user") return Boolean(String(chunk.text || "").trim());
-    const text = String(chunk.text || "").trim();
-    if (!text) return false;
-    if (/^正在自动操作 \d+s/.test(text)) return false;
-    if (/^开始新一轮模型分析/.test(text)) return false;
-    if (/^模型user[：:]/.test(text)) return false;
-    if (/^本轮结束 tools?=/.test(text)) return false;
-    if (/^继续用 Control In App Browser/.test(text)) return false;
-    if (/^继续用 control_in_app_browser/.test(text)) return false;
-    if (/getChatNotReadMessageCount|queryTopBarMessageCount|queryTodoTaskCount|\/prod-api\/getInfo|\/prod-api\/getRouters/.test(text)) return false;
-    if (/采集可见控件 \d+ 个/.test(text)) return false;
-    if (/^请求\s+(GET|POST|PUT|PATCH|DELETE|HEAD)\s+/i.test(text)) return false;
-    if (/https?:\/\//i.test(text) && /(refreshToken|access_token|token)=/i.test(text)) return false;
-    if (/\bPI\b/.test(text) && /click|fill|control_in_app_browser|发给/.test(text)) return false;
-    return true;
+    return false;
   }
 
   function publicThoughtChunk(chunk: ThoughtChunk): ThoughtChunk | null {
@@ -1131,6 +1121,7 @@ export default function PageRecorder({
 
   useEffect(() => {
     if (restoreResultAttemptedRef.current || historyLoading || activeResultIdRef.current) return;
+    if (rememberedLiveRecording(sessionStorage)) return;
     restoreResultAttemptedRef.current = true;
     const rememberedId = rememberedRecordingResultId(sessionStorage);
     if (!rememberedId) return;
@@ -1390,6 +1381,37 @@ export default function PageRecorder({
     window.setTimeout(tryStart, 0);
   }
 
+  useEffect(() => {
+    const live = liveAtBoot.current;
+    if (!live?.recordingId) return undefined;
+    actionRef.current = live.action || "";
+    const stub: WorkflowSnapshot = {
+      run_id: live.recordingId,
+      action: live.action || "",
+      title,
+      revision: 0,
+      status: "recording",
+      progress: { step: "capturing", label: "正在接回预览" },
+      capture_frozen: false,
+      draft: null,
+      error: "",
+      assist: { reason: "" },
+      human_can_click: true,
+    };
+    snapshotRef.current = stub;
+    setSnapshot(stub);
+    reachedStageRef.current = 1;
+    socketInitRef.current = {
+      type: "attach",
+      recording_id: live.recordingId,
+      tenant,
+      subsystem,
+      viewport: recordingViewport(),
+    };
+    beginStartWhenPreviewReady(live.action || "");
+    return undefined;
+  }, []);
+
   function editIdentity(edit: DraftEdit) {
     return [
       edit.op,
@@ -1539,6 +1561,11 @@ export default function PageRecorder({
     };
     snapshotRef.current = next;
     setSnapshot(next);
+    if (String(next.run_id || "").startsWith("rec_")) {
+      rememberLiveRecording(sessionStorage, { recordingId: String(next.run_id), action: next.action || actionRef.current });
+      setKeepRecording(true);
+      setViewStage((current) => (current === 0 ? 1 : current));
+    }
     if (["recording", "processing", "waiting_operator", "editable", "failed", "cancelled", "published", "skill_ready", "skill_written_needs_auth", "verify_failed", "stopped"].includes(next.status)) {
       setConnecting(false);
     }
@@ -1637,6 +1664,21 @@ export default function PageRecorder({
       }
       if (incoming.type === "snapshot" && incoming.snapshot) {
         receiveSnapshot(incoming.snapshot as WorkflowSnapshot);
+      } else if (incoming.type === "thoughts") {
+        const items = Array.isArray(incoming.items) ? incoming.items : [];
+        const next: ThoughtChunk[] = [];
+        for (const raw of items) {
+          const row = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+          const chunk = publicThoughtChunk({
+            kind: String(row.kind || "text"),
+            text: String(row.text || ""),
+            phase: row.phase ? String(row.phase) : undefined,
+            ok: typeof row.ok === "boolean" ? row.ok : undefined,
+            stream: row.stream === true,
+          });
+          if (chunk && isUsefulRecorderThought(chunk)) next.push(chunk);
+        }
+        setThoughts(next);
       } else if (incoming.type === "thought") {
         appendThought({
           kind: String(incoming.kind || "text"),
@@ -1684,9 +1726,12 @@ export default function PageRecorder({
           setFinishRequested(false);
           setConnecting(false);
           const detail = String(incoming.detail || "录制处理失败");
-          const openingPage = !snapshotRef.current
-            || snapshotRef.current.status === "idle"
-            || snapshotRef.current.progress.label === "正在打开业务页面";
+          const openingPage = !String(snapshotRef.current?.run_id || "").startsWith("rec_")
+            && (
+              !snapshotRef.current
+              || snapshotRef.current.status === "idle"
+              || snapshotRef.current.progress.label === "正在打开业务页面"
+            );
           if (openingPage) {
             snapshotRef.current = null;
             setSnapshot(null);
@@ -1763,6 +1808,7 @@ export default function PageRecorder({
     closeRecordingSocket();
     forgetRecordingResultId(sessionStorage);
     const action = newActionName();
+    rememberLiveRecording(sessionStorage, { action });
     actionRef.current = action;
     activeResultIdRef.current = "";
     setActiveResultId("");
@@ -1889,10 +1935,18 @@ export default function PageRecorder({
       applyViewedDraft(row, (overlaid.draft || detail.draft || null) as FlowSpec | null, overlaid);
     } catch {
       message.error("打开录制结果失败");
-      setKeepResult(false);
-      setViewStage(0);
-      resumeOnlyRef.current = false;
-      setResumeOnly(false);
+      const live = rememberedLiveRecording(sessionStorage);
+      if (live?.recordingId) {
+        setKeepRecording(true);
+        setViewStage(1);
+        resumeOnlyRef.current = false;
+        setResumeOnly(false);
+      } else {
+        setKeepResult(false);
+        setViewStage(0);
+        resumeOnlyRef.current = false;
+        setResumeOnly(false);
+      }
     } finally {
       setOpeningId("");
     }
@@ -2606,6 +2660,7 @@ export default function PageRecorder({
       setViewStage(2);
       return;
     }
+    if (keepRecording && next === 0) return;
     if (next <= (keepRecording ? 1 : 0)) setViewStage(next);
   }
 

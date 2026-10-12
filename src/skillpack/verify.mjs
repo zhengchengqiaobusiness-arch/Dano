@@ -10,22 +10,58 @@ import { nonStdlibImports } from "./stdlib-imports.mjs";
 import { GUIDE_NAMES } from "../agent/guides.mjs";
 
 function section(text, title) {
-  const match = text.match(new RegExp(`## ${title}\\n([\\s\\S]*?)(?=\\n## |$)`));
-  return match ? match[1] : "";
+  const escaped = String(title || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = String(text || "").match(new RegExp(`(?:^|\\n)(#{1,6})\\s+${escaped}\\s*(?:\\n|$)`));
+  if (!match) return "";
+  const level = match[1].length;
+  const rest = String(text || "").slice(match.index + match[0].length);
+  const next = rest.search(new RegExp(`\\n#{1,${level}}\\s+`));
+  return next < 0 ? rest : rest.slice(0, next);
+}
+
+function firstFieldValue(rest) {
+  return String(rest || "").split(/,\s*(?=[a-z_]+\s*[:=])/)[0].trim();
+}
+
+function extraFieldPairs(rest) {
+  const chunks = String(rest || "").split(/,\s*(?=[a-z_]+\s*[:=])/).slice(1);
+  const out = [];
+  for (const chunk of chunks) {
+    const item = chunk.match(/^([a-z_]+)\s*[:=]\s*(.*)$/);
+    if (item) out.push([item[1], item[2].trim()]);
+  }
+  return out;
+}
+
+const SOURCE_TOKEN = /(previous_response|current_user|other_api|constant|unknown|caller|now)(?![A-Za-z_])/;
+
+function sourceToken(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (FIELD_SOURCES.has(raw)) return raw;
+  const hit = raw.match(SOURCE_TOKEN);
+  return hit ? hit[1] : raw;
+}
+
+function assignFieldKey(row, key, value) {
+  if (key === "source") row.source = sourceToken(value);
+  else row[key] = value;
+  if (key === "reason" || key === "constant_reason") row.constant_reason = value;
 }
 
 function blocks(body, startKey) {
   const rows = [];
   let current = null;
   for (const line of body.split(/\n/)) {
-    const item = line.match(/^- ([a-z_]+):\s*(.*)$/);
+    const item = line.match(/^\s*- ([a-z_]+)\s*[:=]\s*(.*)$/);
     if (!item) continue;
     if (item[1] === startKey) {
       current = {};
       rows.push(current);
     }
     if (!current) continue;
-    current[item[1]] = item[2].trim();
+    assignFieldKey(current, item[1], firstFieldValue(item[2]));
+    for (const [key, value] of extraFieldPairs(item[2])) assignFieldKey(current, key, value);
   }
   return rows;
 }
@@ -47,6 +83,17 @@ function writesRecordedPath(line, clientText, requests) {
   return false;
 }
 
+function functionBlock(text, name) {
+  const token = String(name || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!token) return "";
+  const match = String(text || "").match(new RegExp(`(?:^|\\n)(?:async )?def\\s+${token}\\b[\\s\\S]*?(?=(?:\\n(?:async )?def )|$)`));
+  return match ? match[0] : "";
+}
+
+function blockWrites(block) {
+  return /(?:method\s*=\s*["'](POST|PUT|PATCH|DELETE)["']|\b(?:POST|PUT|PATCH|DELETE)\b.*["']\/)/i.test(String(block || ""));
+}
+
 function commandWrites(line, clientText) {
   const sub = subcommand(line);
   if (!sub || sub === "show-config") return false;
@@ -55,7 +102,19 @@ function commandWrites(line, clientText) {
   const blocks = String(clientText || "").split(/(?=\n(?:async )?def )/);
   const hit = blocks.find((block) => named.test(block) || new RegExp(`add_parser\\(["']${sub.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']\\)`).test(block));
   if (!hit) return false;
-  return /(?:method\s*=\s*["'](POST|PUT|PATCH|DELETE)["']|\b(?:POST|PUT|PATCH|DELETE)\b.*["']\/)/i.test(hit);
+  if (blockWrites(hit)) return true;
+  const skip = new Set([
+    token, `cmd_${token}`, "print", "len", "str", "int", "json", "open", "dict", "list", "range",
+    "enumerate", "zip", "min", "max", "sum", "abs", "bool", "float", "type", "isinstance",
+    "hasattr", "getattr", "setattr", "super", "sorted", "reversed", "map", "filter", "any",
+    "all", "format", "join", "load_runtime", "urlencode", "Request", "urlopen",
+  ]);
+  for (const call of hit.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)) {
+    const name = call[1];
+    if (skip.has(name)) continue;
+    if (blockWrites(functionBlock(clientText, name))) return true;
+  }
+  return false;
 }
 
 function isTemplate(line) {
@@ -159,7 +218,7 @@ function sameCommand(left, right) {
 
 export function authStoppedOutput(output) {
   const text = String(output || "");
-  if (/AuthExpired|缺少鉴权|没有鉴权|请提供 token|账号未登录|\b401\b/.test(text)) return true;
+  if (/AuthExpired|缺少鉴权|没有鉴权|请提供 token|账号未登录|\b401\b|凭证缺失|没有可用 token|没有可用鉴权/i.test(text)) return true;
   return /\b400\b/.test(text) && /refresh|token|令牌|credential/i.test(text);
 }
 
@@ -170,10 +229,250 @@ export function scriptCrashOutput(output) {
 }
 
 function latestMatchingRun(verifyRows, line) {
-  const runs = isTemplate(line)
-    ? (verifyRows || []).filter((item) => subcommand((item.argv || []).join(" ")) === subcommand(line))
-    : (verifyRows || []).filter((item) => sameCommand((item.argv || []).join(" "), line));
+  const sub = subcommand(line);
+  const bySub = sub
+    ? (verifyRows || []).filter((item) => subcommand((item.argv || []).join(" ")) === sub)
+    : [];
+  if (bySub.length) return bySub.at(-1);
+  const runs = (verifyRows || []).filter((item) => sameCommand((item.argv || []).join(" "), line));
   return runs.at(-1) || null;
+}
+
+const FIELD_SOURCES = new Set(["caller", "current_user", "now", "previous_response", "other_api", "constant", "unknown"]);
+const REQUIRED_KINDS = new Set(["page", "caller_all", "server_verified", "server_unknown"]);
+const ON_MISMATCH = new Set(["stop", "ask"]);
+const CHOICE_CONTROLS = new Set(["combobox", "listbox", "radio", "select", "tree", "treeselect"]);
+const DATE_CONTROLS = new Set(["date", "datepicker", "datetime", "time", "datetimepicker"]);
+const CHOICE_INPUTS = new Set(["select", "radio", "treeselect", "checkbox"]);
+const DATE_INPUTS = new Set(["date"]);
+
+function controlToken(value) {
+  return String(value || "").toLowerCase().replace(/[\s_-]/g, "");
+}
+
+function fieldHeaderName(cell) {
+  const raw = String(cell || "").trim();
+  const compact = raw.toLowerCase().replace(/[\s_-]/g, "");
+  if (compact === "pagename" || raw === "字段" || raw === "页面名" || (raw.includes("页面") && raw.includes("字段"))) return "page_name";
+  if (compact === "source" || raw === "来源") return "source";
+  if (compact === "control" || raw === "控件") return "control";
+  if (compact === "options" || raw === "选项") return "options";
+  if (compact === "constantreason" || compact === "reason" || raw === "原因") return "constant_reason";
+  return "";
+}
+
+function tableFieldRows(body) {
+  const rows = [];
+  let headers = [];
+  for (const line of String(body || "").split(/\n/)) {
+    if (!/^\s*\|/.test(line) || /-{3,}/.test(line)) continue;
+    const cells = line.split("|").map((cell) => cell.trim()).filter(Boolean);
+    if (cells.length < 2) continue;
+    if (cells.some((cell) => fieldHeaderName(cell))) {
+      headers = cells.map((cell) => fieldHeaderName(cell) || cell.toLowerCase());
+      continue;
+    }
+    if (headers.length) {
+      const row = { page_name: "", source: "", control: "", options: "", constant_reason: "" };
+      for (let i = 0; i < cells.length && i < headers.length; i += 1) {
+        const key = headers[i];
+        if (key === "page_name" || key === "字段") row.page_name = cells[i];
+        else if (key === "source") row.source = sourceToken(cells[i]);
+        else if (key === "control") row.control = cells[i];
+        else if (key === "options") row.options = cells[i];
+        else if (key === "constant_reason") row.constant_reason = cells[i];
+      }
+      if (!row.page_name) row.page_name = cells[0];
+      if (!row.source) {
+        const token = cells.map((cell) => sourceToken(cell)).find((cell) => FIELD_SOURCES.has(cell));
+        if (token) row.source = token;
+      }
+      if (row.page_name) rows.push(row);
+      continue;
+    }
+    const token = cells.map((cell) => sourceToken(cell)).find((cell) => FIELD_SOURCES.has(cell))
+      || cells.find((cell) => /^[a-z_]+$/.test(cell));
+    if (!token) continue;
+    const control = cells.find((cell) => CHOICE_CONTROLS.has(controlToken(cell)) || ["text", "textbox", "textarea"].includes(controlToken(cell))) || "";
+    rows.push({ page_name: cells[0], source: token, control, options: "" });
+  }
+  return rows;
+}
+
+function callerFacing(row) {
+  if (row.source === "caller") return true;
+  return row.source === "other_api" && CHOICE_CONTROLS.has(controlToken(row.control));
+}
+
+function fieldShapeErrors(fields) {
+  const errors = [];
+  for (const row of fields || []) {
+    if (row.source && !FIELD_SOURCES.has(row.source)) {
+      errors.push({
+        code: "field_source_invalid",
+        field: row.page_name,
+        source: row.source,
+        hint: "source 只写 caller/current_user/now/previous_response/other_api/constant/unknown 这一词，说明放在旁边不要写进 source",
+      });
+    }
+    if (row.required_kind && !REQUIRED_KINDS.has(row.required_kind)) {
+      errors.push({ code: "required_kind_invalid", field: row.page_name, required_kind: row.required_kind });
+    }
+    if (row.on_mismatch && !ON_MISMATCH.has(row.on_mismatch)) {
+      errors.push({ code: "on_mismatch_invalid", field: row.page_name, on_mismatch: row.on_mismatch });
+    }
+    if (CHOICE_CONTROLS.has(controlToken(row.control)) && !String(row.options || "").trim() && row.source !== "other_api") {
+      errors.push({
+        code: "not_invocable",
+        field: row.page_name,
+        hint: "页面下拉/枚举在手册里要写 options，或 source=other_api 表示先跑选项命令再写入 questions[].options",
+      });
+    }
+  }
+  return errors;
+}
+
+function extractQuestions(skillMd) {
+  const text = String(skillMd || "");
+  const idx = text.search(/"questions"\s*:\s*\[/);
+  if (idx < 0) return [];
+  const start = text.indexOf("[", idx);
+  let depth = 0;
+  for (let i = start; i < text.length; i += 1) {
+    if (text[i] === "[") depth += 1;
+    else if (text[i] === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          const rows = JSON.parse(text.slice(start, i + 1));
+          return Array.isArray(rows) ? rows : [];
+        } catch {
+          return [];
+        }
+      }
+    }
+  }
+  return [];
+}
+
+function fieldForQuestion(question, fields) {
+  const id = String(question?.id || "").toLowerCase().replace(/[\s_-]/g, "");
+  const asked = String(question?.question || "");
+  return (fields || []).find((row) => {
+    const name = String(row.page_name || "");
+    const token = name.toLowerCase().replace(/[\s_-]/g, "");
+    return (name && asked.includes(name)) || (token && id.includes(token)) || (token && token.includes(id));
+  });
+}
+
+function questionShapeErrors(questions, fields, haystack, overlay) {
+  const errors = [];
+  const list = Array.isArray(questions) ? questions : [];
+  const choiceFields = (fields || []).filter((row) => callerFacing(row) && CHOICE_CONTROLS.has(controlToken(row.control)));
+  const dateFields = (fields || []).filter((row) => callerFacing(row) && DATE_CONTROLS.has(controlToken(row.control)));
+  const overlayChoice = (overlay?.roles || []).some((role) => CHOICE_CONTROLS.has(controlToken(role)));
+  const overlayDate = (overlay?.inputs || []).some((item) => DATE_CONTROLS.has(controlToken(item)) || item === "datetime-local" || item === "month");
+  const choiceQs = [];
+  const dateQs = [];
+  for (const question of list) {
+    const type = controlToken(question?.inputType);
+    if (CHOICE_INPUTS.has(type)) {
+      choiceQs.push(question);
+      const options = Array.isArray(question.options) ? question.options : [];
+      if (!options.length) {
+        errors.push({
+          code: "not_invocable",
+          file: "SKILL.md",
+          field: question.id,
+          hint: "页面下拉/枚举在 questions[] 里要写 options，不要改成自由文本",
+        });
+        continue;
+      }
+      const row = fieldForQuestion(question, fields);
+      for (const opt of options) {
+        const id = String(opt?.id ?? "").trim();
+        const label = String(opt?.label ?? "").trim();
+        if (!id || !label) {
+          errors.push({
+            code: "not_invocable",
+            file: "SKILL.md",
+            field: question.id,
+            hint: "options 每项要有 id 和 label",
+          });
+          continue;
+        }
+        if (row?.source === "other_api" && haystack.length > 32 && !haystack.includes(id)) {
+          errors.push({
+            code: "not_invocable",
+            file: "SKILL.md",
+            field: question.id,
+            hint: "options 的 id 必须来自本场 listed 或已跑命令的输出，不要写占位",
+          });
+        }
+      }
+    }
+    if (DATE_INPUTS.has(type)) {
+      dateQs.push(question);
+      if (!String(question.dateFormat || "").trim()) {
+        errors.push({
+          code: "not_invocable",
+          file: "SKILL.md",
+          field: question.id,
+          hint: "date 必须有 dateFormat，调用方才能按页面日期控件收集",
+        });
+      }
+    }
+  }
+  if ((choiceFields.length || overlayChoice) && list.length && !choiceQs.length) {
+    errors.push({
+      code: "not_invocable",
+      file: "SKILL.md",
+      hint: "页面 combobox/listbox/radio 在调用方也必须是带 options 的选择，不要写成 text",
+    });
+  }
+  if ((dateFields.length || overlayDate) && list.length && !dateQs.length) {
+    errors.push({
+      code: "not_invocable",
+      file: "SKILL.md",
+      hint: "页面日期控件在调用方也必须是 date 并带 dateFormat，不要写成 text",
+    });
+  }
+  return errors;
+}
+
+function writeConfirmErrors(clientText, skillMd) {
+  const errors = [];
+  const text = String(clientText || "");
+  const parserRe = /add_parser\s*\(\s*["']([^"']+)["']/g;
+  const parsers = [];
+  let match;
+  while ((match = parserRe.exec(text))) parsers.push({ name: match[1], index: match.index });
+  const skillConfirm = new Set(
+    skillCommandLines(skillMd).filter((line) => line.includes("--confirm")).map((line) => subcommand(line)).filter(Boolean),
+  );
+  for (let i = 0; i < parsers.length; i += 1) {
+    const start = parsers[i].index;
+    const end = i + 1 < parsers.length ? parsers[i + 1].index : text.length;
+    const block = text.slice(start, end);
+    const writes = commandWrites(`python scripts/client.py ${parsers[i].name}`, text) || skillConfirm.has(parsers[i].name);
+    if (!writes || /--confirm/.test(block)) continue;
+    errors.push({
+      code: "not_invocable",
+      file: "scripts/client.py",
+      command: parsers[i].name,
+      hint: "写入子命令必须有 --confirm，调用方确认后才发送",
+    });
+  }
+  return errors;
+}
+
+export function argparseDispatchError(clientText) {
+  const text = String(clientText || "");
+  if (!/\.add_parser\s*\(/.test(text)) return "";
+  if (!/set_defaults\s*\(\s*func\s*=/.test(text)) {
+    return "每个 add_parser 必须 set_defaults(func=)，否则 Namespace.func 不存在，调用方一跑就崩";
+  }
+  return "";
 }
 
 function latestVerifyByCommand(verifyRows) {
@@ -209,9 +508,21 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     if (secret.test(texts[rel] || "")) errors.push({ code: "secret_in_source", path: rel });
   }
   const api = texts["references/api.md"] || "";
-  const fields = blocks(section(api, "字段"), "page_name");
+  for (const title of ["字段", "绑定", "未解决", "已验证读命令"]) {
+    const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (!new RegExp(`(?:^|\\n)#{1,6}\\s+${escaped}\\s*(?:\\n|$)`).test(api)) {
+      errors.push({
+        code: "not_invocable",
+        file: "references/api.md",
+        heading: title,
+        hint: `references/api.md 标题必须有「${title}」`,
+      });
+    }
+  }
+  const fields = [...blocks(section(api, "字段"), "page_name"), ...tableFieldRows(section(api, "字段"))];
   const bindings = blocks(section(api, "绑定"), "from");
   const unresolved = blocks(section(api, "未解决"), "field");
+  errors.push(...fieldShapeErrors(fields));
   const evidence = await listEvidence(recordingId, { limit: 0 });
   const known = new Set(evidence.map((row) => row.id));
   for (const group of [...fields, ...bindings, ...unresolved]) {
@@ -224,6 +535,22 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     if (!readGuides.has(name)) errors.push({ code: "guide_not_read", name });
   }
   const skillMd = texts["SKILL.md"] || "";
+  const hasQuestions = /"questions"\s*:\s*\[/.test(skillMd);
+  const hasWriteConfirm = /--confirm/.test(skillMd);
+  if ((fields.some(callerFacing) || hasWriteConfirm) && skillMd && !hasQuestions) {
+    errors.push({
+      code: "not_invocable",
+      file: "SKILL.md",
+      hint: "调用方字段必须在 SKILL.md 里放一张可原样复制的 title+questions[]。调用方每轮只调一次 ask_user_question。页面下拉写入 options，不要写成自由文本。",
+    });
+  }
+  if (hasQuestions && fields.length === 0) {
+    errors.push({
+      code: "not_invocable",
+      file: "references/api.md",
+      hint: "## 字段 收到下一个同级标题为止（其中的 ### 也算）。每条要有 page_name 和 source，用表或 - page_name= 均可，不要只写接口路径。",
+    });
+  }
   if (skillMd && !/^---\n[\s\S]*?\bname:\s*\S+/m.test(skillMd)) {
     errors.push({ code: "not_invocable", file: "SKILL.md", hint: "SKILL.md 必须以 --- 开头的 YAML 包住 name 和 description，再写正文。调用方靠这段启用，不要写成页面点击步骤" });
   }
@@ -233,12 +560,30 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   const reads = readCommands(skillMd);
   const requests = [];
   const requestsForWrites = [];
+  let optionHaystack = "";
   for (const row of evidence.filter((item) => item.kind === "network")) {
     const blob = await getEvidence(recordingId, row.id).catch(() => null);
     const body = blob?.body && typeof blob.body === "object" ? blob.body : blob;
     if (!body) continue;
+    optionHaystack += `${body.response_body || ""} ${body.post_data || ""} ${body.query || ""}`;
     if (body.path) requestsForWrites.push({ method: body.method || "", path: body.path });
     if (body.path || body.post_data) requests.push(requestIndexRow({ ...body, id: row.id }));
+  }
+  for (const row of evidence.filter((item) => item.kind === "verify")) {
+    const blob = await getEvidence(recordingId, row.id).catch(() => null);
+    optionHaystack += `${blob?.stdout || blob?.body?.stdout || ""}`;
+  }
+  const overlay = { roles: [], inputs: [] };
+  for (const row of evidence.filter((item) => item.kind === "action")) {
+    const blob = await getEvidence(recordingId, row.id).catch(() => null);
+    const body = blob?.body && typeof blob.body === "object" ? blob.body : blob;
+    for (const item of body?.overlay_editable || []) {
+      if (item?.role) overlay.roles.push(item.role);
+      if (item?.input) overlay.inputs.push(item.input);
+    }
+  }
+  if (hasQuestions) {
+    errors.push(...questionShapeErrors(extractQuestions(skillMd), fields, optionHaystack, overlay));
   }
   const clientText = texts["scripts/client.py"] || "";
   const writeOnly = writeOnlySkill(skillMd, clientText, requestsForWrites);
@@ -258,6 +603,11 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     });
   }
   if (clientText.trim()) {
+    const argparseHint = argparseDispatchError(clientText);
+    if (argparseHint) {
+      errors.push({ code: "not_invocable", file: "scripts/client.py", hint: argparseHint });
+    }
+    errors.push(...writeConfirmErrors(clientText, skillMd));
     try {
       const probed = await nonStdlibImports(clientText);
       if (probed.syntax) {
@@ -314,11 +664,17 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
           : "run_skill_command 的 argv 用空格拼起来要等于这一行。没有鉴权而停止可以；其它失败要先改到能跑"),
     });
   }
-  if (requests.some((item) => item.issues_credential) && !clientText.includes("credential")) {
+  let packedCredential = {};
+  try {
+    packedCredential = JSON.parse(texts["config/auth.local.json"] || "{}").credential || {};
+  } catch {
+    packedCredential = {};
+  }
+  if (packedCredential.url && packedCredential.method && !clientText.includes("credential")) {
     errors.push({
       code: "credential_not_used",
       file: "scripts/client.py",
-      hint: "证据里有签发访问凭证的请求。业务请求前按 config/auth.local.json 的 credential 重放，失败或仍是 401 再停止",
+      hint: "config/auth.local.json 同时有 credential.url 和 method 时，业务请求前按这份 credential 重放。只有 headers 时不要为 listed 里的刷新请求发明重放。",
     });
   }
   errors.push(...citationErrors(clientText, requests, "scripts/client.py"));
@@ -350,7 +706,7 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   const unique = [];
   const seenError = new Set();
   for (const item of errors) {
-    const key = [item.code, item.field, item.path, item.command, item.name, item.key, item.file].join("|");
+    const key = [item.code, item.field, item.path, item.command, item.name, item.key, item.file, item.heading, item.hint].join("|");
     if (seenError.has(key)) continue;
     seenError.add(key);
     unique.push(item);

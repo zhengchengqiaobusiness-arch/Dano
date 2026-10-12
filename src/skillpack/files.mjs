@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { recordingDir, skillDir } from "../paths.mjs";
@@ -9,6 +10,12 @@ import { readTokenRecord, writeAuthLocalFile } from "../token-store.mjs";
 import { originFromUrl } from "../session-store.mjs";
 
 const WRITABLE = new Set(["SKILL.md", "scripts/client.py", "references/api.md"]);
+const API_TITLES = ["字段", "绑定", "未解决", "已验证读命令"];
+
+function hasAtxTitle(text, title) {
+  const escaped = String(title || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|\\n)#{1,6}\\s+${escaped}\\s*(?:\\n|$)`).test(String(text || ""));
+}
 
 export function skillIdFor(subsystem, recordingId) {
   const sub = String(subsystem || "app").replace(/[^A-Za-z0-9_-]/g, "") || "app";
@@ -58,12 +65,35 @@ export async function writeSkillFile(recordingId, skillId, relativePath, content
   if (!WRITABLE.has(rel) || rel.startsWith("config/")) {
     return { ok: false, error: "frozen_file", writable: [...WRITABLE] };
   }
+  const body = String(contents ?? "");
+  if (rel === "references/api.md") {
+    const missing = API_TITLES.filter((title) => !hasAtxTitle(body, title));
+    if (missing.length) {
+      return {
+        ok: false,
+        error: "not_invocable",
+        file: rel,
+        hint: `references/api.md 标题必须有「${missing.join("」「")}」。不要用接口 path 当标题。`,
+      };
+    }
+  }
   const dir = skillDir(skillId);
   const file = path.join(dir, rel);
   await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, String(contents ?? ""), "utf8");
+  await writeFile(file, body, "utf8");
   await rememberHandbook(recordingId, dir);
   return { ok: true, path: file };
+}
+
+export function authSpawnEnv(authFile) {
+  try {
+    const packed = JSON.parse(readFileSync(authFile, "utf8"));
+    const headers = usableAuthHeaders(packed?.headers);
+    if (!Object.keys(headers).length) return {};
+    return { DANO_AUTH_HEADERS: JSON.stringify(headers) };
+  } catch {
+    return {};
+  }
 }
 
 export async function readSkillFile(skillId, relativePath) {

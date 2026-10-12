@@ -22,6 +22,8 @@ test("request keys include system fields and nested item keys", () => {
 test("a cited path must exist, and every key of that request must be written", () => {
   const requests = [{ id: "req_1", method: "POST", path: "/admin-api/oa/report/save", keys: keysFromPostData(body) }];
   assert.equal(citationErrors("#!/usr/bin/env python3", requests).some((item) => item.code === "path_not_in_evidence"), false);
+  const fileUrl = "https://example.com/admin-api/infra/file/29/get/20261010/179/attachment.png";
+  assert.equal(citationErrors(`上传返回 ${fileUrl}`, requests).some((item) => item.code === "path_not_in_evidence"), false);
   const invented = "POST /api/oa/workreport/daily/create";
   assert.ok(citationErrors(invented, requests).some((item) => item.code === "path_not_in_evidence"));
   const prefix = citationErrors("GET `/admin-api/oa/report`", requests);

@@ -18,4 +18,5 @@ test("skills are full text", async () => {
   assert.match(packed, /snapshot/);
   assert.match(packed, /HAR|record/);
   assert.match(packed, /KEEP_GOAL_TEXT/);
+  assert.match(packed, /不要用接口 path 当标题/);
 });

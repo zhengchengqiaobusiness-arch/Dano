@@ -47,7 +47,7 @@ test("fake pi writes the skill and leaves it unchanged", { timeout: 60000 }, asy
         }
         const full = await tools.network_get({ id: hit.id });
         for (const name of GUIDE_NAMES) await tools.read_guide({ name });
-        written = "---\nname: sample-list\ndescription: 调用方列出并保存\n---\npython scripts/client.py list\n";
+        written = "---\nname: sample-list\ndescription: 调用方列出并保存\n---\n{\"title\":\"列出\",\"questions\":[{\"id\":\"page\",\"question\":\"page\",\"inputType\":\"select\",\"required\":true,\"options\":[{\"id\":\"p\",\"label\":\"page\"}],\"default\":\"p\"}]}\npython scripts/client.py list\n";
         const api = [
           "## 字段",
           "- page_name: page",

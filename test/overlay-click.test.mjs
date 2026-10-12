@@ -6,13 +6,24 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { closeBrowser, desktopViewport, DESKTOP_VIEWPORT, openBrowser } from "../src/browser/session.mjs";
 import { takeSnapshot } from "../src/browser/snapshot.mjs";
-import { runAction } from "../src/browser/actions.mjs";
+import { fieldFillText, runAction, withFillFieldText } from "../src/browser/actions.mjs";
 
 const fixtureDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 
 test("a preview pane smaller than desktop does not become the page viewport", () => {
   assert.deepEqual(desktopViewport({ width: 900, height: 600 }), DESKTOP_VIEWPORT);
   assert.equal(desktopViewport({ width: 1600, height: 900 }).width, 1600);
+});
+
+test("fill_fields accepts value as the text to type", () => {
+  assert.equal(fieldFillText({ ref: "f0:e1@1", value: "日报标题" }), "日报标题");
+  assert.equal(fieldFillText({ ref: "f0:e1@1", text: "已有 text", value: "忽略" }), "已有 text");
+  assert.equal(fieldFillText({ ref: "f0:e1@1" }), null);
+  const act = withFillFieldText({
+    action: "fill_fields",
+    fields: [{ ref: "f0:e1@1", value: "工作总结" }],
+  });
+  assert.equal(act.fields[0].text, "工作总结");
 });
 
 function publishedRef(line) {
@@ -54,6 +65,9 @@ test("an open dialog is published as overlay_exact and later clicks use the curr
     assert.ok(emptyTitle);
     assert.equal(emptyTitle.empty, true);
     assert.equal(emptyTitle.required, true);
+    const editableTitle = (opened.overlay_editable || []).find((row) => String(row.name || "").includes("标题"));
+    assert.ok(editableTitle);
+    assert.ok(editableTitle.ref);
     assert.ok((opened.required_empty_overlay || []).some((name) => String(name).includes("标题")));
     assert.match(opened.snapshot.text, /col "/);
     const emptyCat = (opened.overlay_fields || []).find((row) => String(row.name || "").includes("分类"));
@@ -103,9 +117,14 @@ test("a readonly control returns needs_click instead of filling", { timeout: 600
     const first = await takeSnapshot(id, { budgetMs: 4000 });
     const period = publishedRef(lineWith(first.text, "周期"));
     assert.ok(period);
+    assert.match(first.text, /overlay_exact/);
     const filled = await runAction(id, { action: "fill", ref: period, text: "2026-02-01" });
     assert.equal(filled.ok, false);
     assert.equal(filled.error, "needs_click");
+    const periodFact = (filled.overlay_fields || []).find((row) => String(row.name || "").includes("周期"));
+    assert.ok(periodFact);
+    assert.equal(periodFact.readonly, true);
+    assert.equal((filled.overlay_editable || []).some((row) => String(row.name || "").includes("周期")), false);
   } finally {
     await closeBrowser(id);
     await new Promise((resolve) => site.server.close(resolve));

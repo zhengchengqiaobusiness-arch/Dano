@@ -112,11 +112,16 @@ function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function looksLikeFilePath(value) {
+  return /\.(?:png|jpe?g|gif|webp|svg|ico|pdf|zip|xlsx?|docx?|txt|csv|bin|mp4|mp3|json)(?:\?|$)/i.test(value);
+}
+
 export function citedPaths(text) {
   const found = new Set();
   const add = (raw) => {
     const value = String(raw || "").replace(/\/+$/, "") || "/";
     if (/^\/(?:usr|bin|home|etc|tmp|var|opt|proc|sys)(?:\/|$)/.test(value)) return;
+    if (looksLikeFilePath(value)) return;
     const parts = value.split("/").filter(Boolean);
     if (parts.length < 2 || !parts.some((part) => /[A-Za-z]/.test(part))) return;
     found.add(value);

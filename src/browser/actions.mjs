@@ -15,6 +15,24 @@ const PROBE_PNG = Buffer.from(
 const ACTIONS = new Set(["open", "snapshot", "click", "fill", "fill_fields", "press", "select", "upload", "screenshot"]);
 export const ACT_WALL_MS = 15000;
 
+export function fieldFillText(field) {
+  if (!field || typeof field !== "object") return null;
+  if (typeof field.text === "string") return field.text;
+  if (typeof field.value === "string") return field.value;
+  return null;
+}
+
+export function withFillFieldText(input) {
+  if (!input || input.action !== "fill_fields" || !Array.isArray(input.fields)) return input;
+  return {
+    ...input,
+    fields: input.fields.map((field) => {
+      const text = fieldFillText(field);
+      return field && typeof field === "object" && text != null ? { ...field, text } : field;
+    }),
+  };
+}
+
 async function readBack(locator, text) {
   const aria = await locator.getAttribute("aria-valuenow");
   if (aria != null) return aria === String(text);
@@ -33,13 +51,22 @@ async function readBack(locator, text) {
 
 async function stale(recordingId) {
   const snapshot = await takeSnapshot(recordingId, { budgetMs: 2500 });
-  return { ok: false, error: "stale_ref", snapshot };
+  return withOverlayFacts(recordingId, { ok: false, error: "stale_ref", snapshot });
 }
 
 async function needsClick(locator) {
   const readonly = await locator.getAttribute("readonly").catch(() => null);
   const aria = await locator.getAttribute("aria-readonly").catch(() => null);
-  return readonly != null || aria === "true";
+  if (readonly != null || aria === "true") return true;
+  const kind = await locator.evaluate((node) => {
+    const el = node instanceof Element ? node : null;
+    if (!el) return "";
+    const role = String(el.getAttribute("role") || "").toLowerCase();
+    const nested = el.matches("input") ? el : el.querySelector("input");
+    const type = nested instanceof HTMLInputElement ? String(nested.type || "") : "";
+    return role === "slider" || type === "range" ? "slider" : "";
+  }).catch(() => "");
+  return kind === "slider";
 }
 
 function armChooser(page) {
@@ -75,6 +102,16 @@ function clickUnreachable(error) {
   return pointerBlocked(error) || /not visible|outside of the viewport|Timeout/i.test(String(error?.message || ""));
 }
 
+function sameDocumentNav(current, next) {
+  try {
+    const a = new URL(current);
+    const b = new URL(next);
+    return a.origin === b.origin && a.pathname === b.pathname && a.search === b.search;
+  } catch {
+    return false;
+  }
+}
+
 async function snapshotAfter(recordingId, budgetMs = 3000, { retryEmpty = false } = {}) {
   const snapshot = await takeSnapshot(recordingId, { budgetMs });
   if (!retryEmpty || (snapshot?.refs || []).length) return snapshot;
@@ -86,7 +123,6 @@ async function withOverlayFacts(recordingId, result) {
   if (!result) return result;
   try {
     const overlay_fields = await overlayControlFacts(recordingId);
-    if (!overlay_fields.length) return result;
     return { ...result, ...overlayFactLists(overlay_fields) };
   } catch {
     return result;
@@ -117,10 +153,26 @@ async function perform(recordingId, input) {
       const snapshot = await snapshotAfter(recordingId);
       return { ok: false, error: "origin_denied", snapshot };
     }
-    await state.page.goto(url, { waitUntil: "domcontentloaded" });
-    return { ok: true, snapshot: await snapshotAfter(recordingId, 8000, { retryEmpty: true }) };
+    let emptyRetry = true;
+    let snapMs = 3000;
+    try {
+      const sameDoc = sameDocumentNav(state.page.url(), url);
+      await state.page.goto(url, {
+        waitUntil: sameDoc ? "commit" : "domcontentloaded",
+        timeout: sameDoc ? 4000 : 8000,
+      });
+    } catch {
+      if (originFromUrl(state.page.url()) !== state.origin) {
+        return { ok: false, error: "origin_denied", snapshot: await snapshotAfter(recordingId, 2000) };
+      }
+      emptyRetry = false;
+      snapMs = 2500;
+    }
+    return withOverlayFacts(recordingId, { ok: true, snapshot: await snapshotAfter(recordingId, snapMs, { retryEmpty: emptyRetry }) });
   }
-  if (action === "snapshot") return { ok: true, snapshot: await snapshotAfter(recordingId, 8000) };
+  if (action === "snapshot") {
+    return withOverlayFacts(recordingId, { ok: true, snapshot: await snapshotAfter(recordingId, 8000) });
+  }
   if (action === "screenshot") {
     const target = input.ref ? locatorFor(recordingId, input.ref)?.locator : state.page;
     if (input.ref && !target) return stale(recordingId);
@@ -146,26 +198,37 @@ async function perform(recordingId, input) {
   }));
   try {
     if (action === "fill_fields") {
-      const fields = Array.isArray(input.fields) ? input.fields : [];
+      const fields = withFillFieldText(input).fields || [];
       const filled = [];
       for (const field of fields) {
-        if (!field || typeof field.ref !== "string" || typeof field.text !== "string") {
-          return { ok: false, error: "value_not_applied", ref: field?.ref || "", filled, snapshot: await snapshotAfter(recordingId) };
+        const text = fieldFillText(field);
+        if (!field || typeof field.ref !== "string" || text == null) {
+          return withOverlayFacts(recordingId, { ok: false, error: "value_not_applied", ref: field?.ref || "", filled, snapshot: await snapshotAfter(recordingId) });
         }
         const item = locatorFor(recordingId, field.ref);
         if (!item) return { ...(await stale(recordingId)), ref: field.ref, filled };
         if (await needsClick(item.locator)) {
-          return {
+          return withOverlayFacts(recordingId, {
             ok: false,
             error: "needs_click",
             ref: field.ref,
             filled,
             snapshot: state.lastPublished || await snapshotAfter(recordingId),
-          };
+          });
         }
-        await item.locator.fill(field.text, { timeout: 2000 });
-        if (!(await readBack(item.locator, field.text))) {
-          return { ok: false, error: "value_not_applied", ref: field.ref, filled, snapshot: await snapshotAfter(recordingId) };
+        try {
+          await item.locator.fill(text, { timeout: 2000 });
+        } catch {
+          return withOverlayFacts(recordingId, {
+            ok: false,
+            error: "value_not_applied",
+            ref: field.ref,
+            filled,
+            snapshot: state.lastPublished || await snapshotAfter(recordingId),
+          });
+        }
+        if (!(await readBack(item.locator, text))) {
+          return withOverlayFacts(recordingId, { ok: false, error: "value_not_applied", ref: field.ref, filled, snapshot: await snapshotAfter(recordingId) });
         }
         if (item.label) filled.push(item.label);
       }
@@ -195,12 +258,12 @@ async function perform(recordingId, input) {
         await hit.locator.click({ trial: true, timeout: 2000 });
       } catch (error) {
         if (pointerBlocked(error)) {
-          return {
+          return withOverlayFacts(recordingId, {
             ok: false,
             error: "behind_overlay",
             clicked: hit.label || "",
             snapshot: await snapshotAfter(recordingId),
-          };
+          });
         }
       }
       const chooserArm = armChooser(state.page);
@@ -215,12 +278,12 @@ async function perform(recordingId, input) {
         if (!chooser) {
           chooserArm.stop();
           if (clickUnreachable(error)) {
-            return {
+            return withOverlayFacts(recordingId, {
               ok: false,
               error: "behind_overlay",
               clicked: hit.label || "",
               snapshot: await snapshotAfter(recordingId),
-            };
+            });
           }
           const message = String(error?.message || "click_failed").split("\n")[0];
           logLine(`[browser] click failed ${message}`);
@@ -265,20 +328,20 @@ async function perform(recordingId, input) {
     }
     if (action === "fill") {
       if (await needsClick(hit.locator)) {
-        return {
+        return withOverlayFacts(recordingId, {
           ok: false,
           error: "needs_click",
           ref: input.ref,
           snapshot: state.lastPublished || await snapshotAfter(recordingId),
-        };
+        });
       }
       try {
         await hit.locator.fill(String(input.text ?? ""), { timeout: 2000 });
       } catch {
-        return { ok: false, error: "value_not_applied", snapshot: await snapshotAfter(recordingId) };
+        return withOverlayFacts(recordingId, { ok: false, error: "value_not_applied", snapshot: await snapshotAfter(recordingId) });
       }
       if (!(await readBack(hit.locator, String(input.text ?? "")))) {
-        return { ok: false, error: "value_not_applied", snapshot: await snapshotAfter(recordingId) };
+        return withOverlayFacts(recordingId, { ok: false, error: "value_not_applied", snapshot: await snapshotAfter(recordingId) });
       }
     }
     if (action === "press") await hit.locator.press(String(input.key || input.text || ""));
