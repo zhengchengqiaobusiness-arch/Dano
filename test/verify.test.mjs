@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { writeSkillFile } from "../src/skillpack/files.mjs";
-import { actionEvidenceSummary, skillCommandLines, verifySkill } from "../src/skillpack/verify.mjs";
+import { actionEvidenceSummary, authOverlayParseError, skillCommandLines, verifySkill } from "../src/skillpack/verify.mjs";
 import { skillDir } from "../src/paths.mjs";
 import { appendEvidence } from "../src/evidence/store.mjs";
 import { GUIDE_NAMES } from "../src/agent/guides.mjs";
@@ -571,7 +571,7 @@ test("ATX headings, table source, argparse dispatch, and matching subcommands ar
     "q = sub.add_parser(\"list\")",
     "q.set_defaults(func=cmd_list)",
   ].join("\n"));
-  await writeFile(path.join(dir, "references/api.md"), "# 字段\n| 标题 | invented |\n\n# 绑定\n\n# 未解决\n\n# 已验证读命令\npython3 scripts/client.py list --id 1\n");
+  await writeFile(path.join(dir, "references/api.md"), "# 字段\n| 页面字段 | 来源 |\n| 标题 | invented |\n\n# 绑定\n\n# 未解决\n\n# 已验证读命令\npython3 scripts/client.py list --id 1\n");
   result = await verifySkill(dir, shape.id, shape);
   assert.ok(result.errors.some((item) => item.code === "field_source_invalid"));
 
@@ -913,4 +913,27 @@ test("field tables with aliases and page_name= bullets are parsed, constant need
   result = await verifySkill(dir, shape.id, shape);
   assert.equal(result.errors.some((item) => item.code === "not_invocable" && item.file === "references/api.md" && String(item.hint || "").includes("page_name")), false);
   assert.equal(result.errors.some((item) => item.code === "field_source_invalid"), false);
+
+  await writeFile(path.join(dir, "references/api.md"), [
+    "## 字段",
+    "| 键 | 类型 | 说明 |",
+    "| --- | --- | --- |",
+    "| id | int | 部门 |",
+    "| name | string | 名称 |",
+    "",
+    "## 绑定",
+    "",
+    "## 未解决",
+    "",
+    "## 已验证读命令",
+  ].join("\n"));
+  result = await verifySkill(dir, shape.id, shape);
+  assert.equal(result.errors.some((item) => item.code === "field_source_invalid" && item.field === "id"), false);
+  assert.equal(result.errors.some((item) => item.code === "field_source_invalid" && item.field === "name"), false);
+});
+
+test("DANO_AUTH_HEADERS overlay must be json.loads, not comma pairs", () => {
+  assert.equal(authOverlayParseError("print(1)"), "");
+  assert.equal(authOverlayParseError("raw = os.environ.get(\"DANO_AUTH_HEADERS\")\nheaders.update(json.loads(raw))"), "");
+  assert.match(authOverlayParseError("env = os.environ.get(\"DANO_AUTH_HEADERS\",\"\")\nfor chunk in env.split(\",\"):\n    k,v = chunk.split(\"=\")"), /JSON 对象/);
 });

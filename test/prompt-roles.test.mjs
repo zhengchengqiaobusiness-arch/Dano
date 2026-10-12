@@ -54,6 +54,7 @@ test("the method does not ban number cells or treat filled controls as caller-re
   assert.match(prompt, /指针样式不是能不能点的依据/);
   assert.match(prompt, /只有 auth\.local\.json 的 credential 同时有 url 和 method 时才重放/);
   assert.match(prompt, /不要只认某一个键名/);
+  assert.match(prompt, /DANO_AUTH_HEADERS 是 JSON 对象/);
   assert.match(prompt, /仍写完三文件/);
   assert.doesNotMatch(prompt, /失败或 401 停止/);
   assert.doesNotMatch(prompt, /不点旁边只有数字/);

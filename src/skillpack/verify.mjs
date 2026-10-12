@@ -228,6 +228,15 @@ export function scriptCrashOutput(output) {
   return /Traceback \(most recent call last\)/.test(text);
 }
 
+export function authOverlayParseError(clientText) {
+  const text = String(clientText || "");
+  if (!/\bDANO_AUTH_HEADERS\b/.test(text)) return "";
+  if (/DANO_AUTH_HEADERS[\s\S]{0,400}json\.loads/.test(text) || /json\.loads\s*\(\s*(?:os\.environ\.get\(\s*[\"']DANO_AUTH_HEADERS[\"']|[^)]*DANO_AUTH_HEADERS)/.test(text)) {
+    return "";
+  }
+  return "DANO_AUTH_HEADERS 是 JSON 对象，用 json.loads 覆盖同名头，不要按逗号拆。";
+}
+
 function latestMatchingRun(verifyRows, line) {
   const sub = subcommand(line);
   const bySub = sub
@@ -290,8 +299,7 @@ function tableFieldRows(body) {
       if (row.page_name) rows.push(row);
       continue;
     }
-    const token = cells.map((cell) => sourceToken(cell)).find((cell) => FIELD_SOURCES.has(cell))
-      || cells.find((cell) => /^[a-z_]+$/.test(cell));
+    const token = cells.map((cell) => sourceToken(cell)).find((cell) => FIELD_SOURCES.has(cell));
     if (!token) continue;
     const control = cells.find((cell) => CHOICE_CONTROLS.has(controlToken(cell)) || ["text", "textbox", "textarea"].includes(controlToken(cell))) || "";
     rows.push({ page_name: cells[0], source: token, control, options: "" });
@@ -608,6 +616,8 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
       errors.push({ code: "not_invocable", file: "scripts/client.py", hint: argparseHint });
     }
     errors.push(...writeConfirmErrors(clientText, skillMd));
+    const overlayHint = authOverlayParseError(clientText);
+    if (overlayHint) errors.push({ code: "not_invocable", file: "scripts/client.py", hint: overlayHint });
     try {
       const probed = await nonStdlibImports(clientText);
       if (probed.syntax) {

@@ -196,7 +196,7 @@ export function nextRecordingPrompt({ finished, paused, progressed, continues, v
   const lead = progressed
     ? "页面操作的总结不是结束。对照 listed（本场全部 xhr/fetch 索引）、overlay_editable、listed_write_keys 和目标原文写三文件。SKILL.md 必须含可原样复制的 title+\"questions\":[]；问句覆盖 overlay_editable 的每一项和 listed_write_keys 里来源为 caller 的键；页面 combobox/listbox/radio 在调用方也是 options，不要自由文本，不要 dataSource。写：调用方提交后再 confirm+formIds，python3 加 --confirm。嵌套数组保持为行，不要压成一个字符串。listed 某键这次 empty/[] 只说明这次传了空，同场另有选项请求则再读，不要冻成空数组。手册必填必须和 argparse 一致。每个 add_parser 必须 set_defaults(func=)。写入子命令必须有 --confirm。基地址只读 DANO_BASE_URL 或 runtime.json。SKILL.md 里出现的每一条读命令（含表格）都要跑。正文过大时 network_get 会省略，用 evidence_get 同 id。成品必须可调用。目标只要求写入时不要发明 GET。filled 里的控件名不是调用方必填清单。"
     : "Skill 还没产出。";
-  return `${lead}read_guide 读完名单。对照 listed（本场全部 xhr/fetch 索引）写字段。要采用的请求打开全文。来源标签和命令行谁填必须一致。overlay_editable 上的控件是调用方填或选，不要改成系统自动。empty 里的键传空。只有 auth.local.json 的 credential 同时有 url 和 method 时才重放；listed 里的刷新请求不是必须重放。业务请求把 headers 整袋带上，有任意鉴权头就发，不要只认某一个键名。读命令 401 不要 assist、不要猜 token，仍要写完 SKILL.md 和 references/api.md，再 verify_skill。401 是打包凭证过期，不是产出失败。DANO_AUTH_HEADERS 只覆盖同名头。scripts/client.py 只用 Python 标准库。跑读命令（若目标含读），再 verify_skill。${errors}`;
+  return `${lead}read_guide 读完名单。对照 listed（本场全部 xhr/fetch 索引）写字段。要采用的请求打开全文。来源标签和命令行谁填必须一致。overlay_editable 上的控件是调用方填或选，不要改成系统自动。empty 里的键传空。只有 auth.local.json 的 credential 同时有 url 和 method 时才重放；listed 里的刷新请求不是必须重放。业务请求把 headers 整袋带上，有任意鉴权头就发，不要只认某一个键名。读命令 401 不要 assist、不要猜 token，仍要写完 SKILL.md 和 references/api.md，再 verify_skill。401 是打包凭证过期，不是产出失败。DANO_AUTH_HEADERS 是 JSON 对象，json.loads 后只覆盖同名头。scripts/client.py 只用 Python 标准库。跑读命令（若目标含读），再 verify_skill。${errors}`;
 }
 
 let startOverride = null;
