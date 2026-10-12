@@ -20,9 +20,9 @@
 6. `constant` 固定协议常量，必须另写 `constant_reason`，不能是「录到的就是这个」
 7. `unknown` 进未解决，不要写进可执行命令
 
-`overlay_editable` 上的控件是 `caller`，或选项接口 `other_api` 再读后调用方选。listed 再读给的隐藏键，若 overlay_editable 没有对应控件，才是 `current_user` / `now` / `previous_response` / `constant`。页面上填过的框不等于调用方必填。overlay 的 required 来自 aria-required 或名字/列名里的 `*`，和 argparse required、问句是否必填必须一致。listed 某键这次 empty/[] 只说明这次传了空；同场另有选项请求则再读后让调用方选，不要冻成空数组。基地址只读 `DANO_BASE_URL` 或 `config/runtime.json` 的 `base_url`，不要写死源站。问句覆盖 `overlay_editable` 的每一项和 listed_write_keys 里来源为 caller 的键；嵌套数组保持为行，不要压成一个字符串，不要另造一张更短的表。
+`overlay_editable` 上的控件是 `caller`，或选项接口 `other_api` 再读后调用方选。listed 再读给的隐藏键，若 overlay_editable 没有对应控件，才是 `current_user` / `now` / `previous_response` / `constant`。页面上填过的框不等于调用方必填。overlay 的 required 来自 aria-required 或名字/列名里的 `*`，和 argparse required、问句是否必填必须一致。listed 某键这次 empty/[] 只说明这次传了空；同场另有选项请求则再读后让调用方选，不要冻成空数组。读命令不要写死本场 listed 里的业务 id。身份键从本场身份接口现取，不要问人。基地址只读 `DANO_BASE_URL` 或 `config/runtime.json` 的 `base_url`，不要写死源站。问句覆盖 `overlay_editable` 的每一项和 listed_write_keys 里来源为 caller 的键。同一张 overlay 一张 `questions[]`，不同 overlay 可各一张，调用方每轮只用一张。嵌套数组按列写成可重复命令行参数，问句用 textarea 写 JSON 数组，不要压成一根字符串。
 
-调用方字段形状必须和页面一致：combobox / listbox / radio 在 questions[] 里写 `options`（id/label，来自 listed 或已跑选项命令的输出，不要把命令行写成 option）；页面日期用 `inputType: date` 和 `dateFormat`；textbox 才是文本。不要 `dataSource`。
+调用方字段形状必须和页面一致：活列表 `options: []`，调用时先跑读命令再填；封闭枚举把 id/label 写进 `options`；不要把命令行写成 option。`inputType` 只许 text、textarea、date、select、radio、treeSelect、checkbox。页面日期用 `date` 和 `dateFormat`；textbox 才是文本。不要 `dataSource`。
 
 ## 命令
 

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { recordingDir } from "../src/paths.mjs";
-import { appendSessionThought, applyVerifyToRecording, loadRecording, persistThoughts, publicSessionStatus } from "../src/session.mjs";
+import { appendSessionThought, applyVerifyToRecording, loadRecording, persistThoughts, publicSessionProgress, publicSessionStatus, settlePreviewWithoutBrowser, snapshotMessage } from "../src/session.mjs";
 
 test("the session only publishes recording, skill ready, or failed", () => {
   assert.equal(publicSessionStatus({ status: "recording" }), "recording");
@@ -23,6 +23,35 @@ test("the session only publishes recording, skill ready, or failed", () => {
   assert.equal(recording.status, "skill_ready");
   assert.equal(recording.finished, true);
   assert.equal(publicSessionStatus(recording), "skill_ready");
+});
+
+test("snapshot progress leaves 录制中 after the skill files are written", () => {
+  const recording = { status: "recording", finished: false, revision: 0, title: "", assistReason: "", humanCanClick: true, skillDir: "", verify: null };
+  assert.deepEqual(publicSessionProgress(recording), { step: "capturing", label: "" });
+  recording.wroteSkill = true;
+  assert.equal(publicSessionProgress(recording).step, "writing");
+  assert.match(publicSessionProgress(recording).label, /正在写三文件/);
+  applyVerifyToRecording(recording, { status: "verify_failed", errors: [{ code: "field_source_invalid" }] }, "/tmp/skill");
+  assert.equal(publicSessionStatus(recording), "recording");
+  assert.equal(snapshotMessage(recording).snapshot.progress.step, "writing");
+  assert.match(snapshotMessage(recording).snapshot.progress.label, /校验未过/);
+  recording.finished = true;
+  recording.status = "failed";
+  assert.equal(publicSessionStatus(recording), "failed");
+  assert.equal(publicSessionProgress(recording).step, "failed");
+});
+
+test("a preview reconnect without a browser does not stay live after skill work", () => {
+  const fresh = { status: "recording", finished: false };
+  assert.equal(settlePreviewWithoutBrowser(fresh, { hasPage: false, hasPi: false }), false);
+  assert.equal(fresh.finished, false);
+  const livePage = { status: "recording", finished: false, wroteSkill: true };
+  assert.equal(settlePreviewWithoutBrowser(livePage, { hasPage: true, hasPi: true }), false);
+  const dead = { status: "recording", finished: false, wroteSkill: true, verify: { status: "verify_failed", errors: [{ code: "field_source_invalid" }] } };
+  assert.equal(settlePreviewWithoutBrowser(dead, { hasPage: false, hasPi: false }), true);
+  assert.equal(dead.finished, true);
+  assert.equal(dead.status, "failed");
+  assert.equal(publicSessionStatus(dead), "failed");
 });
 
 test("a finished recording on disk can be attached without a live map entry", async () => {

@@ -6,6 +6,7 @@ import { redactSecrets } from "../auth-vault.mjs";
 import { applyPiModelConfig } from "./pi-model.mjs";
 import { installOpenAIToolCallStreamCompatibility } from "./openai-stream-compat.mjs";
 import { hostTools, toolNames, wrapHostTools } from "./tools.mjs";
+import { overlayItemsLine } from "../browser/snapshot.mjs";
 import { logLine } from "../log.mjs";
 
 function toolLine(toolName, args) {
@@ -41,7 +42,7 @@ export function resultLine(result) {
       return `失败 ${extra}`.slice(0, 500);
     }
     const requiredEmpty = Array.isArray(body.required_empty_overlay) && body.required_empty_overlay.length
-      ? ` 必填空=${body.required_empty_overlay.slice(0, 8).join("|")}`
+      ? ` 必填空=${overlayItemsLine(body.required_empty_overlay, 8)}`
       : "";
     const empty = Array.isArray(body.empty_overlay) && body.empty_overlay.length
       ? ` 空=${body.empty_overlay.slice(0, 8).join("|")}`
@@ -49,7 +50,7 @@ export function resultLine(result) {
     if (body?.ok === true && body.clicked) {
       const quiet = Array.isArray(body.requests) && body.requests.length === 0 ? " 无请求" : "";
       const layer = body.layer_idle ? " 层无请求" : "";
-      return `完成 ${body.clicked}${quiet}${layer}${requiredEmpty}${empty}`;
+      return `完成${requiredEmpty} ${body.clicked}${quiet}${layer}${empty}`;
     }
     if (body?.ok === true && (requiredEmpty || empty)) return `完成${requiredEmpty}${empty}`;
     if (body?.ok === true) return "完成";
@@ -187,16 +188,16 @@ export function nextRecordingPrompt({ finished, paused, progressed, continues, v
     if (verifyErrors.every((item) => item.code === "auth_expired")) {
       return `三文件已写出。打包凭证过期，不要 assist，不要改脚本猜 token，不要把凭证写进对话。结构校验已通过。${errors}`;
     }
-    return `校验失败。对照 listed、overlay_editable、listed_write_keys 只改 SKILL.md、scripts/client.py、references/api.md，再 run_skill_command。不要 browser_act。references/api.md 标题只能是字段、绑定、未解决、已验证读命令，不要用接口 path 当标题。字段段每条要有 page_name 和 source（七个词之一，说明不要写进 source）。调用方字段要有 questions[]，页面下拉要有 options。${errors}`;
+    return `校验失败。对照 listed、overlay_editable、listed_write_keys 只改 SKILL.md、scripts/client.py、references/api.md，再 run_skill_command。不要 browser_act。references/api.md 标题只能是字段、绑定、未解决、已验证读命令，不要用接口 path 当标题。字段段每条要有 page_name 和 source（七个词之一，说明不要写进 source）。调用方字段要有 questions[]。活选项 options 留空，封闭枚举才写 options。${errors}`;
   }
   if (recordingStayOnPage({ verifyErrors, pageProgressed, progressed, unmatchedGoalNames, requiredEmptyOverlay })) {
-    return "页面目标还没做完。对照当前树、goal_named、goal_named_unclicked、clicked、row_facts、overlay_editable、required_empty_overlay、listed_write_keys 和目标原文接着点、填。目标原文点名的名字或列，在当前树找 [ref=] 去点；goal_named_unclicked 里还有名字、或 required_empty_overlay 还非空时不要当成做完，也不要 write_skill_file 或 verify_skill。指针样式不是能不能点的依据。empty=true 的还要填。stale_ref 或 behind_overlay 只用工具返回的新树，不要 browser_open。人可以在同一个预览里点；actor=human 时等这次操作进当前树和 listed 再接着做。";
+    return "页面目标还没做完。对照当前树、goal_named、goal_named_unclicked、clicked、row_facts、overlay_editable、required_empty_overlay、listed_write_keys 和目标原文接着点、填。目标原文点名的名字或列，在当前树找 [ref=] 去点；goal_named_unclicked 里还有名字、或 required_empty_overlay 还非空时不要当成做完，也不要 write_skill_file 或 verify_skill。指针样式不是能不能点的依据。empty=true 的还要填。stale_ref 或 behind_overlay 只用工具返回的新树，不要用旧 ref。同源换页可用 browser_open；跨源不要。人可以在同一个预览里点；actor=human 时等这次操作进当前树和 listed 再接着做。";
   }
   if (continues >= MAX_SKILL_CONTINUES) return null;
   const lead = progressed
-    ? "页面操作的总结不是结束。对照 listed（本场全部 xhr/fetch 索引）、overlay_editable、listed_write_keys 和目标原文写三文件。SKILL.md 必须含可原样复制的 title+\"questions\":[]；问句覆盖 overlay_editable 的每一项和 listed_write_keys 里来源为 caller 的键；页面 combobox/listbox/radio 在调用方也是 options，不要自由文本，不要 dataSource。写：调用方提交后再 confirm+formIds，python3 加 --confirm。嵌套数组保持为行，不要压成一个字符串。listed 某键这次 empty/[] 只说明这次传了空，同场另有选项请求则再读，不要冻成空数组。手册必填必须和 argparse 一致。每个 add_parser 必须 set_defaults(func=)。写入子命令必须有 --confirm。基地址只读 DANO_BASE_URL 或 runtime.json。SKILL.md 里出现的每一条读命令（含表格）都要跑。正文过大时 network_get 会省略，用 evidence_get 同 id。成品必须可调用。目标只要求写入时不要发明 GET。filled 里的控件名不是调用方必填清单。"
+    ? "页面操作的总结不是结束。对照 listed（本场全部 xhr/fetch 索引）、overlay_editable、listed_write_keys 和目标原文写三文件。SKILL.md 必须含可原样复制的 title+\"questions\":[]；问句覆盖 overlay_editable 的每一项和 listed_write_keys 里来源为 caller 的键。同一张 overlay 一张 questions[]，不同 overlay 可各一张，调用方每轮只用一张。活列表 options 留空，封闭枚举才写 options，不要自由文本，不要 dataSource。inputType 只许 text、textarea、date、select、radio、treeSelect、checkbox。写：调用方提交后再 confirm+formIds，python3 加 --confirm。嵌套数组按列写成可重复命令行参数，问句用 textarea 写 JSON 数组，不要压成一个字符串。listed 某键这次 empty/[] 只说明这次传了空，同场另有选项请求则再读，不要冻成空数组。读命令不要写死本场 listed 里的业务 id。手册必填必须和 argparse 一致。每个 add_parser 必须 set_defaults(func=)。写入子命令必须有 --confirm。基地址只读 DANO_BASE_URL 或 runtime.json。SKILL.md 里出现的每一条读命令（含表格）都要跑。正文过大时 network_get 会省略，用 evidence_get 同 id。成品必须可调用。目标只要求写入时不要发明 GET。filled 里的控件名不是调用方必填清单。"
     : "Skill 还没产出。";
-  return `${lead}read_guide 读完名单。对照 listed（本场全部 xhr/fetch 索引）写字段。要采用的请求打开全文。来源标签和命令行谁填必须一致。overlay_editable 上的控件是调用方填或选，不要改成系统自动。empty 里的键传空。只有 auth.local.json 的 credential 同时有 url 和 method 时才重放；listed 里的刷新请求不是必须重放。业务请求把 headers 整袋带上，有任意鉴权头就发，不要只认某一个键名。读命令 401 不要 assist、不要猜 token，仍要写完 SKILL.md 和 references/api.md，再 verify_skill。401 是打包凭证过期，不是产出失败。DANO_AUTH_HEADERS 是 JSON 对象，json.loads 后只覆盖同名头。scripts/client.py 只用 Python 标准库。跑读命令（若目标含读），再 verify_skill。${errors}`;
+  return `${lead}read_guide 读完名单。对照 listed（本场全部 xhr/fetch 索引）写字段。要采用的请求打开全文。来源标签和命令行谁填必须一致。overlay_editable 上的控件是调用方填或选，不要改成系统自动。empty 里的键传空。只有 auth.local.json 的 credential 同时有 url 和 method 时才重放；listed 里的刷新请求不是必须重放。业务请求把 headers 整袋带上，有任意鉴权头就发，不要只认某一个键名。读命令 401 不要 assist、不要猜 token，仍要写完 SKILL.md 和 references/api.md，再 verify_skill。401 是打包凭证过期，不是产出失败。DANO_AUTH_HEADERS 是 JSON 对象，json.loads 后只覆盖同名头，不要用环境变量整袋替换本地头。scripts/client.py 只用 Python 标准库。跑读命令（若目标含读），再 verify_skill。${errors}`;
 }
 
 let startOverride = null;
@@ -240,6 +241,7 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
     sessionManager: SessionManager.inMemory(),
   });
   const session = created.session;
+  const inflightTools = new Map();
   let lastTool = "";
   let progressed = false;
   let pageProgressed = false;
@@ -247,16 +249,24 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
   session.subscribe?.((event) => {
     const type = String(event?.type || "");
     const assistant = event?.assistantMessageEvent;
+    const callId = event.toolCallId || event.callId;
     if (type === "tool_execution_start") {
       if (SKILL_TOOLS.has(event.toolName)) progressed = true;
       if (PAGE_TOOLS.has(event.toolName)) pageProgressed = true;
-      lastTool = toolLine(event.toolName, event.args);
-      const line = `调用 ${lastTool}`;
+      const name = toolLine(event.toolName, event.args);
+      if (callId != null) inflightTools.set(callId, name);
+      lastTool = name;
+      const line = `调用 ${name}`;
       logLine(`[pi] ${line}`);
       recording?.emitThought?.({ kind: "tool", phase: "start", text: line });
     }
     if (type === "tool_execution_end") {
-      const line = `${lastTool || event.toolName || "tool"} ${resultLine(event.result)}`;
+      const name = (callId != null && inflightTools.get(callId))
+        || toolLine(event.toolName, event.args)
+        || lastTool
+        || "tool";
+      if (callId != null) inflightTools.delete(callId);
+      const line = `${name} ${resultLine(event.result)}`;
       logLine(`[pi] ${line}`);
       recording?.emitThought?.({
         kind: "tool",
@@ -321,6 +331,7 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
           recording.status = "failed";
           recording.finished = true;
           recording.emit?.();
+          queueMicrotask(() => recording.pi?.dispose?.());
         }
         return;
       }

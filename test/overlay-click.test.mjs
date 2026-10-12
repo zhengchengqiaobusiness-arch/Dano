@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { closeBrowser, desktopViewport, DESKTOP_VIEWPORT, openBrowser } from "../src/browser/session.mjs";
+import { closeBrowser, desktopViewport, DESKTOP_VIEWPORT, getPage, openBrowser } from "../src/browser/session.mjs";
 import { takeSnapshot } from "../src/browser/snapshot.mjs";
 import { fieldFillText, runAction, withFillFieldText } from "../src/browser/actions.mjs";
 
@@ -68,7 +68,9 @@ test("an open dialog is published as overlay_exact and later clicks use the curr
     const editableTitle = (opened.overlay_editable || []).find((row) => String(row.name || "").includes("标题"));
     assert.ok(editableTitle);
     assert.ok(editableTitle.ref);
-    assert.ok((opened.required_empty_overlay || []).some((name) => String(name).includes("标题")));
+    const requiredTitle = (opened.required_empty_overlay || []).find((item) => String(item?.name || item).includes("标题"));
+    assert.ok(requiredTitle);
+    assert.ok(requiredTitle.ref);
     assert.match(opened.snapshot.text, /col "/);
     const emptyCat = (opened.overlay_fields || []).find((row) => String(row.name || "").includes("分类"));
     assert.ok(emptyCat);
@@ -144,6 +146,24 @@ test("a click inside overlay_exact with no xhr is returned as layer_idle", { tim
     assert.equal(idle.in_overlay, true);
     assert.equal(idle.layer_idle, true);
     assert.equal((idle.requests || []).length, 0);
+  } finally {
+    await closeBrowser(id);
+    await new Promise((resolve) => site.server.close(resolve));
+  }
+});
+
+test("browser_open same url is idempotent; same-origin hash may goto", { timeout: 60000 }, async () => {
+  const site = await serve();
+  const id = "rec_open_nav";
+  try {
+    await openBrowser({ recordingId: id, url: site.url, storageState: null, viewport: { width: 900, height: 700 } });
+    const same = await runAction(id, { action: "open", url: getPage(id).url() });
+    assert.equal(same.ok, true);
+    assert.notEqual(same.error, "already_open");
+    const next = `${site.url.replace(/\/?$/, "/") }#/other`;
+    const opened = await runAction(id, { action: "open", url: next });
+    assert.equal(opened.ok, true);
+    assert.match(getPage(id).url(), /#\/other/);
   } finally {
     await closeBrowser(id);
     await new Promise((resolve) => site.server.close(resolve));

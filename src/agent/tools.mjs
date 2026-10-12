@@ -7,7 +7,7 @@ import { packageRoot, docDir, skillDir as skillPath } from "../paths.mjs";
 import { appendEvidence, getEvidence, listEvidence, appendGoal, readGoal } from "../evidence/store.mjs";
 import { fieldFillText, runAction, withFillFieldText } from "../browser/actions.mjs";
 import { browserSession, persistBrowserSession, withPage } from "../browser/session.mjs";
-import { overlayControlFacts, overlayFactLists, takeSnapshot } from "../browser/snapshot.mjs";
+import { overlayControlFacts, overlayFactLists, overlayItemsLine, takeSnapshot } from "../browser/snapshot.mjs";
 import { compactNetworkIndex, getNetwork, listNetwork, networkBodyForModel, requestKeyIndex } from "../browser/network.mjs";
 import { applyVerifyToRecording } from "../session.mjs";
 import { authSpawnEnv, readSkillFile, skillIdFor, writeRuntimeConfig, writeSkillFile } from "../skillpack/files.mjs";
@@ -26,7 +26,7 @@ const GUIDE_FILES = {
 };
 
 const TOOL_SPECS = [
-  { name: "browser_open", description: "打开入口同源的地址。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
+  { name: "browser_open", description: "打开入口同源的地址。已在该地址则只返回当前树。同源换 hash/path 可以 goto。跨源拒绝。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
   { name: "browser_snapshot", description: "读取当前页面快照树。只点树里的 [ref=fN:eN@数字]。goal_exact / overlay_exact / row_facts 是查找表，不是点击清单。返回 overlay_fields 与 overlay_editable（当前层非只读可填，含 ref；没有弹层时是页面上的 textbox/combobox）。", parameters: { type: "object", properties: {} } },
   { name: "browser_act", description: "ref 整段照抄最近一次 snapshot 树里的 [ref=fN:eN@数字]。@ 后数字对不上就重新 snapshot，只点新树。同名不要挑第一个。没有 ref 就停。不要并行多次 browser_act。同一张树上要改多格，用一次 fill_fields。fill_fields 的 fields 每项是 ref 加要填的字（text 或 value）。填和选用树里 textbox/combobox 以及 overlay_editable 的 ref。返回 clicked、requests、snapshot、overlay_fields、overlay_editable。requests 空只说明这一下没有 xhr/fetch。empty/required/readonly 是事实；empty=true 还要填，empty=false 不要当没填。弹层开着时只点当前树里这层的 ref，不要点 goal_exact 里被挡住的项。in_overlay 表示点的是 overlay_exact 里的控件；layer_idle 表示这层动了但没有 xhr。needs_click 表示这一格不能直接填，先 click 同一个 ref 再填。behind_overlay 时先看 overlay_exact。还没采用请求就不要点会关掉这层的控件。page_unchanged 时换 ref。uploaded 表示文件已写入。needs_upload 时对同一 ref 调用 upload。", parameters: { type: "object", properties: { action: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, fields: { type: "array" }, key: { type: "string" }, file_path: { type: "string" } }, required: ["action"] } },
   { name: "browser_screenshot", description: "把当前画面作为图像送回。", parameters: { type: "object", properties: { ref: { type: "string" }, as_image: { type: "boolean" } } } },
@@ -137,8 +137,13 @@ export function hostTools(recording) {
     },
     async browser_snapshot() {
       if (!browserSession(id)) return { ok: false, error: "no_browser", epoch: 0, refs: [], text: "" };
-      const snapshot = await withPage(id, () => takeSnapshot(id));
+      let snapshot = await withPage(id, () => takeSnapshot(id));
       if (snapshot?.ok === false) return snapshot;
+      if (!(snapshot?.refs || []).length) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        snapshot = await withPage(id, () => takeSnapshot(id));
+        if (snapshot?.ok === false) return snapshot;
+      }
       let overlay = {};
       try {
         overlay = overlayFactLists(await overlayControlFacts(id));
@@ -259,7 +264,12 @@ export function hostTools(recording) {
     async write_skill_file(args) {
       recording.skillId = skillId();
       await writeRuntimeConfig(recording, recording.skillId);
-      return writeSkillFile(id, recording.skillId, args.relative_path, args.contents);
+      const result = await writeSkillFile(id, recording.skillId, args.relative_path, args.contents);
+      if (result?.ok) {
+        recording.wroteSkill = true;
+        recording.emit?.();
+      }
+      return result;
     },
     async read_skill_file(args) {
       return readSkillFile(skillId(), args.relative_path);
@@ -374,7 +384,7 @@ export function wrapHostTools(host) {
       logLine(`[cabp] 开始 ${spec.name} ${argText}`);
       const raw = await host[spec.name](spec.name === "browser_screenshot" ? { ...args, as_image: true } : args);
       const requests = Array.isArray(raw?.requests) ? raw.requests.map((row) => `${row.method || ""} ${row.path || ""} ${row.status || ""}`.trim()).join(" | ") : "";
-      const requiredEmpty = Array.isArray(raw?.required_empty_overlay) && raw.required_empty_overlay.length ? ` required_empty=${raw.required_empty_overlay.join("|")}` : "";
+      const requiredEmpty = overlayItemsLine(raw?.required_empty_overlay) ? ` required_empty=${overlayItemsLine(raw.required_empty_overlay)}` : "";
       const empty = Array.isArray(raw?.empty_overlay) && raw.empty_overlay.length ? ` empty=${raw.empty_overlay.join("|")}` : "";
       const editable = Array.isArray(raw?.overlay_editable) && raw.overlay_editable.length ? ` editable=${raw.overlay_editable.map((row) => row.name || row.role).join("|")}` : "";
       logLine(`[cabp] 结束 ${spec.name} ${Date.now() - started}ms ok=${raw?.ok !== false} error=${raw?.error || ""} clicked=${raw?.clicked || ""} uploaded=${Boolean(raw?.uploaded)} filled=${(raw?.filled || []).join("|")}${requiredEmpty}${empty}${editable} requests=${requests}`);

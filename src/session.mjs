@@ -30,6 +30,7 @@ export async function createRecording(fields) {
     skillDir: "",
     skillId: skillIdFor(subsystem, id),
     verify: null,
+    wroteSkill: false,
     revision: 0,
     paused: false,
     finished: false,
@@ -134,7 +135,35 @@ export function publicSessionStatus(recording) {
   const raw = String(recording?.status || "recording");
   if (raw === "skill_ready" || raw === "skill_written_needs_auth") return "skill_ready";
   if (raw === "failed" || raw === "stopped" || raw === "verify_failed") return "failed";
+  if (recording?.finished) return "failed";
   return "recording";
+}
+
+export function publicSessionProgress(recording) {
+  const status = publicSessionStatus(recording);
+  if (status === "skill_ready") return { step: "done", label: "Skill 产出完毕" };
+  if (status === "failed") {
+    const first = Array.isArray(recording?.verify?.errors) ? recording.verify.errors[0] : null;
+    const code = String(first?.code || "").trim();
+    return { step: "failed", label: code ? `产出失败 ${code}` : "产出失败" };
+  }
+  if (Array.isArray(recording?.verify?.errors) && recording.verify.errors.length) {
+    return { step: "writing", label: "校验未过，正在改三文件" };
+  }
+  if (recording?.wroteSkill) return { step: "writing", label: "正在写三文件" };
+  return { step: "capturing", label: "" };
+}
+
+export function settlePreviewWithoutBrowser(recording, { hasPage = false, hasPi = false } = {}) {
+  if (!recording || recording.finished) return false;
+  if (hasPage || hasPi) return false;
+  if (!recording.wroteSkill && !recording.verify) return false;
+  recording.finished = true;
+  const verifyStatus = recording.verify?.status;
+  recording.status = (verifyStatus === "skill_ready" || verifyStatus === "skill_written_needs_auth")
+    ? "skill_ready"
+    : "failed";
+  return true;
 }
 
 export function applyVerifyToRecording(recording, verify, skillDirPath = "") {
@@ -160,7 +189,7 @@ export function snapshotMessage(recording) {
       title: recording.title,
       revision: recording.revision,
       status: publicSessionStatus(recording),
-      progress: { step: "capturing", label: "" },
+      progress: publicSessionProgress(recording),
       capture_frozen: false,
       draft: null,
       error: "",
@@ -188,6 +217,8 @@ export async function persist(recording) {
     status: recording.status,
     skillId: recording.skillId,
     skillDir: recording.skillDir,
+    finished: Boolean(recording.finished),
+    wroteSkill: Boolean(recording.wroteSkill),
     verify: recording.verify,
   }, null, 2));
 }
@@ -209,6 +240,7 @@ export async function loadRecording(id) {
       revision: Number(raw.revision) || 0,
       listeners: new Set(),
       finished: done,
+      wroteSkill: Boolean(raw.wroteSkill),
       paused: false,
       humanCanClick: true,
       assistReason: "",

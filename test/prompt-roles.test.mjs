@@ -4,7 +4,7 @@ import os from "node:os";
 import test from "node:test";
 import path from "node:path";
 import { packageRoot } from "../src/paths.mjs";
-import { controlLooksEmpty, goalExactLines, nearestNamedAncestor, overlayExactLines, overlayHasRef, stripSnapshotDecorators, yamlFingerprint } from "../src/browser/snapshot.mjs";
+import { controlLooksEmpty, goalExactLines, nearestNamedAncestor, overlayExactLines, overlayFactLists, overlayHasRef, overlayItemLabel, stripSnapshotDecorators, yamlFingerprint } from "../src/browser/snapshot.mjs";
 import { compactNetworkIndex, networkBodyForModel } from "../src/browser/network.mjs";
 import { responseKeyPreview } from "../src/skillpack/request-keys.mjs";
 import { writeOnlySkill } from "../src/skillpack/verify.mjs";
@@ -30,6 +30,11 @@ test("the method does not ban number cells or treat filled controls as caller-re
   assert.match(prompt, /overlay_fields/);
   assert.match(prompt, /不要把凭证写进对话/);
   assert.match(prompt, /嵌套数组/);
+  assert.match(prompt, /options 留空/);
+  assert.match(prompt, /textarea 写 JSON/);
+  assert.match(prompt, /整袋替换/);
+  assert.match(prompt, /读命令也不要写死本场 listed/);
+  assert.match(prompt, /身份键从本场身份接口现取/);
   assert.match(prompt, /占位字/);
   assert.match(prompt, /必填空/);
   assert.match(prompt, /argparse/);
@@ -48,6 +53,8 @@ test("the method does not ban number cells or treat filled controls as caller-re
   assert.match(prompt, /不要 dataSource/);
   assert.match(prompt, /formIds/);
   assert.match(prompt, /不要 browser_open/);
+  assert.match(prompt, /同源换页可用 browser_open/);
+  assert.doesNotMatch(prompt, /已经有页面时不要 browser_open 换地址|already_open/);
   assert.match(prompt, /set_defaults\(func=/);
   assert.match(prompt, /不要写死源站/);
   assert.match(prompt, /listed_write_keys/);
@@ -66,6 +73,13 @@ test("the method does not ban number cells or treat filled controls as caller-re
   assert.doesNotMatch(prompt, /都可以点/);
   assert.doesNotMatch(prompt, /打开弹层已带上/);
   assert.doesNotMatch(prompt, /页面已有值若 listed/);
+});
+
+test("required empty overlay facts include the current ref", () => {
+  const facts = overlayFactLists([{ name: "标题", role: "textbox", ref: "f0:e3@1", empty: true, required: true }]);
+  assert.equal(facts.required_empty_overlay[0].ref, "f0:e3@1");
+  assert.equal(facts.required_empty_overlay[0].role, "textbox");
+  assert.match(overlayItemLabel(facts.required_empty_overlay[0]), /textbox 标题 f0:e3@1/);
 });
 
 test("a displayed placeholder is still an empty overlay fact", () => {

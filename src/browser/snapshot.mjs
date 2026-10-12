@@ -428,6 +428,22 @@ export function overlayAlignRows(fields) {
   }));
 }
 
+export function overlayItemLabel(item) {
+  if (item && typeof item === "object") {
+    const name = String(item.name || "").trim();
+    const role = String(item.role || "").trim();
+    const ref = String(item.ref || "").trim();
+    const head = name && role && name !== role ? `${role} ${name}` : (name || role);
+    return [head, ref].filter(Boolean).join(" ");
+  }
+  return String(item || "");
+}
+
+export function overlayItemsLine(items, limit = 0) {
+  const labels = (Array.isArray(items) ? items : []).map(overlayItemLabel).filter(Boolean);
+  return (limit > 0 ? labels.slice(0, limit) : labels).join("|");
+}
+
 export function overlayFactLists(overlay_fields) {
   const rows = overlayAlignRows(overlay_fields);
   const editable = rows.filter((row) => !row.readonly);
@@ -435,7 +451,11 @@ export function overlayFactLists(overlay_fields) {
     overlay_fields: rows,
     overlay_editable: editable,
     empty_overlay: rows.filter((row) => row.empty).map((row) => row.name || row.role),
-    required_empty_overlay: rows.filter((row) => row.empty && row.required).map((row) => row.name || row.role),
+    required_empty_overlay: rows.filter((row) => row.empty && row.required).map((row) => ({
+      name: row.name || row.role || "",
+      role: row.role || "",
+      ref: row.ref || "",
+    })),
   };
 }
 

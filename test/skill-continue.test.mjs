@@ -17,6 +17,10 @@ test("a finished page turn continues until the skill is verified", () => {
   assert.match(afterWrite, /不是产出失败/);
   assert.doesNotMatch(afterWrite, /失败或 401 再停止/);
   assert.match(afterWrite, /嵌套数组/);
+  assert.match(afterWrite, /options 留空/);
+  assert.match(afterWrite, /textarea/);
+  assert.match(afterWrite, /整袋替换/);
+  assert.match(afterWrite, /读命令不要写死本场 listed/);
   assert.match(afterWrite, /表格/);
   assert.match(afterWrite, /冻成空数组|empty\/\[\]/);
   assert.match(afterWrite, /argparse/);
@@ -53,9 +57,11 @@ test("a finished page turn continues until the skill is verified", () => {
   });
   assert.match(emptyLine, /空=/);
   const requiredLine = resultLine({
-    content: [{ type: "text", text: JSON.stringify({ ok: true, clicked: "button", required_empty_overlay: ["标题"], empty_overlay: ["分类"] }) }],
+    content: [{ type: "text", text: JSON.stringify({ ok: true, clicked: "button", required_empty_overlay: [{ name: "标题", ref: "f0:e3@1" }], empty_overlay: ["分类"] }) }],
   });
   assert.match(requiredLine, /必填空=/);
+  assert.match(requiredLine, /f0:e3@1/);
+  assert.ok(requiredLine.indexOf("必填空=") < requiredLine.indexOf("button"));
   const facts = factsForContinue({
     listed: [{ id: "req_1", method: "POST", keys: ["title"] }],
     overlay_fields: [{ name: "分类", empty: true, required: true, ref: "f0:e3@1" }],
@@ -85,7 +91,8 @@ test("a finished page turn continues until the skill is verified", () => {
   assert.match(stillPage, /overlay_editable/);
   assert.match(stillPage, /指针样式不是能不能点的依据/);
   assert.match(stillPage, /goal_named/);
-  assert.match(stillPage, /不要 browser_open/);
+  assert.match(stillPage, /同源换页可用 browser_open/);
+  assert.doesNotMatch(stillPage, /已经有页面时不要 browser_open 换地址|already_open/);
   assert.doesNotMatch(stillPage, /禁止.*取消|不要点取消/);
   const skippedWrite = nextRecordingPrompt({ finished: false, paused: false, progressed: true, continues: 1, unmatchedGoalNames: ["未填数量"] });
   assert.match(skippedWrite, /goal_named_unclicked/);

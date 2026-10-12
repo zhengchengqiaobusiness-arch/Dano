@@ -10,7 +10,7 @@
 
 ## client 读序
 
-1. 若设置了环境变量 `DANO_AUTH_HEADERS`（JSON 对象），`json.loads` 后用它覆盖同名本地头，不要按逗号拆
+1. 若设置了环境变量 `DANO_AUTH_HEADERS`（JSON 对象），`json.loads` 后只覆盖同名本地头，不要按逗号拆，不要用环境变量整袋替换本地头
 2. 其余头用包内 `config/auth.local.json` 的 `headers`
 3. 两者都没有可用头则抛 `AuthExpired`，停止
 4. 只有 `credential.url` 和 `credential.method` 时才重放签发请求；没有这两项就直接用 headers 打业务接口

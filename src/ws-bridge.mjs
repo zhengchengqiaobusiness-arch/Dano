@@ -4,7 +4,7 @@ import { browserSession, captureFrame, closeBrowser, getPage, openBrowser, witho
 import { beginAction, compactNetworkIndex, endAction, listNetwork, waitForAction } from "./browser/network.mjs";
 import { overlayControlFacts, overlayFactLists, takeSnapshot } from "./browser/snapshot.mjs";
 import { loadStorageState, saveStorageState } from "./session-store.mjs";
-import { appendSessionThought, createRecording, emit, getRecording, loadRecording, persist, persistThoughts, snapshotMessage } from "./session.mjs";
+import { appendSessionThought, createRecording, emit, getRecording, loadRecording, persist, persistThoughts, settlePreviewWithoutBrowser, snapshotMessage } from "./session.mjs";
 import { hostTools } from "./agent/tools.mjs";
 import { startRecordingPi as defaultStart } from "./agent/pi-session.mjs";
 import { armIdleTimer, HUMAN_STEER_IDLE_MS, PREVIEW_DETACH_MS } from "./idle-timer.mjs";
@@ -155,9 +155,15 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
         if (existing) {
           recording = existing;
           attachPreview(recording, ws, send);
-          if (getPage(recording.id)) {
+          const page = getPage(recording.id);
+          if (page) {
             await pushFrame();
             frameTimer = setInterval(pushFrame, 400);
+          } else if (settlePreviewWithoutBrowser(recording, {
+            hasPage: false,
+            hasPi: Boolean(recording.pi),
+          })) {
+            persist(recording).catch(() => {});
           }
           send(snapshotMessage(recording));
           return;

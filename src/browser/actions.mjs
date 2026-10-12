@@ -112,6 +112,14 @@ function sameDocumentNav(current, next) {
   }
 }
 
+function samePageUrl(current, next) {
+  try {
+    return new URL(current).href === new URL(next).href;
+  } catch {
+    return String(current || "") === String(next || "");
+  }
+}
+
 async function snapshotAfter(recordingId, budgetMs = 3000, { retryEmpty = false } = {}) {
   const snapshot = await takeSnapshot(recordingId, { budgetMs });
   if (!retryEmpty || (snapshot?.refs || []).length) return snapshot;
@@ -152,6 +160,12 @@ async function perform(recordingId, input) {
     if (originFromUrl(url) !== state.origin) {
       const snapshot = await snapshotAfter(recordingId);
       return { ok: false, error: "origin_denied", snapshot };
+    }
+    if (samePageUrl(state.page.url(), url)) {
+      return withOverlayFacts(recordingId, {
+        ok: true,
+        snapshot: await snapshotAfter(recordingId, 3000, { retryEmpty: true }),
+      });
     }
     let emptyRetry = true;
     let snapMs = 3000;

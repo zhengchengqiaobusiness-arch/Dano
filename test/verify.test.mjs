@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { writeSkillFile } from "../src/skillpack/files.mjs";
-import { actionEvidenceSummary, authOverlayParseError, skillCommandLines, verifySkill } from "../src/skillpack/verify.mjs";
+import { actionEvidenceSummary, authOverlayParseError, hardcodedOriginError, skillCommandLines, verifySkill } from "../src/skillpack/verify.mjs";
 import { skillDir } from "../src/paths.mjs";
 import { appendEvidence } from "../src/evidence/store.mjs";
 import { GUIDE_NAMES } from "../src/agent/guides.mjs";
@@ -624,7 +624,7 @@ test("caller fields without questions[] or choice options are not invocable", as
   assert.ok(result.errors.some((item) => item.code === "not_invocable" && item.field === "部门"));
   assert.ok(result.errors.some((item) => item.code === "not_invocable" && item.command === "save" && String(item.hint || "").includes("--confirm")));
 
-  await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\n{\"title\":\"办理\",\"questions\":[{\"id\":\"title\",\"question\":\"标题\",\"inputType\":\"text\",\"required\":true,\"default\":\" \"},{\"id\":\"dept\",\"question\":\"部门\",\"inputType\":\"select\",\"required\":true,\"options\":[{\"id\":\"from-list\",\"label\":\"甲\"}],\"default\":\"from-list\"}]}\npython scripts/client.py save --title x --confirm\n");
+  await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\n{\"title\":\"办理\",\"questions\":[{\"id\":\"title\",\"question\":\"标题\",\"inputType\":\"text\",\"required\":true,\"default\":\" \"},{\"id\":\"dept\",\"question\":\"部门\",\"inputType\":\"select\",\"required\":true,\"options\":[],\"default\":\" \"}]}\npython scripts/client.py save --title x --confirm\n");
   await writeFile(path.join(dir, "scripts/client.py"), [
     "import argparse",
     "def cmd_save(args):",
@@ -802,13 +802,35 @@ test("choice and date page controls cannot be asked as free text, and option ids
     },
   });
   result = await verifySkill(dir, shape.id, shape);
-  assert.ok(result.errors.some((item) => item.code === "not_invocable" && item.field === "dept" && String(item.hint || "").includes("占位")));
+  assert.ok(result.errors.some((item) => item.code === "not_invocable" && item.field === "dept" && /留空|占位/.test(String(item.hint || ""))));
 
   await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\n{\"title\":\"办理\",\"questions\":[{\"id\":\"dept\",\"question\":\"部门\",\"inputType\":\"select\",\"required\":true,\"options\":[{\"id\":\"103\",\"label\":\"甲部门名称足够长\"}],\"default\":\"103\"},{\"id\":\"start\",\"question\":\"开始日期\",\"inputType\":\"date\",\"dateFormat\":\"yyyy-MM-dd\",\"required\":true,\"default\":\" \"}]}\npython scripts/client.py save --confirm\n");
   result = await verifySkill(dir, shape.id, shape);
-  assert.equal(result.errors.some((item) => item.file === "SKILL.md" && String(item.hint || "").includes("占位")), false);
-  assert.equal(result.errors.some((item) => String(item.hint || "").includes("dateFormat")), false);
-  assert.equal(result.errors.some((item) => String(item.hint || "").includes("options") && item.file === "SKILL.md" && !String(item.hint || "").includes("占位")), false);
+  assert.ok(result.errors.some((item) => item.code === "not_invocable" && item.field === "dept" && /留空|业务 id/.test(String(item.hint || ""))));
+
+  await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\n{\"title\":\"办理\",\"questions\":[{\"id\":\"dept\",\"question\":\"部门\",\"inputType\":\"select\",\"required\":true,\"options\":[],\"default\":\" \"},{\"id\":\"start\",\"question\":\"开始日期\",\"inputType\":\"date\",\"dateFormat\":\"yyyy-MM-dd\",\"required\":true,\"default\":\" \"}]}\npython scripts/client.py save --confirm\n");
+  result = await verifySkill(dir, shape.id, shape);
+  assert.equal(result.errors.some((item) => item.file === "SKILL.md" && /留空|占位|业务 id|dateFormat/.test(String(item.hint || ""))), false);
+
+  await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\n{\"title\":\"办理\",\"questions\":[{\"id\":\"dept\",\"question\":\"部门\",\"inputType\":\"select\",\"required\":true,\"options\":[],\"default\":\"103\"},{\"id\":\"start\",\"question\":\"开始日期\",\"inputType\":\"date\",\"dateFormat\":\"yyyy-MM-dd\",\"required\":true,\"default\":\" \"}]}\npython scripts/client.py save --confirm\n");
+  result = await verifySkill(dir, shape.id, shape);
+  assert.ok(result.errors.some((item) => item.code === "not_invocable" && item.field === "dept" && String(item.hint || "").includes("业务 id")));
+
+  await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\n{\"title\":\"办理\",\"questions\":[{\"id\":\"items\",\"question\":\"明细\",\"inputType\":\"rows\",\"required\":true,\"default\":\" \"}]}\npython scripts/client.py save --confirm\n");
+  await writeFile(path.join(dir, "references/api.md"), [
+    "## 字段",
+    "- page_name: 明细",
+    "- source: caller",
+    "- control: textbox",
+    "",
+    "## 绑定",
+    "",
+    "## 未解决",
+    "",
+    "## 已验证读命令",
+  ].join("\n"));
+  result = await verifySkill(dir, shape.id, shape);
+  assert.ok(result.errors.some((item) => item.code === "not_invocable" && item.field === "items" && String(item.hint || "").includes("inputType")));
 });
 
 test("field tables with aliases and page_name= bullets are parsed, constant needs no reason gate", async () => {
@@ -936,4 +958,7 @@ test("DANO_AUTH_HEADERS overlay must be json.loads, not comma pairs", () => {
   assert.equal(authOverlayParseError("print(1)"), "");
   assert.equal(authOverlayParseError("raw = os.environ.get(\"DANO_AUTH_HEADERS\")\nheaders.update(json.loads(raw))"), "");
   assert.match(authOverlayParseError("env = os.environ.get(\"DANO_AUTH_HEADERS\",\"\")\nfor chunk in env.split(\",\"):\n    k,v = chunk.split(\"=\")"), /JSON 对象/);
+  assert.match(authOverlayParseError("raw = os.environ.get(\"DANO_AUTH_HEADERS\")\nif raw:\n    return json.loads(raw)"), /覆盖同名|整袋/);
+  assert.equal(hardcodedOriginError("base_url = os.environ.get(\"DANO_BASE_URL\") or runtime.get(\"base_url\") or \"\""), "");
+  assert.match(hardcodedOriginError("DEFAULT_BASE_URL = \"https://example.test\""), /源站/);
 });

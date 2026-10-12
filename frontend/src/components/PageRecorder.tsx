@@ -667,14 +667,20 @@ function dedupeAnalysisActivities(activities: WorkflowActivity[]) {
   return next;
 }
 
-function analysisStatusView(status: WorkflowStatus, cancelling: boolean, _snapshot: WorkflowSnapshot | null) {
+function analysisStatusView(status: WorkflowStatus, cancelling: boolean, snapshot: WorkflowSnapshot | null) {
   if (cancelling && status !== "cancelled") return { color: "warning" as const, label: "录制中" };
   if (status === "skill_ready" || status === "published" || status === "skill_written_needs_auth") {
     return { color: "success" as const, label: "Skill 产出完毕" };
   }
   if (status === "failed" || status === "verify_failed" || status === "stopped" || status === "cancelled") {
-    return { color: "error" as const, label: "产出失败" };
+    return { color: "error" as const, label: snapshot?.progress?.label || "产出失败" };
   }
+  const step = String(snapshot?.progress?.step || "");
+  const label = String(snapshot?.progress?.label || "").trim();
+  if (step === "writing" || step === "verifying") {
+    return { color: "warning" as const, label: label || "正在写 Skill" };
+  }
+  if (label) return { color: "processing" as const, label };
   return { color: "processing" as const, label: "录制中" };
 }
 

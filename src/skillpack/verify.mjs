@@ -231,10 +231,26 @@ export function scriptCrashOutput(output) {
 export function authOverlayParseError(clientText) {
   const text = String(clientText || "");
   if (!/\bDANO_AUTH_HEADERS\b/.test(text)) return "";
-  if (/DANO_AUTH_HEADERS[\s\S]{0,400}json\.loads/.test(text) || /json\.loads\s*\(\s*(?:os\.environ\.get\(\s*[\"']DANO_AUTH_HEADERS[\"']|[^)]*DANO_AUTH_HEADERS)/.test(text)) {
-    return "";
+  const loads = /DANO_AUTH_HEADERS[\s\S]{0,400}json\.loads/.test(text)
+    || /json\.loads\s*\(\s*(?:os\.environ\.get\(\s*[\"']DANO_AUTH_HEADERS[\"']|[^)]*DANO_AUTH_HEADERS)/.test(text);
+  if (!loads) return "DANO_AUTH_HEADERS 是 JSON 对象，用 json.loads 覆盖同名头，不要按逗号拆。";
+  const merged = /\.update\s*\(|headers\s*\[|for\s+\w+\s*,\s*\w+\s+in\s+/.test(text);
+  const replaced = /return\s+json\.loads|headers\s*=\s*json\.loads/.test(text);
+  if (replaced && !merged) {
+    return "DANO_AUTH_HEADERS 是 JSON 对象，json.loads 后只覆盖同名头，不要整袋替换。";
   }
-  return "DANO_AUTH_HEADERS 是 JSON 对象，用 json.loads 覆盖同名头，不要按逗号拆。";
+  return "";
+}
+
+export function hardcodedOriginError(clientText) {
+  const text = String(clientText || "");
+  if (/(?:DEFAULT_BASE_URL|base_url)\s*=\s*["']https?:\/\/(?!127\.0\.0\.1\b|localhost\b)/i.test(text)) {
+    return "基地址只读 DANO_BASE_URL 或 config/runtime.json，不要写死源站。";
+  }
+  if (/(?:os\.environ\.get\(\s*[\"']DANO_BASE_URL[\"'][^)]*\)|DANO_BASE_URL)[^;\n]{0,120}or\s+["']https?:\/\/(?!127\.0\.0\.1\b|localhost\b)/i.test(text)) {
+    return "基地址只读 DANO_BASE_URL 或 config/runtime.json，不要写死源站。";
+  }
+  return "";
 }
 
 function latestMatchingRun(verifyRows, line) {
@@ -254,6 +270,7 @@ const CHOICE_CONTROLS = new Set(["combobox", "listbox", "radio", "select", "tree
 const DATE_CONTROLS = new Set(["date", "datepicker", "datetime", "time", "datetimepicker"]);
 const CHOICE_INPUTS = new Set(["select", "radio", "treeselect", "checkbox"]);
 const DATE_INPUTS = new Set(["date"]);
+const DANO_INPUTS = new Set(["text", "textarea", "date", "select", "radio", "treeselect", "checkbox"]);
 
 function controlToken(value) {
   return String(value || "").toLowerCase().replace(/[\s_-]/g, "");
@@ -333,7 +350,7 @@ function fieldShapeErrors(fields) {
       errors.push({
         code: "not_invocable",
         field: row.page_name,
-        hint: "页面下拉/枚举在手册里要写 options，或 source=other_api 表示先跑选项命令再写入 questions[].options",
+        hint: "封闭枚举在手册里要写 options；source=other_api 时 questions[] 的 options 留空，调用时先跑选项命令再填",
       });
     }
   }
@@ -342,25 +359,35 @@ function fieldShapeErrors(fields) {
 
 function extractQuestions(skillMd) {
   const text = String(skillMd || "");
-  const idx = text.search(/"questions"\s*:\s*\[/);
-  if (idx < 0) return [];
-  const start = text.indexOf("[", idx);
-  let depth = 0;
-  for (let i = start; i < text.length; i += 1) {
-    if (text[i] === "[") depth += 1;
-    else if (text[i] === "]") {
-      depth -= 1;
-      if (depth === 0) {
-        try {
-          const rows = JSON.parse(text.slice(start, i + 1));
-          return Array.isArray(rows) ? rows : [];
-        } catch {
-          return [];
+  const rows = [];
+  let from = 0;
+  while (from < text.length) {
+    const idx = text.slice(from).search(/"questions"\s*:\s*\[/);
+    if (idx < 0) break;
+    const start = text.indexOf("[", from + idx);
+    if (start < 0) break;
+    let depth = 0;
+    let end = -1;
+    for (let i = start; i < text.length; i += 1) {
+      if (text[i] === "[") depth += 1;
+      else if (text[i] === "]") {
+        depth -= 1;
+        if (depth === 0) {
+          end = i;
+          break;
         }
       }
     }
+    if (end < 0) break;
+    try {
+      const parsed = JSON.parse(text.slice(start, end + 1));
+      if (Array.isArray(parsed)) rows.push(...parsed);
+    } catch {
+      // 这一块不是完整 JSON，跳过
+    }
+    from = end + 1;
   }
-  return [];
+  return rows;
 }
 
 function fieldForQuestion(question, fields) {
@@ -373,6 +400,19 @@ function fieldForQuestion(question, fields) {
   });
 }
 
+function liveChoiceQuestion(row, question) {
+  if (row?.source === "other_api") return true;
+  const control = controlToken(row?.control || question?.inputType);
+  return control === "tree" || control === "treeselect";
+}
+
+function recordedSampleDefault(value, haystack) {
+  const text = String(value ?? "").trim();
+  if (!text || text === " " || text === "[]") return false;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text) && !/^\d{3,}$/.test(text)) return false;
+  return String(haystack || "").includes(text);
+}
+
 function questionShapeErrors(questions, fields, haystack, overlay) {
   const errors = [];
   const list = Array.isArray(questions) ? questions : [];
@@ -383,20 +423,55 @@ function questionShapeErrors(questions, fields, haystack, overlay) {
   const choiceQs = [];
   const dateQs = [];
   for (const question of list) {
+    if (Object.prototype.hasOwnProperty.call(question || {}, "dataSource") && question.dataSource != null) {
+      errors.push({
+        code: "not_invocable",
+        file: "SKILL.md",
+        field: question.id,
+        hint: "不要 dataSource。活选项 options 留空，调用时先跑读命令再填。",
+      });
+    }
     const type = controlToken(question?.inputType);
+    if (String(question?.inputType || "").trim() && !DANO_INPUTS.has(type)) {
+      errors.push({
+        code: "not_invocable",
+        file: "SKILL.md",
+        field: question.id,
+        hint: "inputType 只许 text、textarea、date、select、radio、treeSelect、checkbox。表格用 textarea 写 JSON 数组，命令行用可重复行参数。",
+      });
+    }
+    const row = fieldForQuestion(question, fields);
+    if (recordedSampleDefault(question?.default, haystack)) {
+      errors.push({
+        code: "not_invocable",
+        file: "SKILL.md",
+        field: question.id,
+        hint: "default 不要写本场 listed 里的业务 id，用空格占位。",
+      });
+    }
     if (CHOICE_INPUTS.has(type)) {
       choiceQs.push(question);
       const options = Array.isArray(question.options) ? question.options : [];
+      if (liveChoiceQuestion(row, question)) {
+        if (options.length) {
+          errors.push({
+            code: "not_invocable",
+            file: "SKILL.md",
+            field: question.id,
+            hint: "活选项 options 留空，调用时先跑读命令再写入问句，不要把本场 id 写进手册。",
+          });
+        }
+        continue;
+      }
       if (!options.length) {
         errors.push({
           code: "not_invocable",
           file: "SKILL.md",
           field: question.id,
-          hint: "页面下拉/枚举在 questions[] 里要写 options，不要改成自由文本",
+          hint: "封闭枚举在 questions[] 里要写 options，不要改成自由文本",
         });
         continue;
       }
-      const row = fieldForQuestion(question, fields);
       for (const opt of options) {
         const id = String(opt?.id ?? "").trim();
         const label = String(opt?.label ?? "").trim();
@@ -407,16 +482,15 @@ function questionShapeErrors(questions, fields, haystack, overlay) {
             field: question.id,
             hint: "options 每项要有 id 和 label",
           });
-          continue;
         }
-        if (row?.source === "other_api" && haystack.length > 32 && !haystack.includes(id)) {
-          errors.push({
-            code: "not_invocable",
-            file: "SKILL.md",
-            field: question.id,
-            hint: "options 的 id 必须来自本场 listed 或已跑命令的输出，不要写占位",
-          });
-        }
+      }
+      if (options.some((opt) => recordedSampleDefault(opt?.id, haystack))) {
+        errors.push({
+          code: "not_invocable",
+          file: "SKILL.md",
+          field: question.id,
+          hint: "活选项 options 留空，调用时先跑读命令再写入问句，不要把本场 id 写进手册。",
+        });
       }
     }
     if (DATE_INPUTS.has(type)) {
@@ -435,7 +509,7 @@ function questionShapeErrors(questions, fields, haystack, overlay) {
     errors.push({
       code: "not_invocable",
       file: "SKILL.md",
-      hint: "页面 combobox/listbox/radio 在调用方也必须是带 options 的选择，不要写成 text",
+      hint: "页面 combobox/listbox/radio 在调用方也必须是选择控件，活选项 options 留空，封闭枚举才写 options，不要写成 text",
     });
   }
   if ((dateFields.length || overlayDate) && list.length && !dateQs.length) {
@@ -549,7 +623,7 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     errors.push({
       code: "not_invocable",
       file: "SKILL.md",
-      hint: "调用方字段必须在 SKILL.md 里放一张可原样复制的 title+questions[]。调用方每轮只调一次 ask_user_question。页面下拉写入 options，不要写成自由文本。",
+      hint: "调用方字段必须在 SKILL.md 里放可原样复制的 title+questions[]。同一张 overlay 一张表，调用方每轮只调一次 ask_user_question。活选项 options 留空，封闭枚举才写 options，不要写成自由文本。",
     });
   }
   if (hasQuestions && fields.length === 0) {
@@ -618,6 +692,8 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
     errors.push(...writeConfirmErrors(clientText, skillMd));
     const overlayHint = authOverlayParseError(clientText);
     if (overlayHint) errors.push({ code: "not_invocable", file: "scripts/client.py", hint: overlayHint });
+    const originHint = hardcodedOriginError(clientText);
+    if (originHint) errors.push({ code: "not_invocable", file: "scripts/client.py", hint: originHint });
     try {
       const probed = await nonStdlibImports(clientText);
       if (probed.syntax) {
