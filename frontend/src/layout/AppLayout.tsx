@@ -1,6 +1,6 @@
 import { ConfigProvider, Layout } from "antd";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { TENANT_NAME } from "../api/client";
+import { clearTenant, TENANT_NAME } from "../api/client";
 import { beginFreshRecordingEntry } from "../api/recordingResume";
 import { STUDIO_THEME } from "../studioTheme";
 import StudioHeader from "./StudioHeader";
@@ -28,6 +28,7 @@ export default function AppLayout() {
               else nav("/recording");
             }}
             tenant={tenant === "—" ? undefined : tenant}
+            onSwitchTenant={() => { clearTenant(); nav("/tenant"); }}
           />
         ) : null}
         <Content

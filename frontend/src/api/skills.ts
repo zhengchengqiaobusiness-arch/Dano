@@ -77,6 +77,15 @@ export type LoginResult =
   | ({ need_totp?: false } & TenantSession)
   | { need_totp: true; challenge: string; expires_in: number };
 
+export async function createTenantWithPassword(
+  tenant: string,
+  username: string,
+  password: string,
+): Promise<TenantSession> {
+  const { data } = await api.post("/tenants", { tenant, username, password });
+  return data;
+}
+
 export async function login(username: string, password: string): Promise<LoginResult> {
   const { data } = await api.post("/auth/login", { username, password });
   return data;

@@ -30,6 +30,18 @@ export function catalogItemMatches(row, skillId) {
   return row.skill_id === key || row.name === key || row.recording_id === key || row.action === key;
 }
 
+export function skillOwnedByTenant(row, tenant) {
+  return String(row?.tenant || "") === String(tenant || "");
+}
+
+function findCatalogRow(items, skillId, tenant) {
+  return items.find((row) => {
+    if (!catalogItemMatches(row, skillId)) return false;
+    if (tenant === undefined) return true;
+    return skillOwnedByTenant(row, tenant);
+  }) || null;
+}
+
 async function saveCatalog(items) {
   await mkdir(path.dirname(catalogFile()), { recursive: true });
   await writeFile(catalogFile(), `${JSON.stringify(items, null, 2)}\n`, "utf8");
@@ -80,28 +92,32 @@ export async function upsertCatalog(recording) {
   return items[index >= 0 ? index : items.length - 1];
 }
 
-export async function patchCatalogItem(skillId, patch) {
+export async function patchCatalogItem(skillId, patch, tenant) {
   const items = await readCatalog();
-  const item = items.find((row) => catalogItemMatches(row, skillId));
+  const item = findCatalogRow(items, skillId, tenant);
   if (!item) return null;
   Object.assign(item, patch || {}, { updated_at: new Date().toISOString() });
   await saveCatalog(items);
   return item;
 }
 
-export async function setSkillFrozen(skillId, frozen) {
-  return patchCatalogItem(skillId, { frozen: Boolean(frozen) });
+export async function setSkillFrozen(skillId, frozen, tenant) {
+  return patchCatalogItem(skillId, { frozen: Boolean(frozen) }, tenant);
 }
 
 export async function setSkillExportPath(skillId, exportPath) {
   return patchCatalogItem(skillId, { export_path: String(exportPath || "").trim() });
 }
 
-export async function removeSkill(skillId) {
+export async function getSkill(skillId, tenant) {
+  return findCatalogRow(await readCatalog(), skillId, tenant);
+}
+
+export async function removeSkill(skillId, tenant) {
   const items = await readCatalog();
-  const found = items.find((row) => catalogItemMatches(row, skillId));
+  const found = findCatalogRow(items, skillId, tenant);
   if (!found) return null;
-  await saveCatalog(items.filter((row) => !catalogItemMatches(row, skillId)));
+  await saveCatalog(items.filter((row) => row !== found));
   return found;
 }
 
@@ -111,8 +127,15 @@ export function exportedFolderToRemove(item) {
   return exportPath;
 }
 
-export async function listSkillsPage(page = 1, pageSize = 0) {
-  const items = await readCatalog();
+export function freezeExportFolder(item) {
+  if (String(item?.source || "") === "imported") return "";
+  return exportedFolderToRemove(item);
+}
+
+export async function listSkillsPage(page = 1, pageSize = 0, { tenant, includeFrozen = true } = {}) {
+  let items = await readCatalog();
+  if (tenant !== undefined) items = items.filter((row) => skillOwnedByTenant(row, tenant));
+  if (!includeFrozen) items = items.filter((row) => !row.frozen);
   const size = pageSize > 0 ? pageSize : items.length || 0;
   const start = (Math.max(1, page) - 1) * (size || 1);
   const slice = size ? items.slice(start, start + size) : items;

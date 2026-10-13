@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createApp, listen } from "../src/server.mjs";
@@ -16,23 +15,13 @@ import {
   usableExportDir,
 } from "../src/token-store.mjs";
 import { exportedFolderToRemove, readCatalog, upsertCatalog } from "../src/skillpack/catalog.mjs";
-
-async function withData(run) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "cabp-export-"));
-  const previous = process.env.CABP_DATA;
-  process.env.CABP_DATA = root;
-  try {
-    return await run(root);
-  } finally {
-    if (previous === undefined) delete process.env.CABP_DATA;
-    else process.env.CABP_DATA = previous;
-  }
-}
+import { authHeader, jsonRequest, makeTenant, withData } from "./helpers.mjs";
 
 async function seedReadySkill(root, {
   recordingId = "rec_export1",
   skillId = "app.rec_export1",
   skillName = "oa-work-report",
+  tenant = "acme",
 } = {}) {
   const source = path.join(root, "skills", skillId);
   await mkdir(path.join(source, "scripts"), { recursive: true });
@@ -43,7 +32,7 @@ async function seedReadySkill(root, {
   await mkdir(path.join(root, "recordings", recordingId), { recursive: true });
   await writeFile(path.join(root, "recordings", recordingId, "state.json"), JSON.stringify({
     id: recordingId,
-    tenant: "",
+    tenant,
     subsystem: "app",
     title: "识别当前页面",
     startUrl: "http://example.test/",
@@ -57,7 +46,7 @@ async function seedReadySkill(root, {
   await upsertCatalog({
     id: recordingId,
     skillId,
-    tenant: "",
+    tenant,
     subsystem: "app",
     title: "识别当前页面",
     skillDir: source,
@@ -94,20 +83,16 @@ test("export copies into a package folder and freeze does not delete the source"
     const server = createApp();
     const address = await listen(server, 0);
     try {
-      const frozen = await fetch(`http://127.0.0.1:${address.port}/v1/skills/${encodeURIComponent(skillId)}/freeze`, {
-        method: "POST",
-      });
-      const body = await frozen.json();
+      const tenant = await makeTenant(address.port, "acme");
+      const frozen = await jsonRequest(address.port, "POST", `/v1/skills/${encodeURIComponent(skillId)}/freeze`, {}, authHeader(tenant.api_key));
       assert.equal(frozen.status, 200);
-      assert.equal(body.frozen, true);
-      assert.deepEqual(body.removed_folders, [dest]);
+      assert.equal(frozen.data.frozen, true);
+      assert.deepEqual(frozen.data.removed_folders, [dest]);
       assert.equal(existsSync(dest), false);
       assert.equal(existsSync(path.join(source, "SKILL.md")), true);
-      const byRecording = await fetch(`http://127.0.0.1:${address.port}/v1/skills/${encodeURIComponent(recordingId)}/resume`, {
-        method: "POST",
-      });
+      const byRecording = await jsonRequest(address.port, "POST", `/v1/skills/${encodeURIComponent(recordingId)}/resume`, {}, authHeader(tenant.api_key));
       assert.equal(byRecording.status, 200);
-      assert.equal((await byRecording.json()).frozen, false);
+      assert.equal(byRecording.data.frozen, false);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -122,27 +107,20 @@ test("catalog export and directory endpoints use the resolved out dir", async ()
     const server = createApp();
     const address = await listen(server, 0);
     try {
-      const dir = await fetch(`http://127.0.0.1:${address.port}/export/directory`);
-      assert.equal((await dir.json()).out_dir, outDir);
-      const listed = await fetch(`http://127.0.0.1:${address.port}/v1/skills/export`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      const body = await listed.json();
+      const tenant = await makeTenant(address.port, "acme");
+      const headers = authHeader(tenant.api_key);
+      const dir = await jsonRequest(address.port, "GET", "/export/directory", undefined, headers);
+      assert.equal(dir.data.out_dir, outDir);
+      const listed = await jsonRequest(address.port, "POST", "/v1/skills/export", {}, headers);
       assert.equal(listed.status, 200);
-      assert.equal(body.count, 1);
-      assert.equal(body.out_dir, outDir);
-      assert.equal(body.written[0], path.join(outDir, "oa-work-report"));
+      assert.equal(listed.data.count, 1);
+      assert.equal(listed.data.out_dir, outDir);
+      assert.equal(listed.data.written[0], path.join(outDir, "oa-work-report"));
       const handbook = await readFile(path.join(outDir, "oa-work-report", "SKILL.md"), "utf8");
       assert.match(handbook, /name: oa-work-report/);
-      await fetch(`http://127.0.0.1:${address.port}/v1/skills/${encodeURIComponent(recordingId)}/freeze`, { method: "POST" });
-      const skipped = await fetch(`http://127.0.0.1:${address.port}/v1/skills/export`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      assert.equal((await skipped.json()).count, 0);
+      await jsonRequest(address.port, "POST", `/v1/skills/${encodeURIComponent(recordingId)}/freeze`, {}, headers);
+      const skipped = await jsonRequest(address.port, "POST", "/v1/skills/export", {}, headers);
+      assert.equal(skipped.data.count, 0);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -153,6 +131,6 @@ test("resolveExportDirectory falls back to the platform default", async () => {
   await withData(async (root) => {
     assert.equal(await resolveExportDirectory(), defaultExportDirectory());
     assert.ok(String(await persistExportDirectory("")).length > 0);
-    assert.equal(path.basename(root).startsWith("cabp-export-"), true);
+    assert.equal(path.basename(root).startsWith("cabp-data-"), true);
   });
 });

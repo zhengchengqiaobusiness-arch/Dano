@@ -81,8 +81,8 @@ export default defineConfig({
           return gateway;
         },
       },
-      [mount("/tenants")]: { target: gateway, changeOrigin: true, rewrite: stripPrefix },
-      [mount("/auth")]: { target: gateway, changeOrigin: true, rewrite: stripPrefix },
+      [mount("/tenants")]: { target: piCheck, changeOrigin: true, rewrite: stripPrefix },
+      [mount("/auth")]: { target: piCheck, changeOrigin: true, rewrite: stripPrefix },
       // 只代理录制 WebSocket，不代理整个 /onboarding（/onboarding/page 是 SPA 前端路由）
       [mount("/onboarding/page/record")]: { target: piCheck, changeOrigin: true, ws: true, rewrite: stripPrefix },
       [mount("/settings/runtime")]: { target: gateway, changeOrigin: true, rewrite: stripPrefix },

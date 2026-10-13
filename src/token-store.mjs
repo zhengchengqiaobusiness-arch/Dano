@@ -94,8 +94,9 @@ export async function resolveExportDirectory(requested = "") {
   return pickExportDirectory(requested, stored);
 }
 
-export async function writebackExportedPackages({ subsystem, headers }) {
+export async function writebackExportedPackages({ subsystem, headers, tenant = "" }) {
   const wanted = String(subsystem || "").trim();
+  const owner = String(tenant || "").trim();
   const updated = [];
   const exportRoot = await resolveExportDirectory();
   const roots = [...new Set([exportRoot, path.join(dataRoot(), "export")])];
@@ -111,6 +112,7 @@ export async function writebackExportedPackages({ subsystem, headers }) {
       const dir = path.join(root, entry.name);
       try {
         const runtime = JSON.parse(await readFile(path.join(dir, "config", "runtime.json"), "utf8"));
+        if (owner && String(runtime.tenant || "") !== owner) continue;
         if (wanted && String(runtime.subsystem || "") !== wanted) continue;
         await writeAuthLocalFile(dir, headers);
         updated.push(dir);

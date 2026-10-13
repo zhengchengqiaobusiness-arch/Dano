@@ -305,7 +305,7 @@ export async function exportCatalogSkills(outDir, { tenant = "" } = {}) {
   const errors = [];
   for (const row of await readCatalog()) {
     if (row.frozen) continue;
-    if (wanted && row.tenant && row.tenant !== wanted) continue;
+    if (wanted && String(row.tenant || "") !== wanted) continue;
     const recordingId = String(row.recording_id || "").trim();
     const label = row.title || row.name || recordingId;
     if (!recordingId.startsWith("rec_")) {

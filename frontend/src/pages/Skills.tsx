@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Table, Tag, Button, Space, Typography, message, Empty, Modal, Input, Alert, Pagination, Popconfirm } from "antd";
 import { useNavigate } from "react-router-dom";
-import { ReloadOutlined, ExportOutlined, KeyOutlined, DeleteOutlined, PauseCircleOutlined } from "@ant-design/icons";
-import { listSkillsPage, getExportDirectory, saveExportDirectory, deleteSkill, freezeSkill, exportAgentSkills, SkillManifest } from "../api/skills";
+import { ReloadOutlined, ExportOutlined, KeyOutlined, DeleteOutlined, PauseCircleOutlined, CheckCircleOutlined } from "@ant-design/icons";
+import { listSkillsPage, getExportDirectory, saveExportDirectory, deleteSkill, freezeSkill, resumeSkill, exportAgentSkills, SkillManifest } from "../api/skills";
 import TokenModal from "../components/TokenModal";
 import { TENANT_NAME } from "../api/client";
 import { rememberExportDir, rememberedExportDir } from "../api/recording";
@@ -164,7 +164,7 @@ export default function Skills() {
           <Empty
             description={(
               <Space direction="vertical" size={8}>
-                <span>还没有 Skill，先去页面录制</span>
+                <span>本租户暂无已导出 Skill，先去页面录制并产出 Skill</span>
                 <Button type="link" onClick={() => nav("/recording")}>去录制页面</Button>
               </Space>
             )}
@@ -212,17 +212,32 @@ export default function Skills() {
                   {r.integration === "page" && (
                     <Button size="small" icon={<KeyOutlined />} onClick={() => setTokenSub(r.subsystem)}>凭证</Button>
                   )}
-                  <Popconfirm title={`冻结 ${skillDisplayId(r)}?`} description="只清理已导出的文件夹，保留目录记录；冻结后目录重导会跳过。" okText="冻结" cancelText="取消" onConfirm={async () => {
-                    try {
-                      const result = await freezeSkill(r.name || r.recording_id || "");
-                      message.success(`已冻结 ${skillDisplayId(r)}(清理 ${result.removed_folders?.length || 0} 个文件夹)`);
-                      void load(page, pageSize);
-                    } catch (error) {
-                      message.error(`冻结失败:${error instanceof Error ? error.message : ""}`);
-                    }
-                  }}>
-                    <Button size="small" icon={<PauseCircleOutlined />} disabled={r.frozen}>冻结</Button>
-                  </Popconfirm>
+                  {!r.frozen && (
+                    <Popconfirm title={`冻结 ${skillDisplayId(r)}?`} description="只清理已导出的文件夹，保留目录记录；冻结后目录重导会跳过。" okText="冻结" cancelText="取消" onConfirm={async () => {
+                      try {
+                        const result = await freezeSkill(r.name || r.recording_id || "");
+                        message.success(`已冻结 ${skillDisplayId(r)}(清理 ${result.removed_folders?.length || 0} 个文件夹)`);
+                        void load(page, pageSize);
+                      } catch (error) {
+                        message.error(`冻结失败:${error instanceof Error ? error.message : ""}`);
+                      }
+                    }}>
+                      <Button size="small" icon={<PauseCircleOutlined />}>冻结</Button>
+                    </Popconfirm>
+                  )}
+                  {r.frozen && (
+                    <Popconfirm title={`恢复 ${skillDisplayId(r)}?`} description="恢复后下次目录导出会重新写出文件。" okText="恢复" cancelText="取消" onConfirm={async () => {
+                      try {
+                        const result = await resumeSkill(r.name || r.recording_id || "");
+                        message.success(`已恢复 ${skillDisplayId(r)}(${result.state})`);
+                        void load(page, pageSize);
+                      } catch (error) {
+                        message.error(`恢复失败:${error instanceof Error ? error.message : ""}`);
+                      }
+                    }}>
+                      <Button size="small" icon={<CheckCircleOutlined />}>恢复</Button>
+                    </Popconfirm>
+                  )}
                   <Popconfirm title={`删除 ${skillDisplayId(r)}?`} description="先清理本地包，再删除目录里的这条 Skill" okText="删除" okButtonProps={{ danger: true }} cancelText="取消" onConfirm={async () => {
                     try {
                       await deleteSkill(r.name);
