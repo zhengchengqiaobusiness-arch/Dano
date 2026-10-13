@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { writeSkillFile } from "../src/skillpack/files.mjs";
-import { actionEvidenceSummary, authOverlayParseError, hardcodedOriginError, skillCommandLines, verifySkill } from "../src/skillpack/verify.mjs";
+import { actionEvidenceSummary, askProtocolMissing, authOverlayParseError, hardcodedOriginError, jsonWordedQuestion, skillCommandLines, structureErrorsForFile, verifySkill } from "../src/skillpack/verify.mjs";
 import { skillDir } from "../src/paths.mjs";
 import { appendEvidence } from "../src/evidence/store.mjs";
 import { GUIDE_NAMES } from "../src/agent/guides.mjs";
@@ -624,7 +624,8 @@ test("caller fields without questions[] or choice options are not invocable", as
   assert.ok(result.errors.some((item) => item.code === "not_invocable" && item.field === "部门"));
   assert.ok(result.errors.some((item) => item.code === "not_invocable" && item.command === "save" && String(item.hint || "").includes("--confirm")));
 
-  await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\n{\"title\":\"办理\",\"questions\":[{\"id\":\"title\",\"question\":\"标题\",\"inputType\":\"text\",\"required\":true,\"default\":\" \"},{\"id\":\"dept\",\"question\":\"部门\",\"inputType\":\"select\",\"required\":true,\"options\":[],\"default\":\" \"}]}\npython scripts/client.py save --title x --confirm\n");
+  const questionsOnly = "---\nname: sample\ndescription: sample\n---\n{\"title\":\"办理\",\"questions\":[{\"id\":\"title\",\"question\":\"标题\",\"inputType\":\"text\",\"required\":true,\"default\":\" \"},{\"id\":\"dept\",\"question\":\"部门\",\"inputType\":\"select\",\"required\":true,\"options\":[],\"default\":\" \"}]}\npython scripts/client.py save --title x --confirm\n";
+  await writeFile(path.join(dir, "SKILL.md"), questionsOnly);
   await writeFile(path.join(dir, "scripts/client.py"), [
     "import argparse",
     "def cmd_save(args):",
@@ -636,6 +637,10 @@ test("caller fields without questions[] or choice options are not invocable", as
     "q.add_argument(\"--confirm\", action=\"store_true\")",
     "q.set_defaults(func=cmd_save)",
   ].join("\n"));
+  result = await verifySkill(dir, shape.id, shape);
+  // 写能力的 SKILL.md 没写调用方怎么问（confirm + formIds）时不可调用
+  assert.ok(result.errors.some((item) => item.file === "SKILL.md" && String(item.hint || "").includes("调用方怎么问")));
+  await writeFile(path.join(dir, "SKILL.md"), `${questionsOnly}\n调用方怎么问：读不问不确认。写第一次原样发出上面的 questions[]，已知值放 default；提交后只发 {"confirm":true,"formIds":["<formId>"]}，再跑写命令加 --confirm。\n`);
   await writeFile(path.join(dir, "references/api.md"), [
     "## 字段",
     "- page_name: 标题",
@@ -952,6 +957,36 @@ test("field tables with aliases and page_name= bullets are parsed, constant need
   result = await verifySkill(dir, shape.id, shape);
   assert.equal(result.errors.some((item) => item.code === "field_source_invalid" && item.field === "id"), false);
   assert.equal(result.errors.some((item) => item.code === "field_source_invalid" && item.field === "name"), false);
+});
+
+test("questions never show JSON to the caller, and a write skill must say how the caller asks", () => {
+  assert.equal(jsonWordedQuestion({ question: "已完成工作（JSON 数组，每项）", default: " " }), true);
+  assert.equal(jsonWordedQuestion({ question: "附件", default: "[]" }), true);
+  assert.equal(jsonWordedQuestion({ question: "已完成工作（每行一项：工作内容 | 完成进度）", default: " " }), false);
+  assert.equal(jsonWordedQuestion({ question: "标题", default: "周报" }), false);
+  const read = "---\nname: a\ndescription: b\n---\npython3 scripts/client.py list\n";
+  assert.equal(askProtocolMissing(read), false);
+  const writeNoProtocol = "---\nname: a\ndescription: b\n---\n{\"title\":\"办理\",\"questions\":[]}\npython3 scripts/client.py save --confirm\n";
+  assert.equal(askProtocolMissing(writeNoProtocol), true);
+  const writeWithProtocol = `${writeNoProtocol}提交后只发 {"confirm":true,"formIds":["<formId>"]}，再加 --confirm。\n`;
+  assert.equal(askProtocolMissing(writeWithProtocol), false);
+});
+
+test("a written file gets back only its own structural errors, never the run-time ones", () => {
+  const errors = [
+    { code: "not_invocable", file: "references/api.md", hint: "字段" },
+    { code: "field_source_invalid", field: "部门", source: "GET /x" },
+    { code: "evidence_missing", id: "req_9" },
+    { code: "credential_not_used", file: "scripts/client.py" },
+    { code: "import_not_available", name: "requests" },
+    { code: "command_not_run", file: "SKILL.md", command: "python3 scripts/client.py list" },
+    { code: "not_invocable", file: "SKILL.md", hint: "questions[]" },
+    { code: "guide_not_read", name: "x" },
+    { code: "auth_expired" },
+  ];
+  assert.deepEqual(structureErrorsForFile(errors, "references/api.md").map((item) => item.code), ["not_invocable", "field_source_invalid", "evidence_missing"]);
+  assert.deepEqual(structureErrorsForFile(errors, "scripts/client.py").map((item) => item.code), ["credential_not_used", "import_not_available"]);
+  assert.deepEqual(structureErrorsForFile(errors, "SKILL.md").map((item) => item.code), ["not_invocable"]);
 });
 
 test("DANO_AUTH_HEADERS overlay must be json.loads, not comma pairs", () => {

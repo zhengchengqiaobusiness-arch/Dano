@@ -201,6 +201,9 @@ async function perform(recordingId, input) {
       data: Buffer.from(bytes).toString("base64"),
     };
   }
+  if (action !== "fill_fields" && !String(input.ref || "").trim()) {
+    return { ok: false, error: "ref_required", hint: `${action} 要带最近一次快照树里的 [ref=fN:eN@数字]。`, snapshot: state.lastPublished || await snapshotAfter(recordingId) };
+  }
   const hit = locatorFor(recordingId, input.ref);
   const frame = hit?.frame || null;
   const actionId = beginAction(recordingId, frame, { anyFrame: true });
@@ -371,7 +374,13 @@ async function perform(recordingId, input) {
         try {
           await access(filePath);
         } catch {
-          return { ok: false, error: "file_not_found", ref: input.ref, snapshot: state.lastPublished || await snapshotAfter(recordingId) };
+          return {
+            ok: false,
+            error: "file_not_found",
+            ref: input.ref,
+            hint: "这个路径不存在。不要为了上传去造文件；不带 file_path 调用 upload 会用自带的探测图片。",
+            snapshot: state.lastPublished || await snapshotAfter(recordingId),
+          };
         }
       }
       try {

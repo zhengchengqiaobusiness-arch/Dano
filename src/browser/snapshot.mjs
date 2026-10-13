@@ -471,6 +471,9 @@ async function readControlFact(locator, meta) {
       const haspopup = el.getAttribute("aria-haspopup");
       const expanded = el.getAttribute("aria-expanded");
       if (!info.valueRole && !native && haspopup == null && expanded == null && !info.genericNamed) return { skip: true };
+      // 选择类包裹层里的过滤框是同一个控件的一部分，只报包裹层这一行
+      const wrapper = el.parentElement ? el.parentElement.closest('[role="combobox"],[role="listbox"]') : null;
+      if (wrapper && wrapper !== el) return { skip: true };
       let input = "";
       if (nested instanceof HTMLSelectElement) input = "select";
       else if (nested instanceof HTMLTextAreaElement) input = "textarea";
@@ -482,8 +485,13 @@ async function readControlFact(locator, meta) {
       let value = "";
       if (el.getAttribute("aria-valuenow") != null) value = String(el.getAttribute("aria-valuenow"));
       else if (el.getAttribute("aria-checked") != null) value = String(el.getAttribute("aria-checked"));
-      else if (nested && "value" in nested) value = String(nested.value ?? "");
-      else value = String(el.innerText || "").trim();
+      else if (nested && "value" in nested) {
+        value = String(nested.value ?? "");
+        // 选择类控件常把选中项画在包裹层里，内嵌的过滤框本身是空的；这时可见文字才是实值
+        if (!value.trim() && nested !== el && (info.valueRole || haspopup != null || expanded != null)) {
+          value = String(el.innerText || "").trim();
+        }
+      } else value = String(el.innerText || "").trim();
       return {
         skip: false,
         value,

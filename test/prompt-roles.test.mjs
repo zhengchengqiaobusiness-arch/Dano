@@ -31,7 +31,12 @@ test("the method does not ban number cells or treat filled controls as caller-re
   assert.match(prompt, /不要把凭证写进对话/);
   assert.match(prompt, /嵌套数组/);
   assert.match(prompt, /options 留空/);
-  assert.match(prompt, /textarea 写 JSON/);
+  assert.match(prompt, /一行一项、列之间用「\|」/);
+  assert.match(prompt, /不写 JSON/);
+  assert.doesNotMatch(prompt, /textarea 写 JSON/);
+  assert.match(prompt, /调用方怎么问/);
+  assert.match(prompt, /已知值放 default 不再另问/);
+  assert.match(prompt, /不另造确认题/);
   assert.match(prompt, /整袋替换/);
   assert.match(prompt, /读命令也不要写死本场 listed/);
   assert.match(prompt, /身份键从本场身份接口现取/);

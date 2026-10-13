@@ -21,6 +21,10 @@ export function resultLine(result) {
   try {
     const body = JSON.parse(text);
     const errors = Array.isArray(body?.errors) ? body.errors : [];
+    if (body?.ok === true && Array.isArray(body.structure_errors) && body.structure_errors.length) {
+      const codes = body.structure_errors.map((item) => [item.code, item.field, item.file, String(item.hint || "").replace(/\s+/g, " ").slice(0, 60)].filter(Boolean).join(":")).slice(0, 6).join(" ");
+      return `完成 结构待改 ${codes}`.slice(0, 500);
+    }
     const authOnly = errors.length > 0 && errors.every((item) => item.code === "auth_expired");
     if (authOnly && (body.ok === true || body.status === "skill_written_needs_auth" || body.status === "skill_ready")) {
       return "完成 结构已过 鉴权过期";
@@ -65,6 +69,25 @@ export function resultLine(result) {
 const PAGE_TOOLS = new Set(["browser_open", "browser_snapshot", "browser_act", "browser_screenshot"]);
 const SKILL_TOOLS = new Set(["write_skill_file", "run_skill_command", "verify_skill"]);
 const MAX_SKILL_CONTINUES = 8;
+export const PI_STALL_MS = Math.max(30000, Number(process.env.PI_STALL_MS) || 180000);
+const STALL_CHECK_MS = 10000;
+export const MAX_STALLS = 3;
+
+// 模型在一轮里既不出 token 也不调工具，超过 PI_STALL_MS 就中断这一轮，带当前事实重发；连续 MAX_STALLS 次才算失败。
+export function stallVerdict({ prompting, streaming, idleMs, stalls, stallMs = PI_STALL_MS }) {
+  if (!prompting || !streaming) return null;
+  if (!(idleMs >= stallMs)) return null;
+  const next = (stalls || 0) + 1;
+  const fail = next >= MAX_STALLS;
+  const seconds = Math.round(idleMs / 1000);
+  return {
+    stalls: next,
+    fail,
+    line: fail
+      ? `模型 ${seconds} 秒无响应，连续 ${next} 次停滞，录制失败`
+      : `模型 ${seconds} 秒无响应，已中断本轮，带当前事实重发`,
+  };
+}
 
 export function listedWriteKeys(listed) {
   const keys = [];
@@ -195,7 +218,7 @@ export function nextRecordingPrompt({ finished, paused, progressed, continues, v
   }
   if (continues >= MAX_SKILL_CONTINUES) return null;
   const lead = progressed
-    ? "页面操作的总结不是结束。对照 listed（本场全部 xhr/fetch 索引）、overlay_editable、listed_write_keys 和目标原文写三文件。SKILL.md 必须含可原样复制的 title+\"questions\":[]；问句覆盖 overlay_editable 的每一项和 listed_write_keys 里来源为 caller 的键。同一张 overlay 一张 questions[]，不同 overlay 可各一张，调用方每轮只用一张。活列表 options 留空，封闭枚举才写 options，不要自由文本，不要 dataSource。inputType 只许 text、textarea、date、select、radio、treeSelect、checkbox。写：调用方提交后再 confirm+formIds，python3 加 --confirm。嵌套数组按列写成可重复命令行参数，问句用 textarea 写 JSON 数组，不要压成一个字符串。listed 某键这次 empty/[] 只说明这次传了空，同场另有选项请求则再读，不要冻成空数组。读命令不要写死本场 listed 里的业务 id。手册必填必须和 argparse 一致。每个 add_parser 必须 set_defaults(func=)。写入子命令必须有 --confirm。基地址只读 DANO_BASE_URL 或 runtime.json。SKILL.md 里出现的每一条读命令（含表格）都要跑。正文过大时 network_get 会省略，用 evidence_get 同 id。成品必须可调用。目标只要求写入时不要发明 GET。filled 里的控件名不是调用方必填清单。"
+    ? "页面操作的总结不是结束。对照 listed（本场全部 xhr/fetch 索引）、overlay_editable、listed_write_keys 和目标原文写三文件。SKILL.md 必须含可原样复制的 title+\"questions\":[]；问句覆盖 overlay_editable 的每一项和 listed_write_keys 里来源为 caller 的键。同一张 overlay 一张 questions[]，不同 overlay 可各一张，调用方每轮只用一张。活列表 options 留空，封闭枚举才写 options，不要自由文本，不要 dataSource。inputType 只许 text、textarea、date、select、radio、treeSelect、checkbox。SKILL.md 写一段调用方怎么问：读不问不确认；写第一次原样整份发 questions[]，已知值放 default 不再另问，查到的业务日期直接作 default；提交后同一轮只发 confirm+formIds，不另造确认题；再 python3 加 --confirm。嵌套数组按列写成可重复命令行参数，问句用一个 textarea 一行一项、列用「|」，问句和 default 不写 JSON。listed 某键这次 empty/[] 只说明这次传了空，同场另有选项请求则再读，不要冻成空数组。读命令不要写死本场 listed 里的业务 id。手册必填必须和 argparse 一致。每个 add_parser 必须 set_defaults(func=)。写入子命令必须有 --confirm。基地址只读 DANO_BASE_URL 或 runtime.json。SKILL.md 里出现的每一条读命令（含表格）都要跑。正文过大时 network_get 会省略，用 evidence_get 同 id。成品必须可调用。目标只要求写入时不要发明 GET。filled 里的控件名不是调用方必填清单。"
     : "Skill 还没产出。";
   return `${lead}read_guide 读完名单。对照 listed（本场全部 xhr/fetch 索引）写字段。要采用的请求打开全文。来源标签和命令行谁填必须一致。overlay_editable 上的控件是调用方填或选，不要改成系统自动。empty 里的键传空。只有 auth.local.json 的 credential 同时有 url 和 method 时才重放；listed 里的刷新请求不是必须重放。业务请求把 headers 整袋带上，有任意鉴权头就发，不要只认某一个键名。读命令 401 不要 assist、不要猜 token，仍要写完 SKILL.md 和 references/api.md，再 verify_skill。401 是打包凭证过期，不是产出失败。DANO_AUTH_HEADERS 是 JSON 对象，json.loads 后只覆盖同名头，不要用环境变量整袋替换本地头。scripts/client.py 只用 Python 标准库。跑读命令（若目标含读），再 verify_skill。${errors}`;
 }
@@ -246,11 +269,14 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
   let progressed = false;
   let pageProgressed = false;
   let continues = 0;
+  let lastEventAt = Date.now();
+  let stalls = 0;
   session.subscribe?.((event) => {
     const type = String(event?.type || "");
-    const assistant = event?.assistantMessageEvent;
+    lastEventAt = Date.now();
     const callId = event.toolCallId || event.callId;
     if (type === "tool_execution_start") {
+      stalls = 0;
       if (SKILL_TOOLS.has(event.toolName)) progressed = true;
       if (PAGE_TOOLS.has(event.toolName)) pageProgressed = true;
       const name = toolLine(event.toolName, event.args);
@@ -278,6 +304,32 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
   });
   let prompting = null;
   const queued = [];
+  const stallTimer = setInterval(() => {
+    if (recording?.finished) {
+      clearInterval(stallTimer);
+      return;
+    }
+    const verdict = stallVerdict({
+      prompting: Boolean(prompting),
+      streaming: Boolean(session.isStreaming),
+      idleMs: Date.now() - lastEventAt,
+      stalls,
+    });
+    if (!verdict) return;
+    stalls = verdict.stalls;
+    lastEventAt = Date.now();
+    logLine(`[pi] ${verdict.line}`);
+    recording?.emitThought?.({ kind: "tool", phase: "end", ok: false, text: verdict.line });
+    if (verdict.fail && recording) {
+      recording.status = "failed";
+      recording.finished = true;
+      recording.emit?.();
+    }
+    Promise.resolve(session.abort?.()).catch(() => {}).then(() => {
+      if (verdict.fail) recording?.pi?.dispose?.();
+    });
+  }, STALL_CHECK_MS);
+  stallTimer.unref?.();
   async function prompt(text) {
     if (recording?.finished) return;
     if (recording?.paused || prompting) {
@@ -285,6 +337,7 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
       return prompting;
     }
     try {
+      lastEventAt = Date.now();
       prompting = session.prompt(text);
       await prompting;
     } catch (error) {
@@ -352,7 +405,10 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
       }
       await prompt(message);
     },
-    dispose: () => session.dispose?.(),
+    dispose: () => {
+      clearInterval(stallTimer);
+      return session.dispose?.();
+    },
   };
   const goalText = `${goal.goal_text || ""}\n${goal.page_url || ""}`;
   const context = typeof host.context === "function" ? await host.context() : {};

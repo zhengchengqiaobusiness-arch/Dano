@@ -11,7 +11,7 @@ import { overlayControlFacts, overlayFactLists, overlayItemsLine, takeSnapshot }
 import { compactNetworkIndex, getNetwork, listNetwork, networkBodyForModel, requestKeyIndex } from "../browser/network.mjs";
 import { applyVerifyToRecording } from "../session.mjs";
 import { authSpawnEnv, readSkillFile, skillIdFor, writeRuntimeConfig, writeSkillFile } from "../skillpack/files.mjs";
-import { actionEvidenceSummary, authStoppedOutput, clickedLabels, filledLabels, finishSkill } from "../skillpack/verify.mjs";
+import { actionEvidenceSummary, authStoppedOutput, clickedLabels, filledLabels, finishSkill, structureErrorsForFile, verifySkill } from "../skillpack/verify.mjs";
 import { redactSecrets } from "../auth-vault.mjs";
 import { GUIDE_NAMES, guideBody } from "./guides.mjs";
 import { logLine } from "../log.mjs";
@@ -37,7 +37,7 @@ const TOOL_SPECS = [
   { name: "read_guide", description: "写 Skill 前读取文档。name 用返回的 names 里的一份，或 all 一次读完名单。鉴权、提问、活选项和写作方法都从这里读，写进 SKILL.md、scripts/client.py、references/api.md。本场没有 CONTRACT.json 和 flow.py。", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
   { name: "assist", description: "当前页被登录框或验证码挡住时调用。run_skill_command 的 401 或打包凭证过期不要调用。这次调用会停住，直到人在预览里处理完并确认。返回里的 snapshot 才是确认后的当前页，从那张快照接着做。", parameters: { type: "object", properties: { reason: { type: "string" } }, required: ["reason"] } },
   { name: "append_goal", description: "只填充目标里仍为空的键，写入原句。", parameters: { type: "object", properties: { key: { type: "string" }, text: { type: "string" } }, required: ["key", "text"] } },
-  { name: "write_skill_file", description: "只写 SKILL.md、scripts/client.py、references/api.md。SKILL.md 必须以 --- 包住 name 和 description。references/api.md 标题必须是字段、绑定、未解决、已验证读命令，缺了会拒写。", parameters: { type: "object", properties: { relative_path: { type: "string" }, contents: { type: "string" } }, required: ["relative_path", "contents"] } },
+  { name: "write_skill_file", description: "只写 SKILL.md、scripts/client.py、references/api.md。SKILL.md 必须以 --- 包住 name 和 description。references/api.md 标题必须是字段、绑定、未解决、已验证读命令，缺了会拒写。写入成功时顺带返回这份文件现在过不了 verify_skill 的结构项 structure_errors，先改这份文件再跑命令。", parameters: { type: "object", properties: { relative_path: { type: "string" }, contents: { type: "string" } }, required: ["relative_path", "contents"] } },
   { name: "read_skill_file", description: "读取已写的 Skill 文件。", parameters: { type: "object", properties: { relative_path: { type: "string" } }, required: ["relative_path"] } },
   { name: "run_skill_command", description: "在 Skill 目录执行 python3 scripts/client.py。argv 是字符串数组，例如 [\"python3\", \"scripts/client.py\", \"list\"]。本机没有 python3 时运行时改用 python。先写出 scripts/client.py 再跑；文件不在会返回 missing_file。", parameters: { type: "object", properties: { argv: { type: "array", items: { type: "string" } } }, required: ["argv"] } },
   { name: "verify_skill", description: "校验三文件结构：文件在、可调用、SKILL.md 里出现的读命令（含表格单元格）已跑、引用 path 在证据里、引用 path 的函数写了该请求的键。不判断字段该谁填、必填与否或来源，不要求只写目标发明 GET。返回 listed 用的 requests 和 filled。", parameters: { type: "object", properties: {} } },
@@ -268,6 +268,16 @@ export function hostTools(recording) {
       if (result?.ok) {
         recording.wroteSkill = true;
         recording.emit?.();
+        // 同一套结构校验在写入时就摆回来，只给这份文件的项，省掉一轮 verify_skill 往返
+        try {
+          const verify = await verifySkill(skillPath(recording.skillId), id, recording, { dryRun: true });
+          const structure_errors = structureErrorsForFile(verify.errors, String(args.relative_path || "").replace(/\\/g, "/"));
+          if (structure_errors.length) {
+            return { ...result, structure_errors, hint: "已写入。下面是这份文件现在过不了 verify_skill 的结构项，先改这份文件再跑命令。" };
+          }
+        } catch {
+          // 写入已成功；结构预检失败就留给 verify_skill
+        }
       }
       return result;
     },

@@ -30,6 +30,8 @@ test("fake pi writes the skill and leaves it unchanged", { timeout: 60000 }, asy
   await new Promise((resolve) => site.listen(0, "127.0.0.1", resolve));
   const startUrl = `http://127.0.0.1:${site.address().port}/`;
   let written = "";
+  let writeFeedback = null;
+  let strictFeedback = null;
   setStartRecordingPi(async ({ tools, recording }) => {
     const fake = {
       async prompt() {
@@ -79,7 +81,11 @@ test("fake pi writes the skill and leaves it unchanged", { timeout: 60000 }, asy
         ].join("\n");
         await tools.write_skill_file({ relative_path: "SKILL.md", contents: written });
         await tools.write_skill_file({ relative_path: "scripts/client.py", contents: "def list_items():\n    print('ok')\n" });
-        await tools.write_skill_file({ relative_path: "references/api.md", contents: api });
+        // 字段段只有 path 子标题、没有 page_name/source 行：写入成功，但结构项当场摆回来，不用等 verify_skill
+        const loose = await tools.write_skill_file({ relative_path: "references/api.md", contents: "# 字段\n\n### GET /api/save\n响应 data[]\n\n## 绑定\n\n## 未解决\n\n## 已验证读命令\n" });
+        writeFeedback = loose;
+        const strict = await tools.write_skill_file({ relative_path: "references/api.md", contents: api });
+        strictFeedback = strict;
         await tools.run_skill_command({ argv: ["python", "scripts/client.py", "list"] });
         await tools.verify_skill();
       },
@@ -121,6 +127,12 @@ test("fake pi writes the skill and leaves it unchanged", { timeout: 60000 }, asy
   const file = await readFile(path.join(skillDir(`app.${snap.snapshot.run_id}`), "SKILL.md"), "utf8");
   assert.equal(file, written);
   assert.equal(saves, 1);
+  assert.equal(writeFeedback?.ok, true);
+  assert.ok(Array.isArray(writeFeedback?.structure_errors) && writeFeedback.structure_errors.length > 0);
+  assert.ok(writeFeedback.structure_errors.every((item) => item.code !== "command_not_run"));
+  assert.ok(writeFeedback.structure_errors.some((item) => String(item.hint || "").includes("page_name")));
+  assert.equal(strictFeedback?.ok, true);
+  assert.equal(strictFeedback?.structure_errors, undefined);
   const source = await readFile(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "agent", "pi-session.mjs"), "utf8");
   assert.match(source, /createAgentSession/);
   assert.match(source, /session\.prompt/);

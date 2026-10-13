@@ -1,7 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { hostTools } from "../src/agent/tools.mjs";
-import { factsForContinue, listedWriteKeys, nextRecordingPrompt, recordingStayOnPage, resultLine, unmatchedGoalNames } from "../src/agent/pi-session.mjs";
+import { MAX_STALLS, factsForContinue, listedWriteKeys, nextRecordingPrompt, recordingStayOnPage, resultLine, stallVerdict, unmatchedGoalNames } from "../src/agent/pi-session.mjs";
+
+test("a silent model turn is interrupted after the stall budget, and only repeated stalls fail the recording", () => {
+  const stallMs = 180000;
+  assert.equal(stallVerdict({ prompting: true, streaming: true, idleMs: 60000, stalls: 0, stallMs }), null);
+  assert.equal(stallVerdict({ prompting: false, streaming: false, idleMs: 900000, stalls: 0, stallMs }), null);
+  assert.equal(stallVerdict({ prompting: true, streaming: false, idleMs: 900000, stalls: 0, stallMs }), null);
+  const first = stallVerdict({ prompting: true, streaming: true, idleMs: 630000, stalls: 0, stallMs });
+  assert.equal(first.stalls, 1);
+  assert.equal(first.fail, false);
+  assert.match(first.line, /630 秒无响应/);
+  assert.match(first.line, /重发/);
+  const last = stallVerdict({ prompting: true, streaming: true, idleMs: stallMs, stalls: MAX_STALLS - 1, stallMs });
+  assert.equal(last.fail, true);
+  assert.match(last.line, /录制失败/);
+});
 
 test("a finished page turn continues until the skill is verified", () => {
   const again = nextRecordingPrompt({ finished: false, paused: false, progressed: false, continues: 0 });

@@ -1,8 +1,8 @@
 # 调用方输入
 
-调用方填写的字段写在 `SKILL.md` 参数和 `scripts/client.py` 命令行，不要写成页面怎么点。同一张 overlay 一张 `title` + `questions[]`，覆盖该层 `overlay_editable` 的每一项，以及 listed_write_keys 里来源为 caller 的键。不同 overlay 可各一张表，调用方每轮只用一张。不要另造一张更短的表。嵌套数组按列写成可重复命令行参数，问句用 textarea 写 JSON 数组，不要压成一根字符串。
+调用方填写的字段写在 `SKILL.md` 参数和 `scripts/client.py` 命令行，不要写成页面怎么点。同一张 overlay 一张 `title` + `questions[]`，覆盖该层 `overlay_editable` 的每一项，以及 listed_write_keys 里来源为 caller 的键。不同 overlay 可各一张表，调用方每轮只用一张。不要另造一张更短的表。嵌套数组（表格行）按列写成可重复命令行参数，问句用一个 `textarea`：一行一项、列之间用「|」，括号里只写列名顺序。问句和 `default` 不出现 JSON、数组、类型名。
 
-`inputType` 只许 `text`、`textarea`、`date`（必须有 `dateFormat`）、`select`、`radio`、`treeSelect`、`checkbox`。
+`inputType` 只许 `text`、`textarea`、`date`（必须有 `dateFormat`）、`select`、`radio`、`treeSelect`、`checkbox`。调用方的 `dataSource` 只接受同源地址，业务站不同源，所以不要 `dataSource`。
 
 ## 要问调用方
 
@@ -11,10 +11,14 @@
 - 页面 combobox / listbox / radio / tree：活列表 `options: []`，调用时先跑读命令再填；封闭枚举把 id/label 写进 `options`。不要把命令行写成 option
 - 页面日期：`inputType: date` 且必须有 `dateFormat`
 - textbox：文本
-- 表格列：问句 `textarea`，值为列键组成的 JSON 数组
+- 表格列：问句 `textarea`，一行一项、列用「|」
 - 需要调用方核对即将提交的值
 
-读：没有调用方槽就立刻执行，不要确认卡。写：调用方提交该表后，下一轮只发 `{"confirm":true,"formIds":["<本表 formId>"]}`，再跑 `python3` 写命令加 `--confirm`。字段表和确认卡不要写在同一次调用里。不要 `dataSource`。
+## 调用方怎么问（原样写进 SKILL.md）
+
+读：读命令没有调用方槽就直接执行，不发 `ask_user_question`，不发确认卡。
+
+写：第一次把 `SKILL.md` 里这张 `title` + `questions[]` 原样整份发出，`id`、`question`、`inputType`、`options`、`required` 不改，不增题、不减题、不另造确认题。对话里已确定的值放进对应 `default`，不再另问；上一步查到的业务日期直接作 `default`，不改成当天。调用方提交后，同一轮只发 `{"confirm":true,"formIds":["<本表 formId>"]}`。确认后跑 `python3` 写命令加 `--confirm`。字段表和确认卡不要写在同一次调用里。
 
 `SKILL.md` 里放可原样复制的 JSON，调用方每轮只调一次 `ask_user_question`：
 
@@ -26,12 +30,12 @@
     {"id": "start_date", "question": "开始日期", "inputType": "date", "dateFormat": "yyyy-MM-dd", "required": true, "default": " "},
     {"id": "kind", "question": "类型", "inputType": "radio", "required": true, "options": [{"id": "1", "label": "甲"}, {"id": "2", "label": "乙"}], "default": " "},
     {"id": "dept", "question": "部门", "inputType": "treeSelect", "required": true, "options": [], "default": " "},
-    {"id": "items", "question": "明细（JSON 数组，键与列名一致）", "inputType": "textarea", "required": true, "default": "[]"}
+    {"id": "items", "question": "明细（每行一项：内容 | 进度）", "inputType": "textarea", "required": true, "default": " "}
   ]
 }
 ```
 
-活列表手册 `options` 留空；封闭枚举才把 id/label 写进手册。`default` 必填且非空，不要填录制当时的业务 id。页面 combobox / listbox / radio / select / tree 不要改成 `inputType: text`。页面日期必须是 `date` + `dateFormat`。
+活列表手册 `options` 留空；封闭枚举才把 id/label 写进手册。手册里 `default` 用空格占位，调用时由调用方按对话上下文填成非空；不要填录制当时的业务 id，不要写 JSON。页面 combobox / listbox / radio / select / tree 不要改成 `inputType: text`。页面日期必须是 `date` + `dateFormat`。
 
 ## 不要问
 

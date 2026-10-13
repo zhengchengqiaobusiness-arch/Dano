@@ -406,6 +406,22 @@ function liveChoiceQuestion(row, question) {
   return control === "tree" || control === "treeselect";
 }
 
+export const ASK_PROTOCOL = "读：读命令没有调用方槽就直接执行，不发 ask_user_question，不发确认卡。写：第一次把 SKILL.md 里这张 title+questions[] 原样发出，id、question、inputType、options、required 不改，不增题、不减题、不另造确认题；对话里已确定的值放进对应 default，不再另问，上一步查到的业务日期直接作 default，不改成当天；调用方提交后同一轮只发 {\"confirm\":true,\"formIds\":[\"<formId>\"]}；确认后跑 python3 写命令加 --confirm。";
+const JSON_QUESTION_HINT = "问句只写页面标签和列名，不写 JSON、数组、类型名；default 不写 JSON。多行明细用 textarea 一行一项、列之间用「|」，括号里只写列名顺序。";
+
+export function jsonWordedQuestion(question) {
+  const asked = String(question?.question || "");
+  if (/json/i.test(asked)) return true;
+  const value = String(question?.default ?? "").trim();
+  return /^[\[{]/.test(value);
+}
+
+export function askProtocolMissing(skillMd) {
+  const text = String(skillMd || "");
+  if (!/--confirm/.test(text)) return false;
+  return !(/formIds/.test(text) && /"confirm"\s*:\s*true|confirm\s*:\s*true/.test(text));
+}
+
 function recordedSampleDefault(value, haystack) {
   const text = String(value ?? "").trim();
   if (!text || text === " " || text === "[]") return false;
@@ -428,7 +444,7 @@ function questionShapeErrors(questions, fields, haystack, overlay) {
         code: "not_invocable",
         file: "SKILL.md",
         field: question.id,
-        hint: "不要 dataSource。活选项 options 留空，调用时先跑读命令再填。",
+        hint: "不要 dataSource：调用方只接受同源 dataSource，业务站不同源。活选项 options 留空，调用时先跑读命令再填。",
       });
     }
     const type = controlToken(question?.inputType);
@@ -437,7 +453,15 @@ function questionShapeErrors(questions, fields, haystack, overlay) {
         code: "not_invocable",
         file: "SKILL.md",
         field: question.id,
-        hint: "inputType 只许 text、textarea、date、select、radio、treeSelect、checkbox。表格用 textarea 写 JSON 数组，命令行用可重复行参数。",
+        hint: "inputType 只许 text、textarea、date、select、radio、treeSelect、checkbox。多行明细用 textarea 一行一项、列用「|」，命令行用可重复行参数。",
+      });
+    }
+    if (jsonWordedQuestion(question)) {
+      errors.push({
+        code: "not_invocable",
+        file: "SKILL.md",
+        field: question.id,
+        hint: JSON_QUESTION_HINT,
       });
     }
     const row = fieldForQuestion(question, fields);
@@ -571,7 +595,31 @@ function idsOf(value) {
   return String(value || "").split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
 }
 
-export async function verifySkill(skillDirPath, recordingId, recording = {}) {
+// 结构错误归到哪份文件：写文件时只把这份文件的错误摆回去
+export function structureErrorFile(error) {
+  if (error?.file) return String(error.file);
+  switch (error?.code) {
+    case "field_source_invalid":
+    case "required_kind_invalid":
+    case "on_mismatch_invalid":
+    case "evidence_missing":
+      return "references/api.md";
+    case "import_not_available":
+      return "scripts/client.py";
+    default:
+      return "";
+  }
+}
+
+const NOT_WRITE_TIME = new Set(["command_not_run", "auth_expired", "guide_not_read", "attachment_unresolved"]);
+
+export function structureErrorsForFile(errors, rel) {
+  return (Array.isArray(errors) ? errors : []).filter((error) => (
+    !NOT_WRITE_TIME.has(error?.code) && structureErrorFile(error) === rel
+  ));
+}
+
+export async function verifySkill(skillDirPath, recordingId, recording = {}, { dryRun = false } = {}) {
   const dir = skillDirPath || skillDir(recording.skillId || "");
   const errors = [];
   const files = ["SKILL.md", "scripts/client.py", "references/api.md", "config/runtime.json", "config/auth.local.json"];
@@ -624,6 +672,13 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
       code: "not_invocable",
       file: "SKILL.md",
       hint: "调用方字段必须在 SKILL.md 里放可原样复制的 title+questions[]。同一张 overlay 一张表，调用方每轮只调一次 ask_user_question。活选项 options 留空，封闭枚举才写 options，不要写成自由文本。",
+    });
+  }
+  if (askProtocolMissing(skillMd)) {
+    errors.push({
+      code: "not_invocable",
+      file: "SKILL.md",
+      hint: `SKILL.md 要写明调用方怎么问。${ASK_PROTOCOL}`,
     });
   }
   if (hasQuestions && fields.length === 0) {
@@ -804,7 +859,7 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}) {
   if (!errors.length && hasCredentialHeaders(headers)) status = "skill_ready";
   else if (!errors.length || authOnly) status = "skill_written_needs_auth";
   const verify = { ok: status !== "verify_failed", status, errors, requests, filled: filledLabels(evidence) };
-  if (status === "skill_ready" || status === "skill_written_needs_auth") {
+  if (!dryRun && (status === "skill_ready" || status === "skill_written_needs_auth")) {
     await upsertCatalog({ ...recording, id: recordingId, skillId: recording.skillId, status, skillDir: dir });
   }
   return verify;

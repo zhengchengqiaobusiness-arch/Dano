@@ -82,6 +82,13 @@ test("an open dialog is published as overlay_exact and later clicks use the curr
     assert.ok(emptySystem);
     assert.equal(emptySystem.empty, true);
     assert.equal(emptySystem.required, false);
+    // 选中项画在包裹层、内嵌过滤框为空的下拉：已选即不是空，也不进必填空
+    const pickedType = (opened.overlay_fields || []).find((row) => String(row.name || "").includes("汇报类型"));
+    assert.ok(pickedType);
+    assert.equal(pickedType.required, true);
+    assert.equal(pickedType.empty, false);
+    assert.match(String(pickedType.value || ""), /日报/);
+    assert.equal((opened.required_empty_overlay || []).some((item) => String(item?.name || item).includes("汇报类型")), false);
     const blocked = await runAction(id, { action: "click", ref: publishedRef(lineWith(opened.snapshot.text, "被挡住")) });
     const tree = blocked.snapshot?.text || opened.snapshot.text;
     assert.match(tree, /确定/);

@@ -7,7 +7,7 @@
 - 活列表（source=other_api，或页面是树）：手册 `questions[]` 里 `options: []`。调用时先跑读命令，把返回的 `{id,label}` 写入调用方问句的 options。失败、空列表、或无法映射到稳定 id 就停。
 - 封闭枚举（不是选项接口、页面上就那几个）把 id/label 写进手册 `options`。
 - 不要把「运行某命令」写成唯一 option，也不要留一个占位 id。
-- 不要 `dataSource`。不要把本场 listed 里的业务 id 写进 `default`。
+- 不要 `dataSource`：调用方只接受同源 dataSource，业务站不同源。不要把本场 listed 里的业务 id 写进 `default`。
 - listed 某键这次是空数组，只说明这次请求传了空，不是该键永远空。同场另有该键的选项请求，来源是再读后调用方选。手册里活选项的 `options: []` 是调用时再填，不是把该项冻死。
 - 用户看见 label，接口接收稳定 id。
 - 树形结果按接口给出的 children 字段展平后再列给调用方。
