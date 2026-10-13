@@ -3,7 +3,7 @@ import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { originFromUrl } from "../session-store.mjs";
 import { browserSession, raceWall, sameDocumentNav, withPage } from "./session.mjs";
-import { locatorFor, overlayControlFacts, overlayExactBlock, overlayFactLists, overlayHasRef, takeSnapshot, yamlFingerprint } from "./snapshot.mjs";
+import { locatorFor, overlayControlFacts, overlayExactBlock, overlayFactLists, overlayHasRef, overlaySurfaceKind, takeSnapshot, yamlFingerprint } from "./snapshot.mjs";
 import { beginAction, endAction, listNetwork, waitForAction } from "./network.mjs";
 import { logLine } from "../log.mjs";
 
@@ -130,7 +130,8 @@ async function withOverlayFacts(recordingId, result) {
   if (!result) return result;
   try {
     const overlay_fields = await overlayControlFacts(recordingId);
-    return { ...result, ...overlayFactLists(overlay_fields) };
+    const snapshotText = result.snapshot?.text || browserSession(recordingId)?.lastPublished?.text || "";
+    return { ...result, ...overlayFactLists(overlay_fields), overlay_surface: overlaySurfaceKind(snapshotText) };
   } catch {
     return result;
   }
@@ -142,7 +143,7 @@ export function runAction(recordingId, input) {
     ACT_WALL_MS,
     async () => {
       const snapshot = await takeSnapshot(recordingId, { budgetMs: 2000 }).catch(() => ({ epoch: 0, text: "", refs: [] }));
-      return { ok: false, error: "act_timeout", snapshot };
+      return withOverlayFacts(recordingId, { ok: false, error: "act_timeout", snapshot });
     },
   );
 }
@@ -391,13 +392,13 @@ async function perform(recordingId, input) {
         try {
           await access(filePath);
         } catch {
-          return {
+          return withOverlayFacts(recordingId, {
             ok: false,
             error: "file_not_found",
             ref: input.ref,
             hint: "这个路径不存在。不要为了上传去造文件；不带 file_path 调用 upload 会用自带的探测图片。",
             snapshot: state.lastPublished || await snapshotAfter(recordingId),
-          };
+          });
         }
       }
       try {
@@ -410,13 +411,13 @@ async function perform(recordingId, input) {
       } catch (error) {
         const message = String(error?.message || error);
         if (/not an HTMLInputElement|setInputFiles/i.test(message)) {
-          return {
+          return withOverlayFacts(recordingId, {
             ok: false,
             error: "needs_upload",
             ref: input.ref,
             hint: "这一格不是文件框。先 click 打开选择器，再对返回 needs_upload 的那个 ref 调用 upload。不要编一个不存在的路径。",
             snapshot: state.lastPublished || await snapshotAfter(recordingId),
-          };
+          });
         }
         return { ok: false, error: message.split("\n")[0], snapshot: await snapshotAfter(recordingId) };
       }

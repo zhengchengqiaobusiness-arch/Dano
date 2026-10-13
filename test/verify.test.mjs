@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { writeSkillFile } from "../src/skillpack/files.mjs";
-import { actionEvidenceSummary, askCoverageErrors, askProtocolMissing, authOverlayParseError, hardcodedOriginError, jsonWordedQuestion, overlayLayersFromBodies, skillCommandLines, structureErrorsForFile, verifySkill } from "../src/skillpack/verify.mjs";
+import { actionEvidenceSummary, apiFieldRows, askCoverageErrors, askProtocolMissing, authOverlayParseError, fieldAlignment, hardcodedOriginError, jsonWordedQuestion, overlayLayersFromBodies, skillCommandLines, structureErrorsForFile, verifySkill } from "../src/skillpack/verify.mjs";
 import { jsNonStdlibImports, nonStdlibImports } from "../src/skillpack/stdlib-imports.mjs";
 import { skillDir } from "../src/paths.mjs";
 import { appendEvidence } from "../src/evidence/store.mjs";
@@ -1067,4 +1067,120 @@ test("questions[] must cover caller fields and the densest overlay layer", async
   });
   const result = await verifySkill(dir, shape.id, shape);
   assert.ok(result.errors.some((item) => item.field === "工作总结" && String(item.hint || "").includes("questions[]")));
+});
+
+test("### headings in 字段 are page_name, command headings are not, and required marks are not part of the name", async () => {
+  const rows = apiFieldRows([
+    "## 字段",
+    "### 标题",
+    "source: caller",
+    "control: textbox",
+    "",
+    "### 工作总结",
+    "- source: caller",
+    "",
+    "### report-statistics",
+    "source: caller",
+    "",
+    "### save（POST /save）",
+    "| page_name | source |",
+    "| --- | --- |",
+    "| 备注 | caller |",
+    "",
+    "## 绑定",
+    "",
+    "## 未解决",
+    "",
+    "## 已验证读命令",
+  ].join("\n"), new Set(["report-statistics"]));
+  assert.ok(rows.some((row) => row.page_name === "标题" && row.source === "caller"));
+  assert.ok(rows.some((row) => row.page_name === "工作总结" && row.source === "caller"));
+  assert.ok(rows.some((row) => row.page_name === "备注" && row.source === "caller"));
+  assert.equal(rows.some((row) => row.page_name === "report-statistics"), false);
+  assert.equal(rows.some((row) => /save/.test(row.page_name || "")), false);
+
+  const overlay = overlayLayersFromBodies([{
+    overlay_editable: [
+      { name: "combobox \"* 汇报类型\" in \"单据信息\"", role: "combobox" },
+      { name: "textbox \"标题\"", role: "textbox" },
+    ],
+    requests: [{ method: "POST", path: "/save" }],
+  }]);
+  const missing = askCoverageErrors(
+    [{ id: "title", question: "标题", inputType: "text" }],
+    [{ page_name: "标题", source: "caller" }],
+    overlay,
+    { hasWriteConfirm: true },
+  );
+  assert.ok(missing.some((item) => item.field === "汇报类型"));
+  assert.equal(missing.some((item) => String(item.field || "").includes("*")), false);
+  const covered = askCoverageErrors(
+    [
+      { id: "title", question: "标题", inputType: "text" },
+      { id: "type", question: "汇报类型", inputType: "select" },
+    ],
+    [
+      { page_name: "标题", source: "caller" },
+      { page_name: "汇报类型", source: "caller" },
+    ],
+    overlay,
+    { hasWriteConfirm: true },
+  );
+  assert.equal(covered.filter((item) => item.field === "汇报类型").length, 0);
+
+  const alignment = fieldAlignment(
+    [{ page_name: "标题", source: "caller" }, { page_name: "汇报类型", source: "caller" }],
+    [{ id: "title" }, { id: "type" }],
+    overlay,
+  );
+  assert.ok(alignment.overlay_editable_names.includes("汇报类型"));
+  assert.ok(alignment.overlay_editable_names.includes("标题"));
+  assert.deepEqual(alignment.parsed_page_names, ["标题", "汇报类型"]);
+  assert.deepEqual(alignment.question_ids, ["title", "type"]);
+
+  await useData();
+  const shape = { id: "rec_verify_heading_fields", tenant: "", subsystem: "app", skillId: "app.rec_verify_heading_fields", startUrl: "http://127.0.0.1/" };
+  const dir = skillDir(shape.skillId);
+  await mkdir(path.join(dir, "scripts"), { recursive: true });
+  await mkdir(path.join(dir, "references"), { recursive: true });
+  await mkdir(path.join(dir, "config"), { recursive: true });
+  await writeFile(path.join(dir, "SKILL.md"), "---\nname: save-item\ndescription: 调用方保存\n---\n{\"title\":\"保存\",\"questions\":[{\"id\":\"title\",\"question\":\"标题\",\"inputType\":\"text\",\"required\":true,\"default\":\" \"}]}\npython scripts/client.py save --confirm\npython scripts/client.py report-statistics\n调用方怎么问：读不问不确认。写第一次原样发出 questions[]；提交后只发 {\"confirm\":true,\"formIds\":[\"<formId>\"]}，再加 --confirm。\n");
+  await writeFile(path.join(dir, "scripts/client.py"), "def save():\n    method = \"POST\"\n    path = \"/api/save\"\n    body[\"title\"] = args.title\ndef report_statistics():\n    method = \"GET\"\n    path = \"/api/stats\"\n");
+  await writeFile(path.join(dir, "references/api.md"), [
+    "## 字段",
+    "### 标题",
+    "source: caller",
+    "",
+    "### report-statistics",
+    "source: caller",
+    "",
+    "## 绑定",
+    "",
+    "## 未解决",
+    "",
+    "## 已验证读命令",
+  ].join("\n"));
+  await writeFile(path.join(dir, "config/runtime.json"), "{}\n");
+  await writeFile(path.join(dir, "config/auth.local.json"), "{\"headers\":{\"Authorization\":\"Bearer tok\"}}\n");
+  await seedGuides(shape.id);
+  await appendEvidence(shape.id, {
+    kind: "action",
+    summary: "click:确定",
+    body: {
+      overlay_editable: [{ name: "textbox \"标题\"", role: "textbox" }],
+      requests: [{ method: "POST", path: "/api/save" }],
+    },
+  });
+  await appendEvidence(shape.id, {
+    kind: "verify",
+    ok: true,
+    argv: ["python", "scripts/client.py", "report-statistics"],
+    summary: "python scripts/client.py report-statistics",
+  });
+  const result = await verifySkill(dir, shape.id, shape);
+  assert.equal(result.errors.some((item) => String(item.hint || "").includes("收到下一个")), false);
+  assert.equal(result.errors.some((item) => item.field === "标题" && String(item.hint || "").includes("page_name")), false);
+  assert.equal(result.errors.some((item) => item.field === "report-statistics"), false);
+  assert.ok(result.alignment.parsed_page_names.includes("标题"));
+  assert.equal(result.alignment.parsed_page_names.includes("report-statistics"), false);
 });

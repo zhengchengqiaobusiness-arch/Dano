@@ -134,6 +134,18 @@ export function overlayExactBlock(snapshotText) {
   return (end < 0 ? from : from.slice(0, end)).split("\n").slice(0, 160).join("\n");
 }
 
+export function overlaySurfaceKind(snapshotText) {
+  const block = overlayExactBlock(snapshotText);
+  for (const line of block.split("\n")) {
+    if (!/\[ref=/.test(line)) continue;
+    const role = (unwrapLine(line).match(/^([a-zA-Z]+)/) || [])[1] || "";
+    if (/^(dialog|alertdialog)$/i.test(role)) return "dialog";
+    if (/^(listbox|menu|tooltip)$/i.test(role)) return "popup";
+    return "page";
+  }
+  return "page";
+}
+
 export function overlayHasRef(snapshotText, ref) {
   const raw = String(ref || "").trim().replace(/^\[ref=/, "").replace(/\]$/, "");
   if (!raw) return false;

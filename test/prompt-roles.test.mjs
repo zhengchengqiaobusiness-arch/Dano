@@ -4,7 +4,7 @@ import os from "node:os";
 import test from "node:test";
 import path from "node:path";
 import { packageRoot } from "../src/paths.mjs";
-import { controlLooksEmpty, goalExactLines, nearestNamedAncestor, overlayExactLines, overlayFactLists, overlayHasRef, overlayItemLabel, stripSnapshotDecorators, yamlFingerprint } from "../src/browser/snapshot.mjs";
+import { controlLooksEmpty, goalExactLines, nearestNamedAncestor, overlayExactLines, overlayFactLists, overlayHasRef, overlayItemLabel, overlaySurfaceKind, stripSnapshotDecorators, yamlFingerprint } from "../src/browser/snapshot.mjs";
 import { compactNetworkIndex, networkBodyForModel } from "../src/browser/network.mjs";
 import { responseKeyPreview } from "../src/skillpack/request-keys.mjs";
 import { writeOnlySkill } from "../src/skillpack/verify.mjs";
@@ -42,6 +42,8 @@ test("the method does not ban number cells or treat filled controls as caller-re
   assert.match(prompt, /身份键从本场身份接口现取/);
   assert.match(prompt, /占位字/);
   assert.match(prompt, /必填空/);
+  assert.match(prompt, /empty=true 表示当前没值/);
+  assert.doesNotMatch(prompt, /empty=true 的还要填/);
   assert.match(prompt, /argparse/);
   assert.match(prompt, /冻成空数组/);
   assert.match(prompt, /DANO_BASE_URL/);
@@ -142,6 +144,12 @@ test("pointer cursor is not published, and a page menu is not the overlay when a
     '  - menuitem "甲" [ref=f0:e3@1]',
   ].join("\n"));
   assert.ok(dropdown.some((line) => line.includes("甲")));
+});
+
+test("published overlay_exact dialog is a write surface, a page search box is not", () => {
+  assert.equal(overlaySurfaceKind("overlay_exact\n- dialog \"新建\" [ref=f0:e1@1]\n  - textbox \"标题\" [ref=f0:e2@1]\nframe f0 http://example.test/\n"), "dialog");
+  assert.equal(overlaySurfaceKind("overlay_exact\n- textbox \"请输入部门名称\" [ref=f0:e9@1]\nframe f0 http://example.test/\n"), "page");
+  assert.equal(overlaySurfaceKind("overlay_exact\n- listbox \"选项\" [ref=f0:e3@1]\nframe f0 http://example.test/\n"), "popup");
 });
 
 test("without a dialog, overlay_exact is the page value controls, not chrome or buttons", () => {

@@ -58,7 +58,7 @@ export function resultLine(result) {
     const requiredEmpty = Array.isArray(body.required_empty_overlay) && body.required_empty_overlay.length
       ? ` 必填空=${overlayItemsLine(body.required_empty_overlay, 8)}`
       : "";
-    const empty = Array.isArray(body.empty_overlay) && body.empty_overlay.length
+    const empty = Array.isArray(body.empty_overlay) && body.empty_overlay.length && body.overlay_surface !== "page"
       ? ` 空=${body.empty_overlay.slice(0, 8).join("|")}`
       : "";
     if (body?.ok === true && body.clicked) {
@@ -211,6 +211,10 @@ export function factsForContinue(context) {
     })),
     empty_overlay: Array.isArray(context?.empty_overlay) ? context.empty_overlay.slice(0, 40) : [],
     required_empty_overlay: Array.isArray(context?.required_empty_overlay) ? context.required_empty_overlay.slice(0, 40) : [],
+    overlay_surface: context?.overlay_surface || "",
+    overlay_editable_names: Array.isArray(context?.overlay_editable_names) ? context.overlay_editable_names.slice(0, 40) : (context?.alignment?.overlay_editable_names || []).slice(0, 40),
+    parsed_page_names: Array.isArray(context?.parsed_page_names) ? context.parsed_page_names.slice(0, 40) : (context?.alignment?.parsed_page_names || []).slice(0, 40),
+    question_ids: Array.isArray(context?.question_ids) ? context.question_ids.slice(0, 40) : (context?.alignment?.question_ids || []).slice(0, 40),
     snapshot: String(text).slice(0, 12000),
     goal_named: goal_named.slice(0, 40),
     goal_named_unclicked: unmatchedGoalNames(fromSnap, clicked, goalText).slice(0, 40),
@@ -243,10 +247,10 @@ export function nextRecordingPrompt({ finished, paused, skillReady, progressed, 
     if (verifyErrors.every((item) => item.code === "auth_expired")) {
       return `三文件已写出。打包凭证过期，不要 assist，不要改脚本猜 token，不要把凭证写进对话。结构校验已通过。${errors}`;
     }
-    return `校验失败。对照 listed、overlay_editable、listed_write_keys 只改 SKILL.md、scripts/client.py、references/api.md，再 run_skill_command。不要 browser_act。references/api.md 标题只能是字段、绑定、未解决、已验证读命令，不要用接口 path 当标题。字段段每条要有 page_name 和 source（七个词之一，说明不要写进 source）。source=caller 与当前层 overlay_editable 都要出现在 questions[]，不要瘦表。读：已确定的不进本次 questions[]，不要另造查询确认卡。写：第一次原样整份发 questions[]。活选项 options 留空，封闭枚举才写 options。${errors}`;
+    return `校验失败。对照 listed、overlay_editable、listed_write_keys、overlay_editable_names、parsed_page_names、question_ids 只改 SKILL.md、scripts/client.py、references/api.md，再 run_skill_command。不要 browser_act。references/api.md 标题只能是字段、绑定、未解决、已验证读命令，不要用接口 path 当标题。字段段每条要有 page_name 和 source（七个词之一，说明不要写进 source）。source=caller 与当前层 overlay_editable 都要出现在 questions[]，不要瘦表。读：已确定的不进本次 questions[]，不要另造查询确认卡。写：第一次原样整份发 questions[]。活选项 options 留空，封闭枚举才写 options。${errors}`;
   }
   if (recordingStayOnPage({ verifyErrors, pageProgressed, progressed, unmatchedGoalNames, requiredEmptyOverlay, recordedWrite })) {
-    return "页面目标还没做完。对照当前树、goal_named、goal_named_unclicked、clicked、row_facts、overlay_editable、required_empty_overlay、listed、listed_write_keys 和目标原文接着点、填。目标原文点名的名字或列，在当前树找 [ref=] 去点。goal_named_unclicked 只看当前树里还没出现在 clicked 的名字；clicked 里已有的不要重复点。required_empty_overlay 还非空且 listed 还没有这次写入时不要当成做完，也不要 write_skill_file 或 verify_skill。指针样式不是能不能点的依据。empty=true 的还要填。stale_ref 或 behind_overlay 只用工具返回的新树，不要用旧 ref。同源换页可用 browser_open；跨源不要。人可以在同一个预览里点；actor=human 时等这次操作进当前树和 listed 再接着做。";
+    return "页面目标还没做完。对照当前树、goal_named、goal_named_unclicked、clicked、row_facts、overlay_editable、required_empty_overlay、listed、listed_write_keys 和目标原文接着点、填。目标原文点名的名字或列，在当前树找 [ref=] 去点。goal_named_unclicked 只看当前树里还没出现在 clicked 的名字；clicked 里已有的不要重复点。required_empty_overlay 还非空且 listed 还没有这次写入时不要当成做完，也不要 write_skill_file 或 verify_skill。指针样式不是能不能点的依据。empty=true 是没值，不是必须去填。stale_ref 或 behind_overlay 只用工具返回的新树，不要用旧 ref。同源换页可用 browser_open；跨源不要。人可以在同一个预览里点；actor=human 时等这次操作进当前树和 listed 再接着做。";
   }
   if (continues >= MAX_SKILL_CONTINUES) return null;
   const lead = progressed
@@ -274,7 +278,7 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
   const authStorage = AuthStorage.create(path.join(agentDir, "auth.json"));
   const modelRegistry = ModelRegistry.create(authStorage, path.join(agentDir, "models.json"));
   const resolved = applyPiModelConfig(authStorage, modelRegistry);
-  installOpenAIToolCallStreamCompatibility({ baseUrl: resolved.baseUrl });
+  installOpenAIToolCallStreamCompatibility({ baseUrl: resolved.baseUrl, toolNames: toolNames() });
   const goal = await readGoal(recordingId);
   const systemPrompt = await recordingSystemPrompt(goal);
   const resourceLoader = new DefaultResourceLoader({
@@ -390,7 +394,7 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
       }
       if (recording?.paused || session.isStreaming) return;
       const current = typeof host.context === "function" ? await host.context() : {};
-      const facts = factsForContinue(current);
+      const facts = factsForContinue({ ...current, alignment: recording?.verify?.alignment });
       const recordedWrite = (facts.listed_writes || []).length > 0;
       const follow = nextRecordingPrompt({
         finished: recording?.finished,
@@ -451,12 +455,13 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
   };
   const goalText = `${goal.goal_text || ""}\n${goal.page_url || ""}`;
   const context = typeof host.context === "function" ? await host.context() : {};
+  const startFacts = { ...context, alignment: recording?.verify?.alignment };
   const early = recording?.earlySteer || [];
   if (recording) {
     recording.earlySteer = [];
     recording.pi = handle;
   }
-  prompt(`${goalText}\n${JSON.stringify(factsForContinue(context))}`).catch((error) => {
+  prompt(`${goalText}\n${JSON.stringify(factsForContinue(startFacts))}`).catch((error) => {
     logLine(`[pi] ${error?.message || error}`);
     recording?.emitThought?.({ kind: "tool", phase: "end", ok: false, text: String(error?.message || error).slice(0, 200) });
   });

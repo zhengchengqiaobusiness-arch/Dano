@@ -53,6 +53,9 @@ test("a finished page turn continues until the skill is verified", () => {
   assert.match(failed, /不要 browser_act/);
   assert.match(failed, /字段、绑定、未解决、已验证读命令/);
   assert.match(failed, /不要用接口 path 当标题/);
+  assert.match(failed, /overlay_editable_names/);
+  assert.match(failed, /parsed_page_names/);
+  assert.match(failed, /question_ids/);
   assert.doesNotMatch(failed, /禁止.*取消|不要点取消/);
   const expired = nextRecordingPrompt({ finished: false, paused: false, progressed: true, continues: 2, verifyErrors: [{ code: "auth_expired" }] });
   assert.match(expired, /打包凭证过期/);
@@ -74,6 +77,14 @@ test("a finished page turn continues until the skill is verified", () => {
     content: [{ type: "text", text: JSON.stringify({ ok: true, filled: ["a"], empty_overlay: ["联系人", "所属系统"] }) }],
   });
   assert.match(emptyLine, /空=/);
+  const pageEmpty = resultLine({
+    content: [{ type: "text", text: JSON.stringify({ ok: true, clicked: "generic", overlay_surface: "page", empty_overlay: ["请输入部门名称"], required_empty_overlay: [] }) }],
+  });
+  assert.doesNotMatch(pageEmpty, /空=/);
+  const dialogEmpty = resultLine({
+    content: [{ type: "text", text: JSON.stringify({ ok: true, clicked: "button", overlay_surface: "dialog", empty_overlay: ["标题"] }) }],
+  });
+  assert.match(dialogEmpty, /空=/);
   const requiredLine = resultLine({
     content: [{ type: "text", text: JSON.stringify({ ok: true, clicked: "button", required_empty_overlay: [{ name: "标题", ref: "f0:e3@1" }], empty_overlay: ["分类"] }) }],
   });
@@ -93,6 +104,13 @@ test("a finished page turn continues until the skill is verified", () => {
   assert.equal(facts.overlay_fields[0].empty, true);
   assert.equal(facts.required_empty_overlay[0], "分类");
   assert.equal(facts.overlay_editable[0].ref, "f0:e3@1");
+  const aligned = factsForContinue({
+    listed: [{ id: "req_1", method: "POST", keys: ["title"] }],
+    alignment: { overlay_editable_names: ["标题"], parsed_page_names: ["标题"], question_ids: ["title"] },
+  });
+  assert.deepEqual(aligned.overlay_editable_names, ["标题"]);
+  assert.deepEqual(aligned.parsed_page_names, ["标题"]);
+  assert.deepEqual(aligned.question_ids, ["title"]);
   assert.deepEqual(facts.listed_write_keys, ["title"]);
   assert.ok(facts.goal_named.includes("未填数量"));
   assert.equal(facts.goal_named.includes("导出"), false);
@@ -123,6 +141,8 @@ test("a finished page turn continues until the skill is verified", () => {
   assert.match(stillPage, /同源换页可用 browser_open/);
   assert.match(stillPage, /clicked 里已有的不要重复点/);
   assert.match(stillPage, /只看当前树/);
+  assert.match(stillPage, /empty=true 是没值/);
+  assert.doesNotMatch(stillPage, /empty=true 的还要填/);
   assert.doesNotMatch(stillPage, /已经有页面时不要 browser_open 换地址|already_open/);
   assert.doesNotMatch(stillPage, /禁止.*取消|不要点取消/);
   const skippedWrite = nextRecordingPrompt({ finished: false, paused: false, progressed: true, continues: 1, unmatchedGoalNames: ["未填数量"] });

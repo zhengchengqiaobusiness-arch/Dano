@@ -7,7 +7,7 @@ import { packageRoot, docDir, skillDir as skillPath } from "../paths.mjs";
 import { appendEvidence, getEvidence, listEvidence, appendGoal, readGoal } from "../evidence/store.mjs";
 import { fieldFillText, runAction, withFillFieldText } from "../browser/actions.mjs";
 import { browserSession, persistBrowserSession, withPage } from "../browser/session.mjs";
-import { overlayControlFacts, overlayFactLists, overlayItemsLine, takeSnapshot } from "../browser/snapshot.mjs";
+import { overlayControlFacts, overlayFactLists, overlayItemsLine, overlaySurfaceKind, takeSnapshot } from "../browser/snapshot.mjs";
 import { compactNetworkIndex, getNetwork, listNetwork, networkBodyForModel, requestKeyIndex } from "../browser/network.mjs";
 import { applyVerifyToRecording, releaseVerifiedSkill } from "../session.mjs";
 import { authSpawnEnv, readSkillFile, skillIdFor, writeRuntimeConfig, writeSkillFile } from "../skillpack/files.mjs";
@@ -28,7 +28,7 @@ const GUIDE_FILES = {
 const TOOL_SPECS = [
   { name: "browser_open", description: "打开入口同源的地址。已在该地址则只返回当前树。同源换 hash/path 可以 goto。跨源拒绝。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
   { name: "browser_snapshot", description: "读取当前页面快照树。只点树里的 [ref=fN:eN@数字]。goal_exact / overlay_exact / row_facts 是查找表，不是点击清单。返回 overlay_fields 与 overlay_editable（当前层非只读可填，含 ref；没有弹层时是页面上的 textbox/combobox）。", parameters: { type: "object", properties: {} } },
-  { name: "browser_act", description: "ref 整段照抄最近一次 snapshot 树里的 [ref=fN:eN@数字]。@ 后数字对不上就重新 snapshot，只点新树。同名不要挑第一个。没有 ref 就停。不要并行多次 browser_act。同一张树上要改多格，用一次 fill_fields。fill_fields 的 fields 每项是 ref 加要填的字（text 或 value）。填和选用树里 textbox/combobox 以及 overlay_editable 的 ref。返回 clicked、requests、snapshot、overlay_fields、overlay_editable。requests 空只说明这一下没有 xhr/fetch。empty/required/readonly 是事实；empty=true 还要填，empty=false 不要当没填。弹层开着时只点当前树里这层的 ref，不要点 goal_exact 里被挡住的项。in_overlay 表示点的是 overlay_exact 里的控件；layer_idle 表示这层动了但没有 xhr。needs_click 表示这一格不能直接填，先 click 同一个 ref 再填。behind_overlay 时先看 overlay_exact。还没采用请求就不要点会关掉这层的控件。page_unchanged 时换 ref。uploaded 表示文件已写入。needs_upload 时对同一 ref 调用 upload。", parameters: { type: "object", properties: { action: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, fields: { type: "array" }, key: { type: "string" }, file_path: { type: "string" } }, required: ["action"] } },
+  { name: "browser_act", description: "ref 整段照抄最近一次 snapshot 树里的 [ref=fN:eN@数字]。@ 后数字对不上就重新 snapshot，只点新树。同名不要挑第一个。没有 ref 就停。不要并行多次 browser_act。同一张树上要改多格，用一次 fill_fields。fill_fields 的 fields 每项是 ref 加要填的字（text 或 value）。填和选用树里 textbox/combobox 以及 overlay_editable 的 ref。返回 clicked、requests、snapshot、overlay_fields、overlay_editable。requests 空只说明这一下没有 xhr/fetch。empty/required/readonly 是事实；empty=true 是没值，required 才是当前层必填还空；empty=false 不要当没填。弹层开着时只点当前树里这层的 ref，不要点 goal_exact 里被挡住的项。in_overlay 表示点的是 overlay_exact 里的控件；layer_idle 表示这层动了但没有 xhr。needs_click 表示这一格不能直接填，先 click 同一个 ref 再填。behind_overlay 时先看 overlay_exact。还没采用请求就不要点会关掉这层的控件。page_unchanged 时换 ref。uploaded 表示文件已写入。needs_upload 时对同一 ref 调用 upload。", parameters: { type: "object", properties: { action: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, fields: { type: "array" }, key: { type: "string" }, file_path: { type: "string" } }, required: ["action"] } },
   { name: "browser_screenshot", description: "把当前画面作为图像送回。不换树，点、填仍用最近一次 snapshot 的 [ref=]。", parameters: { type: "object", properties: { ref: { type: "string" }, as_image: { type: "boolean" } } } },
   { name: "network_list", description: "列出本场全部 xhr/fetch 索引（id/method/path/keys/empty/response_keys）。empty 是这次请求里的空键，不是永远空。写字段时看这份 listed，不要只看点击口袋。", parameters: { type: "object", properties: { after_id: { type: "string" }, action_id: { type: "string" } } } },
   { name: "network_get", description: "按 id 读取一条请求。正文过大则省略并给出 response_keys，用 evidence_get 同 id 取全文。body_missing 表示没有正文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
@@ -153,10 +153,10 @@ export function hostTools(recording) {
       const saved = await appendEvidence(id, {
         kind: "snapshot",
         summary: "snapshot",
-        body: { ...snapshot, ...overlay },
+        body: { ...snapshot, ...overlay, overlay_surface: overlaySurfaceKind(snapshot.text) },
         body_missing: false,
       });
-      return { ...snapshot, ...overlay, evidence_id: saved.id };
+      return { ...snapshot, ...overlay, overlay_surface: overlaySurfaceKind(snapshot.text), evidence_id: saved.id };
     },
     async browser_act(args) {
       const act = withFillFieldText(args);
@@ -284,9 +284,11 @@ export function hostTools(recording) {
         try {
           const verify = await verifySkill(skillPath(recording.skillId), id, recording, { dryRun: true });
           const structure_errors = structureErrorsForFile(verify.errors, String(args.relative_path || "").replace(/\\/g, "/"));
+          const alignment = verify.alignment || null;
           if (structure_errors.length) {
-            return { ...result, structure_errors, hint: "已写入。下面是这份文件现在过不了 verify_skill 的结构项，先改这份文件再跑命令。" };
+            return { ...result, structure_errors, alignment, hint: "已写入。对照 overlay_editable_names、parsed_page_names、question_ids 改这份文件再跑命令。" };
           }
+          if (alignment) return { ...result, alignment };
         } catch {
           // 写入已成功；结构预检失败就留给 verify_skill
         }
@@ -381,6 +383,7 @@ export function hostTools(recording) {
       } catch {
         overlay_fields = [];
       }
+      const snapshotText = snapshot?.body?.text || snapshot?.text || "";
       return {
         goal,
         snapshot,
@@ -390,6 +393,7 @@ export function hostTools(recording) {
         clicked: clickedLabels(evidence),
         filled: filledLabels(evidence),
         seen_goal_names: browserSession(id)?.seenGoalNames || [],
+        overlay_surface: overlaySurfaceKind(snapshotText),
         ...overlayFactLists(overlay_fields),
       };
     },

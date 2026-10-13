@@ -321,6 +321,85 @@ function tableFieldRows(body) {
   return rows;
 }
 
+const RESERVED_FIELD_TITLES = new Set(["字段", "绑定", "未解决", "已验证读命令"]);
+
+export function overlayPageName(raw) {
+  return String(raw || "").replace(/^\*+\s*/, "").replace(/\s*\*+$/, "").trim();
+}
+
+function headingLooksLikeCommand(title, commandNames) {
+  const raw = String(title || "").trim();
+  if (!raw) return true;
+  if (/scripts\/client\.py|\.py\b|https?:\/\//i.test(raw)) return true;
+  if (/\b(GET|POST|PUT|PATCH|DELETE)\b/i.test(raw) && /\//.test(raw)) return true;
+  if (/^\/[A-Za-z0-9._\-/?=&%]+/.test(raw)) return true;
+  const token = overlayPageName(raw.replace(/（.*$/, "").replace(/\(.*$/, ""));
+  return Boolean(token && commandNames && commandNames.has(token));
+}
+
+function headingFieldRows(body, commandNames) {
+  const rows = [];
+  let current = null;
+  for (const line of String(body || "").split(/\n/)) {
+    const heading = line.match(/^\s*#{3,6}\s+(.+?)\s*$/);
+    if (heading) {
+      const title = overlayPageName(String(heading[1] || "").replace(/`/g, ""));
+      if (!title || headingLooksLikeCommand(heading[1], commandNames) || RESERVED_FIELD_TITLES.has(title)) {
+        current = null;
+        continue;
+      }
+      current = { page_name: title };
+      rows.push(current);
+      continue;
+    }
+    if (!current) continue;
+    if (/^\s*\|/.test(line) || /^\s*#{1,2}\s+/.test(line)) {
+      current = null;
+      continue;
+    }
+    const keyed = line.match(/^\s*- ([a-z_]+)\s*[:=]\s*(.*)$/)
+      || line.match(/^\s{0,6}([a-z_]+)\s*[:=]\s*(.+)$/);
+    if (!keyed) continue;
+    assignFieldKey(current, keyed[1], firstFieldValue(keyed[2]));
+    for (const [key, value] of extraFieldPairs(keyed[2])) assignFieldKey(current, key, value);
+  }
+  return rows;
+}
+
+function mergeFieldRows(rows) {
+  const byName = new Map();
+  const order = [];
+  for (const row of rows || []) {
+    const name = overlayPageName(row?.page_name || "");
+    if (!name) continue;
+    const prev = byName.get(name);
+    if (!prev) order.push(name);
+    byName.set(name, { ...prev, ...row, page_name: name });
+  }
+  return order.map((name) => byName.get(name));
+}
+
+export function listedCommandNames(skillMd, clientText) {
+  const names = new Set();
+  for (const line of skillCommandLines(skillMd)) {
+    const sub = subcommand(line);
+    if (sub) names.add(sub);
+  }
+  for (const match of String(clientText || "").matchAll(/add_parser\(\s*["']([^"']+)["']/g)) {
+    names.add(match[1]);
+  }
+  return names;
+}
+
+export function apiFieldRows(apiText, commandNames = new Set()) {
+  const body = section(apiText, "字段");
+  return mergeFieldRows([
+    ...headingFieldRows(body, commandNames),
+    ...blocks(body, "page_name"),
+    ...tableFieldRows(body),
+  ]);
+}
+
 function callerFacing(row) {
   if (row.source === "caller") return true;
   return row.source === "other_api" && CHOICE_CONTROLS.has(controlToken(row.control));
@@ -428,11 +507,35 @@ function overlayAskName(row) {
   const raw = String(row?.name || row?.column || "").trim();
   if (!raw) return "";
   const quoted = [...raw.matchAll(/"((?:\\.|[^"])*)"/g)].map((item) => item[1].replace(/\\"/g, '"')).find((item) => item.length >= 2);
-  const label = quoted || raw.replace(/^(textbox|searchbox|combobox|spinbutton|checkbox|radio|slider|listbox|generic|button)\s+/i, "").trim();
+  const label = overlayPageName(quoted || raw.replace(/^(textbox|searchbox|combobox|spinbutton|checkbox|radio|slider|listbox|generic|button)\s+/i, ""));
   if (!label || label.length < 2) return "";
   if (/^(请选|请输入|请填写|请填入)/.test(label)) return "";
   if (/^(textbox|searchbox|combobox|spinbutton|checkbox|radio|slider|listbox|generic|button)$/i.test(label)) return "";
   return label;
+}
+
+export function fieldAlignment(fields, questions, overlayLayers) {
+  const layers = Array.isArray(overlayLayers) ? overlayLayers : [];
+  const writeLayers = layers.filter((layer) => (layer.requests || []).some(isWriteRequest));
+  const densest = (writeLayers.length ? writeLayers : layers).reduce((best, layer) => (
+    (layer.items || []).length > (best.items || []).length ? layer : best
+  ), { items: [] });
+  const overlay_editable_names = [];
+  for (const item of densest.items || []) {
+    const name = overlayAskName(item);
+    if (name && !overlay_editable_names.includes(name)) overlay_editable_names.push(name);
+  }
+  const parsed_page_names = [];
+  for (const row of fields || []) {
+    const name = String(row.page_name || "").trim();
+    if (name && !parsed_page_names.includes(name)) parsed_page_names.push(name);
+  }
+  const question_ids = [];
+  for (const question of questions || []) {
+    const id = String(question?.id || question?.question || "").trim();
+    if (id && !question_ids.includes(id)) question_ids.push(id);
+  }
+  return { overlay_editable_names, parsed_page_names, question_ids };
 }
 
 function questionCoversName(questions, name) {
@@ -743,7 +846,7 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}, { d
       });
     }
   }
-  const fields = [...blocks(section(api, "字段"), "page_name"), ...tableFieldRows(section(api, "字段"))];
+  const fields = apiFieldRows(api, listedCommandNames(texts["SKILL.md"] || "", texts["scripts/client.py"] || ""));
   const bindings = blocks(section(api, "绑定"), "from");
   const unresolved = blocks(section(api, "未解决"), "field");
   errors.push(...fieldShapeErrors(fields));
@@ -779,7 +882,8 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}, { d
     errors.push({
       code: "not_invocable",
       file: "references/api.md",
-      hint: "## 字段 收到下一个同级标题为止（其中的 ### 也算）。每条要有 page_name 和 source，用表或 - page_name= 均可，不要只写接口路径。",
+      heading: "字段",
+      hint: "字段段没有解析到 page_name",
     });
   }
   if (skillMd && !/^---\n[\s\S]*?\bname:\s*\S+/m.test(skillMd)) {
@@ -956,7 +1060,8 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}, { d
   let status = "verify_failed";
   if (!errors.length && hasCredentialHeaders(headers)) status = "skill_ready";
   else if (!errors.length || authOnly) status = "skill_written_needs_auth";
-  const verify = { ok: status !== "verify_failed", status, errors, requests, filled: filledLabels(evidence) };
+  const alignment = fieldAlignment(fields, questions, overlayLayersFromBodies(overlayBodies));
+  const verify = { ok: status !== "verify_failed", status, errors, requests, filled: filledLabels(evidence), alignment };
   if (!dryRun && (status === "skill_ready" || status === "skill_written_needs_auth")) {
     await upsertCatalog({ ...recording, id: recordingId, skillId: recording.skillId, status, skillDir: dir });
   }
