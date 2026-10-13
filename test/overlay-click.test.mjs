@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { closeBrowser, desktopViewport, DESKTOP_VIEWPORT, getPage, openBrowser } from "../src/browser/session.mjs";
+import { browserSession, closeBrowser, desktopViewport, DESKTOP_VIEWPORT, getPage, openBrowser } from "../src/browser/session.mjs";
 import { takeSnapshot } from "../src/browser/snapshot.mjs";
 import { fieldFillText, runAction, withFillFieldText } from "../src/browser/actions.mjs";
 
@@ -89,6 +89,13 @@ test("an open dialog is published as overlay_exact and later clicks use the curr
     assert.equal(pickedType.empty, false);
     assert.match(String(pickedType.value || ""), /日报/);
     assert.equal((opened.required_empty_overlay || []).some((item) => String(item?.name || item).includes("汇报类型")), false);
+    const pickedPeriod = (opened.overlay_fields || []).find((row) => String(row.name || "").includes("周期类型"));
+    assert.ok(pickedPeriod);
+    assert.equal(pickedPeriod.required, true);
+    assert.equal(pickedPeriod.empty, false);
+    assert.match(String(pickedPeriod.value || ""), /周报/);
+    assert.equal((opened.required_empty_overlay || []).some((item) => String(item?.name || item).includes("周期类型")), false);
+    assert.equal((opened.overlay_fields || []).some((row) => String(row.name || "").includes("隐藏必填")), false);
     const blocked = await runAction(id, { action: "click", ref: publishedRef(lineWith(opened.snapshot.text, "被挡住")) });
     const tree = blocked.snapshot?.text || opened.snapshot.text;
     assert.match(tree, /确定/);
@@ -156,6 +163,44 @@ test("a click inside overlay_exact with no xhr is returned as layer_idle", { tim
   } finally {
     await closeBrowser(id);
     await new Promise((resolve) => site.server.close(resolve));
+  }
+});
+
+test("hash route does not bump epoch or drop current refs", { timeout: 60000 }, async () => {
+  const html = `<!doctype html><html><body>
+    <a id="go" href="#/other">去另一页</a>
+    <button id="stay" type="button">仍在</button>
+    <p id="panel">home</p>
+    <script>
+      window.addEventListener("hashchange", () => {
+        document.getElementById("panel").textContent = location.hash || "home";
+      });
+    </script>
+  </body></html>`;
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}/`;
+  const id = "rec_hash_epoch";
+  try {
+    await openBrowser({ recordingId: id, url, storageState: null, viewport: { width: 900, height: 700 } });
+    const first = await takeSnapshot(id, { budgetMs: 4000 });
+    const stay = publishedRef(lineWith(first.text, "仍在"));
+    assert.ok(stay);
+    const epoch = browserSession(id).epoch;
+    const snap = browserSession(id).snap;
+    await getPage(id).evaluate(() => { location.hash = "#/other"; });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(browserSession(id).epoch, epoch);
+    assert.equal(browserSession(id).snap, snap);
+    const again = await runAction(id, { action: "click", ref: stay });
+    assert.equal(again.ok, true);
+    assert.notEqual(again.error, "stale_ref");
+  } finally {
+    await closeBrowser(id);
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 

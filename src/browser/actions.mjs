@@ -2,7 +2,7 @@ import { writeFile, mkdir, access } from "node:fs/promises";
 import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { originFromUrl } from "../session-store.mjs";
-import { browserSession, raceWall, withPage } from "./session.mjs";
+import { browserSession, raceWall, sameDocumentNav, withPage } from "./session.mjs";
 import { locatorFor, overlayControlFacts, overlayFactLists, overlayHasRef, takeSnapshot, yamlFingerprint } from "./snapshot.mjs";
 import { beginAction, endAction, listNetwork, waitForAction } from "./network.mjs";
 import { logLine } from "../log.mjs";
@@ -100,16 +100,6 @@ function pointerBlocked(error) {
 
 function clickUnreachable(error) {
   return pointerBlocked(error) || /not visible|outside of the viewport|Timeout/i.test(String(error?.message || ""));
-}
-
-function sameDocumentNav(current, next) {
-  try {
-    const a = new URL(current);
-    const b = new URL(next);
-    return a.origin === b.origin && a.pathname === b.pathname && a.search === b.search;
-  } catch {
-    return false;
-  }
 }
 
 function samePageUrl(current, next) {

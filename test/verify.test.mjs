@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { writeSkillFile } from "../src/skillpack/files.mjs";
 import { actionEvidenceSummary, askProtocolMissing, authOverlayParseError, hardcodedOriginError, jsonWordedQuestion, skillCommandLines, structureErrorsForFile, verifySkill } from "../src/skillpack/verify.mjs";
+import { jsNonStdlibImports, nonStdlibImports } from "../src/skillpack/stdlib-imports.mjs";
 import { skillDir } from "../src/paths.mjs";
 import { appendEvidence } from "../src/evidence/store.mjs";
 import { GUIDE_NAMES } from "../src/agent/guides.mjs";
@@ -245,6 +246,13 @@ test("a click that writes a file is recorded as an upload, and a credential requ
   await writeFile(path.join(dir, "scripts/client.py"), "import json\ncredential = auth['credential']\n");
   const used = await verifySkill(dir, shape.id, shape);
   assert.equal(used.errors.some((item) => item.code === "credential_not_used"), false);
+});
+
+test("import probe falls back when a python binary name is missing", async () => {
+  assert.deepEqual(jsNonStdlibImports("import json\nimport urllib.request\nfrom pathlib import Path\nimport requests\n"), ["requests"]);
+  const probed = await nonStdlibImports("import json\nimport urllib.request\n");
+  assert.equal((probed.imports || []).includes("json"), false);
+  assert.equal((probed.imports || []).includes("urllib"), false);
 });
 
 test("a script that imports outside the standard library cannot be called", async () => {

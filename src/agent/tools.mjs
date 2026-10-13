@@ -184,7 +184,14 @@ export function hostTools(recording) {
       return networkBodyForModel(item);
     },
     async evidence_get(args) {
-      return getEvidence(id, args.id);
+      try {
+        return await getEvidence(id, args.id);
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+        const item = getNetwork(id, args.id);
+        if (item) return item;
+        return { ok: false, error: "missing", hint: "这个 id 没有全文。listed 里的请求用 network_get。" };
+      }
     },
     async read_page_asset(args) {
       const origin = new URL(recording.startUrl).origin;

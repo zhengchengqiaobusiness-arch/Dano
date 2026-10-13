@@ -17,3 +17,15 @@ test("evidence body is stored whole", async () => {
   const empty = await getEvidence(id, missing.id);
   assert.equal(empty.body_missing, true);
 });
+
+test("a missing evidence id is missing, not a thrown path string", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "cabp-ev-miss-"));
+  process.env.CABP_DATA = root;
+  const id = "rec_evidence_miss";
+  try {
+    await getEvidence(id, "ev_does_not_exist");
+    assert.fail("expected ENOENT");
+  } catch (error) {
+    assert.equal(error.code, "ENOENT");
+  }
+});

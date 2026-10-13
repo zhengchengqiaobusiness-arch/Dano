@@ -17,6 +17,17 @@ export function browserSession(recordingId) {
   return sessions.get(recordingId) || null;
 }
 
+export function sameDocumentNav(current, next) {
+  try {
+    const a = new URL(current);
+    const b = new URL(next);
+    if (a.origin !== b.origin || a.pathname !== b.pathname || a.search !== b.search) return false;
+    return a.hash !== b.hash;
+  } catch {
+    return false;
+  }
+}
+
 export async function openBrowser({ recordingId, url, storageState, viewport }) {
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({ headless: true });
@@ -33,6 +44,7 @@ export async function openBrowser({ recordingId, url, storageState, viewport }) 
     origin: originFromUrl(url),
     epoch: 1,
     refs: new Map(),
+    lastMainUrl: page.url(),
     lastPointerMoveAt: 0,
     actionSeq: 0,
   };
@@ -42,8 +54,13 @@ export async function openBrowser({ recordingId, url, storageState, viewport }) 
   });
   page.on("framenavigated", (frame) => {
     if (frame !== page.mainFrame()) return;
-    state.epoch += 1;
-    state.refs.clear();
+    const next = frame.url();
+    const prev = state.lastMainUrl || page.url();
+    state.lastMainUrl = next;
+    if (!sameDocumentNav(prev, next)) {
+      state.epoch += 1;
+      state.refs.clear();
+    }
     clearTimeout(state.persistTimer);
     state.persistTimer = setTimeout(() => {
       persistBrowserSession(recordingId).catch(() => {});

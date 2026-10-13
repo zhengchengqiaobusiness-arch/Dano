@@ -464,6 +464,7 @@ async function readControlFact(locator, meta) {
     return await locator.evaluate((node, info) => {
       const el = node instanceof Element ? node : null;
       if (!el) return { skip: true };
+      if (!el.getClientRects().length) return { skip: true };
       const nested = el.matches("input,select,textarea") ? el : el.querySelector("input,select,textarea");
       const native = el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT"
         || el.getAttribute("contenteditable") === "true"
@@ -487,9 +488,17 @@ async function readControlFact(locator, meta) {
       else if (el.getAttribute("aria-checked") != null) value = String(el.getAttribute("aria-checked"));
       else if (nested && "value" in nested) {
         value = String(nested.value ?? "");
-        // 选择类控件常把选中项画在包裹层里，内嵌的过滤框本身是空的；这时可见文字才是实值
-        if (!value.trim() && nested !== el && (info.valueRole || haspopup != null || expanded != null)) {
-          value = String(el.innerText || "").trim();
+        // 选择类控件常把选中项画在包裹层或兄弟节点上；role 在 input 自己身上时 value 仍是空过滤框
+        if (!value.trim() && (info.choiceRole || haspopup != null || expanded != null)) {
+          let host = el;
+          if (el.matches("input,select,textarea")) {
+            host = el.closest('[role="combobox"],[role="listbox"]');
+            if (!host || host === el) host = el.parentElement || el;
+          }
+          const text = String((host || el).innerText || "").trim();
+          const ph = String(placeholder || "");
+          const parts = text.split(/\s+/).map((part) => part.trim()).filter(Boolean);
+          value = parts.find((part) => part && part !== ph && !/^(请选|请输入|请填写|请填入)/.test(part)) || "";
         }
       } else value = String(el.innerText || "").trim();
       return {
@@ -540,6 +549,7 @@ export async function overlayControlFacts(recordingId) {
     const part = await Promise.all(jobs.slice(i, i + 24).map(async (job) => {
       const raw = await readControlFact(job.locator, {
         valueRole: VALUE_ROLES.test(job.role),
+        choiceRole: /^(combobox|listbox)$/.test(job.role),
         genericNamed: job.role === "generic" && Boolean(job.label),
       });
       if (!raw || raw.skip) return null;
