@@ -5,10 +5,10 @@ import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { webDir, skillDir } from "./paths.mjs";
 import { attachWebSocket } from "./ws-bridge.mjs";
-import { exportSkill } from "./session.mjs";
-import { listSkillsPage, removeSkill, setSkillFrozen } from "./skillpack/catalog.mjs";
+import { exportCatalogSkills, exportSkill } from "./session.mjs";
+import { exportedFolderToRemove, listSkillsPage, removeSkill, setSkillFrozen } from "./skillpack/catalog.mjs";
 import {
-  maskHeaders, readExportDirectory, readTokenRecord, writebackExportedPackages, writeExportDirectory, writeTokenRecord,
+  maskHeaders, persistExportDirectory, readTokenRecord, resolveExportDirectory, writebackExportedPackages, writeTokenRecord,
 } from "./token-store.mjs";
 
 const CORS = new Set(["http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:19082", "http://localhost:19082"]);
@@ -57,6 +57,12 @@ export function createApp({ startRecordingPi } = {}) {
       send(res, 200, await listSkillsPage(page, pageSize), origin);
       return;
     }
+    if (req.method === "POST" && url.pathname === "/v1/skills/export") {
+      const body = await readBody(req);
+      const result = await exportCatalogSkills(body.out_dir || body.directory || "", { tenant: body.tenant || "" });
+      send(res, 200, result, origin);
+      return;
+    }
     const skillAction = url.pathname.match(/^\/v1\/skills\/([^/]+)\/(freeze|resume)$/);
     if (req.method === "POST" && skillAction) {
       const skillId = decodeURIComponent(skillAction[1]);
@@ -66,12 +72,15 @@ export function createApp({ startRecordingPi } = {}) {
         return;
       }
       const removedFolders = [];
-      if (skillAction[2] === "freeze" && item.export_path) {
-        await rm(item.export_path, { recursive: true, force: true }).catch((error) => {
-          console.log(`[skill] freeze cleanup failed ${item.export_path} ${error.message}`);
-        });
-        removedFolders.push(item.export_path);
-        console.log(`[skill] frozen ${skillId} removed=${item.export_path}`);
+      const exportPath = skillAction[2] === "freeze" ? exportedFolderToRemove(item) : "";
+      if (exportPath) {
+        try {
+          await rm(exportPath, { recursive: true, force: true });
+          removedFolders.push(exportPath);
+          console.log(`[skill] frozen ${skillId} removed=${exportPath}`);
+        } catch (error) {
+          console.log(`[skill] freeze cleanup failed ${exportPath} ${error.message}`);
+        }
       } else {
         console.log(`[skill] ${skillAction[2]} ${skillId}`);
       }
@@ -87,9 +96,10 @@ export function createApp({ startRecordingPi } = {}) {
     if (req.method === "DELETE" && oneSkill) {
       const skillId = decodeURIComponent(oneSkill[1]);
       const removed = await removeSkill(skillId);
-      if (removed?.export_path) await rm(removed.export_path, { recursive: true, force: true }).catch(() => {});
+      const exportPath = exportedFolderToRemove(removed);
+      if (exportPath) await rm(exportPath, { recursive: true, force: true }).catch(() => {});
       console.log(`[skill] delete ${skillId} ok=${Boolean(removed)}`);
-      send(res, removed ? 200 : 404, { deleted: Boolean(removed), skill_id: skillId, removed_folders: removed?.export_path ? [removed.export_path] : [] }, origin);
+      send(res, removed ? 200 : 404, { deleted: Boolean(removed), skill_id: skillId, removed_folders: exportPath ? [exportPath] : [] }, origin);
       return;
     }
     if (req.method === "GET" && url.pathname.startsWith("/v1/skills/")) {
@@ -128,12 +138,12 @@ export function createApp({ startRecordingPi } = {}) {
       return;
     }
     if (req.method === "GET" && (url.pathname === "/export/directory" || url.pathname === "/v1/export/directory")) {
-      send(res, 200, { out_dir: await readExportDirectory() }, origin);
+      send(res, 200, { out_dir: await resolveExportDirectory() }, origin);
       return;
     }
     if ((req.method === "PUT" || req.method === "POST") && (url.pathname === "/export/directory" || url.pathname === "/v1/export/directory")) {
       const body = await readBody(req);
-      send(res, 200, { out_dir: await writeExportDirectory(body.out_dir || "") }, origin);
+      send(res, 200, { out_dir: await persistExportDirectory(body.out_dir || body.directory || "") }, origin);
       return;
     }
     const exported = url.pathname.match(/^\/v1\/pi-recordings\/([^/]+)\/export-skill$/);
@@ -149,8 +159,15 @@ export function createApp({ startRecordingPi } = {}) {
       return;
     }
     if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      createReadStream(path.join(webDir(), "index.html")).pipe(res);
+      const stream = createReadStream(path.join(webDir(), "index.html"));
+      stream.on("error", () => {
+        if (!res.headersSent) send(res, 404, { error: "not_found" }, origin);
+        else res.destroy();
+      });
+      stream.once("open", () => {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        stream.pipe(res);
+      });
       return;
     }
     send(res, 404, { error: "not_found" }, origin);

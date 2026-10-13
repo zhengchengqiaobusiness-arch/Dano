@@ -244,10 +244,7 @@ export function authOverlayParseError(clientText) {
 
 export function hardcodedOriginError(clientText) {
   const text = String(clientText || "");
-  if (/(?:DEFAULT_BASE_URL|base_url)\s*=\s*["']https?:\/\/(?!127\.0\.0\.1\b|localhost\b)/i.test(text)) {
-    return "基地址只读 DANO_BASE_URL 或 config/runtime.json，不要写死源站。";
-  }
-  if (/(?:os\.environ\.get\(\s*[\"']DANO_BASE_URL[\"'][^)]*\)|DANO_BASE_URL)[^;\n]{0,120}or\s+["']https?:\/\/(?!127\.0\.0\.1\b|localhost\b)/i.test(text)) {
+  if (/["']https?:\/\/(?!127\.0\.0\.1\b|localhost\b)/i.test(text)) {
     return "基地址只读 DANO_BASE_URL 或 config/runtime.json，不要写死源站。";
   }
   return "";

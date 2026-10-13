@@ -1,9 +1,11 @@
-import { mkdir, readFile, writeFile, appendFile, cp } from "node:fs/promises";
+import { mkdir, readFile, writeFile, appendFile, cp, rm } from "node:fs/promises";
 import path from "node:path";
-import { dataRoot, recordingDir, skillDir } from "./paths.mjs";
+import { isInternalDataPath, recordingDir, skillDir } from "./paths.mjs";
 import { newRecordingId, writeInitialGoal } from "./evidence/store.mjs";
 import { skillIdFor, writeRuntimeConfig } from "./skillpack/files.mjs";
 import { addLogWriter } from "./log.mjs";
+import { persistExportDirectory, resolveExportDirectory } from "./token-store.mjs";
+import { readCatalog, setSkillExportPath } from "./skillpack/catalog.mjs";
 
 const THOUGHT_LIMIT = 4000;
 
@@ -256,15 +258,69 @@ export async function loadRecording(id) {
   }
 }
 
+export function exportedPackageName(skillMdText, skillId) {
+  const yaml = String(skillMdText || "").match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  const named = yaml ? String(yaml[1]).match(/^name\s*:\s*["']?([^\s"'\n]+)/m) : null;
+  const raw = String(named?.[1] || skillId || "skill").trim();
+  return raw.replace(/[\\/]+/g, "-") || "skill";
+}
+
 export async function exportSkill(id, outDir) {
   const recording = await loadRecording(id);
   if (!recording || publicSessionStatus(recording) !== "skill_ready") {
     return { status: "not_ready", verify: recording?.verify || null };
   }
   const source = recording.skillDir || skillDir(recording.skillId);
-  await writeRuntimeConfig(recording, recording.skillId);
-  const target = String(outDir || "").trim() || path.join(dataRoot(), "export", recording.skillId);
-  const dest = path.resolve(target);
-  await cp(source, dest, { recursive: true });
-  return { status: "exported", skill_id: recording.skillId, export_path: dest };
+  try {
+    await writeRuntimeConfig(recording, recording.skillId);
+  } catch {
+    // 源包仍复制；runtime 写失败不挡导出
+  }
+  let handbook = "";
+  try {
+    handbook = await readFile(path.join(source, "SKILL.md"), "utf8");
+  } catch {
+    handbook = "";
+  }
+  const root = await resolveExportDirectory(outDir);
+  const dest = path.resolve(root, exportedPackageName(handbook, recording.skillId));
+  if (isInternalDataPath(dest)) {
+    return { status: "export_failed", errors: ["export_dir_internal"], skill_id: recording.skillId };
+  }
+  if (path.resolve(source) !== dest) {
+    await mkdir(path.dirname(dest), { recursive: true });
+    await rm(dest, { recursive: true, force: true });
+    await cp(source, dest, { recursive: true });
+  }
+  await persistExportDirectory(root);
+  await setSkillExportPath(recording.skillId, dest);
+  return { status: "exported", skill_id: recording.skillId, export_path: dest, out_dir: root };
+}
+
+export async function exportCatalogSkills(outDir, { tenant = "" } = {}) {
+  const root = await resolveExportDirectory(outDir);
+  await persistExportDirectory(root);
+  const wanted = String(tenant || "").trim();
+  const written = [];
+  const errors = [];
+  for (const row of await readCatalog()) {
+    if (row.frozen) continue;
+    if (wanted && row.tenant && row.tenant !== wanted) continue;
+    const recordingId = String(row.recording_id || "").trim();
+    const label = row.title || row.name || recordingId;
+    if (!recordingId.startsWith("rec_")) {
+      errors.push(`${label}: 缺少 recording_id`);
+      continue;
+    }
+    const outcome = await exportSkill(recordingId, root);
+    if (outcome.status === "exported") written.push(outcome.export_path);
+    else errors.push(`${label}: ${outcome.status || "export_failed"}`);
+  }
+  return {
+    out_dir: root,
+    mode: "dump",
+    count: written.length,
+    written,
+    errors,
+  };
 }

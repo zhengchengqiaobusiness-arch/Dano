@@ -11,6 +11,17 @@ export function dataRoot() {
   return process.env.CABP_DATA || path.join(ROOT, "data");
 }
 
+export function isInternalDataPath(target) {
+  const dest = path.resolve(String(target || ""));
+  const root = path.resolve(dataRoot());
+  if (dest === root) return true;
+  for (const folder of ["skills", "recordings", "sessions", "tokens"]) {
+    const base = path.join(root, folder);
+    if (dest === base || dest.startsWith(`${base}${path.sep}`)) return true;
+  }
+  return false;
+}
+
 export function recordingDir(id) {
   return path.join(dataRoot(), "recordings", id);
 }

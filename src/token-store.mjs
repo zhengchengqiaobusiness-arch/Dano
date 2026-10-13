@@ -64,10 +64,41 @@ export async function writeAuthLocalFile(packageDir, headers, credential = null)
   return target;
 }
 
+export const LINUX_EXPORT_DIRECTORY = "/opt/dano/runtime-data/.agents/skills";
+
+export function defaultExportDirectory(platform = process.platform, env = process.env) {
+  const fromEnv = String(env?.CABP_EXPORT_DIR || "").trim();
+  if (fromEnv) return fromEnv.replace(/[\\/]+$/, "") || fromEnv;
+  if (platform !== "win32") return LINUX_EXPORT_DIRECTORY;
+  return path.join(dataRoot(), "export");
+}
+
+export function usableExportDir(text, platform = process.platform) {
+  const dir = String(text || "").trim().replace(/[\\/]+$/, "");
+  if (!dir) return "";
+  if (platform !== "win32" && /^[A-Za-z]:[\\/]/.test(dir)) return "";
+  if (platform !== "win32" && !dir.startsWith("/") && dir.includes("\\")) return "";
+  return dir;
+}
+
+export function pickExportDirectory(requested, stored = "", platform = process.platform, env = process.env) {
+  for (const raw of [requested, stored]) {
+    const text = usableExportDir(raw, platform);
+    if (text) return text;
+  }
+  return defaultExportDirectory(platform, env);
+}
+
+export async function resolveExportDirectory(requested = "") {
+  const stored = await readExportDirectory().catch(() => "");
+  return pickExportDirectory(requested, stored);
+}
+
 export async function writebackExportedPackages({ subsystem, headers }) {
   const wanted = String(subsystem || "").trim();
   const updated = [];
-  const roots = [path.join(dataRoot(), "export")];
+  const exportRoot = await resolveExportDirectory();
+  const roots = [...new Set([exportRoot, path.join(dataRoot(), "export")])];
   for (const root of roots) {
     let entries = [];
     try {
@@ -110,4 +141,9 @@ export async function writeExportDirectory(outDir) {
   await mkdir(path.dirname(exportDirFile()), { recursive: true });
   await writeFile(exportDirFile(), `${JSON.stringify({ out_dir: next, updated_at: new Date().toISOString() }, null, 2)}\n`, "utf8");
   return next;
+}
+
+export async function persistExportDirectory(outDir) {
+  const next = usableExportDir(outDir) || defaultExportDirectory();
+  return writeExportDirectory(next);
 }

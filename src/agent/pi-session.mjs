@@ -42,8 +42,17 @@ export function resultLine(result) {
       return `失败 ${codes}`.slice(0, 500);
     }
     if (body?.ok === false) {
-      const extra = [body.error, body.hint, body.file, body.stderr, body.stdout, ...(body.names || []), ...(body.writable || [])].filter(Boolean).join(" ");
-      return `失败 ${extra}`.slice(0, 500);
+      const exit = body.code != null && body.code !== "" ? ` exit=${body.code}` : "";
+      let biz = "";
+      const stdout = String(body.stdout || "").trim();
+      try {
+        const parsed = JSON.parse(stdout);
+        if (parsed && typeof parsed === "object" && "code" in parsed) biz = ` business_code=${parsed.code}`;
+      } catch {
+        // stdout 不是 JSON
+      }
+      const extra = [body.error, body.hint, body.file, body.stderr, ...(body.names || []), ...(body.writable || [])].filter(Boolean).join(" ");
+      return `失败${exit}${biz} ${extra}`.slice(0, 500);
     }
     const requiredEmpty = Array.isArray(body.required_empty_overlay) && body.required_empty_overlay.length
       ? ` 必填空=${overlayItemsLine(body.required_empty_overlay, 8)}`
@@ -94,6 +103,7 @@ export function listedWriteKeys(listed) {
   const seen = new Set();
   for (const row of Array.isArray(listed) ? listed : []) {
     if (!/POST|PUT|PATCH|DELETE/i.test(String(row.method || ""))) continue;
+    if (row.issues_credential) continue;
     for (const key of Array.isArray(row.keys) ? row.keys : []) {
       const name = String(key || "").trim();
       if (!name || seen.has(name)) continue;
@@ -102,6 +112,23 @@ export function listedWriteKeys(listed) {
     }
   }
   return keys;
+}
+
+export function listedWrites(listed) {
+  const rows = [];
+  const seen = new Set();
+  for (const row of Array.isArray(listed) ? listed : []) {
+    if (!/^(POST|PUT|PATCH|DELETE)$/i.test(String(row.method || ""))) continue;
+    if (row.issues_credential) continue;
+    const path = String(row.path || "").trim();
+    if (!path) continue;
+    const method = String(row.method || "").toUpperCase();
+    const id = `${method} ${path}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    rows.push({ id: row.id || "", method, path });
+  }
+  return rows;
 }
 
 function quotedLookupNames(text, heading) {
@@ -137,10 +164,11 @@ export function unmatchedGoalNames(goalNamed, clicked, goalText = "") {
   return names;
 }
 
-export function recordingStayOnPage({ verifyErrors, pageProgressed, progressed, unmatchedGoalNames, requiredEmptyOverlay }) {
+export function recordingStayOnPage({ verifyErrors, pageProgressed, progressed, unmatchedGoalNames, requiredEmptyOverlay, recordedWrite }) {
   if (Array.isArray(verifyErrors) && verifyErrors.length) return false;
   if (pageProgressed && !progressed) return true;
   if (Array.isArray(unmatchedGoalNames) && unmatchedGoalNames.length > 0) return true;
+  if (recordedWrite) return false;
   return Array.isArray(requiredEmptyOverlay) && requiredEmptyOverlay.length > 0;
 }
 
@@ -165,10 +193,11 @@ export function factsForContinue(context) {
     listed_write_keys: Array.isArray(context?.listed_write_keys)
       ? context.listed_write_keys.slice(0, 80)
       : listedWriteKeys(context?.listed).slice(0, 80),
+    listed_writes: Array.isArray(context?.listed_writes)
+      ? context.listed_writes.slice(0, 40)
+      : listedWrites(context?.listed).slice(0, 40),
     clicked,
     filled: context?.filled || [],
-    goal_named: goal_named.slice(0, 40),
-    goal_named_unclicked: unmatchedGoalNames(goal_named, clicked, goalText).slice(0, 40),
     overlay_fields,
     overlay_editable: overlay_editable.map((row) => ({
       ref: row.ref || "",
@@ -182,6 +211,8 @@ export function factsForContinue(context) {
     empty_overlay: Array.isArray(context?.empty_overlay) ? context.empty_overlay.slice(0, 40) : [],
     required_empty_overlay: Array.isArray(context?.required_empty_overlay) ? context.required_empty_overlay.slice(0, 40) : [],
     snapshot: String(text).slice(0, 12000),
+    goal_named: goal_named.slice(0, 40),
+    goal_named_unclicked: unmatchedGoalNames(fromSnap, clicked, goalText).slice(0, 40),
   };
 }
 
@@ -203,7 +234,7 @@ export async function recordingSystemPrompt(goal) {
   return `${await loadMethodPack()}\n\n${METHOD_CLOSER}\n\n${JSON.stringify(goal)}`;
 }
 
-export function nextRecordingPrompt({ finished, paused, progressed, continues, verifyErrors, pageProgressed, unmatchedGoalNames, requiredEmptyOverlay }) {
+export function nextRecordingPrompt({ finished, paused, progressed, continues, verifyErrors, pageProgressed, unmatchedGoalNames, requiredEmptyOverlay, recordedWrite }) {
   if (finished || paused) return null;
   const errors = Array.isArray(verifyErrors) && verifyErrors.length ? `\n${JSON.stringify(verifyErrors)}` : "";
   if (Array.isArray(verifyErrors) && verifyErrors.length) {
@@ -213,8 +244,8 @@ export function nextRecordingPrompt({ finished, paused, progressed, continues, v
     }
     return `校验失败。对照 listed、overlay_editable、listed_write_keys 只改 SKILL.md、scripts/client.py、references/api.md，再 run_skill_command。不要 browser_act。references/api.md 标题只能是字段、绑定、未解决、已验证读命令，不要用接口 path 当标题。字段段每条要有 page_name 和 source（七个词之一，说明不要写进 source）。调用方字段要有 questions[]。活选项 options 留空，封闭枚举才写 options。${errors}`;
   }
-  if (recordingStayOnPage({ verifyErrors, pageProgressed, progressed, unmatchedGoalNames, requiredEmptyOverlay })) {
-    return "页面目标还没做完。对照当前树、goal_named、goal_named_unclicked、clicked、row_facts、overlay_editable、required_empty_overlay、listed_write_keys 和目标原文接着点、填。目标原文点名的名字或列，在当前树找 [ref=] 去点；goal_named_unclicked 里还有名字、或 required_empty_overlay 还非空时不要当成做完，也不要 write_skill_file 或 verify_skill。指针样式不是能不能点的依据。empty=true 的还要填。stale_ref 或 behind_overlay 只用工具返回的新树，不要用旧 ref。同源换页可用 browser_open；跨源不要。人可以在同一个预览里点；actor=human 时等这次操作进当前树和 listed 再接着做。";
+  if (recordingStayOnPage({ verifyErrors, pageProgressed, progressed, unmatchedGoalNames, requiredEmptyOverlay, recordedWrite })) {
+    return "页面目标还没做完。对照当前树、goal_named、goal_named_unclicked、clicked、row_facts、overlay_editable、required_empty_overlay、listed、listed_write_keys 和目标原文接着点、填。目标原文点名的名字或列，在当前树找 [ref=] 去点。goal_named_unclicked 只看当前树里还没出现在 clicked 的名字；clicked 里已有的不要重复点。required_empty_overlay 还非空且 listed 还没有这次写入时不要当成做完，也不要 write_skill_file 或 verify_skill。指针样式不是能不能点的依据。empty=true 的还要填。stale_ref 或 behind_overlay 只用工具返回的新树，不要用旧 ref。同源换页可用 browser_open；跨源不要。人可以在同一个预览里点；actor=human 时等这次操作进当前树和 listed 再接着做。";
   }
   if (continues >= MAX_SKILL_CONTINUES) return null;
   const lead = progressed
@@ -359,6 +390,7 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
       if (recording?.paused || session.isStreaming) return;
       const current = typeof host.context === "function" ? await host.context() : {};
       const facts = factsForContinue(current);
+      const recordedWrite = (facts.listed_writes || []).length > 0;
       const follow = nextRecordingPrompt({
         finished: recording?.finished,
         paused: recording?.paused,
@@ -368,6 +400,7 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
         pageProgressed,
         unmatchedGoalNames: facts.goal_named_unclicked,
         requiredEmptyOverlay: facts.required_empty_overlay,
+        recordedWrite,
       });
       const stayOnPage = recordingStayOnPage({
         verifyErrors: recording?.verify?.errors,
@@ -375,6 +408,7 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
         progressed,
         unmatchedGoalNames: facts.goal_named_unclicked,
         requiredEmptyOverlay: facts.required_empty_overlay,
+        recordedWrite,
       });
       const skillTurn = progressed && !stayOnPage;
       progressed = false;

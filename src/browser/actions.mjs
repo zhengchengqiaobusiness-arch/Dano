@@ -3,7 +3,7 @@ import path from "node:path";
 import { recordingDir } from "../paths.mjs";
 import { originFromUrl } from "../session-store.mjs";
 import { browserSession, raceWall, sameDocumentNav, withPage } from "./session.mjs";
-import { locatorFor, overlayControlFacts, overlayFactLists, overlayHasRef, takeSnapshot, yamlFingerprint } from "./snapshot.mjs";
+import { locatorFor, overlayControlFacts, overlayExactBlock, overlayFactLists, overlayHasRef, takeSnapshot, yamlFingerprint } from "./snapshot.mjs";
 import { beginAction, endAction, listNetwork, waitForAction } from "./network.mjs";
 import { logLine } from "../log.mjs";
 
@@ -159,8 +159,9 @@ async function perform(recordingId, input) {
     }
     let emptyRetry = true;
     let snapMs = 3000;
+    const beforeOverlay = yamlFingerprint(overlayExactBlock(state.lastPublished?.text || ""));
+    const sameDoc = sameDocumentNav(state.page.url(), url);
     try {
-      const sameDoc = sameDocumentNav(state.page.url(), url);
       await state.page.goto(url, {
         waitUntil: sameDoc ? "commit" : "domcontentloaded",
         timeout: sameDoc ? 4000 : 8000,
@@ -172,7 +173,17 @@ async function perform(recordingId, input) {
       emptyRetry = false;
       snapMs = 2500;
     }
-    return withOverlayFacts(recordingId, { ok: true, snapshot: await snapshotAfter(recordingId, snapMs, { retryEmpty: emptyRetry }) });
+    let snapshot = await snapshotAfter(recordingId, snapMs, { retryEmpty: emptyRetry });
+    if (sameDoc) {
+      for (let i = 0; i < 3; i += 1) {
+        const nowOverlay = yamlFingerprint(overlayExactBlock(snapshot.text || ""));
+        if (beforeOverlay && nowOverlay !== beforeOverlay) break;
+        if (!beforeOverlay && i > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        snapshot = await snapshotAfter(recordingId, snapMs, { retryEmpty: emptyRetry });
+      }
+    }
+    return withOverlayFacts(recordingId, { ok: true, snapshot });
   }
   if (action === "snapshot") {
     return withOverlayFacts(recordingId, { ok: true, snapshot: await snapshotAfter(recordingId, 8000) });
@@ -189,6 +200,9 @@ async function perform(recordingId, input) {
       as_image: true,
       mimeType: "image/png",
       data: Buffer.from(bytes).toString("base64"),
+      epoch: state.epoch,
+      snap: state.snap || 0,
+      hint: "这张图不换树。点、填只用最近一次 snapshot 树里的 [ref=]。",
     };
   }
   if (action !== "fill_fields" && !String(input.ref || "").trim()) {

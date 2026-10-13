@@ -31,7 +31,6 @@ export default function StudioHeader({
           items={[
             {
               title: "录制准备",
-              disabled: keepRecording,
               status: current === 0 ? "process" : keepRecording || current > 0 ? "finish" : "wait",
             },
             {

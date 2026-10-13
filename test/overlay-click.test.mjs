@@ -204,6 +204,44 @@ test("hash route does not bump epoch or drop current refs", { timeout: 60000 }, 
   }
 });
 
+test("hash open waits until the new view overlay is current", { timeout: 60000 }, async () => {
+  const html = `<!doctype html><html><body>
+    <div id="a"><label>甲字段<input id="a-field" /></label></div>
+    <div id="b" style="display:none"><label>乙字段<input id="b-field" required aria-required="true" /></label></div>
+    <script>
+      function show() {
+        const onB = location.hash === "#/b";
+        document.getElementById("a").hidden = onB;
+        document.getElementById("b").hidden = !onB;
+        document.getElementById("a").style.display = onB ? "none" : "block";
+        document.getElementById("b").style.display = onB ? "block" : "none";
+      }
+      window.addEventListener("hashchange", () => setTimeout(show, 80));
+      show();
+    </script>
+  </body></html>`;
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}/`;
+  const id = "rec_hash_overlay";
+  try {
+    await openBrowser({ recordingId: id, url, storageState: null, viewport: { width: 900, height: 700 } });
+    const home = await runAction(id, { action: "snapshot" });
+    assert.match(String((home.overlay_fields || []).map((row) => row.name).join(" ")), /甲字段/);
+    const opened = await runAction(id, { action: "open", url: `${url}#/b` });
+    assert.equal(opened.ok, true);
+    const names = (opened.overlay_fields || []).map((row) => String(row.name || ""));
+    assert.equal(names.some((name) => name.includes("甲字段")), false);
+    assert.equal(names.some((name) => name.includes("乙字段")), true);
+  } finally {
+    await closeBrowser(id);
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("browser_open same url is idempotent; same-origin hash may goto", { timeout: 60000 }, async () => {
   const site = await serve();
   const id = "rec_open_nav";

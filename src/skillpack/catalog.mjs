@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { dataRoot } from "../paths.mjs";
+import { dataRoot, isInternalDataPath } from "../paths.mjs";
 import { readGoal } from "../evidence/store.mjs";
 
 export function catalogTitle(title, goalText, fallback) {
@@ -22,6 +22,17 @@ export async function readCatalog() {
     if (error?.code === "ENOENT") return [];
     return [];
   }
+}
+
+export function catalogItemMatches(row, skillId) {
+  const key = String(skillId || "").trim();
+  if (!key) return false;
+  return row.skill_id === key || row.name === key || row.recording_id === key || row.action === key;
+}
+
+async function saveCatalog(items) {
+  await mkdir(path.dirname(catalogFile()), { recursive: true });
+  await writeFile(catalogFile(), `${JSON.stringify(items, null, 2)}\n`, "utf8");
 }
 
 export async function upsertCatalog(recording) {
@@ -53,30 +64,51 @@ export async function upsertCatalog(recording) {
     version: 1,
     frozen: false,
   };
-  const index = items.findIndex((row) => row.skill_id === item.skill_id);
-  if (index >= 0) items[index] = { ...items[index], ...item, created_at: items[index].created_at || now };
-  else items.push(item);
-  await mkdir(path.dirname(catalogFile()), { recursive: true });
-  await writeFile(catalogFile(), `${JSON.stringify(items, null, 2)}\n`, "utf8");
+  const index = items.findIndex((row) => row.skill_id === item.skill_id || row.recording_id === item.recording_id);
+  if (index >= 0) {
+    const prev = items[index];
+    items[index] = {
+      ...prev,
+      ...item,
+      created_at: prev.created_at || now,
+      frozen: Boolean(prev.frozen),
+      version: Number(prev.version || 1),
+      export_path: prev.export_path && prev.export_path !== item.export_path ? prev.export_path : item.export_path,
+    };
+  } else items.push(item);
+  await saveCatalog(items);
+  return items[index >= 0 ? index : items.length - 1];
+}
+
+export async function patchCatalogItem(skillId, patch) {
+  const items = await readCatalog();
+  const item = items.find((row) => catalogItemMatches(row, skillId));
+  if (!item) return null;
+  Object.assign(item, patch || {}, { updated_at: new Date().toISOString() });
+  await saveCatalog(items);
   return item;
 }
 
 export async function setSkillFrozen(skillId, frozen) {
-  const items = await readCatalog();
-  const item = items.find((row) => row.skill_id === skillId || row.name === skillId);
-  if (!item) return null;
-  item.frozen = Boolean(frozen);
-  item.updated_at = new Date().toISOString();
-  await writeFile(catalogFile(), `${JSON.stringify(items, null, 2)}\n`, "utf8");
-  return item;
+  return patchCatalogItem(skillId, { frozen: Boolean(frozen) });
+}
+
+export async function setSkillExportPath(skillId, exportPath) {
+  return patchCatalogItem(skillId, { export_path: String(exportPath || "").trim() });
 }
 
 export async function removeSkill(skillId) {
   const items = await readCatalog();
-  const next = items.filter((row) => row.skill_id !== skillId && row.name !== skillId);
-  if (next.length === items.length) return null;
-  await writeFile(catalogFile(), `${JSON.stringify(next, null, 2)}\n`, "utf8");
-  return items.find((row) => row.skill_id === skillId || row.name === skillId);
+  const found = items.find((row) => catalogItemMatches(row, skillId));
+  if (!found) return null;
+  await saveCatalog(items.filter((row) => !catalogItemMatches(row, skillId)));
+  return found;
+}
+
+export function exportedFolderToRemove(item) {
+  const exportPath = String(item?.export_path || item?.package_dir || "").trim();
+  if (!exportPath || isInternalDataPath(exportPath)) return "";
+  return exportPath;
 }
 
 export async function listSkillsPage(page = 1, pageSize = 0) {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { hostTools } from "../src/agent/tools.mjs";
-import { MAX_STALLS, factsForContinue, listedWriteKeys, nextRecordingPrompt, recordingStayOnPage, resultLine, stallVerdict, unmatchedGoalNames } from "../src/agent/pi-session.mjs";
+import { MAX_STALLS, factsForContinue, listedWriteKeys, listedWrites, nextRecordingPrompt, recordingStayOnPage, resultLine, stallVerdict, unmatchedGoalNames } from "../src/agent/pi-session.mjs";
 
 test("a silent model turn is interrupted after the stall budget, and only repeated stalls fail the recording", () => {
   const stallMs = 180000;
@@ -95,11 +95,22 @@ test("a finished page turn continues until the skill is verified", () => {
   assert.equal(facts.goal_named.includes("导出"), false);
   assert.ok(facts.goal_named_unclicked.includes("未填数量"));
   assert.equal(facts.goal_named_unclicked.includes("7"), false);
+  const factsLater = factsForContinue({
+    seen_goal_names: ["月报", "未填数量"],
+    clicked: ["cell \"7\" col \"应填数量\""],
+    snapshot: { text: "goal_exact\n- cell \"7\" col \"未填数量\" [ref=f0:e12@1]\nframe f0 http://example.test/\n" },
+    goal: { goal_text: "点应填数量、已填数量、未填数量、月报" },
+  });
+  assert.ok(factsLater.goal_named.includes("月报"));
+  assert.equal(factsLater.goal_named_unclicked.includes("月报"), false);
+  assert.ok(factsLater.goal_named_unclicked.includes("未填数量"));
   assert.deepEqual(unmatchedGoalNames(["未填数量", "7", "导出"], ["cell \"7\" col \"应填数量\""], "点应填数量、已填数量、未填数量"), ["未填数量"]);
   assert.equal(recordingStayOnPage({ pageProgressed: false, progressed: true, unmatchedGoalNames: ["未填数量"] }), true);
   assert.equal(recordingStayOnPage({ verifyErrors: [{ code: "auth_expired" }], unmatchedGoalNames: ["未填数量"] }), false);
   assert.equal(recordingStayOnPage({ pageProgressed: false, progressed: true, unmatchedGoalNames: [], requiredEmptyOverlay: ["标题"] }), true);
   assert.equal(recordingStayOnPage({ pageProgressed: false, progressed: true, unmatchedGoalNames: [], requiredEmptyOverlay: [] }), false);
+  assert.equal(recordingStayOnPage({ pageProgressed: false, progressed: true, unmatchedGoalNames: [], requiredEmptyOverlay: ["标题"], recordedWrite: true }), false);
+  assert.equal(recordingStayOnPage({ pageProgressed: false, progressed: true, unmatchedGoalNames: ["未填数量"], requiredEmptyOverlay: ["标题"], recordedWrite: true }), true);
   assert.equal(nextRecordingPrompt({ finished: false, paused: false, progressed: true, continues: 8, verifyErrors: [{ code: "command_not_run" }] }), null);
   const stillPage = nextRecordingPrompt({ finished: false, paused: false, progressed: false, continues: 8, pageProgressed: true });
   assert.match(stillPage, /write_skill_file 或 verify_skill|不要 verify_skill/);
@@ -107,6 +118,8 @@ test("a finished page turn continues until the skill is verified", () => {
   assert.match(stillPage, /指针样式不是能不能点的依据/);
   assert.match(stillPage, /goal_named/);
   assert.match(stillPage, /同源换页可用 browser_open/);
+  assert.match(stillPage, /clicked 里已有的不要重复点/);
+  assert.match(stillPage, /只看当前树/);
   assert.doesNotMatch(stillPage, /已经有页面时不要 browser_open 换地址|already_open/);
   assert.doesNotMatch(stillPage, /禁止.*取消|不要点取消/);
   const skippedWrite = nextRecordingPrompt({ finished: false, paused: false, progressed: true, continues: 1, unmatchedGoalNames: ["未填数量"] });
@@ -119,8 +132,34 @@ test("a finished page turn continues until the skill is verified", () => {
   assert.doesNotMatch(skippedWrite, /对照 listed（本场全部 xhr\/fetch 索引）、overlay_editable、listed_write_keys 和目标原文写三文件/);
   assert.deepEqual(listedWriteKeys([
     { method: "GET", keys: ["id"] },
+    { method: "POST", keys: ["refreshToken"], issues_credential: true },
     { method: "POST", keys: ["title", "deptId"] },
   ]), ["title", "deptId"]);
+  assert.deepEqual(listedWrites([
+    { id: "req_3", method: "POST", path: "/auth/refresh", issues_credential: true },
+    { id: "req_50", method: "POST", path: "/biz/submit", keys: ["title"] },
+  ]), [{ id: "req_50", method: "POST", path: "/biz/submit" }]);
+  const afterRecordedWrite = nextRecordingPrompt({
+    finished: false, paused: false, progressed: true, continues: 1,
+    unmatchedGoalNames: [], requiredEmptyOverlay: ["标题"], recordedWrite: true,
+  });
+  assert.match(afterRecordedWrite, /写三文件/);
+  assert.doesNotMatch(afterRecordedWrite, /不要 write_skill_file/);
+  const commandFail = resultLine({
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        ok: false,
+        code: 1,
+        stdout: JSON.stringify({ code: 0, msg: "", data: [{ id: 1 }] }, null, 2),
+        stderr: "",
+      }),
+    }],
+  });
+  assert.match(commandFail, /失败/);
+  assert.match(commandFail, /exit=1/);
+  assert.match(commandFail, /business_code=0/);
+  assert.doesNotMatch(commandFail, /\"data\"/);
   const headingLine = resultLine({
     content: [{
       type: "text",

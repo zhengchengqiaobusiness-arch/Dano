@@ -3,13 +3,15 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import path from "node:path";
 import { packageRoot } from "../src/paths.mjs";
+import { createApp, listen } from "../src/server.mjs";
 
 test("web has three steps and no capability page", async () => {
   const html = await readFile(path.join(packageRoot(), "frontend", "src", "layout", "StudioHeader.tsx"), "utf8");
   assert.match(html, /录制准备/);
   assert.match(html, /页面录制/);
   assert.match(html, /Skill 目录/);
-  assert.match(html, /disabled: keepRecording/);
+  assert.match(html, /disabled: !keepRecording/);
+  assert.equal(html.includes("disabled: keepRecording,"), false);
   assert.equal(html.includes("能力结果"), false);
   assert.equal(html.includes("产出 Skill"), false);
   const recorder = await readFile(path.join(packageRoot(), "frontend", "src", "components", "PageRecorder.tsx"), "utf8");
@@ -22,7 +24,11 @@ test("web has three steps and no capability page", async () => {
   assert.match(recorder, /incoming.type === "thoughts"/);
   assert.match(recorder, /chunk.kind === "tool"/);
   assert.equal(recorder.includes("chunk.kind === \"tool\" || chunk.kind === \"thinking\""), false);
-  assert.match(recorder, /keepRecording && next === 0/);
+  assert.match(recorder, /beginFreshRecordingEntry\(sessionStorage\)/);
+  assert.match(recorder, /if \(next === 0\)/);
+  assert.equal(recorder.includes("keepRecording && next === 0"), false);
+  const layout = await readFile(path.join(packageRoot(), "frontend", "src", "layout", "AppLayout.tsx"), "utf8");
+  assert.match(layout, /beginFreshRecordingEntry\(sessionStorage\)/);
   assert.match(recorder, /rememberLiveRecording/);
   assert.match(recorder, /rememberedLiveRecording\(sessionStorage\)/);
   assert.match(recorder, /current === 0 \? 1 : current/);
@@ -37,4 +43,15 @@ test("web has three steps and no capability page", async () => {
   assert.match(resume, /keep === true \|\| recordingId\.startsWith\("rec_"\)/);
   assert.match(resume, /keep: true/);
   assert.match(resume, /if \(!recordingId\.startsWith\("rec_"\) && !action\) return/);
+});
+
+test("a missing bundled page is 404, not a process crash", async () => {
+  const server = createApp();
+  const address = await listen(server, 0);
+  try {
+    const res = await fetch(`http://127.0.0.1:${address.port}/`);
+    assert.equal(res.status, 404);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

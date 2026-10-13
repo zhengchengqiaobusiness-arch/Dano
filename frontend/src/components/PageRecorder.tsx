@@ -64,6 +64,7 @@ import { routeSummaryFromOutcome } from "../api/skillExportDraft";
 import { historyLifecycleView } from "../api/skillLifecycle";
 import { applyExportedCatalog, notifySkillCatalogChanged } from "../api/skillCatalog";
 import {
+  beginFreshRecordingEntry,
   forgetRecordingResultId,
   rememberedLiveRecording,
   rememberedRecordingResultId,
@@ -2667,7 +2668,21 @@ export default function PageRecorder({
       setViewStage(2);
       return;
     }
-    if (keepRecording && next === 0) return;
+    if (next === 0) {
+      beginFreshRecordingEntry(sessionStorage);
+      closeRecordingSocket();
+      resumeOnlyRef.current = false;
+      setResumeOnly(false);
+      setKeepRecording(false);
+      setKeepResult(false);
+      setViewStage(0);
+      setConnecting(false);
+      snapshotRef.current = null;
+      setSnapshot(null);
+      setThoughts([]);
+      actionRef.current = "";
+      return;
+    }
     if (next <= (keepRecording ? 1 : 0)) setViewStage(next);
   }
 

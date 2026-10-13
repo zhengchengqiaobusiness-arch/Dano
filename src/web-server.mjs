@@ -12,8 +12,17 @@ const server = http.createServer((req, res) => {
     res.end();
     return;
   }
-  res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-  createReadStream(path.join(webDir(), file)).pipe(res);
+  const stream = createReadStream(path.join(webDir(), file));
+  stream.on("error", () => {
+    if (!res.headersSent) {
+      res.writeHead(404);
+      res.end();
+    } else res.destroy();
+  });
+  stream.once("open", () => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    stream.pipe(res);
+  });
 });
 server.listen(port, "127.0.0.1", () => {
   console.log(`playwright-cabp web http://127.0.0.1:${port}`);

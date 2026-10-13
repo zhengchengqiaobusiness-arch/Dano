@@ -13,9 +13,11 @@ services:
       HOST: "0.0.0.0"
       PORT: "18081"
       CABP_DATA: /app/data
+      CABP_EXPORT_DIR: /opt/dano/runtime-data/.agents/skills
     volumes:
       - ./data:/app/data
       - ./.env:/app/.env:ro
+      - /opt/dano/runtime-data/.agents/skills:/opt/dano/runtime-data/.agents/skills
     shm_size: "2gb"
     init: true
     ports:

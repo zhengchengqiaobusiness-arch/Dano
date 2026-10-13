@@ -2,8 +2,7 @@ import { useEffect, useState } from "react";
 import { Table, Tag, Button, Space, Typography, message, Empty, Modal, Input, Alert, Pagination, Popconfirm } from "antd";
 import { useNavigate } from "react-router-dom";
 import { ReloadOutlined, ExportOutlined, KeyOutlined, DeleteOutlined, PauseCircleOutlined } from "@ant-design/icons";
-import { listSkillsPage, getExportDirectory, saveExportDirectory, deleteSkill, freezeSkill, SkillManifest } from "../api/skills";
-import { exportRecordingSkill } from "../api/recording";
+import { listSkillsPage, getExportDirectory, saveExportDirectory, deleteSkill, freezeSkill, exportAgentSkills, SkillManifest } from "../api/skills";
 import TokenModal from "../components/TokenModal";
 import { TENANT_NAME } from "../api/client";
 import { rememberExportDir, rememberedExportDir } from "../api/recording";
@@ -101,31 +100,18 @@ export default function Skills() {
     if (outDir) await persistExportDir(outDir);
     setExporting(true);
     try {
-      const written: string[] = [];
-      const failed: string[] = [];
-      for (const skill of data) {
-        const id = String(skill.recording_id || "").trim();
-        const label = skill.title || skill.name;
-        if (!id.startsWith("rec_")) {
-          failed.push(label);
-          continue;
-        }
-        const outcome = await exportRecordingSkill(id, {
-          title: skill.title || "",
-          out_dir: outDir,
-          recording_id: id,
-          tenant,
-          subsystem: skill.subsystem,
-        });
-        if (outcome.status === "exported") written.push(outcome.export_path || label);
-        else failed.push(label);
+      const result = await exportAgentSkills(outDir, tenant);
+      if (result.out_dir) {
+        rememberExportDir(result.out_dir);
+        setExportDir(result.out_dir);
       }
-      if (written.length && failed.length) {
-        message.warning(`已导出 ${written.length} 个，另有 ${failed.length} 个还不能导出`);
-      } else if (written.length) {
-        message.success(`已导出 ${written.length} 个 Skill`);
+      const errors = Array.isArray(result.errors) ? result.errors.filter(Boolean) : [];
+      if (result.count && errors.length) {
+        message.warning(`已导出 ${result.count} 个，另有 ${errors.length} 个还不能导出`);
+      } else if (result.count) {
+        message.success(`已导出 ${result.count} 个 Skill 到 ${result.out_dir}`);
       } else {
-        message.warning("还没有可以导出的 Skill");
+        message.warning(errors[0] || "还没有可以导出的 Skill");
       }
       setExportOpen(false);
       void load(page, pageSize);
@@ -228,7 +214,7 @@ export default function Skills() {
                   )}
                   <Popconfirm title={`冻结 ${skillDisplayId(r)}?`} description="只清理已导出的文件夹，保留目录记录；冻结后目录重导会跳过。" okText="冻结" cancelText="取消" onConfirm={async () => {
                     try {
-                      const result = await freezeSkill(r.name);
+                      const result = await freezeSkill(r.name || r.recording_id || "");
                       message.success(`已冻结 ${skillDisplayId(r)}(清理 ${result.removed_folders?.length || 0} 个文件夹)`);
                       void load(page, pageSize);
                     } catch (error) {

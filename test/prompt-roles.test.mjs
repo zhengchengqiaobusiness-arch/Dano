@@ -54,7 +54,9 @@ test("the method does not ban number cells or treat filled controls as caller-re
   assert.match(prompt, /questions\[\]/);
   assert.match(prompt, /dateFormat/);
   assert.match(prompt, /goal_named_unclicked/);
-  assert.match(prompt, /也不要 write_skill_file/);
+  assert.match(prompt, /listed 还没有这次写入时不要当填完、不要 write_skill_file/);
+  assert.match(prompt, /screenshot 不换树/);
+  assert.match(prompt, /clicked 里已有的不要重复点/);
   assert.match(prompt, /不要 dataSource/);
   assert.match(prompt, /formIds/);
   assert.match(prompt, /不要 browser_open/);

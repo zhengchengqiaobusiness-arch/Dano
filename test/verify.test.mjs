@@ -1004,4 +1004,6 @@ test("DANO_AUTH_HEADERS overlay must be json.loads, not comma pairs", () => {
   assert.match(authOverlayParseError("raw = os.environ.get(\"DANO_AUTH_HEADERS\")\nif raw:\n    return json.loads(raw)"), /覆盖同名|整袋/);
   assert.equal(hardcodedOriginError("base_url = os.environ.get(\"DANO_BASE_URL\") or runtime.get(\"base_url\") or \"\""), "");
   assert.match(hardcodedOriginError("DEFAULT_BASE_URL = \"https://example.test\""), /源站/);
+  assert.match(hardcodedOriginError("    return \"https://example.test\""), /源站/);
+  assert.equal(hardcodedOriginError("return os.environ.get(\"DANO_BASE_URL\") or runtime.get(\"base_url\") or \"\""), "");
 });

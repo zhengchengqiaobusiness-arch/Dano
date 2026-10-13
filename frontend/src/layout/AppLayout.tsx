@@ -1,6 +1,7 @@
 import { ConfigProvider, Layout } from "antd";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { TENANT_NAME } from "../api/client";
+import { beginFreshRecordingEntry } from "../api/recordingResume";
 import { STUDIO_THEME } from "../studioTheme";
 import StudioHeader from "./StudioHeader";
 
@@ -23,6 +24,7 @@ export default function AppLayout() {
             keepRecording
             onChange={(next) => {
               if (next === 2) nav("/skills");
+              else if (next === 0) nav("/recording", { state: beginFreshRecordingEntry(sessionStorage) });
               else nav("/recording");
             }}
             tenant={tenant === "—" ? undefined : tenant}
