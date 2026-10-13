@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Modal, Input, Button, Space, Typography, Tag, message, Empty, Alert, Descriptions } from "antd";
 import { ReloadOutlined, SaveOutlined } from "@ant-design/icons";
 import { getRuntimeToken, saveRuntimeToken, RuntimeToken } from "../api/skills";
+import { isTenantAuthError } from "../api/client";
 import { rememberedExportDir } from "../api/recording";
 
 // 录制型 skill 运行期鉴权。token 按 (tenant, subsystem) 存在 Pi_check 本机仓库。
@@ -21,7 +22,7 @@ export default function TokenModal({
     try {
       setRec(await getRuntimeToken(tenant, subsystem));
     } catch (e: any) {
-      message.error("查询失败:" + (e?.response?.data?.detail || e.message));
+      if (!isTenantAuthError(e)) message.error("查询失败:" + (e?.response?.data?.detail || e.message));
     } finally {
       setLoading(false);
     }
@@ -58,7 +59,7 @@ export default function TokenModal({
       setToken("");
       await load();
     } catch (e: any) {
-      message.error("保存失败:" + (e?.response?.data?.detail || e.message));
+      if (!isTenantAuthError(e)) message.error("保存失败:" + (e?.response?.data?.detail || e.message));
     } finally {
       setSaving(false);
     }

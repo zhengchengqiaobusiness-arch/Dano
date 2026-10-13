@@ -41,6 +41,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useNavigate } from "react-router-dom";
 import type {
   FormEvent,
   KeyboardEvent,
@@ -74,6 +75,7 @@ import {
 } from "../api/recordingResume";
 import type { SkillGenerationRequest } from "../api/recording";
 import { getExportDirectory, listSkills, saveExportDirectory } from "../api/skills";
+import { clearTenant, getTenantKey } from "../api/client";
 import Skills from "../pages/Skills";
 import { adminBasename } from "../adminBase";
 import StudioHeader from "../layout/StudioHeader";
@@ -805,6 +807,7 @@ export default function PageRecorder({
   baseUrl,
   storageState,
 }: PageRecorderProps) {
+  const nav = useNavigate();
   const setup = useMemo(readSetupDraft, []);
   const [startUrl, setStartUrl] = useState(setup.startUrl);
   const [goalText, setGoalText] = useState(setup.goalText);
@@ -1798,6 +1801,10 @@ export default function PageRecorder({
   }
 
   function startRecording() {
+    if (!tenant) {
+      message.error("请先选择租户");
+      return;
+    }
     if (!startUrl.trim() || !goalText.trim()) {
       message.error("请填写业务页地址和录制目标");
       return;
@@ -4020,13 +4027,14 @@ export default function PageRecorder({
         keepRecording={keepRecording}
         onChange={changeStage}
         tenant={tenant || undefined}
+        onSwitchTenant={() => { clearTenant(); nav("/tenant"); }}
       />
       <div className="studio-body">
       <div className="studio-main">
       <div className="studio-workspace">
       <div style={{ display: viewStage === 0 ? "flex" : "none", height: "100%", minHeight: 0 }}>{renderSetup()}</div>
       {keepRecording ? <div style={{ display: viewStage === 1 ? "flex" : "none", height: "100%", minHeight: 0 }}>{renderRecording()}</div> : null}
-      <div className="studio-catalog" style={{ display: viewStage === 2 ? "flex" : "none" }}><Skills /></div>
+      {getTenantKey() ? <div className="studio-catalog" style={{ display: viewStage === 2 ? "flex" : "none" }}><Skills /></div> : null}
       </div>
       </div>
       <Modal

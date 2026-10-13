@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Button, Card, Form, Input, Typography, message } from "antd";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { changePassword, login } from "../api/skills";
 import { getTenantKey, setTenant } from "../api/client";
 
@@ -59,9 +59,6 @@ export default function Tenant() {
             登录
           </Button>
         </Form>
-        <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0, textAlign: "center" }}>
-          还没有租户? <Link to="/tenant/register">新建租户</Link>
-        </Typography.Paragraph>
       </Card>
 
       {getTenantKey() ? (

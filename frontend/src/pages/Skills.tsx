@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { ReloadOutlined, ExportOutlined, KeyOutlined, DeleteOutlined, PauseCircleOutlined, CheckCircleOutlined } from "@ant-design/icons";
 import { listSkillsPage, getExportDirectory, saveExportDirectory, deleteSkill, freezeSkill, resumeSkill, exportAgentSkills, SkillManifest } from "../api/skills";
 import TokenModal from "../components/TokenModal";
-import { TENANT_NAME } from "../api/client";
+import { TENANT_NAME, getTenantKey, isTenantAuthError } from "../api/client";
 import { rememberExportDir, rememberedExportDir } from "../api/recording";
 import { observeSkillCatalogChanges, skillDisplayId } from "../api/skillCatalog";
 
@@ -26,6 +26,12 @@ function fmtTime(s?: string) {
   if (Number.isNaN(d.getTime())) return s;
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function catalogFail(prefix: string, error: unknown) {
+  if (isTenantAuthError(error)) return;
+  const e = error as { response?: { data?: { detail?: string; errors?: string[] } }; message?: string };
+  message.error(prefix + (e?.response?.data?.detail || e?.response?.data?.errors?.[0] || e?.message || ""));
 }
 
 type Row = SkillManifest & { __group?: boolean; __ops?: number; children?: SkillManifest[] };
@@ -67,6 +73,10 @@ export default function Skills() {
   const tenant = localStorage.getItem(TENANT_NAME) || "";
 
   async function loadExportDir() {
+    if (!getTenantKey()) {
+      setExportDir(rememberedExportDir());
+      return;
+    }
     try {
       const dir = await getExportDirectory();
       if (dir) {
@@ -116,13 +126,19 @@ export default function Skills() {
       setExportOpen(false);
       void load(page, pageSize);
     } catch (e: any) {
-      message.error("导出失败:" + (e?.response?.data?.detail || e?.response?.data?.errors?.[0] || e.message));
+      catalogFail("导出失败:", e);
     } finally {
       setExporting(false);
     }
   }
 
   async function load(nextPage = page, nextSize = pageSize) {
+    if (!getTenantKey()) {
+      setData([]);
+      setTotal(0);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
       const result = await listSkillsPage(nextPage, nextSize);
@@ -131,7 +147,7 @@ export default function Skills() {
       setPage(Number(result.page) || nextPage);
       setPageSize(Number(result.page_size) || nextSize);
     } catch (e: any) {
-      message.error("加载失败:" + (e?.response?.data?.detail || e?.response?.data?.errors?.[0] || e.message));
+      catalogFail("加载失败:", e);
     } finally {
       setLoading(false);
     }
@@ -219,7 +235,7 @@ export default function Skills() {
                         message.success(`已冻结 ${skillDisplayId(r)}(清理 ${result.removed_folders?.length || 0} 个文件夹)`);
                         void load(page, pageSize);
                       } catch (error) {
-                        message.error(`冻结失败:${error instanceof Error ? error.message : ""}`);
+                        catalogFail("冻结失败:", error);
                       }
                     }}>
                       <Button size="small" icon={<PauseCircleOutlined />}>冻结</Button>
@@ -232,7 +248,7 @@ export default function Skills() {
                         message.success(`已恢复 ${skillDisplayId(r)}(${result.state})`);
                         void load(page, pageSize);
                       } catch (error) {
-                        message.error(`恢复失败:${error instanceof Error ? error.message : ""}`);
+                        catalogFail("恢复失败:", error);
                       }
                     }}>
                       <Button size="small" icon={<CheckCircleOutlined />}>恢复</Button>
@@ -244,7 +260,7 @@ export default function Skills() {
                       message.success(`已删除 ${skillDisplayId(r)}`);
                       void load(page, pageSize);
                     } catch (error) {
-                      message.error(`删除失败:${error instanceof Error ? error.message : ""}`);
+                      catalogFail("删除失败:", error);
                     }
                   }}>
                     <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>

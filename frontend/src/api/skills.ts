@@ -1,5 +1,5 @@
 import { adminHref } from "../adminBase";
-import { api, TENANT_KEY } from "./client";
+import { api, getTenantKey, TENANT_KEY } from "./client";
 
 // 与后端 catalog/manifest.SkillManifest 对齐
 export interface SkillManifest {
@@ -135,6 +135,7 @@ export async function regenerateBackupCodes(
 }
 
 export async function listSkills(): Promise<SkillManifest[]> {
+  if (!getTenantKey()) return [];
   const { data } = await api.get("/v1/skills");
   if (Array.isArray(data)) return data;
   return Array.isArray(data?.items) ? data.items : [];
@@ -148,6 +149,7 @@ export interface SkillListPage {
 }
 
 export async function listSkillsPage(page: number, pageSize: number): Promise<SkillListPage> {
+  if (!getTenantKey()) return { items: [], total: 0, page, page_size: pageSize };
   const { data } = await api.get("/v1/skills", { params: { page, page_size: pageSize } });
   if (Array.isArray(data)) {
     const start = (page - 1) * pageSize;
@@ -172,6 +174,7 @@ export async function resumeSkill(skillId: string): Promise<{ skill_id: string; 
 }
 
 export async function getExportDirectory(): Promise<string> {
+  if (!getTenantKey()) return "";
   const { data } = await api.get("/export/directory");
   return String(data?.out_dir || "").trim();
 }
@@ -236,6 +239,7 @@ export interface RuntimeToken {
 }
 
 export async function getRuntimeToken(tenant: string, subsystem: string): Promise<RuntimeToken> {
+  if (!getTenantKey()) return { tenant, subsystem, has_token: false, headers: {} };
   const { data } = await api.get("/v1/settings/token", { params: { tenant, subsystem } });
   return data;
 }
