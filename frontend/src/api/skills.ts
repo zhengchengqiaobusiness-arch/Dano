@@ -1,3 +1,4 @@
+import { adminHref } from "../adminBase";
 import { api, TENANT_KEY } from "./client";
 
 // 与后端 catalog/manifest.SkillManifest 对齐
@@ -199,7 +200,7 @@ export async function uploadSkillZip(file: File): Promise<ImportSkillResult> {
   const form = new FormData();
   form.append("file", file);
   const tenantKey = localStorage.getItem(TENANT_KEY) || "";
-  const resp = await fetch("/v1/skills/upload", {
+  const resp = await fetch(adminHref("/v1/skills/upload"), {
     method: "POST",
     headers: tenantKey ? { "X-Tenant-Key": tenantKey } : {},
     body: form,

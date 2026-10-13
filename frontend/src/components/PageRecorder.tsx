@@ -74,6 +74,7 @@ import {
 import type { SkillGenerationRequest } from "../api/recording";
 import { getExportDirectory, listSkills, saveExportDirectory } from "../api/skills";
 import Skills from "../pages/Skills";
+import { adminBasename } from "../adminBase";
 import StudioHeader from "../layout/StudioHeader";
 import type {
   RecordingResultDetail,
@@ -707,7 +708,7 @@ function recorderWebSocketUrl() {
   if (configured) return configured;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   // DEV 模式：通过 Vite 代理（/onboarding → Pi_check 18080），避免依赖 Python 网关
-  return `${proto}://${location.host}/onboarding/page/record`;
+  return `${proto}://${location.host}${adminBasename()}/onboarding/page/record`;
 }
 
 const DESKTOP_VIEWPORT = { width: 1440, height: 900 };
