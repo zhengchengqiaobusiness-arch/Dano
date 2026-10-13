@@ -38,7 +38,27 @@ test("fake pi writes the skill and leaves it unchanged", { timeout: 60000 }, asy
         const snap = await tools.browser_snapshot();
         const inner = snap.text.split(/\n/).filter((line) => /\[ref=f1:/.test(line) && /button/i.test(line));
         const ref = (inner[1].match(/\[ref=(f1:[^\]]+)\]/) || inner[1].match(/ref=(f1:e\d+@\d+)/))[1];
-        await tools.browser_act({ action: "click", ref });
+        const acted = await tools.browser_act({ action: "click", ref });
+        const askName = (row) => {
+          const raw = String(row?.name || row?.column || "").trim();
+          const quoted = [...raw.matchAll(/"((?:\\.|[^"])*)"/g)].map((item) => item[1]).find((item) => item.length >= 2);
+          const label = quoted || raw.replace(/^(textbox|searchbox|combobox|spinbutton|checkbox|radio|slider|listbox|generic|button)\s+/i, "").trim();
+          return label.length >= 2 ? label : "";
+        };
+        const overlayNames = [];
+        for (const row of acted.overlay_editable || snap.overlay_editable || []) {
+          const name = askName(row);
+          if (name && !overlayNames.includes(name)) overlayNames.push(name);
+        }
+        if (!overlayNames.length) overlayNames.push("page");
+        const questions = overlayNames.map((name, index) => {
+          const row = (acted.overlay_editable || snap.overlay_editable || []).find((item) => askName(item) === name) || {};
+          const choice = /^(combobox|listbox|radio|checkbox)$/i.test(String(row.role || ""));
+          return choice
+            ? { id: `f${index}`, question: name, inputType: "radio", required: true, options: [{ id: "opt", label: name }], default: "opt" }
+            : { id: `f${index}`, question: name, inputType: "text", required: true, default: " " };
+        });
+        const fieldRows = overlayNames.map((name) => `- page_name: ${name}\n- source: caller\n- control: textbox`).join("\n\n");
         const started = Date.now();
         let hit = null;
         while (Date.now() - started < 3000) {
@@ -49,20 +69,11 @@ test("fake pi writes the skill and leaves it unchanged", { timeout: 60000 }, asy
         }
         const full = await tools.network_get({ id: hit.id });
         for (const name of GUIDE_NAMES) await tools.read_guide({ name });
-        written = "---\nname: sample-list\ndescription: 调用方列出并保存\n---\n{\"title\":\"列出\",\"questions\":[{\"id\":\"page\",\"question\":\"page\",\"inputType\":\"select\",\"required\":true,\"options\":[{\"id\":\"p\",\"label\":\"page\"}],\"default\":\"p\"}]}\npython scripts/client.py list\n";
+        written = `---\nname: sample-list\ndescription: 调用方列出并保存\n---\n${JSON.stringify({ title: "列出", questions })}\npython scripts/client.py list\n`;
         const api = [
           "## 字段",
-          "- page_name: page",
-          "- caller_name: list",
-          "- request_path: /api/save",
-          "- data_type: object",
-          "- control: button",
-          "- source: caller",
-          "- required_kind: page",
-          "- format:",
-          "- group:",
+          fieldRows,
           `- evidence_ids: ${snap.evidence_id},${full.id}`,
-          "- constant_reason:",
           "",
           "## 绑定",
           "- from: caller",

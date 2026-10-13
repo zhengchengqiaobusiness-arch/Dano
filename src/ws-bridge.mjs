@@ -4,7 +4,7 @@ import { browserSession, captureFrame, closeBrowser, getPage, openBrowser, witho
 import { beginAction, compactNetworkIndex, endAction, listNetwork, waitForAction } from "./browser/network.mjs";
 import { overlayControlFacts, overlayFactLists, takeSnapshot } from "./browser/snapshot.mjs";
 import { loadStorageState, saveStorageState } from "./session-store.mjs";
-import { appendSessionThought, createRecording, emit, getRecording, loadRecording, persist, persistThoughts, settlePreviewWithoutBrowser, snapshotMessage } from "./session.mjs";
+import { appendSessionThought, createRecording, emit, getRecording, loadRecording, persist, persistThoughts, reopenRecordingForSteer, settlePreviewWithoutBrowser, snapshotMessage } from "./session.mjs";
 import { hostTools } from "./agent/tools.mjs";
 import { startRecordingPi as defaultStart } from "./agent/pi-session.mjs";
 import { armIdleTimer, HUMAN_STEER_IDLE_MS, PREVIEW_DETACH_MS } from "./idle-timer.mjs";
@@ -262,9 +262,7 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
           release(text);
           return;
         }
-        recording.paused = false;
-        if (recording.status === "waiting_operator") recording.status = "recording";
-        recording.assistReason = "";
+        reopenRecordingForSteer(recording);
         send(snapshotMessage(recording));
         try {
           await recording.pi?.prompt(text);

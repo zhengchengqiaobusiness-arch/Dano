@@ -6,6 +6,7 @@ const OVERLAY_MODAL = /^(dialog|alertdialog)\b/i;
 const CHROME_LANDMARK = /^(navigation|banner|contentinfo|complementary)$/i;
 const PAGE_CHROME = /^(navigation|banner|contentinfo)$/i;
 const VALUE_ROLES = /^(textbox|searchbox|combobox|spinbutton|checkbox|radio|slider|listbox)$/i;
+const DATE_LIKE = /\d{4}[-/.年]\d{1,2}|日期|时间/;
 const NOT_VALUE_ROLE = /^(menuitem|menu|navigation|banner|complementary|link|heading|listitem|option|tab|treeitem|columnheader|row)$/i;
 const ROW_ROLE = /^row\b/i;
 const CELL_ROLE = /^(cell|gridcell|button|link|textbox)\b/i;
@@ -471,7 +472,12 @@ async function readControlFact(locator, meta) {
         || Boolean(nested && (nested.tagName === "INPUT" || nested.tagName === "TEXTAREA" || nested.tagName === "SELECT"));
       const haspopup = el.getAttribute("aria-haspopup");
       const expanded = el.getAttribute("aria-expanded");
-      if (!info.valueRole && !native && haspopup == null && expanded == null && !info.genericNamed) return { skip: true };
+      const inputGuess = nested instanceof HTMLInputElement ? String(nested.type || "") : "";
+      const dateLike = Boolean(info.dateLike)
+        || /^(date|datetime-local|month|time|week)$/i.test(inputGuess)
+        || /\d{4}[-/.年]\d{1,2}|日期|时间/.test(String(el.getAttribute("aria-label") || el.textContent || ""));
+      if (!info.valueRole && !native && haspopup == null && expanded == null && !info.genericNamed && !dateLike) return { skip: true };
+      if (String(el.getAttribute("role") || "").toLowerCase() === "button" && !native && haspopup == null && expanded == null && !dateLike) return { skip: true };
       // 选择类包裹层里的过滤框是同一个控件的一部分，只报包裹层这一行
       const wrapper = el.parentElement ? el.parentElement.closest('[role="combobox"],[role="listbox"]') : null;
       if (wrapper && wrapper !== el) return { skip: true };
@@ -551,6 +557,7 @@ export async function overlayControlFacts(recordingId) {
         valueRole: VALUE_ROLES.test(job.role),
         choiceRole: /^(combobox|listbox)$/.test(job.role),
         genericNamed: job.role === "generic" && Boolean(job.label),
+        dateLike: DATE_LIKE.test(`${job.label} ${job.column}`),
       });
       if (!raw || raw.skip) return null;
       return {

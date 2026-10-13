@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { writeSkillFile } from "../src/skillpack/files.mjs";
-import { actionEvidenceSummary, askProtocolMissing, authOverlayParseError, hardcodedOriginError, jsonWordedQuestion, skillCommandLines, structureErrorsForFile, verifySkill } from "../src/skillpack/verify.mjs";
+import { actionEvidenceSummary, askCoverageErrors, askProtocolMissing, authOverlayParseError, hardcodedOriginError, jsonWordedQuestion, overlayLayersFromBodies, skillCommandLines, structureErrorsForFile, verifySkill } from "../src/skillpack/verify.mjs";
 import { jsNonStdlibImports, nonStdlibImports } from "../src/skillpack/stdlib-imports.mjs";
 import { skillDir } from "../src/paths.mjs";
 import { appendEvidence } from "../src/evidence/store.mjs";
@@ -498,7 +498,8 @@ test("only the latest auth stop is auth_expired and does not fail the structure"
   const rec = { status: "recording", finished: false, verify: null, skillDir: "" };
   applyVerifyToRecording(rec, result, dir);
   assert.equal(rec.status, "skill_ready");
-  assert.equal(rec.finished, true);
+  assert.equal(rec.skillReady, true);
+  assert.equal(rec.finished, false);
   assert.equal(publicSessionStatus(rec), "skill_ready");
   const failed = { status: "recording", finished: false };
   applyVerifyToRecording(failed, { status: "verify_failed", errors: [{ code: "command_not_run" }] });
@@ -547,7 +548,7 @@ test("ATX headings, table source, argparse dispatch, and matching subcommands ar
   await mkdir(path.join(dir, "scripts"), { recursive: true });
   await mkdir(path.join(dir, "references"), { recursive: true });
   await mkdir(path.join(dir, "config"), { recursive: true });
-  await writeFile(path.join(dir, "SKILL.md"), "---\nname: list-items\ndescription: 调用方列出记录\n---\npython3 scripts/client.py list --id <id>\n{\"title\":\"列出\",\"questions\":[{\"id\":\"id\",\"question\":\"记录\",\"inputType\":\"text\",\"required\":true,\"default\":\" \"}]}\n");
+  await writeFile(path.join(dir, "SKILL.md"), "---\nname: list-items\ndescription: 调用方列出记录\n---\npython3 scripts/client.py list --id <id>\n{\"title\":\"列出\",\"questions\":[{\"id\":\"id\",\"question\":\"记录\",\"inputType\":\"text\",\"required\":true,\"default\":\" \"},{\"id\":\"title\",\"question\":\"标题\",\"inputType\":\"text\",\"required\":true,\"default\":\" \"}]}\n");
   await writeFile(path.join(dir, "scripts/client.py"), [
     "import argparse",
     "def cmd_list(args):",
@@ -858,7 +859,7 @@ test("field tables with aliases and page_name= bullets are parsed, constant need
     "name: sample",
     "description: sample",
     "---",
-    "{\"title\":\"办理\",\"questions\":[{\"id\":\"title\",\"question\":\"标题\",\"inputType\":\"text\",\"required\":true,\"default\":\" \"}]}",
+    "{\"title\":\"办理\",\"questions\":[{\"id\":\"title\",\"question\":\"标题\",\"inputType\":\"text\",\"required\":true,\"default\":\" \"},{\"id\":\"remark\",\"question\":\"备注\",\"inputType\":\"text\",\"required\":false,\"default\":\" \"}]}",
     "python scripts/client.py save --title x --confirm",
   ].join("\n");
   const client = [
@@ -978,6 +979,10 @@ test("questions never show JSON to the caller, and a write skill must say how th
   assert.equal(askProtocolMissing(writeNoProtocol), true);
   const writeWithProtocol = `${writeNoProtocol}提交后只发 {"confirm":true,"formIds":["<formId>"]}，再加 --confirm。\n`;
   assert.equal(askProtocolMissing(writeWithProtocol), false);
+  const readAndWrite = "---\nname: a\ndescription: b\n---\npython3 scripts/client.py list\npython3 scripts/client.py save --confirm\n提交后只发 {\"confirm\":true,\"formIds\":[\"<formId>\"]}，再加 --confirm。\n";
+  assert.equal(askProtocolMissing(readAndWrite), true);
+  const readSkip = `${readAndWrite}读：已确定的不进本次 questions[]，不问。\n`;
+  assert.equal(askProtocolMissing(readSkip), false);
 });
 
 test("a written file gets back only its own structural errors, never the run-time ones", () => {
@@ -1006,4 +1011,60 @@ test("DANO_AUTH_HEADERS overlay must be json.loads, not comma pairs", () => {
   assert.match(hardcodedOriginError("DEFAULT_BASE_URL = \"https://example.test\""), /源站/);
   assert.match(hardcodedOriginError("    return \"https://example.test\""), /源站/);
   assert.equal(hardcodedOriginError("return os.environ.get(\"DANO_BASE_URL\") or runtime.get(\"base_url\") or \"\""), "");
+});
+
+test("questions[] must cover caller fields and the densest overlay layer", async () => {
+  const fields = [
+    { page_name: "标题", source: "caller", control: "textbox" },
+    { page_name: "工作总结", source: "caller", control: "textbox" },
+    { page_name: "作者", source: "current_user", control: "textbox" },
+  ];
+  const thin = [{ id: "title", question: "标题", inputType: "text" }];
+  const layers = overlayLayersFromBodies([
+    {
+      overlay_editable: [
+        { name: "textbox \"标题\"", role: "textbox" },
+        { name: "textbox \"工作总结\"", role: "textbox" },
+        { name: "textbox \"明日计划\"", role: "textbox" },
+      ],
+      requests: [{ method: "POST", path: "/api/save" }],
+    },
+  ]);
+  const missing = askCoverageErrors(thin, fields, layers, { hasWriteConfirm: true });
+  assert.ok(missing.some((item) => item.field === "工作总结" && item.file === "SKILL.md"));
+  assert.ok(missing.some((item) => item.field === "明日计划" && item.file === "references/api.md"));
+  assert.equal(missing.some((item) => item.field === "作者"), false);
+  const full = [
+    { id: "title", question: "标题", inputType: "text" },
+    { id: "summary", question: "工作总结", inputType: "textarea" },
+    { id: "plan", question: "明日计划", inputType: "textarea" },
+  ];
+  const fieldsFull = [...fields, { page_name: "明日计划", source: "caller", control: "textbox" }];
+  assert.equal(askCoverageErrors(full, fieldsFull, layers, { hasWriteConfirm: true }).length, 0);
+
+  await useData();
+  const shape = { id: "rec_verify_overlay_cover", tenant: "", subsystem: "app", skillId: "app.rec_verify_overlay_cover", startUrl: "http://127.0.0.1/" };
+  const dir = skillDir(shape.skillId);
+  await mkdir(path.join(dir, "scripts"), { recursive: true });
+  await mkdir(path.join(dir, "references"), { recursive: true });
+  await mkdir(path.join(dir, "config"), { recursive: true });
+  await writeFile(path.join(dir, "SKILL.md"), "---\nname: save-item\ndescription: 调用方保存\n---\n{\"title\":\"保存\",\"questions\":[{\"id\":\"title\",\"question\":\"标题\",\"inputType\":\"text\",\"required\":true,\"default\":\" \"}]}\npython scripts/client.py save --confirm\n调用方怎么问：读不问不确认。写第一次原样发出 questions[]；提交后只发 {\"confirm\":true,\"formIds\":[\"<formId>\"]}，再加 --confirm。\n");
+  await writeFile(path.join(dir, "scripts/client.py"), "def save():\n    method = \"POST\"\n    path = \"/api/save\"\n    body[\"title\"] = args.title\n");
+  await writeFile(path.join(dir, "references/api.md"), "## 字段\n- page_name: 标题\n- source: caller\n\n## 绑定\n\n## 未解决\n\n## 已验证读命令\n");
+  await writeFile(path.join(dir, "config/runtime.json"), "{}\n");
+  await writeFile(path.join(dir, "config/auth.local.json"), "{\"headers\":{\"Authorization\":\"Bearer tok\"}}\n");
+  await seedGuides(shape.id);
+  await appendEvidence(shape.id, {
+    kind: "action",
+    summary: "click:确定",
+    body: {
+      overlay_editable: [
+        { name: "textbox \"标题\"", role: "textbox" },
+        { name: "textbox \"工作总结\"", role: "textbox" },
+      ],
+      requests: [{ method: "POST", path: "/api/save" }],
+    },
+  });
+  const result = await verifySkill(dir, shape.id, shape);
+  assert.ok(result.errors.some((item) => item.field === "工作总结" && String(item.hint || "").includes("questions[]")));
 });

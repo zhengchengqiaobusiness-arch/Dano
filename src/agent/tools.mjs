@@ -9,7 +9,7 @@ import { fieldFillText, runAction, withFillFieldText } from "../browser/actions.
 import { browserSession, persistBrowserSession, withPage } from "../browser/session.mjs";
 import { overlayControlFacts, overlayFactLists, overlayItemsLine, takeSnapshot } from "../browser/snapshot.mjs";
 import { compactNetworkIndex, getNetwork, listNetwork, networkBodyForModel, requestKeyIndex } from "../browser/network.mjs";
-import { applyVerifyToRecording } from "../session.mjs";
+import { applyVerifyToRecording, releaseVerifiedSkill } from "../session.mjs";
 import { authSpawnEnv, readSkillFile, skillIdFor, writeRuntimeConfig, writeSkillFile } from "../skillpack/files.mjs";
 import { actionEvidenceSummary, authStoppedOutput, clickedLabels, filledLabels, finishSkill, structureErrorsForFile, verifySkill } from "../skillpack/verify.mjs";
 import { redactSecrets } from "../auth-vault.mjs";
@@ -150,7 +150,12 @@ export function hostTools(recording) {
       } catch {
         overlay = {};
       }
-      const saved = await appendEvidence(id, { kind: "snapshot", summary: "snapshot", body: snapshot, body_missing: false });
+      const saved = await appendEvidence(id, {
+        kind: "snapshot",
+        summary: "snapshot",
+        body: { ...snapshot, ...overlay },
+        body_missing: false,
+      });
       return { ...snapshot, ...overlay, evidence_id: saved.id };
     },
     async browser_act(args) {
@@ -356,6 +361,10 @@ export function hostTools(recording) {
       recording.skillId = skillId();
       const verify = await finishSkill(recording);
       applyVerifyToRecording(recording, verify, skillPath(recording.skillId));
+      if (verify?.status === "skill_ready" || verify?.status === "skill_written_needs_auth") {
+        const exported = await releaseVerifiedSkill(recording);
+        if (exported) verify.export = exported;
+      }
       recording.emit?.();
       return verify;
     },

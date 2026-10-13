@@ -43,6 +43,9 @@ test("a finished page turn continues until the skill is verified", () => {
   assert.match(afterWrite, /--confirm/);
   assert.equal(nextRecordingPrompt({ finished: true, paused: false, progressed: false, continues: 0 }), null);
   assert.equal(nextRecordingPrompt({ finished: false, paused: true, progressed: false, continues: 0 }), null);
+  assert.equal(nextRecordingPrompt({ finished: false, paused: false, skillReady: true, progressed: true, continues: 1, verifyErrors: [] }), null);
+  const afterSteer = nextRecordingPrompt({ finished: false, paused: false, skillReady: false, progressed: true, continues: 0, verifyErrors: [] });
+  assert.match(afterSteer, /写三文件|verify_skill/);
   assert.ok(nextRecordingPrompt({ finished: false, paused: false, progressed: true, continues: 4, verifyErrors: [] }));
   assert.equal(nextRecordingPrompt({ finished: false, paused: false, progressed: false, continues: 8 }), null);
   const failed = nextRecordingPrompt({ finished: false, paused: false, progressed: true, continues: 2, verifyErrors: [{ code: "not_invocable", file: "SKILL.md" }] });

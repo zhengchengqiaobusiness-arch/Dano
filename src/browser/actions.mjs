@@ -102,6 +102,15 @@ function clickUnreachable(error) {
   return pointerBlocked(error) || /not visible|outside of the viewport|Timeout/i.test(String(error?.message || ""));
 }
 
+export function clickFailureKind(error) {
+  const message = String(error?.message || error || "");
+  if (pointerBlocked(error)) return "behind_overlay";
+  if (/not visible/i.test(message)) return "not_visible";
+  if (/outside of the viewport/i.test(message)) return "outside_viewport";
+  if (/Timeout/i.test(message)) return "click_timeout";
+  return "click_failed";
+}
+
 function samePageUrl(current, next) {
   try {
     return new URL(current).href === new URL(next).href;
@@ -298,12 +307,16 @@ async function perform(recordingId, input) {
         ]);
         if (!chooser) {
           chooserArm.stop();
-          if (clickUnreachable(error)) {
+          const kind = clickFailureKind(error);
+          if (kind === "behind_overlay" || kind === "not_visible" || kind === "outside_viewport" || kind === "click_timeout") {
             return withOverlayFacts(recordingId, {
               ok: false,
-              error: "behind_overlay",
+              error: kind,
               clicked: hit.label || "",
               snapshot: await snapshotAfter(recordingId),
+              hint: kind === "behind_overlay"
+                ? "这个 ref 被当前层挡住。只用返回的 overlay_exact 与新树。"
+                : "这个 ref 当前点不到。重新 snapshot，只点新树里的 [ref=]。不要改点同名的另一个。",
             });
           }
           const message = String(error?.message || "click_failed").split("\n")[0];

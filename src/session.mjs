@@ -36,6 +36,7 @@ export async function createRecording(fields) {
     revision: 0,
     paused: false,
     finished: false,
+    skillReady: false,
     listeners: new Set(),
     thoughts: [],
   };
@@ -173,12 +174,38 @@ export function applyVerifyToRecording(recording, verify, skillDirPath = "") {
   if (skillDirPath) recording.skillDir = skillDirPath;
   if (verify?.status === "skill_ready" || verify?.status === "skill_written_needs_auth") {
     recording.status = "skill_ready";
-    recording.finished = true;
+    recording.skillReady = true;
+    recording.finished = false;
     persistThoughts(recording).catch(() => {});
     return;
   }
   recording.status = "recording";
+  recording.skillReady = false;
   recording.finished = false;
+}
+
+export function reopenRecordingForSteer(recording) {
+  if (!recording) return recording;
+  recording.paused = false;
+  recording.finished = false;
+  if (recording.status === "waiting_operator" || recording.status === "skill_ready") {
+    recording.status = "recording";
+  }
+  recording.skillReady = false;
+  recording.assistReason = "";
+  return recording;
+}
+
+export async function releaseVerifiedSkill(recording) {
+  if (!recording || publicSessionStatus(recording) !== "skill_ready") return null;
+  try {
+    const outcome = await exportSkill(recording.id, "");
+    recording.export = outcome;
+    return outcome;
+  } catch (error) {
+    recording.export = { status: "export_failed", errors: [String(error?.message || error)] };
+    return recording.export;
+  }
 }
 
 export function snapshotMessage(recording) {
@@ -220,8 +247,10 @@ export async function persist(recording) {
     skillId: recording.skillId,
     skillDir: recording.skillDir,
     finished: Boolean(recording.finished),
+    skillReady: Boolean(recording.skillReady),
     wroteSkill: Boolean(recording.wroteSkill),
     verify: recording.verify,
+    export: recording.export || null,
   }, null, 2));
 }
 
@@ -235,18 +264,20 @@ export async function loadRecording(id) {
   try {
     const raw = JSON.parse(await readFile(path.join(recordingDir(id), "state.json"), "utf8"));
     const status = String(raw.status || "recording");
-    const done = status === "skill_ready" || status === "failed" || status === "stopped" || Boolean(raw.finished);
+    const done = status === "failed" || status === "stopped" || Boolean(raw.finished);
     const recording = {
       ...raw,
       status,
       revision: Number(raw.revision) || 0,
       listeners: new Set(),
       finished: done,
+      skillReady: Boolean(raw.skillReady) || (status === "skill_ready" && !done),
       wroteSkill: Boolean(raw.wroteSkill),
       paused: false,
       humanCanClick: true,
       assistReason: "",
       verify: raw.verify || null,
+      export: raw.export || null,
       thoughts: await readThoughts(id),
     };
     bindEmitThought(recording);

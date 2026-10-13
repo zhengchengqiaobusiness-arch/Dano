@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { recordingDir } from "../src/paths.mjs";
-import { appendSessionThought, applyVerifyToRecording, loadRecording, persistThoughts, publicSessionProgress, publicSessionStatus, settlePreviewWithoutBrowser, snapshotMessage } from "../src/session.mjs";
+import { appendSessionThought, applyVerifyToRecording, loadRecording, persistThoughts, publicSessionProgress, publicSessionStatus, reopenRecordingForSteer, settlePreviewWithoutBrowser, snapshotMessage } from "../src/session.mjs";
 
 test("the session only publishes recording, skill ready, or failed", () => {
   assert.equal(publicSessionStatus({ status: "recording" }), "recording");
@@ -21,8 +21,14 @@ test("the session only publishes recording, skill ready, or failed", () => {
   assert.equal(publicSessionStatus(recording), "recording");
   applyVerifyToRecording(recording, { status: "skill_written_needs_auth", errors: [] }, "/tmp/skill");
   assert.equal(recording.status, "skill_ready");
-  assert.equal(recording.finished, true);
+  assert.equal(recording.skillReady, true);
+  assert.equal(recording.finished, false);
   assert.equal(publicSessionStatus(recording), "skill_ready");
+  reopenRecordingForSteer(recording);
+  assert.equal(recording.status, "recording");
+  assert.equal(recording.skillReady, false);
+  assert.equal(recording.finished, false);
+  assert.equal(publicSessionStatus(recording), "recording");
 });
 
 test("snapshot progress leaves 录制中 after the skill files are written", () => {
@@ -54,6 +60,25 @@ test("a preview reconnect without a browser does not stay live after skill work"
   assert.equal(publicSessionStatus(dead), "failed");
 });
 
+test("skill_ready on disk without finished stays open for steer", async () => {
+  process.env.CABP_DATA = await mkdtemp(path.join(os.tmpdir(), "cabp-session-open-"));
+  const id = "rec_attach_open";
+  await mkdir(recordingDir(id), { recursive: true });
+  await writeFile(path.join(recordingDir(id), "state.json"), JSON.stringify({
+    id,
+    status: "skill_ready",
+    skillId: "app.rec_attach_open",
+    startUrl: "http://127.0.0.1/",
+    skillReady: true,
+    finished: false,
+  }));
+  const loaded = await loadRecording(id);
+  assert.equal(loaded.status, "skill_ready");
+  assert.equal(loaded.finished, false);
+  assert.equal(loaded.skillReady, true);
+  assert.equal(publicSessionStatus(loaded), "skill_ready");
+});
+
 test("a finished recording on disk can be attached without a live map entry", async () => {
   process.env.CABP_DATA = await mkdtemp(path.join(os.tmpdir(), "cabp-session-"));
   const id = "rec_attach_disk";
@@ -63,6 +88,7 @@ test("a finished recording on disk can be attached without a live map entry", as
     status: "skill_ready",
     skillId: "app.rec_attach_disk",
     startUrl: "http://127.0.0.1/",
+    finished: true,
   }));
   const loaded = await loadRecording(id);
   assert.equal(loaded.status, "skill_ready");

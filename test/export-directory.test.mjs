@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { createApp, listen } from "../src/server.mjs";
 import { isInternalDataPath } from "../src/paths.mjs";
-import { exportedPackageName, exportSkill } from "../src/session.mjs";
+import { applyVerifyToRecording, exportedPackageName, exportSkill, loadRecording, releaseVerifiedSkill } from "../src/session.mjs";
 import {
   LINUX_EXPORT_DIRECTORY,
   defaultExportDirectory,
@@ -124,6 +124,25 @@ test("catalog export and directory endpoints use the resolved out dir", async ()
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
+  });
+});
+
+test("verify success copies the package into the resolved export dir without ending the session", async () => {
+  await withData(async (root) => {
+    const { recordingId, source } = await seedReadySkill(root, { recordingId: "rec_auto_export", skillId: "app.rec_auto_export" });
+    const outDir = path.join(root, "agents-skills");
+    await persistExportDirectory(outDir);
+    const recording = await loadRecording(recordingId);
+    recording.finished = false;
+    applyVerifyToRecording(recording, { status: "skill_ready", errors: [] }, source);
+    assert.equal(recording.finished, false);
+    assert.equal(recording.skillReady, true);
+    const outcome = await releaseVerifiedSkill(recording);
+    assert.equal(outcome.status, "exported");
+    assert.equal(existsSync(path.join(outDir, "oa-work-report", "SKILL.md")), true);
+    assert.equal(existsSync(path.join(outDir, "oa-work-report", "config", "auth.local.json")), true);
+    assert.equal(recording.finished, false);
+    assert.equal(recording.export.status, "exported");
   });
 });
 

@@ -692,7 +692,7 @@ function isStageSevenProgress(progress?: { step?: string; round?: number } | nul
 }
 
 function pageInteractive(status: WorkflowStatus) {
-  return status === "recording" || status === "waiting_operator";
+  return status === "recording" || status === "waiting_operator" || status === "skill_ready" || status === "skill_written_needs_auth";
 }
 
 function pageStage(status: WorkflowStatus, _resumeOnly = false, _verificationLive = false) {

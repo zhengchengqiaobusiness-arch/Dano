@@ -6,13 +6,22 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { browserSession, closeBrowser, desktopViewport, DESKTOP_VIEWPORT, getPage, openBrowser } from "../src/browser/session.mjs";
 import { takeSnapshot } from "../src/browser/snapshot.mjs";
-import { fieldFillText, runAction, withFillFieldText } from "../src/browser/actions.mjs";
+import { clickFailureKind, fieldFillText, runAction, withFillFieldText } from "../src/browser/actions.mjs";
 
 const fixtureDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 
 test("a preview pane smaller than desktop does not become the page viewport", () => {
   assert.deepEqual(desktopViewport({ width: 900, height: 600 }), DESKTOP_VIEWPORT);
   assert.equal(desktopViewport({ width: 1600, height: 900 }).width, 1600);
+});
+
+test("click failures distinguish overlay intercepts from timeout and hidden controls", () => {
+  assert.equal(clickFailureKind(new Error("Pointer events intercepts pointer")), "behind_overlay");
+  assert.equal(clickFailureKind(new Error("<div> intercepts pointer events")), "behind_overlay");
+  assert.equal(clickFailureKind(new Error("Element is not visible")), "not_visible");
+  assert.equal(clickFailureKind(new Error("element is outside of the viewport")), "outside_viewport");
+  assert.equal(clickFailureKind(new Error("Timeout 8000ms exceeded.")), "click_timeout");
+  assert.equal(clickFailureKind(new Error("strict mode violation")), "click_failed");
 });
 
 test("fill_fields accepts value as the text to type", () => {
@@ -61,6 +70,8 @@ test("an open dialog is published as overlay_exact and later clicks use the curr
     const opened = await runAction(id, { action: "click", ref: publishedRef(lineWith(first.text, "打开")) });
     assert.equal(opened.ok, true);
     assert.match(opened.snapshot.text, /overlay_exact|dialog/);
+    const dateFact = (opened.overlay_editable || []).find((row) => String(row.name || "").includes("汇报日期"));
+    assert.ok(dateFact);
     const emptyTitle = (opened.overlay_fields || []).find((row) => String(row.name || "").includes("标题"));
     assert.ok(emptyTitle);
     assert.equal(emptyTitle.empty, true);
