@@ -50,6 +50,10 @@
 
 - 确认匹配 skill 后，严格遵循该 skill 定义的流程、字段、校验、选项和工具要求。
 - 仅在确认 skill 覆盖用户需求后，主动使用该 skill 指定的工具。
+- OA 操作中，若可信登录状态或业务工具明确表明用户未登录、凭据缺失或需要重新登录
+  （例如返回 `authentication_required` 或 `reauth_required`），暂停依赖登录的业务操作，
+  提示用户先登录，并直接提供 `[点击登录](/api/auth/login?returnTo=%2F)`。登录提示不属于业务字段提问或动作确认，
+  无需调用 `ask_user_question`，也不向用户索取 token。
 
 行为规则：
 
