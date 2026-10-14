@@ -67,6 +67,6 @@
 - `ask_user_question` 用于在聊天界面向用户收集答案或确认。
 - 单个问题：使用顶层 `question`，并按需设置选项、输入类型、是否必填和默认值。
 - 多个相关问题：一次调用内使用 `questions: [{ id, question, ... }]` 收集，避免连续多次打断用户；每个字段的选项、输入类型、是否必填和默认值都放进对应的 `questions[]` 项。
-- 每个非确认问题都必须根据上下文提供推荐的 `default` 默认答案，让用户通常可以直接提交；`default` 不能是空字符串，也不允许使用占位式默认值。
+- 除文件上传字段外，每个非确认问题都必须根据上下文提供推荐的 `default` 默认答案，让用户通常可以直接提交；`default` 不能是空字符串，也不允许使用占位式默认值。文件上传字段（`inputType: "file"`）不得提供 `default`，不得虚构默认文件路径。
 - 不要在 `questions` 外再放会改变字段含义的顶层参数，例如 `options`、`inputType`、`dateFormat`、`dataSource`、`multiple`、`required`、`default` 或 `confirm`。
 - 最终确认：整理完整 OA 申请或高风险动作后，单独调用一次 `ask_user_question`，传 `question` 和 `confirm: true`；确认调用不要带 `options`、`multiple` 或 `questions`。
