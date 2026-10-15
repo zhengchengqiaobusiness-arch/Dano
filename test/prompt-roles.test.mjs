@@ -4,7 +4,7 @@ import os from "node:os";
 import test from "node:test";
 import path from "node:path";
 import { packageRoot } from "../src/paths.mjs";
-import { controlLooksEmpty, goalExactLines, nearestNamedAncestor, overlayExactLines, overlayFactLists, overlayHasRef, overlayItemLabel, overlaySurfaceKind, stripSnapshotDecorators, yamlFingerprint } from "../src/browser/snapshot.mjs";
+import { controlLooksEmpty, goalExactLines, markReadonly, nearestNamedAncestor, overlayExactLines, overlayFactLists, overlayHasRef, overlayItemLabel, overlaySurfaceKind, stripSnapshotDecorators, yamlFingerprint } from "../src/browser/snapshot.mjs";
 import { compactNetworkIndex, networkBodyForModel } from "../src/browser/network.mjs";
 import { responseKeyPreview } from "../src/skillpack/request-keys.mjs";
 import { writeOnlySkill } from "../src/skillpack/verify.mjs";
@@ -35,8 +35,8 @@ test("the method does not ban number cells or treat filled controls as caller-re
   assert.match(prompt, /不写 JSON/);
   assert.doesNotMatch(prompt, /textarea 写 JSON/);
   assert.match(prompt, /调用方怎么问/);
-  assert.match(prompt, /已知值放 default 不再另问/);
-  assert.match(prompt, /不另造确认题/);
+  assert.match(prompt, /skill-generator-ask-user-question-guide\.md/);
+  assert.match(prompt, /一字不改/);
   assert.match(prompt, /整袋替换/);
   assert.match(prompt, /读命令也不要写死本场 listed/);
   assert.match(prompt, /身份键从本场身份接口现取/);
@@ -60,7 +60,7 @@ test("the method does not ban number cells or treat filled controls as caller-re
   assert.match(prompt, /screenshot 不换树/);
   assert.match(prompt, /clicked 里已有的不要重复点/);
   assert.match(prompt, /不要 dataSource/);
-  assert.match(prompt, /formIds/);
+  assert.match(prompt, /「调用方怎么问」一节的原文/);
   assert.match(prompt, /不要 browser_open/);
   assert.match(prompt, /同源换页可用 browser_open/);
   assert.doesNotMatch(prompt, /已经有页面时不要 browser_open 换地址|already_open/);
@@ -84,6 +84,15 @@ test("the method does not ban number cells or treat filled controls as caller-re
   assert.doesNotMatch(prompt, /页面已有值若 listed/);
 });
 
+test("markReadonly keeps picker inputs editable", () => {
+  assert.equal(markReadonly(null, true, null, { role: "combobox" }), false);
+  assert.equal(markReadonly(null, true, null, { ariaHaspopup: "listbox" }), false);
+  assert.equal(markReadonly(null, true, null, { ariaHaspopup: "false" }), true);
+  assert.equal(markReadonly(null, true, null), true);
+  assert.equal(markReadonly("true", false, null, { role: "combobox" }), true);
+  assert.equal(markReadonly(null, false, null, { htmlDisabled: true }), true);
+});
+
 test("required empty overlay facts include the current ref", () => {
   const facts = overlayFactLists([{ name: "标题", role: "textbox", ref: "f0:e3@1", empty: true, required: true }]);
   assert.equal(facts.required_empty_overlay[0].ref, "f0:e3@1");
@@ -95,10 +104,11 @@ test("a displayed placeholder is still an empty overlay fact", () => {
   assert.equal(controlLooksEmpty(""), true);
   assert.equal(controlLooksEmpty("   "), true);
   assert.equal(controlLooksEmpty("请选择", "请选择"), true);
+  assert.equal(controlLooksEmpty("Select an option", "Select an option"), true);
   assert.equal(controlLooksEmpty("甲", "请选择"), false);
-  assert.equal(controlLooksEmpty("请选择所属系统", "", "请选择所属系统"), true);
-  assert.equal(controlLooksEmpty("已选系统", "", "请选择所属系统"), false);
-  assert.equal(controlLooksEmpty("已选甲", "", "已选甲"), false);
+  assert.equal(controlLooksEmpty("Chosen", "Select an option"), false);
+  assert.equal(controlLooksEmpty("所属系统", "请选择所属系统"), false);
+  assert.equal(controlLooksEmpty("已选甲", "", ["已选甲"]), true);
 });
 
 test("assist for a packed token is rejected, page login is not", () => {
@@ -254,4 +264,8 @@ test("read_guide all records every method file", async () => {
   const unknown = await tools.read_guide({ name: "nope.md" });
   assert.equal(unknown.ok, false);
   assert.equal(unknown.error, "unknown_guide");
+  const workflow = await tools.read_guide({ name: "skill-generator-workflow.md" });
+  assert.equal(workflow.ok, true);
+  assert.match(workflow.text, /datetime\.now\(\)，不要用 timezone\.utc/);
+  assert.match(workflow.text, /source 写 current_user：脚本调用本场录到的身份接口现取，不要让调用方填内部 id/);
 });

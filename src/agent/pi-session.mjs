@@ -21,17 +21,22 @@ export function resultLine(result) {
   if (!text) return result?.isError ? "失败" : "完成";
   try {
     const body = JSON.parse(text);
+    const observations = Array.isArray(body?.observations) ? body.observations : [];
+    const note = observations.length
+      ? ` 待核对 ${observations.length}：${observations.slice(0, 3).map((item) => [item.code, item.field].filter(Boolean).join(":")).join(" ")}`
+      : "";
+    const cut = (line) => `${line}${note}`.slice(0, 500);
     const errors = Array.isArray(body?.errors) ? body.errors : [];
     if (body?.ok === true && Array.isArray(body.structure_errors) && body.structure_errors.length) {
       const codes = body.structure_errors.map((item) => [item.code, item.field, item.file, String(item.hint || "").replace(/\s+/g, " ").slice(0, 60)].filter(Boolean).join(":")).slice(0, 6).join(" ");
-      return `完成 结构待改 ${codes}`.slice(0, 500);
+      return cut(`完成 结构待改 ${codes}`);
     }
     const authOnly = errors.length > 0 && errors.every((item) => item.code === "auth_expired");
     if (authOnly && (body.ok === true || body.status === "skill_written_needs_auth" || body.status === "skill_ready")) {
-      return "完成 结构已过 鉴权过期";
+      return cut("完成 结构已过 鉴权过期");
     }
     if (body?.error === "auth_expired") {
-      return "完成 鉴权过期 继续写三文件";
+      return cut("完成 鉴权过期 继续写三文件");
     }
     if (errors.length) {
       const codes = errors.map((item) => {
@@ -40,7 +45,7 @@ export function resultLine(result) {
         if (hint) parts.push(hint.slice(0, 60));
         return parts.join(":");
       }).slice(0, 6).join(" ");
-      return `失败 ${codes}`.slice(0, 500);
+      return cut(`失败 ${codes}`);
     }
     if (body?.ok === false) {
       const exit = body.code != null && body.code !== "" ? ` exit=${body.code}` : "";
@@ -53,7 +58,7 @@ export function resultLine(result) {
         // stdout 不是 JSON
       }
       const extra = [body.error, body.hint, body.file, body.stderr, ...(body.names || []), ...(body.writable || [])].filter(Boolean).join(" ");
-      return `失败${exit}${biz} ${extra}`.slice(0, 500);
+      return cut(`失败${exit}${biz} ${extra}`);
     }
     const requiredEmpty = Array.isArray(body.required_empty_overlay) && body.required_empty_overlay.length
       ? ` 必填空=${overlayItemsLine(body.required_empty_overlay, 8)}`
@@ -64,12 +69,12 @@ export function resultLine(result) {
     if (body?.ok === true && body.clicked) {
       const quiet = Array.isArray(body.requests) && body.requests.length === 0 ? " 无请求" : "";
       const layer = body.layer_idle ? " 层无请求" : "";
-      return `完成${requiredEmpty} ${body.clicked}${quiet}${layer}${empty}`;
+      return cut(`完成${requiredEmpty} ${body.clicked}${quiet}${layer}${empty}`);
     }
-    if (body?.ok === true && (requiredEmpty || empty)) return `完成${requiredEmpty}${empty}`;
-    if (body?.ok === true) return "完成";
-    if (Array.isArray(body?.refs)) return `完成 refs=${body.refs.length}`;
-    if (body?.image_in_conversation) return "完成 图像";
+    if (body?.ok === true && (requiredEmpty || empty)) return cut(`完成${requiredEmpty}${empty}`);
+    if (body?.ok === true) return cut("完成");
+    if (Array.isArray(body?.refs)) return cut(`完成 refs=${body.refs.length}`);
+    if (body?.image_in_conversation) return cut("完成 图像");
   } catch {
     // 不是 JSON 就只留一行
   }
@@ -77,7 +82,39 @@ export function resultLine(result) {
 }
 
 const PAGE_TOOLS = new Set(["browser_open", "browser_snapshot", "browser_act", "browser_screenshot"]);
-const SKILL_TOOLS = new Set(["write_skill_file", "run_skill_command", "verify_skill"]);
+const SKILL_TOOLS = new Set(["write_skill_file", "edit_skill_file", "run_skill_command", "verify_skill"]);
+const PAGE_RESULT_TOOLS = new Set(["browser_open", "browser_snapshot", "browser_act", "browser_screenshot", "assist"]);
+const KEEP_KEYS = ["ok", "error", "clicked", "filled", "uploaded", "in_overlay", "layer_idle", "page_unchanged", "evidence_id", "hint", "continued", "note"];
+
+function elidePart(part) {
+  if (part?.type === "image") return { type: "text", text: "[较早的截图已省略，只看最新一次页面结果]" };
+  if (part?.type !== "text") return part;
+  let body;
+  try {
+    body = JSON.parse(part.text);
+  } catch {
+    return part;
+  }
+  if (!body || typeof body !== "object") return part;
+  const kept = {};
+  for (const key of KEEP_KEYS) if (body[key] !== undefined) kept[key] = body[key];
+  if (Array.isArray(body.requests)) kept.requests = body.requests.map((row) => ({ id: row.id, method: row.method, path: row.path }));
+  kept.elided = "较早的页面结果，树和控件事实已省略；ref 只用最新一次页面结果里的";
+  return { type: "text", text: JSON.stringify(kept) };
+}
+
+export function elideOldPageResults(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  let latest = -1;
+  list.forEach((message, index) => {
+    if (message?.role === "toolResult" && PAGE_RESULT_TOOLS.has(message.toolName)) latest = index;
+  });
+  if (latest < 0) return list;
+  return list.map((message, index) => {
+    if (index >= latest || message?.role !== "toolResult" || !PAGE_RESULT_TOOLS.has(message.toolName)) return message;
+    return { ...message, content: (message.content || []).map(elidePart) };
+  });
+}
 const MAX_SKILL_CONTINUES = 8;
 export const PI_STALL_MS = Math.max(30000, Number(process.env.PI_STALL_MS) || 180000);
 const STALL_CHECK_MS = 10000;
@@ -173,7 +210,7 @@ export function recordingStayOnPage({ verifyErrors, pageProgressed, progressed, 
   return Array.isArray(requiredEmptyOverlay) && requiredEmptyOverlay.length > 0;
 }
 
-export function factsForContinue(context) {
+export function factsForContinue(context, { includeSnapshot = true } = {}) {
   const snapshot = context?.snapshot;
   const text = snapshot?.body?.text || snapshot?.text || "";
   const overlay_fields = Array.isArray(context?.overlay_fields) ? context.overlay_fields.slice(0, 160) : [];
@@ -215,7 +252,7 @@ export function factsForContinue(context) {
     overlay_editable_names: Array.isArray(context?.overlay_editable_names) ? context.overlay_editable_names.slice(0, 40) : (context?.alignment?.overlay_editable_names || []).slice(0, 40),
     parsed_page_names: Array.isArray(context?.parsed_page_names) ? context.parsed_page_names.slice(0, 40) : (context?.alignment?.parsed_page_names || []).slice(0, 40),
     question_ids: Array.isArray(context?.question_ids) ? context.question_ids.slice(0, 40) : (context?.alignment?.question_ids || []).slice(0, 40),
-    snapshot: String(text).slice(0, 12000),
+    ...(includeSnapshot ? { snapshot: String(text).slice(0, 12000) } : {}),
     goal_named: goal_named.slice(0, 40),
     goal_named_unclicked: unmatchedGoalNames(fromSnap, clicked, goalText).slice(0, 40),
   };
@@ -236,7 +273,14 @@ async function loadMethodPack() {
 }
 
 export async function recordingSystemPrompt(goal) {
-  return `${await loadMethodPack()}\n\n${METHOD_CLOSER}\n\n${JSON.stringify(goal)}`;
+  return `${await loadMethodPack()}\n\n${JSON.stringify(goal)}`;
+}
+
+export function reviewPrompt({ observations = [], goalUnclicked = [] } = {}) {
+  const obs = (Array.isArray(observations) ? observations : []).slice(0, 30);
+  const goal = (Array.isArray(goalUnclicked) ? goalUnclicked : []).slice(0, 30);
+  if (!obs.length && !goal.length) return null;
+  return `三文件已通过结构校验并已导出。下面是只能由你判断的核对项，不阻止产出：goal_named_unclicked 是目标原文点名、页面上出现过、但还没点过的名字；observations 是页面、字段、问句之间对不上的地方。逐条判断：确实漏了，页面还开着，用当前树的 ref 补做，采用新请求后用 edit_skill_file 改三文件，再跑命令和 verify_skill；不是漏项就不改，用一句话说明理由。不要为了让核对项消失而删掉手册内容或命令示例。\n${JSON.stringify({ goal_named_unclicked: goal, observations: obs })}`;
 }
 
 export function nextRecordingPrompt({ finished, paused, skillReady, progressed, continues, verifyErrors, pageProgressed, unmatchedGoalNames, requiredEmptyOverlay, recordedWrite }) {
@@ -247,14 +291,14 @@ export function nextRecordingPrompt({ finished, paused, skillReady, progressed, 
     if (verifyErrors.every((item) => item.code === "auth_expired")) {
       return `三文件已写出。打包凭证过期，不要 assist，不要改脚本猜 token，不要把凭证写进对话。结构校验已通过。${errors}`;
     }
-    return `校验失败。对照 listed、overlay_editable、listed_write_keys、overlay_editable_names、parsed_page_names、question_ids 只改 SKILL.md、scripts/client.py、references/api.md，再 run_skill_command。不要 browser_act。references/api.md 标题只能是字段、绑定、未解决、已验证读命令，不要用接口 path 当标题。字段段每条要有 page_name 和 source（七个词之一，说明不要写进 source）。source=caller 与当前层 overlay_editable 都要出现在 questions[]，不要瘦表。读：已确定的不进本次 questions[]，不要另造查询确认卡。写：第一次原样整份发 questions[]。活选项 options 留空，封闭枚举才写 options。${errors}`;
+    return `校验失败。对照 listed、overlay_editable、listed_write_keys、overlay_editable_names、parsed_page_names、question_ids 只改 SKILL.md、scripts/client.py、references/api.md，用 edit_skill_file 只改出错的段落，再 run_skill_command。不要 browser_act。references/api.md 标题只能是字段、绑定、未解决、已验证读命令，不要用接口 path 当标题。字段段每条要有 page_name 和 source（七个词之一，说明不要写进 source）。source=caller 与当前层 overlay_editable 都要出现在 questions[]，不要瘦表。读：已确定的不进本次 questions[]，不要另造查询确认卡。写：第一次原样整份发 questions[]。活选项 options 留空，封闭枚举才写 options。${errors}`;
   }
   if (recordingStayOnPage({ verifyErrors, pageProgressed, progressed, unmatchedGoalNames, requiredEmptyOverlay, recordedWrite })) {
     return "页面目标还没做完。对照当前树、goal_named、goal_named_unclicked、clicked、row_facts、overlay_editable、required_empty_overlay、listed、listed_write_keys 和目标原文接着点、填。目标原文点名的名字或列，在当前树找 [ref=] 去点。goal_named_unclicked 只看当前树里还没出现在 clicked 的名字；clicked 里已有的不要重复点。required_empty_overlay 还非空且 listed 还没有这次写入时不要当成做完，也不要 write_skill_file 或 verify_skill。指针样式不是能不能点的依据。empty=true 是没值，不是必须去填。stale_ref 或 behind_overlay 只用工具返回的新树，不要用旧 ref。同源换页可用 browser_open；跨源不要。人可以在同一个预览里点；actor=human 时等这次操作进当前树和 listed 再接着做。";
   }
   if (continues >= MAX_SKILL_CONTINUES) return null;
   const lead = progressed
-    ? "页面操作的总结不是结束。对照 listed（本场全部 xhr/fetch 索引）、overlay_editable、listed_write_keys 和目标原文写三文件。SKILL.md 必须含可原样复制的 title+\"questions\":[]；问句覆盖 overlay_editable 的每一项和 listed_write_keys 里来源为 caller 的键，不要瘦表。同一张 overlay 一张 questions[]，不同 overlay 可各一张，调用方每轮只用一张。活列表 options 留空，封闭枚举才写 options，不要自由文本，不要 dataSource。inputType 只许 text、textarea、date、select、radio、treeSelect、checkbox。SKILL.md 写一段调用方怎么问：读不问不确认，已确定的不进本次 questions[]，不要另造查询确认卡；写第一次原样整份发 questions[]，已知值放 default 不再另问，查到的业务日期直接作 default；提交后同一轮只发 confirm+formIds，不另造确认题；再 python3 加 --confirm。嵌套数组按列写成可重复命令行参数，问句用一个 textarea 一行一项、列用「|」，问句和 default 不写 JSON。listed 某键这次 empty/[] 只说明这次传了空，同场另有选项请求则再读，不要冻成空数组。读命令不要写死本场 listed 里的业务 id。手册必填必须和 argparse 一致。每个 add_parser 必须 set_defaults(func=)。写入子命令必须有 --confirm。基地址只读 DANO_BASE_URL 或 runtime.json。SKILL.md 里出现的每一条读命令（含表格）都要跑。正文过大时 network_get 会省略，用 evidence_get 同 id。成品必须可调用。目标只要求写入时不要发明 GET。filled 里的控件名不是调用方必填清单。"
+    ? "页面操作的总结不是结束。对照 listed（本场全部 xhr/fetch 索引）、overlay_editable、listed_write_keys 和目标原文写三文件。SKILL.md 必须含可原样复制的 title+\"questions\":[]；问句覆盖 overlay_editable 的每一项和 listed_write_keys 里来源为 caller 的键，不要瘦表。同一张 overlay 一张 questions[]，不同 overlay 可各一张，调用方每轮只用一张。活列表 options 留空，封闭枚举才写 options，不要自由文本，不要 dataSource。inputType 只许 text、textarea、date、select、radio、treeSelect、checkbox。SKILL.md 里放一段「调用方怎么问」，正文用 read_guide 里 skill-generator-ask-user-question-guide.md「调用方怎么问」一节的原文，一字不改。嵌套数组按列写成可重复命令行参数，问句用一个 textarea 一行一项、列用「|」，问句和 default 不写 JSON。listed 某键这次 empty/[] 只说明这次传了空，同场另有选项请求则再读，不要冻成空数组。读命令不要写死本场 listed 里的业务 id。手册必填必须和 argparse 一致。每个 add_parser 必须 set_defaults(func=)。写入子命令必须有 --confirm。基地址只读 DANO_BASE_URL 或 runtime.json。SKILL.md 里出现的每一条读命令（含表格）都要跑。正文过大时 network_get 会省略，用 evidence_get 同 id。成品必须可调用。目标只要求写入时不要发明 GET。filled 里的控件名不是调用方必填清单。"
     : "Skill 还没产出。";
   return `${lead}read_guide 读完名单。对照 listed（本场全部 xhr/fetch 索引）写字段。要采用的请求打开全文。来源标签和命令行谁填必须一致。overlay_editable 上的控件是调用方填或选，不要改成系统自动。empty 里的键传空。只有 auth.local.json 的 credential 同时有 url 和 method 时才重放；listed 里的刷新请求不是必须重放。业务请求把 headers 整袋带上，有任意鉴权头就发，不要只认某一个键名。读命令 401 不要 assist、不要猜 token，仍要写完 SKILL.md 和 references/api.md，再 verify_skill。401 是打包凭证过期，不是产出失败。DANO_AUTH_HEADERS 是 JSON 对象，json.loads 后只覆盖同名头，不要用环境变量整袋替换本地头。scripts/client.py 只用 Python 标准库。跑读命令（若目标含读），再 verify_skill。${errors}`;
 }
@@ -300,8 +344,14 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
     sessionManager: SessionManager.inMemory(),
   });
   const session = created.session;
+  const baseTransform = session.agent.transformContext;
+  session.agent.transformContext = async (messages, signal) => (
+    elideOldPageResults(baseTransform ? await baseTransform(messages, signal) : messages)
+  );
   const inflightTools = new Map();
   let lastTool = "";
+  let streamedChars = 0;
+  let lastProgressAt = 0;
   let progressed = false;
   let pageProgressed = false;
   let continues = 0;
@@ -311,6 +361,16 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
     const type = String(event?.type || "");
     lastEventAt = Date.now();
     const callId = event.toolCallId || event.callId;
+    if (type === "message_start" || type === "tool_execution_start") streamedChars = 0;
+    if (type === "message_update") {
+      const delta = event.assistantMessageEvent?.delta;
+      if (typeof delta === "string") streamedChars += delta.length;
+      const now = Date.now();
+      if (streamedChars > 0 && now - lastProgressAt >= 5000) {
+        lastProgressAt = now;
+        recording?.emitThought?.({ kind: "tool", phase: "start", text: `模型输出中，已收到 ${streamedChars} 字` });
+      }
+    }
     if (type === "tool_execution_start") {
       stalls = 0;
       if (SKILL_TOOLS.has(event.toolName)) progressed = true;
@@ -394,7 +454,16 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
       }
       if (recording?.paused || session.isStreaming) return;
       const current = typeof host.context === "function" ? await host.context() : {};
-      const facts = factsForContinue({ ...current, alignment: recording?.verify?.alignment });
+      const facts = factsForContinue({ ...current, alignment: recording?.verify?.alignment }, { includeSnapshot: false });
+      const ready = recording?.skillReady || recording?.status === "skill_ready" || recording?.status === "skill_written_needs_auth";
+      if (ready && recording && !recording.reviewed) {
+        recording.reviewed = true;
+        const review = reviewPrompt({ observations: recording.verify?.observations, goalUnclicked: facts.goal_named_unclicked });
+        if (review) {
+          await prompt(`${review}\n${JSON.stringify(facts)}`);
+          return;
+        }
+      }
       const recordedWrite = (facts.listed_writes || []).length > 0;
       const follow = nextRecordingPrompt({
         finished: recording?.finished,
@@ -440,6 +509,7 @@ export async function startRecordingPi({ recordingId, tools, recording }) {
       if (recording?.skillReady || recording?.status === "skill_ready") {
         continues = 0;
         progressed = true;
+        if (recording) recording.reviewed = false;
       }
       reopenRecordingForSteer(recording);
       if (session.isStreaming) {

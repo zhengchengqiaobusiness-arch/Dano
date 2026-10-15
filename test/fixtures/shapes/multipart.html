@@ -1,0 +1,15 @@
+<!doctype html>
+<html>
+<body>
+  <label>file<input id="file" type="file" name="file"></label>
+  <script>
+    document.getElementById("file").addEventListener("change", () => {
+      const data = new FormData();
+      const file = document.getElementById("file").files[0];
+      if (file) data.append("file", file);
+      data.append("name", "item");
+      fetch("/api/items", { method: "POST", body: data });
+    });
+  </script>
+</body>
+</html>

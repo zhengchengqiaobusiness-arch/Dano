@@ -21,16 +21,30 @@ export function bodyKeyPaths(value, prefix = "", out = new Set(), empty = null) 
   return out;
 }
 
-export function keysFromPostData(postData) {
-  if (!postData) return [];
-  let parsed = postData;
-  if (typeof postData === "string") {
-    try {
-      parsed = JSON.parse(postData);
-    } catch {
-      return [];
-    }
+export function parsePostData(postData, contentType = "") {
+  if (postData && typeof postData === "object") return postData;
+  const text = String(postData || "");
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    // 不是 JSON，按声明的类型再认
   }
+  const type = String(contentType || "").toLowerCase();
+  if (type.includes("multipart/form-data")) {
+    const out = {};
+    for (const match of text.matchAll(/name="([^"]+)"/g)) out[match[1]] = "[part]";
+    return Object.keys(out).length ? out : null;
+  }
+  if (type.includes("application/x-www-form-urlencoded") || /^[^=&\s]+=[^&]*(?:&[^=&\s]+=[^&]*)*$/.test(text)) {
+    return Object.fromEntries(new URLSearchParams(text));
+  }
+  return null;
+}
+
+export function keysFromPostData(postData, contentType = "") {
+  const parsed = parsePostData(postData, contentType);
+  if (!parsed) return [];
   return [...bodyKeyPaths(parsed)];
 }
 
@@ -80,24 +94,17 @@ export function responseKeyPreview(body, cap = 24) {
 }
 
 export function requestIndexRow(row) {
+  const type = row.request_content_type ?? row.body?.request_content_type ?? "";
+  const post = row.post_data ?? row.body?.post_data;
+  const parsed = parsePostData(post, type);
   const keys = new Set([
-    ...keysFromPostData(row.post_data ?? row.body?.post_data),
+    ...keysFromPostData(post, type),
     ...keysFromQuery(row.query ?? row.body?.query),
   ]);
   const empty = new Set(emptyFromQuery(row.query ?? row.body?.query));
-  const post = row.post_data ?? row.body?.post_data;
-  if (post) {
-    let parsed = post;
-    if (typeof post === "string") {
-      try {
-        parsed = JSON.parse(post);
-      } catch {
-        parsed = null;
-      }
-    }
-    if (parsed) bodyKeyPaths(parsed, "", new Set(), empty);
-  }
+  if (parsed) bodyKeyPaths(parsed, "", new Set(), empty);
   const issued = issuedCredential(row.response_body ?? row.body?.response_body);
+  const unread = row.post_data_unreadable || row.body?.post_data_unreadable;
   return {
     id: row.id,
     method: row.method || "",
@@ -105,6 +112,7 @@ export function requestIndexRow(row) {
     keys: [...keys],
     ...(empty.size ? { empty: [...empty] } : {}),
     ...(issued ? { issues_credential: true } : {}),
+    ...(unread ? { post_data_unreadable: unread } : {}),
   };
 }
 

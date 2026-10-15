@@ -3,7 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { headersFromStorageState, issuedCredential, mergePackedHeaders, noteLoginBody, readAuthVault, redactSecrets, rollCredentialUrl, usableAuthHeaders, writeAuthVault } from "../src/auth-vault.mjs";
+import { headersFromLoginPayload, headersFromStorageState, issuedCredential, mergePackedHeaders, noteLoginBody, pickCredentialHeaders, readAuthVault, redactSecrets, rollCredentialUrl, usableAuthHeaders, writeAuthVault } from "../src/auth-vault.mjs";
 import { writeAuthLocalFile } from "../src/token-store.mjs";
 import { authSpawnEnv, writeRuntimeConfig, writeSkillFile } from "../src/skillpack/files.mjs";
 import { pickLatestCredentialHeaders } from "../src/browser/network.mjs";
@@ -15,6 +15,10 @@ test("a later header write keeps the credential request, and only the matching q
   const issued = issuedCredential(JSON.stringify({ data: { accessToken: "abc12345", refreshToken: "ref-old", expiresTime: 9 } }));
   assert.equal(issued.refreshToken, "ref-old");
   assert.equal(issuedCredential(JSON.stringify({ data: { id: 1 } })), null);
+  const fromLogin = headersFromLoginPayload(JSON.stringify({ data: { accessToken: "abc12345", tenantId: 9 } }));
+  assert.match(fromLogin.Authorization, /^Bearer /);
+  assert.equal(fromLogin["Tenant-Id"], undefined);
+  assert.equal(Object.keys(fromLogin).join(), "Authorization");
   const url = "https://example.test/session/refresh?tenantId=1&refreshToken=ref-old";
   assert.equal(rollCredentialUrl(url, "ref-old", "ref-new"), "https://example.test/session/refresh?tenantId=1&refreshToken=ref-new");
   await noteLoginBody("rec_auth", JSON.stringify({ data: { accessToken: "abc12345", refreshToken: "ref-old" } }), {
@@ -105,7 +109,16 @@ test("storage tokens and live-looking keys become Authorization, and secrets are
     }],
   });
   assert.match(headers.Authorization, /^Bearer /);
-  assert.equal(headers["Tenant-Id"], "9");
+  assert.equal(headers["Tenant-Id"], undefined);
+  const observed = pickCredentialHeaders({
+    Authorization: "Bearer live-token-abcdefghijklmn",
+    "X-Api-Key": "key-1",
+    "User-Agent": "Mozilla",
+  });
+  const chosen = Object.keys(observed).length ? observed : headers;
+  assert.match(chosen.Authorization, /live-token-abcdefghijklmn/);
+  assert.equal(chosen["X-Api-Key"], "key-1");
+  assert.doesNotMatch(chosen.Authorization, /DPORTAL/);
   const redacted = redactSecrets('Authorization: Bearer abcdefghijklmnop reason=config/auth.local.json');
   assert.doesNotMatch(redacted, /abcdefghijklmnop/);
   assert.match(redacted, /\[redacted\]/);
@@ -141,8 +154,13 @@ test("later cookie-only requests do not hide a prior access token", () => {
 });
 
 test("missing packed headers counts as auth stop, and api.md path headings are rejected before write", async () => {
-  assert.equal(authStoppedOutput('{"ok": false, "error": "凭证缺失：config/auth.local.json 的 headers 里没有 Authorization"}'), true);
+  assert.equal(authStoppedOutput("auth_expired"), true);
   assert.equal(authStoppedOutput("AuthExpired"), true);
+  assert.equal(authStoppedOutput("401"), true);
+  assert.equal(authStoppedOutput("403"), true);
+  assert.equal(authStoppedOutput("400 token missing"), true);
+  assert.equal(authStoppedOutput("400 refresh failed"), true);
+  assert.equal(authStoppedOutput("凭证缺失：请提供 token"), false);
   process.env.CABP_DATA = await mkdtemp(path.join(os.tmpdir(), "cabp-auth-write-"));
   const rejected = await writeSkillFile("rec_headings", "app.rec_headings", "references/api.md", "## 1. 部门树\nGET /admin-api/system/dept/simple-list\n");
   assert.equal(rejected.ok, false);
@@ -159,4 +177,31 @@ test("missing packed headers counts as auth stop, and api.md path headings are r
   const overlay = JSON.parse(env.DANO_AUTH_HEADERS);
   assert.match(overlay.Authorization, /packed-token-value-here/);
   assert.equal(overlay.Cookie, "sid=1");
+});
+
+test("pickCredentialHeaders drops browser-managed names and keeps custom auth names", () => {
+  const picked = pickCredentialHeaders({
+    ":authority": "example.test",
+    Accept: "*/*",
+    "User-Agent": "Mozilla",
+    Origin: "http://example.test",
+    Referer: "http://example.test/",
+    "Content-Type": "application/json",
+    "sec-ch-ua": "Chromium",
+    Authorization: "Bearer abcdefghijklmnop",
+    "X-Csrf-Token": "csrf-token-value",
+    "X-Api-Key": "key-1",
+    AppId: "app-1",
+    Cookie: "sid=1",
+  });
+  assert.equal(picked.Accept, undefined);
+  assert.equal(picked["User-Agent"], undefined);
+  assert.equal(picked.Origin, undefined);
+  assert.equal(picked["Content-Type"], undefined);
+  assert.equal(picked["Sec-Ch-Ua"], undefined);
+  assert.match(picked.Authorization, /^Bearer /);
+  assert.equal(picked["X-Csrf-Token"], "csrf-token-value");
+  assert.equal(picked["X-Api-Key"], "key-1");
+  assert.equal(picked.Appid, "app-1");
+  assert.equal(picked.Cookie, "sid=1");
 });

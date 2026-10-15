@@ -8,10 +8,10 @@ import { appendEvidence, getEvidence, listEvidence, appendGoal, readGoal } from 
 import { fieldFillText, runAction, withFillFieldText } from "../browser/actions.mjs";
 import { browserSession, persistBrowserSession, withPage } from "../browser/session.mjs";
 import { overlayControlFacts, overlayFactLists, overlayItemsLine, overlaySurfaceKind, takeSnapshot } from "../browser/snapshot.mjs";
-import { compactNetworkIndex, getNetwork, listNetwork, networkBodyForModel, requestKeyIndex } from "../browser/network.mjs";
+import { compactNetworkIndex, foldedSummary, getNetwork, listNetwork, networkBodyForModel, requestKeyIndex } from "../browser/network.mjs";
 import { applyVerifyToRecording, releaseVerifiedSkill } from "../session.mjs";
 import { authSpawnEnv, readSkillFile, skillIdFor, writeRuntimeConfig, writeSkillFile } from "../skillpack/files.mjs";
-import { actionEvidenceSummary, authStoppedOutput, clickedLabels, filledLabels, finishSkill, structureErrorsForFile, verifySkill } from "../skillpack/verify.mjs";
+import { actionEvidenceSummary, authStoppedOutput, clickedLabels, filledLabels, finishSkill, observationsForFile, structureErrorsForFile, verifySkill } from "../skillpack/verify.mjs";
 import { redactSecrets } from "../auth-vault.mjs";
 import { GUIDE_NAMES, guideBody } from "./guides.mjs";
 import { logLine } from "../log.mjs";
@@ -30,7 +30,7 @@ const TOOL_SPECS = [
   { name: "browser_snapshot", description: "读取当前页面快照树。只点树里的 [ref=fN:eN@数字]。goal_exact / overlay_exact / row_facts 是查找表，不是点击清单。返回 overlay_fields 与 overlay_editable（当前层非只读可填，含 ref；没有弹层时是页面上的 textbox/combobox）。", parameters: { type: "object", properties: {} } },
   { name: "browser_act", description: "ref 整段照抄最近一次 snapshot 树里的 [ref=fN:eN@数字]。@ 后数字对不上就重新 snapshot，只点新树。同名不要挑第一个。没有 ref 就停。不要并行多次 browser_act。同一张树上要改多格，用一次 fill_fields。fill_fields 的 fields 每项是 ref 加要填的字（text 或 value）。填和选用树里 textbox/combobox 以及 overlay_editable 的 ref。返回 clicked、requests、snapshot、overlay_fields、overlay_editable。requests 空只说明这一下没有 xhr/fetch。empty/required/readonly 是事实；empty=true 是没值，required 才是当前层必填还空；empty=false 不要当没填。弹层开着时只点当前树里这层的 ref，不要点 goal_exact 里被挡住的项。in_overlay 表示点的是 overlay_exact 里的控件；layer_idle 表示这层动了但没有 xhr。needs_click 表示这一格不能直接填，先 click 同一个 ref 再填。behind_overlay 时先看 overlay_exact。还没采用请求就不要点会关掉这层的控件。page_unchanged 时换 ref。uploaded 表示文件已写入。needs_upload 时对同一 ref 调用 upload。", parameters: { type: "object", properties: { action: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, fields: { type: "array" }, key: { type: "string" }, file_path: { type: "string" } }, required: ["action"] } },
   { name: "browser_screenshot", description: "把当前画面作为图像送回。不换树，点、填仍用最近一次 snapshot 的 [ref=]。", parameters: { type: "object", properties: { ref: { type: "string" }, as_image: { type: "boolean" } } } },
-  { name: "network_list", description: "列出本场全部 xhr/fetch 索引（id/method/path/keys/empty/response_keys）。empty 是这次请求里的空键，不是永远空。写字段时看这份 listed，不要只看点击口袋。", parameters: { type: "object", properties: { after_id: { type: "string" }, action_id: { type: "string" } } } },
+  { name: "network_list", description: "列出本场全部 xhr/fetch 索引（id/method/path/keys/empty/response_keys）。empty 是这次请求里的空键，不是永远空。写字段时看这份 listed，不要只看点击口袋。默认不列 HEAD、静态文件和无动作的重复请求，all=true 看全部。action_id 为空时 after_action/after_ms 是它在哪个动作之后多久发出，只是时间事实，自己判断是否由那一下引起。post_data_unreadable 表示浏览器没有交出带文件的表单正文；字段名看这次 upload 返回的 file_field，或用 read_page_asset 读前端脚本核对。", parameters: { type: "object", properties: { after_id: { type: "string" }, action_id: { type: "string" }, all: { type: "boolean" } } } },
   { name: "network_get", description: "按 id 读取一条请求。正文过大则省略并给出 response_keys，用 evidence_get 同 id 取全文。body_missing 表示没有正文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
   { name: "evidence_get", description: "按 id 读取一条证据全文。", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
   { name: "read_page_asset", description: "读取本场已捕获、与入口同源的 javascript 响应。", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
@@ -38,9 +38,10 @@ const TOOL_SPECS = [
   { name: "assist", description: "当前页被登录框或验证码挡住时调用。run_skill_command 的 401 或打包凭证过期不要调用。这次调用会停住，直到人在预览里处理完并确认。返回里的 snapshot 才是确认后的当前页，从那张快照接着做。", parameters: { type: "object", properties: { reason: { type: "string" } }, required: ["reason"] } },
   { name: "append_goal", description: "只填充目标里仍为空的键，写入原句。", parameters: { type: "object", properties: { key: { type: "string" }, text: { type: "string" } }, required: ["key", "text"] } },
   { name: "write_skill_file", description: "只写 SKILL.md、scripts/client.py、references/api.md。SKILL.md 必须以 --- 包住 name 和 description。references/api.md 标题必须是字段、绑定、未解决、已验证读命令，缺了会拒写。写入成功时顺带返回这份文件现在过不了 verify_skill 的结构项 structure_errors，先改这份文件再跑命令。", parameters: { type: "object", properties: { relative_path: { type: "string" }, contents: { type: "string" } }, required: ["relative_path", "contents"] } },
+  { name: "edit_skill_file", description: "改已写文件里的一段：old_text 必须在文件里恰好出现一次，替换成 new_text。只能改 SKILL.md、scripts/client.py、references/api.md。返回与 write_skill_file 相同（含 structure_errors）。只改出错的那一段，不要整份重写。", parameters: { type: "object", properties: { relative_path: { type: "string" }, old_text: { type: "string" }, new_text: { type: "string" } }, required: ["relative_path", "old_text", "new_text"] } },
   { name: "read_skill_file", description: "读取已写的 Skill 文件。", parameters: { type: "object", properties: { relative_path: { type: "string" } }, required: ["relative_path"] } },
   { name: "run_skill_command", description: "在 Skill 目录执行 python3 scripts/client.py。argv 是字符串数组，例如 [\"python3\", \"scripts/client.py\", \"list\"]。本机没有 python3 时运行时改用 python。先写出 scripts/client.py 再跑；文件不在会返回 missing_file。", parameters: { type: "object", properties: { argv: { type: "array", items: { type: "string" } } }, required: ["argv"] } },
-  { name: "verify_skill", description: "校验三文件结构：文件在、可调用、SKILL.md 里出现的读命令（含表格单元格）已跑、引用 path 在证据里、引用 path 的函数写了该请求的键。不判断字段该谁填、必填与否或来源，不要求只写目标发明 GET。返回 listed 用的 requests 和 filled。", parameters: { type: "object", properties: {} } },
+  { name: "verify_skill", description: "校验三文件结构：文件在、可调用、SKILL.md 里出现的读命令（含表格单元格）已跑、引用 path 在证据里、引用 path 的函数写了该请求的键。不判断字段该谁填、必填与否或来源，不要求只写目标发明 GET。返回 listed 用的 requests 和 filled。observations 是页面、字段、问句之间的对照，不阻止产出。逐条判断：确实漏了或写错了，就用 edit_skill_file 改了再 verify_skill；没漏就不用改。", parameters: { type: "object", properties: {} } },
 ];
 
 function parseStructured(value) {
@@ -75,8 +76,17 @@ export function sessionAssistBlocked(reason) {
   return /\bno_browser\b|origin_denied|会话已断开|没有浏览器/i.test(String(reason || ""));
 }
 
-function pythonFallback(bin) {
+export function pythonFallback(bin) {
   return bin === "python3" ? "python" : bin === "python" ? "python3" : "";
+}
+
+export async function spawnClientWithPythonFallback(argv, cwd, authFile, recording, run = spawnClient) {
+  let result = await run(argv, cwd, authFile, recording);
+  if (result.code === 127 || result.code === 9009) {
+    const alt = pythonFallback(argv[0]);
+    if (alt) result = await run([alt, ...argv.slice(1)], cwd, authFile, recording);
+  }
+  return result;
 }
 
 function clientSpawnEnv(recording, authFile) {
@@ -137,19 +147,24 @@ export function hostTools(recording) {
     },
     async browser_snapshot() {
       if (!browserSession(id)) return { ok: false, error: "no_browser", epoch: 0, refs: [], text: "" };
-      let snapshot = await withPage(id, () => takeSnapshot(id));
-      if (snapshot?.ok === false) return snapshot;
-      if (!(snapshot?.refs || []).length) {
-        await new Promise((resolve) => setTimeout(resolve, 800));
-        snapshot = await withPage(id, () => takeSnapshot(id));
-        if (snapshot?.ok === false) return snapshot;
-      }
-      let overlay = {};
-      try {
-        overlay = overlayFactLists(await overlayControlFacts(id));
-      } catch {
-        overlay = {};
-      }
+      const taken = await withPage(id, async () => {
+        let snapshot = await takeSnapshot(id);
+        if (snapshot?.ok === false) return { snapshot };
+        if (!(snapshot?.refs || []).length) {
+          await new Promise((resolve) => setTimeout(resolve, 800));
+          snapshot = await takeSnapshot(id);
+          if (snapshot?.ok === false) return { snapshot };
+        }
+        let overlay = {};
+        try {
+          overlay = overlayFactLists(await overlayControlFacts(id));
+        } catch {
+          overlay = {};
+        }
+        return { snapshot, overlay };
+      });
+      if (taken.snapshot?.ok === false) return taken.snapshot;
+      const { snapshot, overlay } = taken;
       const saved = await appendEvidence(id, {
         kind: "snapshot",
         summary: "snapshot",
@@ -181,7 +196,7 @@ export function hostTools(recording) {
       return { ...result, as_image: true };
     },
     async network_list(args) {
-      return { items: listNetwork(id, args || {}) };
+      return { items: listNetwork(id, args || {}), folded: foldedSummary(id), hint: "folded 里是 HEAD、静态文件和无动作的重复请求；需要时 all=true 看全部" };
     },
     async network_get(args) {
       const item = getNetwork(id, args.id);
@@ -202,7 +217,7 @@ export function hostTools(recording) {
       const origin = new URL(recording.startUrl).origin;
       const target = String(args.url || "");
       if (!target.startsWith(origin)) return { ok: false, error: "origin_denied" };
-      const rows = listNetwork(id, {});
+      const rows = listNetwork(id, { all: true });
       const full = rows.map((row) => getNetwork(id, row.id)).find((row) => row && row.url === target && /javascript/i.test(row.content_type || ""));
       if (!full || full.body_missing) return { ok: false, body_missing: true };
       const saved = await appendEvidence(id, { kind: "asset", summary: target, body: full.response_body, body_missing: false });
@@ -283,17 +298,41 @@ export function hostTools(recording) {
         // 同一套结构校验在写入时就摆回来，只给这份文件的项，省掉一轮 verify_skill 往返
         try {
           const verify = await verifySkill(skillPath(recording.skillId), id, recording, { dryRun: true });
-          const structure_errors = structureErrorsForFile(verify.errors, String(args.relative_path || "").replace(/\\/g, "/"));
+          const rel = String(args.relative_path || "").replace(/\\/g, "/");
+          const structure_errors = structureErrorsForFile(verify.errors, rel);
+          const observations = observationsForFile(verify.observations, rel);
           const alignment = verify.alignment || null;
+          const extra = {
+            ...(structure_errors.length ? { structure_errors } : {}),
+            ...(observations.length ? { observations } : {}),
+            ...(alignment ? { alignment } : {}),
+          };
           if (structure_errors.length) {
-            return { ...result, structure_errors, alignment, hint: "已写入。对照 overlay_editable_names、parsed_page_names、question_ids 改这份文件再跑命令。" };
+            return { ...result, ...extra, hint: "已写入。对照 overlay_editable_names、parsed_page_names、question_ids 改这份文件再跑命令。" };
           }
-          if (alignment) return { ...result, alignment };
+          if (Object.keys(extra).length) return { ...result, ...extra };
         } catch {
           // 写入已成功；结构预检失败就留给 verify_skill
         }
       }
       return result;
+    },
+    async edit_skill_file(args) {
+      recording.skillId = skillId();
+      let current;
+      try {
+        current = await readSkillFile(recording.skillId, args.relative_path);
+      } catch {
+        return { ok: false, error: "missing_file", path: String(args.relative_path || "") };
+      }
+      if (!current?.ok) return current;
+      const oldText = String(args.old_text ?? "");
+      if (!oldText) return { ok: false, error: "old_text_required" };
+      const count = current.contents.split(oldText).length - 1;
+      if (count === 0) return { ok: false, error: "old_text_not_found", hint: "old_text 从 read_skill_file 的原文整段照抄" };
+      if (count > 1) return { ok: false, error: "old_text_not_unique", count, hint: "多带几行上下文，让 old_text 只出现一次" };
+      const contents = current.contents.replace(oldText, () => String(args.new_text ?? ""));
+      return tools.write_skill_file({ relative_path: args.relative_path, contents });
     },
     async read_skill_file(args) {
       return readSkillFile(skillId(), args.relative_path);
@@ -314,11 +353,7 @@ export function hostTools(recording) {
         return { ok: false, error: "missing_file", path: "scripts/client.py" };
       }
       const authFile = path.join(cwd, "config", "auth.local.json");
-      let result = await spawnClient(argv, cwd, authFile, recording);
-      if (result.code === 127) {
-        const alt = pythonFallback(argv[0]);
-        if (alt) result = await spawnClient([alt, ...argv.slice(1)], cwd, authFile, recording);
-      }
+      let result = await spawnClientWithPythonFallback(argv, cwd, authFile, recording);
       if (result.code !== 0 && authStoppedOutput(`${result.stdout}\n${result.stderr}`)) {
         await persistBrowserSession(id).catch(() => null);
         await writeRuntimeConfig(recording, recording.skillId);
@@ -379,7 +414,7 @@ export function hostTools(recording) {
       if (snaps[0]) snapshot = await getEvidence(id, snaps[0].id);
       let overlay_fields = [];
       try {
-        overlay_fields = await overlayControlFacts(id);
+        overlay_fields = await withPage(id, () => overlayControlFacts(id));
       } catch {
         overlay_fields = [];
       }

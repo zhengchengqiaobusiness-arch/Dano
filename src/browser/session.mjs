@@ -1,4 +1,4 @@
-import { headersFromStorageState, mergePackedHeaders, writeAuthVault } from "../auth-vault.mjs";
+import { headersFromStorageState, writeAuthVault } from "../auth-vault.mjs";
 import { originFromUrl, saveStorageState } from "../session-store.mjs";
 import { attachCredentialCapture, attachNetwork, latestCredentialHeaders } from "./network.mjs";
 
@@ -76,7 +76,8 @@ export function getPage(recordingId) {
 }
 
 const pageLocks = new Map();
-export const PAGE_LOCK_MS = 15000;
+// 只防真正卡死；页面操作本身都有上限，正常不会走到这里
+export const PAGE_LOCK_MS = 60000;
 
 export function raceWall(promise, ms, fallback) {
   let timer;
@@ -122,7 +123,8 @@ export async function persistBrowserSession(recordingId) {
   try {
     const saved = await state.context.storageState();
     const url = state.page?.url?.() || state.origin;
-    const headers = mergePackedHeaders(headersFromStorageState(saved), latestCredentialHeaders(recordingId));
+    const observed = latestCredentialHeaders(recordingId);
+    const headers = Object.keys(observed).length ? observed : headersFromStorageState(saved);
     if (Object.keys(headers).length) await writeAuthVault(recordingId, headers);
     return await saveStorageState(url, saved);
   } catch {

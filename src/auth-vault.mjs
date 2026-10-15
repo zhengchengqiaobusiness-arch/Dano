@@ -16,8 +16,6 @@ export function isSealedHeaderValue(value) {
   return text.startsWith("[sealed:") || text.includes("****");
 }
 
-const CREDENTIAL_HEADERS = new Set(["authorization", "tenant-id", "cookie", "x-token", "x-access-token", "token"]);
-
 export function usableAuthHeaders(raw) {
   const headers = {};
   const source = raw && typeof raw === "object" ? raw.headers || raw : {};
@@ -109,7 +107,6 @@ export function headersFromStorageState(state) {
       const name = String(row?.name || "");
       const value = unwrapStorageValue(row?.value);
       if (!value || isSealedHeaderValue(value)) continue;
-      if (/^tenantId$|^tenant-id$|^TENANT_ID$/i.test(name)) headers["Tenant-Id"] = value;
       if (looksLikeAccessToken(name, value)) headers.Authorization = asAuthorization(value);
     }
   }
@@ -136,8 +133,6 @@ export function headersFromLoginPayload(raw) {
   const token = body.accessToken || body.access_token || body.token;
   if (!token || isSealedHeaderValue(token)) return {};
   const headers = { Authorization: asAuthorization(token) };
-  const tenantId = body.tenantId || body.tenant_id;
-  if (tenantId) headers["Tenant-Id"] = String(tenantId);
   return usableAuthHeaders(headers);
 }
 
@@ -154,11 +149,13 @@ export function issuedCredential(raw) {
   };
 }
 
+const BROWSER_MANAGED = /^(?::.*|accept|accept-[a-z-]+|user-agent|referer|origin|host|connection|content-type|content-length|cache-control|pragma|priority|dnt|te|upgrade-insecure-requests|sec-[a-z0-9-]+)$/i;
+
 export function pickCredentialHeaders(raw) {
   const picked = {};
   for (const [key, value] of Object.entries(raw || {})) {
-    const lower = String(key).toLowerCase();
-    if (CREDENTIAL_HEADERS.has(lower) || /(token|auth|tenant|session)/i.test(lower)) picked[key] = value;
+    if (BROWSER_MANAGED.test(String(key))) continue;
+    picked[key] = value;
   }
   return usableAuthHeaders(picked);
 }

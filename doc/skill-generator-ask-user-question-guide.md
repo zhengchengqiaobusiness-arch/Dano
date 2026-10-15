@@ -16,9 +16,7 @@
 
 ## 调用方怎么问（原样写进 SKILL.md）
 
-读：读命令没有调用方槽就直接执行，不发 `ask_user_question`，不发确认卡。
-
-写：第一次把 `SKILL.md` 里这张 `title` + `questions[]` 原样整份发出，`id`、`question`、`inputType`、`options`、`required` 不改，不增题、不减题、不另造确认题。对话里已确定的值放进对应 `default`，不再另问；上一步查到的业务日期直接作 `default`，不改成当天。调用方提交后，同一轮只发 `{"confirm":true,"formIds":["<本表 formId>"]}`。确认后跑 `python3` 写命令加 `--confirm`。字段表和确认卡不要写在同一次调用里。
+读：无调用方槽立刻执行；已确定的不进本次 questions[]，不发 ask_user_question，不发确认卡，不要另造查询确认卡。写：第一次把 SKILL.md 里这张 title+questions[] 原样整份发出，id、question、inputType、options、required 不改，不增题、不减题、不另造确认题；对话里已确定的值放进对应 default，不再另问，上一步查到的业务日期直接作 default，不改成当天；调用方提交后同一轮只发 {"confirm":true,"formIds":["<formId>"]}；确认后跑 python3 写命令加 --confirm。
 
 `SKILL.md` 里放可原样复制的 JSON，调用方每轮只调一次 `ask_user_question`：
 

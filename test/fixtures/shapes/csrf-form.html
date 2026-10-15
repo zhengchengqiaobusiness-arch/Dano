@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+  <meta name="csrf-token" content="csrf-test">
+</head>
+<body>
+  <label>name<input id="name" name="name" aria-label="name"></label>
+  <label>note<input id="note" name="note" aria-label="note" value=""></label>
+  <button type="button" id="save">save</button>
+  <script>
+    document.cookie = "session=shape";
+    document.getElementById("save").onclick = () => {
+      const token = document.querySelector('meta[name="csrf-token"]').content;
+      const body = new URLSearchParams({
+        name: document.getElementById("name").value,
+        note: document.getElementById("note").value,
+      });
+      fetch("/api/items", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "X-CSRF-Token": token,
+        },
+        body,
+      });
+    };
+  </script>
+</body>
+</html>

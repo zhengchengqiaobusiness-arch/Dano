@@ -4,9 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { writeSkillFile } from "../src/skillpack/files.mjs";
-import { actionEvidenceSummary, apiFieldRows, askCoverageErrors, askProtocolMissing, authOverlayParseError, fieldAlignment, hardcodedOriginError, jsonWordedQuestion, overlayLayersFromBodies, skillCommandLines, structureErrorsForFile, verifySkill } from "../src/skillpack/verify.mjs";
+import { resultLine } from "../src/agent/pi-session.mjs";
+import { actionEvidenceSummary, apiFieldRows, ASK_PROTOCOL, askCoverageObservations, askProtocolMissing, authOverlayParseError, authStoppedOutput, fieldAlignment, frontmatterErrors, hardcodedOriginError, jsonDefault, jsonWording, overlayLayersFromBodies, skillCommandLines, squashProtocol, structureErrorsForFile, verifySkill } from "../src/skillpack/verify.mjs";
 import { jsNonStdlibImports, nonStdlibImports } from "../src/skillpack/stdlib-imports.mjs";
-import { skillDir } from "../src/paths.mjs";
+import { docDir, skillDir } from "../src/paths.mjs";
 import { appendEvidence } from "../src/evidence/store.mjs";
 import { GUIDE_NAMES } from "../src/agent/guides.mjs";
 import { applyVerifyToRecording, publicSessionStatus } from "../src/session.mjs";
@@ -405,6 +406,17 @@ async function seedGuides(recordingId) {
   }
 }
 
+test("authStoppedOutput matches auth_expired 401 403 and 400 with token", () => {
+  assert.equal(authStoppedOutput("auth_expired"), true);
+  assert.equal(authStoppedOutput("AuthExpired"), true);
+  assert.equal(authStoppedOutput("status 401"), true);
+  assert.equal(authStoppedOutput("status 403"), true);
+  assert.equal(authStoppedOutput("400 refresh"), true);
+  assert.equal(authStoppedOutput("400 credential"), true);
+  assert.equal(authStoppedOutput("账号未登录"), false);
+  assert.equal(authStoppedOutput("凭证缺失：请提供 token"), false);
+});
+
 test("a later successful run is not auth_expired, and a GET subcommand is not a write because its name sits near a POST path", async () => {
   await useData();
   const shape = { id: "rec_verify_auth_latest", tenant: "", subsystem: "app", skillId: "app.rec_verify_auth_latest", startUrl: "http://127.0.0.1/" };
@@ -649,7 +661,7 @@ test("caller fields without questions[] or choice options are not invocable", as
   result = await verifySkill(dir, shape.id, shape);
   // 写能力的 SKILL.md 没写调用方怎么问（confirm + formIds）时不可调用
   assert.ok(result.errors.some((item) => item.file === "SKILL.md" && String(item.hint || "").includes("调用方怎么问")));
-  await writeFile(path.join(dir, "SKILL.md"), `${questionsOnly}\n调用方怎么问：读不问不确认。写第一次原样发出上面的 questions[]，已知值放 default；提交后只发 {"confirm":true,"formIds":["<formId>"]}，再跑写命令加 --confirm。\n`);
+  await writeFile(path.join(dir, "SKILL.md"), `${questionsOnly}\n${ASK_PROTOCOL}\n`);
   await writeFile(path.join(dir, "references/api.md"), [
     "## 字段",
     "- page_name: 标题",
@@ -786,8 +798,9 @@ test("choice and date page controls cannot be asked as free text, and option ids
   await writeFile(path.join(dir, "config/auth.local.json"), "{\"headers\":{\"Authorization\":\"Bearer tok\"}}\n");
   await seedGuides(shape.id);
   let result = await verifySkill(dir, shape.id, shape);
-  assert.ok(result.errors.some((item) => item.code === "not_invocable" && String(item.hint || "").includes("options")));
-  assert.ok(result.errors.some((item) => item.code === "not_invocable" && String(item.hint || "").includes("dateFormat")));
+  assert.ok(result.observations.some((item) => item.code === "control_type_mismatch" && String(item.hint || "").includes("options")));
+  assert.ok(result.observations.some((item) => item.code === "control_type_mismatch" && String(item.hint || "").includes("dateFormat")));
+  assert.equal(result.errors.some((item) => /页面 combobox|页面日期控件|封闭枚举在 questions/.test(String(item.hint || ""))), false);
 
   await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\n{\"title\":\"办理\",\"questions\":[{\"id\":\"dept\",\"question\":\"部门\",\"inputType\":\"select\",\"required\":true,\"options\":[{\"id\":\"from-list-command\",\"label\":\"运行 list\"}],\"default\":\"from-list-command\"},{\"id\":\"start\",\"question\":\"开始日期\",\"inputType\":\"date\",\"dateFormat\":\"yyyy-MM-dd\",\"required\":true,\"default\":\" \"}]}\npython scripts/client.py save --confirm\n");
   await writeFile(path.join(dir, "references/api.md"), [
@@ -816,11 +829,13 @@ test("choice and date page controls cannot be asked as free text, and option ids
     },
   });
   result = await verifySkill(dir, shape.id, shape);
-  assert.ok(result.errors.some((item) => item.code === "not_invocable" && item.field === "dept" && /留空|占位/.test(String(item.hint || ""))));
+  assert.ok(result.observations.some((item) => item.code === "live_options_listed" && item.field === "dept"));
+  assert.equal(result.errors.some((item) => item.field === "dept" && /留空|占位/.test(String(item.hint || ""))), false);
 
   await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\n{\"title\":\"办理\",\"questions\":[{\"id\":\"dept\",\"question\":\"部门\",\"inputType\":\"select\",\"required\":true,\"options\":[{\"id\":\"103\",\"label\":\"甲部门名称足够长\"}],\"default\":\"103\"},{\"id\":\"start\",\"question\":\"开始日期\",\"inputType\":\"date\",\"dateFormat\":\"yyyy-MM-dd\",\"required\":true,\"default\":\" \"}]}\npython scripts/client.py save --confirm\n");
   result = await verifySkill(dir, shape.id, shape);
-  assert.ok(result.errors.some((item) => item.code === "not_invocable" && item.field === "dept" && /留空|业务 id/.test(String(item.hint || ""))));
+  assert.ok(result.observations.some((item) => item.code === "sample_value" && item.field === "dept"));
+  assert.equal(result.errors.some((item) => item.field === "dept" && /留空|业务 id/.test(String(item.hint || ""))), false);
 
   await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\n{\"title\":\"办理\",\"questions\":[{\"id\":\"dept\",\"question\":\"部门\",\"inputType\":\"select\",\"required\":true,\"options\":[],\"default\":\" \"},{\"id\":\"start\",\"question\":\"开始日期\",\"inputType\":\"date\",\"dateFormat\":\"yyyy-MM-dd\",\"required\":true,\"default\":\" \"}]}\npython scripts/client.py save --confirm\n");
   result = await verifySkill(dir, shape.id, shape);
@@ -828,7 +843,8 @@ test("choice and date page controls cannot be asked as free text, and option ids
 
   await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\n{\"title\":\"办理\",\"questions\":[{\"id\":\"dept\",\"question\":\"部门\",\"inputType\":\"select\",\"required\":true,\"options\":[],\"default\":\"103\"},{\"id\":\"start\",\"question\":\"开始日期\",\"inputType\":\"date\",\"dateFormat\":\"yyyy-MM-dd\",\"required\":true,\"default\":\" \"}]}\npython scripts/client.py save --confirm\n");
   result = await verifySkill(dir, shape.id, shape);
-  assert.ok(result.errors.some((item) => item.code === "not_invocable" && item.field === "dept" && String(item.hint || "").includes("业务 id")));
+  assert.ok(result.observations.some((item) => item.code === "sample_value" && item.field === "dept"));
+  assert.equal(result.errors.some((item) => item.field === "dept" && String(item.hint || "").includes("业务 id")), false);
 
   await writeFile(path.join(dir, "SKILL.md"), "---\nname: sample\ndescription: sample\n---\n{\"title\":\"办理\",\"questions\":[{\"id\":\"items\",\"question\":\"明细\",\"inputType\":\"rows\",\"required\":true,\"default\":\" \"}]}\npython scripts/client.py save --confirm\n");
   await writeFile(path.join(dir, "references/api.md"), [
@@ -969,20 +985,23 @@ test("field tables with aliases and page_name= bullets are parsed, constant need
 });
 
 test("questions never show JSON to the caller, and a write skill must say how the caller asks", () => {
-  assert.equal(jsonWordedQuestion({ question: "已完成工作（JSON 数组，每项）", default: " " }), true);
-  assert.equal(jsonWordedQuestion({ question: "附件", default: "[]" }), true);
-  assert.equal(jsonWordedQuestion({ question: "已完成工作（每行一项：工作内容 | 完成进度）", default: " " }), false);
-  assert.equal(jsonWordedQuestion({ question: "标题", default: "周报" }), false);
+  assert.equal(jsonWording({ question: "已完成工作（JSON 数组，每项）", default: " " }), true);
+  assert.equal(jsonDefault({ question: "附件", default: "[]" }), true);
+  assert.equal(jsonWording({ question: "已完成工作（每行一项：工作内容 | 完成进度）", default: " " }), false);
+  assert.equal(jsonDefault({ question: "标题", default: "周报" }), false);
   const read = "---\nname: a\ndescription: b\n---\npython3 scripts/client.py list\n";
   assert.equal(askProtocolMissing(read), false);
   const writeNoProtocol = "---\nname: a\ndescription: b\n---\n{\"title\":\"办理\",\"questions\":[]}\npython3 scripts/client.py save --confirm\n";
   assert.equal(askProtocolMissing(writeNoProtocol), true);
-  const writeWithProtocol = `${writeNoProtocol}提交后只发 {"confirm":true,"formIds":["<formId>"]}，再加 --confirm。\n`;
-  assert.equal(askProtocolMissing(writeWithProtocol), false);
-  const readAndWrite = "---\nname: a\ndescription: b\n---\npython3 scripts/client.py list\npython3 scripts/client.py save --confirm\n提交后只发 {\"confirm\":true,\"formIds\":[\"<formId>\"]}，再加 --confirm。\n";
-  assert.equal(askProtocolMissing(readAndWrite), true);
-  const readSkip = `${readAndWrite}读：已确定的不进本次 questions[]，不问。\n`;
-  assert.equal(askProtocolMissing(readSkip), false);
+  const writeSpaced = `${writeNoProtocol}${ASK_PROTOCOL.replace(/。/g, "。\n  ")}\n`;
+  assert.equal(askProtocolMissing(writeSpaced), false);
+  const writeMissingSentence = `${writeNoProtocol}${ASK_PROTOCOL.replace("不要另造查询确认卡。", "")}\n`;
+  assert.equal(askProtocolMissing(writeMissingSentence), true);
+});
+
+test("ask-user-question guide keeps the ask protocol verbatim", async () => {
+  const guide = await readFile(path.join(docDir(), "skill-generator-ask-user-question-guide.md"), "utf8");
+  assert.ok(squashProtocol(guide).includes(squashProtocol(ASK_PROTOCOL)));
 });
 
 test("a written file gets back only its own structural errors, never the run-time ones", () => {
@@ -1030,9 +1049,9 @@ test("questions[] must cover caller fields and the densest overlay layer", async
       requests: [{ method: "POST", path: "/api/save" }],
     },
   ]);
-  const missing = askCoverageErrors(thin, fields, layers, { hasWriteConfirm: true });
-  assert.ok(missing.some((item) => item.field === "工作总结" && item.file === "SKILL.md"));
-  assert.ok(missing.some((item) => item.field === "明日计划" && item.file === "references/api.md"));
+  const missing = askCoverageObservations(thin, fields, layers, { hasWriteConfirm: true });
+  assert.ok(missing.some((item) => item.code === "ask_coverage" && item.field === "工作总结" && item.file === "SKILL.md"));
+  assert.ok(missing.some((item) => item.code === "ask_coverage" && item.field === "明日计划" && item.file === "references/api.md"));
   assert.equal(missing.some((item) => item.field === "作者"), false);
   const full = [
     { id: "title", question: "标题", inputType: "text" },
@@ -1040,7 +1059,7 @@ test("questions[] must cover caller fields and the densest overlay layer", async
     { id: "plan", question: "明日计划", inputType: "textarea" },
   ];
   const fieldsFull = [...fields, { page_name: "明日计划", source: "caller", control: "textbox" }];
-  assert.equal(askCoverageErrors(full, fieldsFull, layers, { hasWriteConfirm: true }).length, 0);
+  assert.equal(askCoverageObservations(full, fieldsFull, layers, { hasWriteConfirm: true }).length, 0);
 
   await useData();
   const shape = { id: "rec_verify_overlay_cover", tenant: "", subsystem: "app", skillId: "app.rec_verify_overlay_cover", startUrl: "http://127.0.0.1/" };
@@ -1066,7 +1085,8 @@ test("questions[] must cover caller fields and the densest overlay layer", async
     },
   });
   const result = await verifySkill(dir, shape.id, shape);
-  assert.ok(result.errors.some((item) => item.field === "工作总结" && String(item.hint || "").includes("questions[]")));
+  assert.ok(result.observations.some((item) => item.code === "ask_coverage" && item.field === "工作总结"));
+  assert.equal(result.errors.some((item) => item.field === "工作总结"), false);
 });
 
 test("### headings in 字段 are page_name, command headings are not, and required marks are not part of the name", async () => {
@@ -1106,15 +1126,15 @@ test("### headings in 字段 are page_name, command headings are not, and requir
     ],
     requests: [{ method: "POST", path: "/save" }],
   }]);
-  const missing = askCoverageErrors(
+  const missing = askCoverageObservations(
     [{ id: "title", question: "标题", inputType: "text" }],
     [{ page_name: "标题", source: "caller" }],
     overlay,
     { hasWriteConfirm: true },
   );
-  assert.ok(missing.some((item) => item.field === "汇报类型"));
+  assert.ok(missing.some((item) => item.code === "ask_coverage" && item.field === "汇报类型"));
   assert.equal(missing.some((item) => String(item.field || "").includes("*")), false);
-  const covered = askCoverageErrors(
+  const covered = askCoverageObservations(
     [
       { id: "title", question: "标题", inputType: "text" },
       { id: "type", question: "汇报类型", inputType: "select" },
@@ -1184,3 +1204,124 @@ test("### headings in 字段 are page_name, command headings are not, and requir
   assert.ok(result.alignment.parsed_page_names.includes("标题"));
   assert.equal(result.alignment.parsed_page_names.includes("report-statistics"), false);
 });
+
+test("name mismatches go to observations and do not fail status", async () => {
+  await useData();
+  const shape = { id: "rec_verify_obs", tenant: "", subsystem: "app", skillId: "app.rec_verify_obs", startUrl: "http://127.0.0.1/" };
+  const dir = skillDir(shape.skillId);
+  await mkdir(path.join(dir, "scripts"), { recursive: true });
+  await mkdir(path.join(dir, "references"), { recursive: true });
+  await mkdir(path.join(dir, "config"), { recursive: true });
+  const skill = [
+    "---",
+    "name: save-item",
+    "description: 调用方保存一条记录",
+    "---",
+    "{\"title\":\"保存\",\"questions\":[{\"id\":\"begin\",\"question\":\"开始日期\",\"inputType\":\"text\",\"required\":true,\"default\":\" \"}]}",
+    "python scripts/client.py save --confirm",
+    ASK_PROTOCOL,
+  ].join("\n");
+  await writeFile(path.join(dir, "SKILL.md"), `${skill}\n`);
+  await writeFile(path.join(dir, "scripts/client.py"), "def save():\n    method = \"POST\"\n    path = \"/api/items\"\n    body[\"name\"] = args.name\n");
+  await writeFile(path.join(dir, "references/api.md"), "## 字段\n- page_name: Start\n- source: caller\n- evidence_ids: req_save\n\n## 绑定\n\n## 未解决\n\n## 已验证读命令\n");
+  await writeFile(path.join(dir, "config/runtime.json"), "{}\n");
+  await writeFile(path.join(dir, "config/auth.local.json"), "{\"headers\":{\"Authorization\":\"Bearer tok\"}}\n");
+  await seedGuides(shape.id);
+  await appendEvidence(shape.id, {
+    id: "req_save",
+    kind: "network",
+    summary: "POST /api/items",
+    body: { method: "POST", path: "/api/items", post_data: JSON.stringify({ name: "a" }), response_body: "{}" },
+  });
+  await appendEvidence(shape.id, {
+    kind: "action",
+    summary: "click:save",
+    body: {
+      overlay_editable: [{ name: "textbox \"Start\"", role: "textbox" }],
+      requests: [{ method: "POST", path: "/api/items" }],
+    },
+  });
+  const result = await verifySkill(dir, shape.id, shape);
+  assert.equal(result.errors.some((item) => item.code === "ask_coverage"), false);
+  assert.ok(result.observations.some((item) => item.code === "ask_coverage"));
+  assert.ok(result.status === "skill_ready" || result.status === "skill_written_needs_auth");
+  assert.match(resultLine({ content: [{ type: "text", text: JSON.stringify(result) }] }), /待核对/);
+
+  const icon = { id: "rec_verify_icon", tenant: "", subsystem: "app", skillId: "app.rec_verify_icon", startUrl: "http://127.0.0.1/" };
+  const iconDir = skillDir(icon.skillId);
+  await mkdir(path.join(iconDir, "scripts"), { recursive: true });
+  await mkdir(path.join(iconDir, "references"), { recursive: true });
+  await mkdir(path.join(iconDir, "config"), { recursive: true });
+  await writeFile(path.join(iconDir, "SKILL.md"), "---\nname: save-item\ndescription: save\n---\npython scripts/client.py list\n");
+  await writeFile(path.join(iconDir, "scripts/client.py"), "def list():\n    method = \"GET\"\n    path = \"/api/items\"\n");
+  await writeFile(path.join(iconDir, "references/api.md"), API_HEADINGS);
+  await writeFile(path.join(iconDir, "config/runtime.json"), "{}\n");
+  await writeFile(path.join(iconDir, "config/auth.local.json"), "{\"headers\":{}}\n");
+  await seedGuides(icon.id);
+  await appendEvidence(icon.id, {
+    kind: "action",
+    summary: "snapshot",
+    body: { overlay_editable: [{ name: "textbox", role: "textbox", ref: "f0:e1@1" }] },
+  });
+  await appendEvidence(icon.id, {
+    kind: "network",
+    summary: "GET /api/items",
+    body: { method: "GET", path: "/api/items" },
+  });
+  await appendEvidence(icon.id, { kind: "verify", ok: true, argv: ["python", "scripts/client.py", "list"] });
+  const iconResult = await verifySkill(iconDir, icon.id, icon);
+  assert.equal(iconResult.errors.length, 0);
+
+  await writeFile(path.join(dir, "SKILL.md"), [
+    "---",
+    "name: save-item",
+    "description: save",
+    "---",
+    JSON.stringify({
+      title: "保存",
+      questions: [
+        { id: "name", question: "名称", inputType: "badtype", required: true, default: " " },
+        { id: "kind", question: "种类", inputType: "select", required: true, options: [{ id: "a" }], default: " " },
+        { id: "start", question: "开始", inputType: "date", required: true, default: " " },
+        { id: "note", question: "备注", inputType: "text", dataSource: { url: "/x" }, default: "{}" },
+      ],
+    }),
+    "python scripts/client.py save --confirm",
+    ASK_PROTOCOL,
+  ].join("\n"));
+  const hard = await verifySkill(dir, shape.id, shape);
+  assert.ok(hard.errors.some((item) => item.field === "name" && String(item.hint || "").includes("inputType")));
+  assert.ok(hard.errors.some((item) => item.field === "kind" && String(item.hint || "").includes("id 和 label")));
+  assert.ok(hard.errors.some((item) => item.field === "start" && String(item.hint || "").includes("dateFormat")));
+  assert.ok(hard.errors.some((item) => item.field === "note" && String(item.hint || "").includes("dataSource")));
+  assert.ok(hard.errors.some((item) => item.field === "note" && String(item.hint || "").includes("JSON")));
+});
+
+test("frontmatterErrors checks YAML structure only", () => {
+  const badIndent = frontmatterErrors("---\nname: x\n description: y\n---\n");
+  assert.equal(badIndent.length, 2);
+  assert.ok(badIndent.every((item) => item.code === "not_invocable" && item.file === "SKILL.md"));
+  assert.ok(badIndent.some((item) => item.line === "description: y"));
+  assert.ok(badIndent.some((item) => item.key === "description"));
+
+  assert.equal(frontmatterErrors("---\nname: x\ndescription: y\n---\nbody\n").length, 0);
+
+  const folded = frontmatterErrors("---\nname: x\ndescription: |\n  first\n  second\n---\n");
+  assert.equal(folded.length, 0);
+
+  const unquoted = frontmatterErrors("---\nname: x\ndescription: note: value\n---\n");
+  assert.equal(unquoted.length, 1);
+  assert.equal(unquoted[0].key, "description");
+  assert.equal(frontmatterErrors("---\nname: x\ndescription: \"note: value\"\n---\n").length, 0);
+
+  assert.equal(frontmatterErrors("name: x\ndescription: y\n").length, 1);
+  const noName = frontmatterErrors("---\ndescription: y\n---\n");
+  assert.equal(noName.length, 1);
+  assert.equal(noName[0].key, "name");
+  const noDesc = frontmatterErrors("---\nname: x\n---\n");
+  assert.equal(noDesc.length, 1);
+  assert.equal(noDesc[0].key, "description");
+
+  assert.equal(frontmatterErrors("---\r\nname: x\r\ndescription: y\r\n---\r\nbody\r\n").length, 0);
+});
+

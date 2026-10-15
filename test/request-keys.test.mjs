@@ -136,3 +136,29 @@ test("a key in another function does not satisfy the function that sends the pat
   assert.ok(cited.some((item) => item.code === "key_not_written" && item.key === "state"));
   assert.equal(cited.some((item) => item.key === "owner"), false);
 });
+
+test("urlencoded and multipart bodies expose keys, and JSON stays the same", () => {
+  const form = requestIndexRow({
+    id: "req_form",
+    method: "POST",
+    path: "/submit",
+    request_content_type: "application/x-www-form-urlencoded",
+    post_data: "title=hi&note=&count=1",
+  });
+  assert.ok(form.keys.includes("title"));
+  assert.ok(form.keys.includes("note"));
+  assert.ok(form.keys.includes("count"));
+  assert.ok(form.empty.includes("note"));
+  const multi = requestIndexRow({
+    id: "req_multi",
+    method: "POST",
+    path: "/upload",
+    request_content_type: "multipart/form-data; boundary=----x",
+    post_data: '------x\r\nContent-Disposition: form-data; name="file"\r\n\r\nblob\r\n------x\r\nContent-Disposition: form-data; name="caption"\r\n\r\nhi\r\n------x--',
+  });
+  assert.ok(multi.keys.includes("file"));
+  assert.ok(multi.keys.includes("caption"));
+  const json = keysFromPostData(JSON.stringify(body));
+  assert.ok(json.includes("creator"));
+  assert.ok(json.includes("items[].itemType"));
+});

@@ -5,7 +5,7 @@ import path from "node:path";
 import { recordingDir, skillDir } from "../paths.mjs";
 import { mergePackedHeaders, readAuthVault, usableAuthHeaders } from "../auth-vault.mjs";
 import { persistBrowserSession } from "../browser/session.mjs";
-import { latestCredentialHeaders } from "../browser/network.mjs";
+import { getNetwork, latestCredentialHeaders, listNetwork } from "../browser/network.mjs";
 import { readTokenRecord, writeAuthLocalFile } from "../token-store.mjs";
 import { originFromUrl } from "../session-store.mjs";
 
@@ -105,10 +105,24 @@ export async function readSkillFile(skillId, relativePath) {
 
 export async function writeRuntimeConfig(recording, skillId) {
   const dir = skillDir(skillId);
+  const entry = originFromUrl(recording.startUrl) || "";
+  const bases = {};
+  for (const row of listNetwork(recording.id, { all: true })) {
+    const item = getNetwork(recording.id, row.id);
+    const origin = originFromUrl(item?.url || "");
+    if (!origin || origin === entry) continue;
+    const method = String(item?.method || "").toUpperCase();
+    const related = Boolean(item?.action_id)
+      || Object.keys(item?.request_headers || {}).length > 0
+      || (method && method !== "GET");
+    if (!related) continue;
+    bases[new URL(origin).host] = origin;
+  }
   const runtime = {
     tenant: String(recording.tenant || ""),
     subsystem: String(recording.subsystem || "app"),
-    base_url: originFromUrl(recording.startUrl) || "",
+    base_url: entry,
+    ...(Object.keys(bases).length ? { bases } : {}),
   };
   await mkdir(path.join(dir, "config"), { recursive: true });
   await writeFile(path.join(dir, "config", "runtime.json"), `${JSON.stringify(runtime, null, 2)}\n`, "utf8");

@@ -7,6 +7,7 @@ import { hasCredentialHeaders } from "../auth-vault.mjs";
 import { upsertCatalog } from "./catalog.mjs";
 import { requestIndexRow, citationErrors, citedPaths, windowsForPath } from "./request-keys.mjs";
 import { nonStdlibImports } from "./stdlib-imports.mjs";
+import { declaredSubcommands } from "./argparse-probe.mjs";
 import { GUIDE_NAMES } from "../agent/guides.mjs";
 
 function section(text, title) {
@@ -94,8 +95,9 @@ function blockWrites(block) {
   return /(?:method\s*=\s*["'](POST|PUT|PATCH|DELETE)["']|\b(?:POST|PUT|PATCH|DELETE)\b.*["']\/)/i.test(String(block || ""));
 }
 
-function commandWrites(line, clientText) {
+function commandWrites(line, clientText, declared = null) {
   const sub = subcommand(line);
+  if (declared && sub && Object.prototype.hasOwnProperty.call(declared, sub)) return declared[sub] === true;
   if (!sub || sub === "show-config") return false;
   const token = sub.replaceAll("-", "_");
   const named = new RegExp(`(?:^|\\n)(?:async )?def\\s+(?:cmd_)?${token}\\b`);
@@ -179,7 +181,8 @@ export function skillCommandLines(skillMd) {
     seen.add(line);
     found.push(line);
   };
-  for (const line of String(skillMd || "").split(/\n/)) {
+  const text = String(skillMd || "").replace(/\r\n/g, "\n").replace(/\\\n[ \t]*/g, " ");
+  for (const line of text.split(/\n/)) {
     const trimmed = line.trim();
     add(trimmed);
     if (trimmed.includes("|")) {
@@ -193,19 +196,19 @@ function readCommands(skillMd) {
   return skillCommandLines(skillMd).filter((line) => !line.includes("--confirm"));
 }
 
-export function writeOnlySkill(skillMd, clientText, requests) {
+export function writeOnlySkill(skillMd, clientText, requests, declared = null) {
   const lines = skillCommandLines(skillMd);
   if (!lines.length) return false;
   const recordedWrite = (requests || []).some((row) => /^(POST|PUT|PATCH|DELETE)$/i.test(row.method || ""));
   if (!recordedWrite) return false;
   const reads = lines.filter((line) => (
     !line.includes("--confirm")
-    && !commandWrites(line, clientText)
+    && !commandWrites(line, clientText, declared)
     && !writesRecordedPath(line, clientText, requests)
   ));
   const writes = lines.filter((line) => (
     line.includes("--confirm")
-    || commandWrites(line, clientText)
+    || commandWrites(line, clientText, declared)
     || writesRecordedPath(line, clientText, requests)
   ));
   return writes.length > 0 && reads.length === 0;
@@ -218,8 +221,8 @@ function sameCommand(left, right) {
 
 export function authStoppedOutput(output) {
   const text = String(output || "");
-  if (/AuthExpired|缺少鉴权|没有鉴权|请提供 token|账号未登录|\b401\b|凭证缺失|没有可用 token|没有可用鉴权/i.test(text)) return true;
-  return /\b400\b/.test(text) && /refresh|token|令牌|credential/i.test(text);
+  if (/\bauth_expired\b|\bAuthExpired\b|\b401\b|\b403\b/i.test(text)) return true;
+  return /\b400\b/.test(text) && /refresh|token|credential/i.test(text);
 }
 
 export function scriptCrashOutput(output) {
@@ -485,33 +488,41 @@ function liveChoiceQuestion(row, question) {
 export const ASK_PROTOCOL = "读：无调用方槽立刻执行；已确定的不进本次 questions[]，不发 ask_user_question，不发确认卡，不要另造查询确认卡。写：第一次把 SKILL.md 里这张 title+questions[] 原样整份发出，id、question、inputType、options、required 不改，不增题、不减题、不另造确认题；对话里已确定的值放进对应 default，不再另问，上一步查到的业务日期直接作 default，不改成当天；调用方提交后同一轮只发 {\"confirm\":true,\"formIds\":[\"<formId>\"]}；确认后跑 python3 写命令加 --confirm。";
 const JSON_QUESTION_HINT = "问句只写页面标签和列名，不写 JSON、数组、类型名；default 不写 JSON。多行明细用 textarea 一行一项、列之间用「|」，括号里只写列名顺序。";
 
+export function jsonDefault(question) {
+  return /^[\[{]/.test(String(question?.default ?? "").trim());
+}
+
+export function jsonWording(question) {
+  return /json/i.test(String(question?.question || ""));
+}
+
 export function jsonWordedQuestion(question) {
-  const asked = String(question?.question || "");
-  if (/json/i.test(asked)) return true;
-  const value = String(question?.default ?? "").trim();
-  return /^[\[{]/.test(value);
+  return jsonWording(question) || jsonDefault(question);
+}
+
+export function squashProtocol(text) {
+  return String(text || "").replace(/[\s`>*_\\]/g, "");
 }
 
 export function askProtocolMissing(skillMd) {
   const text = String(skillMd || "");
   if (!/--confirm/.test(text)) return false;
-  const confirmOk = /formIds/.test(text) && /"confirm"\s*:\s*true|confirm\s*:\s*true/.test(text);
-  if (!confirmOk) return true;
-  const lines = skillCommandLines(text);
-  const hasRead = lines.some((line) => !line.includes("--confirm"));
-  if (!hasRead) return false;
-  return !(/读/.test(text) && (/不问/.test(text) || /不进/.test(text) || /不要确认卡/.test(text)));
+  return !squashProtocol(text).includes(squashProtocol(ASK_PROTOCOL));
 }
 
 function overlayAskName(row) {
-  const raw = String(row?.name || row?.column || "").trim();
-  if (!raw) return "";
-  const quoted = [...raw.matchAll(/"((?:\\.|[^"])*)"/g)].map((item) => item[1].replace(/\\"/g, '"')).find((item) => item.length >= 2);
-  const label = overlayPageName(quoted || raw.replace(/^(textbox|searchbox|combobox|spinbutton|checkbox|radio|slider|listbox|generic|button)\s+/i, ""));
-  if (!label || label.length < 2) return "";
-  if (/^(请选|请输入|请填写|请填入)/.test(label)) return "";
-  if (/^(textbox|searchbox|combobox|spinbutton|checkbox|radio|slider|listbox|generic|button)$/i.test(label)) return "";
-  return label;
+  const placeholder = String(row?.placeholder || "").trim();
+  for (const raw of [row?.name, row?.column]) {
+    const text = String(raw || "").trim();
+    if (!text) continue;
+    const quoted = [...text.matchAll(/"((?:\\.|[^"])*)"/g)].map((item) => item[1].replace(/\\"/g, '"')).find((item) => item.length >= 2);
+    const label = overlayPageName(quoted || text.replace(/^(textbox|searchbox|combobox|spinbutton|checkbox|radio|slider|listbox|generic|button)\s+/i, ""));
+    if (!label || label.length < 2) continue;
+    if (placeholder && label === placeholder) continue;
+    if (/^(textbox|searchbox|combobox|spinbutton|checkbox|radio|slider|listbox|generic|button)$/i.test(label)) continue;
+    return label;
+  }
+  return "";
 }
 
 export function fieldAlignment(fields, questions, overlayLayers) {
@@ -571,16 +582,16 @@ function isWriteRequest(row) {
   return /^(POST|PUT|PATCH|DELETE)$/i.test(String(row?.method || ""));
 }
 
-export function askCoverageErrors(questions, fields, overlayLayers, { hasWriteConfirm = false } = {}) {
-  const errors = [];
+export function askCoverageObservations(questions, fields, overlayLayers, { hasWriteConfirm = false } = {}) {
+  const observations = [];
   const list = Array.isArray(questions) ? questions : [];
   const layers = Array.isArray(overlayLayers) ? overlayLayers : [];
   if (list.length) {
     for (const row of (fields || []).filter(callerFacing)) {
       const name = String(row.page_name || "").trim();
       if (!name || questionCoversName(list, name)) continue;
-      errors.push({
-        code: "not_invocable",
+      observations.push({
+        code: "ask_coverage",
         file: "SKILL.md",
         field: name,
         hint: "source=caller 的字段必须出现在 questions[]，不要瘦表。",
@@ -598,8 +609,8 @@ export function askCoverageErrors(questions, fields, overlayLayers, { hasWriteCo
   }
   for (const name of names) {
     if (!fieldCoversName(fields, name)) {
-      errors.push({
-        code: "not_invocable",
+      observations.push({
+        code: "ask_coverage",
         file: "references/api.md",
         field: name,
         hint: "当前层 overlay_editable 的控件必须有 page_name。来源仍由 PI 标；不要漏写已捕获的字段。",
@@ -608,15 +619,15 @@ export function askCoverageErrors(questions, fields, overlayLayers, { hasWriteCo
     if ((hasWriteConfirm || list.length) && !questionCoversName(list, name)) {
       const row = (fields || []).find((item) => fieldCoversName([item], name));
       if (row && !callerFacing(row)) continue;
-      errors.push({
-        code: "not_invocable",
+      observations.push({
+        code: "ask_coverage",
         file: "SKILL.md",
         field: name,
         hint: "当前层 overlay_editable 的调用方控件必须出现在 questions[]，不要瘦表。",
       });
     }
   }
-  return errors;
+  return observations;
 }
 
 function recordedSampleDefault(value, haystack) {
@@ -628,6 +639,7 @@ function recordedSampleDefault(value, haystack) {
 
 function questionShapeErrors(questions, fields, haystack, overlay) {
   const errors = [];
+  const observations = [];
   const list = Array.isArray(questions) ? questions : [];
   const choiceFields = (fields || []).filter((row) => callerFacing(row) && CHOICE_CONTROLS.has(controlToken(row.control)));
   const dateFields = (fields || []).filter((row) => callerFacing(row) && DATE_CONTROLS.has(controlToken(row.control)));
@@ -653,7 +665,7 @@ function questionShapeErrors(questions, fields, haystack, overlay) {
         hint: "inputType 只许 text、textarea、date、select、radio、treeSelect、checkbox。多行明细用 textarea 一行一项、列用「|」，命令行用可重复行参数。",
       });
     }
-    if (jsonWordedQuestion(question)) {
+    if (jsonDefault(question)) {
       errors.push({
         code: "not_invocable",
         file: "SKILL.md",
@@ -661,10 +673,18 @@ function questionShapeErrors(questions, fields, haystack, overlay) {
         hint: JSON_QUESTION_HINT,
       });
     }
+    if (jsonWording(question)) {
+      observations.push({
+        code: "question_wording",
+        file: "SKILL.md",
+        field: question.id,
+        hint: JSON_QUESTION_HINT,
+      });
+    }
     const row = fieldForQuestion(question, fields);
     if (recordedSampleDefault(question?.default, haystack)) {
-      errors.push({
-        code: "not_invocable",
+      observations.push({
+        code: "sample_value",
         file: "SKILL.md",
         field: question.id,
         hint: "default 不要写本场 listed 里的业务 id，用空格占位。",
@@ -675,8 +695,8 @@ function questionShapeErrors(questions, fields, haystack, overlay) {
       const options = Array.isArray(question.options) ? question.options : [];
       if (liveChoiceQuestion(row, question)) {
         if (options.length) {
-          errors.push({
-            code: "not_invocable",
+          observations.push({
+            code: "live_options_listed",
             file: "SKILL.md",
             field: question.id,
             hint: "活选项 options 留空，调用时先跑读命令再写入问句，不要把本场 id 写进手册。",
@@ -685,8 +705,8 @@ function questionShapeErrors(questions, fields, haystack, overlay) {
         continue;
       }
       if (!options.length) {
-        errors.push({
-          code: "not_invocable",
+        observations.push({
+          code: "closed_options_missing",
           file: "SKILL.md",
           field: question.id,
           hint: "封闭枚举在 questions[] 里要写 options，不要改成自由文本",
@@ -706,8 +726,8 @@ function questionShapeErrors(questions, fields, haystack, overlay) {
         }
       }
       if (options.some((opt) => recordedSampleDefault(opt?.id, haystack))) {
-        errors.push({
-          code: "not_invocable",
+        observations.push({
+          code: "sample_value",
           file: "SKILL.md",
           field: question.id,
           hint: "活选项 options 留空，调用时先跑读命令再写入问句，不要把本场 id 写进手册。",
@@ -727,23 +747,23 @@ function questionShapeErrors(questions, fields, haystack, overlay) {
     }
   }
   if ((choiceFields.length || overlayChoice) && list.length && !choiceQs.length) {
-    errors.push({
-      code: "not_invocable",
+    observations.push({
+      code: "control_type_mismatch",
       file: "SKILL.md",
       hint: "页面 combobox/listbox/radio 在调用方也必须是选择控件，活选项 options 留空，封闭枚举才写 options，不要写成 text",
     });
   }
   if ((dateFields.length || overlayDate) && list.length && !dateQs.length) {
-    errors.push({
-      code: "not_invocable",
+    observations.push({
+      code: "control_type_mismatch",
       file: "SKILL.md",
       hint: "页面日期控件在调用方也必须是 date 并带 dateFormat，不要写成 text",
     });
   }
-  return errors;
+  return { errors, observations };
 }
 
-function writeConfirmErrors(clientText, skillMd) {
+function writeConfirmErrors(clientText, skillMd, declared = null) {
   const errors = [];
   const text = String(clientText || "");
   const parserRe = /add_parser\s*\(\s*["']([^"']+)["']/g;
@@ -757,7 +777,7 @@ function writeConfirmErrors(clientText, skillMd) {
     const start = parsers[i].index;
     const end = i + 1 < parsers.length ? parsers[i + 1].index : text.length;
     const block = text.slice(start, end);
-    const writes = commandWrites(`python scripts/client.py ${parsers[i].name}`, text) || skillConfirm.has(parsers[i].name);
+    const writes = commandWrites(`python scripts/client.py ${parsers[i].name}`, text, declared) || skillConfirm.has(parsers[i].name);
     if (!writes || /--confirm/.test(block)) continue;
     errors.push({
       code: "not_invocable",
@@ -816,9 +836,49 @@ export function structureErrorsForFile(errors, rel) {
   ));
 }
 
+export function observationsForFile(observations, rel) {
+  return (Array.isArray(observations) ? observations : []).filter((item) => structureErrorFile(item) === rel);
+}
+
+export function frontmatterErrors(skillMd) {
+  const text = String(skillMd || "").replace(/\r\n/g, "\n");
+  const head = text.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
+  if (!head) {
+    return [{ code: "not_invocable", file: "SKILL.md", hint: "SKILL.md 第一行必须是 ---，用一对 --- 包住 YAML 头（name、description），再写正文。" }];
+  }
+  const errors = [];
+  const keys = {};
+  let blockKey = "";
+  for (const line of head[1].split("\n")) {
+    if (!line.trim() || /^\s*#/.test(line)) continue;
+    const top = line.match(/^([A-Za-z0-9_-]+):(?:[ \t]+(.*))?$/);
+    if (top) {
+      const value = String(top[2] || "").trim();
+      keys[top[1]] = value;
+      blockKey = value === "" || /^[|>][-+]?$/.test(value) ? top[1] : "";
+      if (value && !/^["'|>]/.test(value) && /(?::\s|\s#)/.test(value)) {
+        errors.push({ code: "not_invocable", file: "SKILL.md", key: top[1], hint: "YAML 值里有「: 」或「 #」时，整段值用双引号包住。" });
+      }
+      continue;
+    }
+    if (blockKey && /^[ \t]+\S/.test(line)) {
+      keys[blockKey] = `${keys[blockKey]} ${line.trim()}`.trim();
+      continue;
+    }
+    errors.push({ code: "not_invocable", file: "SKILL.md", line: line.trim().slice(0, 80), hint: "YAML 头里每个键都要顶格写成「键: 值」；缩进行只能跟在以 | 或 > 结尾的键后面。" });
+  }
+  for (const name of ["name", "description"]) {
+    if (!String(keys[name] || "").replace(/^[|>][-+]?/, "").trim()) {
+      errors.push({ code: "not_invocable", file: "SKILL.md", key: name, hint: `YAML 头缺少顶格的 ${name}。` });
+    }
+  }
+  return errors;
+}
+
 export async function verifySkill(skillDirPath, recordingId, recording = {}, { dryRun = false } = {}) {
   const dir = skillDirPath || skillDir(recording.skillId || "");
   const errors = [];
+  const observations = [];
   const files = ["SKILL.md", "scripts/client.py", "references/api.md", "config/runtime.json", "config/auth.local.json"];
   const texts = {};
   for (const rel of files) {
@@ -886,9 +946,7 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}, { d
       hint: "字段段没有解析到 page_name",
     });
   }
-  if (skillMd && !/^---\n[\s\S]*?\bname:\s*\S+/m.test(skillMd)) {
-    errors.push({ code: "not_invocable", file: "SKILL.md", hint: "SKILL.md 必须以 --- 开头的 YAML 包住 name 和 description，再写正文。调用方靠这段启用，不要写成页面点击步骤" });
-  }
+  if (skillMd) errors.push(...frontmatterErrors(skillMd));
   if (/disable-model-invocation:\s*true/.test(skillMd)) {
     errors.push({ code: "not_invocable", file: "SKILL.md", hint: "不要写 disable-model-invocation，否则调用方的智能体不会启用" });
   }
@@ -921,11 +979,59 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}, { d
   }
   const questions = hasQuestions ? extractQuestions(skillMd) : [];
   if (hasQuestions) {
-    errors.push(...questionShapeErrors(questions, fields, optionHaystack, overlay));
+    const shaped = questionShapeErrors(questions, fields, optionHaystack, overlay);
+    errors.push(...shaped.errors);
+    observations.push(...shaped.observations);
   }
-  errors.push(...askCoverageErrors(questions, fields, overlayLayersFromBodies(overlayBodies), { hasWriteConfirm }));
+  observations.push(...askCoverageObservations(questions, fields, overlayLayersFromBodies(overlayBodies), { hasWriteConfirm }));
+  const seenEmpty = new Set();
+  for (const row of evidence.filter((item) => item.kind === "action")) {
+    const blob = await getEvidence(recordingId, row.id).catch(() => null);
+    const body = blob?.body && typeof blob.body === "object" ? blob.body : blob;
+    const reqs = Array.isArray(body?.requests) ? body.requests : [];
+    if (!reqs.some((item) => /^(POST|PUT|PATCH|DELETE)$/i.test(item?.method || ""))) continue;
+    for (const item of body.required_empty_overlay || []) {
+      const name = overlayAskName(typeof item === "string" ? { name: item } : item);
+      if (!name || seenEmpty.has(name)) continue;
+      seenEmpty.add(name);
+      observations.push({
+        code: "required_empty_at_write",
+        file: "SKILL.md",
+        field: name,
+        hint: "提交那一下这个必填控件仍为空，提交却成功了，说明页面或接口给了默认值。手册里要写明它的取值和来源（调用方选、页面默认值或常量），不要写死录制时的值而不让调用方选。",
+      });
+    }
+  }
+  if (hasQuestions) {
+    const pageRows = [];
+    const seenPage = new Set();
+    for (const body of overlayBodies) {
+      for (const item of body?.overlay_editable || []) {
+        const name = overlayAskName(item);
+        if (!name || seenPage.has(name)) continue;
+        seenPage.add(name);
+        pageRows.push({ page_name: name });
+      }
+    }
+    for (const row of fields) {
+      const name = String(row.page_name || "").trim();
+      if (!name || seenPage.has(name)) continue;
+      seenPage.add(name);
+      pageRows.push({ page_name: name });
+    }
+    for (const question of questions) {
+      if (fieldForQuestion(question, pageRows)) continue;
+      observations.push({
+        code: "question_not_on_page",
+        file: "SKILL.md",
+        field: question.id,
+        hint: "这一题在页面可填控件和字段段里都找不到对应项。若值来自当前登录用户或另一个接口，source 写 current_user 或 other_api，由脚本现取，不要问调用方；若确实由调用方提供，不用改。",
+      });
+    }
+  }
   const clientText = texts["scripts/client.py"] || "";
-  const writeOnly = writeOnlySkill(skillMd, clientText, requestsForWrites);
+  const declared = clientText.trim() ? await declaredSubcommands(dir) : null;
+  const writeOnly = writeOnlySkill(skillMd, clientText, requestsForWrites, declared);
   const businessReads = reads.filter((line) => !/^python3?\s+scripts\/client\.py\s+show-config\s*$/.test(line));
   if (!writeOnly && citedPaths(clientText).length && !businessReads.length) {
     errors.push({
@@ -946,7 +1052,7 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}, { d
     if (argparseHint) {
       errors.push({ code: "not_invocable", file: "scripts/client.py", hint: argparseHint });
     }
-    errors.push(...writeConfirmErrors(clientText, skillMd));
+    errors.push(...writeConfirmErrors(clientText, skillMd, declared));
     const overlayHint = authOverlayParseError(clientText);
     if (overlayHint) errors.push({ code: "not_invocable", file: "scripts/client.py", hint: overlayHint });
     const originHint = hardcodedOriginError(clientText);
@@ -976,7 +1082,7 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}, { d
       });
     }
   }
-  const mustRun = reads.filter((line) => !commandWrites(line, clientText) && !writesRecordedPath(line, clientText, requestsForWrites));
+  const mustRun = reads.filter((line) => !commandWrites(line, clientText, declared) && !writesRecordedPath(line, clientText, requestsForWrites));
   const verifyRows = evidence.filter((item) => item.kind === "verify");
   for (const line of mustRun) {
     const row = latestMatchingRun(verifyRows, line);
@@ -1056,12 +1162,22 @@ export async function verifySkill(skillDirPath, recordingId, recording = {}, { d
   }
   errors.length = 0;
   errors.push(...unique);
+  const uniqueObs = [];
+  const seenObs = new Set();
+  for (const item of observations) {
+    const key = [item.code, item.field, item.path, item.command, item.name, item.key, item.file, item.heading, item.hint].join("|");
+    if (seenObs.has(key)) continue;
+    seenObs.add(key);
+    uniqueObs.push(item);
+  }
+  observations.length = 0;
+  observations.push(...uniqueObs);
   const authOnly = errors.length > 0 && errors.every((item) => item.code === "auth_expired");
   let status = "verify_failed";
   if (!errors.length && hasCredentialHeaders(headers)) status = "skill_ready";
   else if (!errors.length || authOnly) status = "skill_written_needs_auth";
   const alignment = fieldAlignment(fields, questions, overlayLayersFromBodies(overlayBodies));
-  const verify = { ok: status !== "verify_failed", status, errors, requests, filled: filledLabels(evidence), alignment };
+  const verify = { ok: status !== "verify_failed", status, errors, observations, requests, filled: filledLabels(evidence), alignment };
   if (!dryRun && (status === "skill_ready" || status === "skill_written_needs_auth")) {
     await upsertCatalog({ ...recording, id: recordingId, skillId: recording.skillId, status, skillDir: dir });
   }

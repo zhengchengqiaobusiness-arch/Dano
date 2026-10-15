@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+<body>
+  <div id="step1">
+    <label>name<input id="name" aria-label="name"></label>
+    <button type="button" id="next">Next</button>
+  </div>
+  <div id="step2" style="display:none">
+    <label>kind<input id="kind" aria-label="kind"></label>
+  </div>
+  <script>
+    document.getElementById("next").onclick = () => {
+      document.getElementById("step1").style.display = "none";
+      document.getElementById("step2").style.display = "block";
+    };
+  </script>
+</body>
+</html>

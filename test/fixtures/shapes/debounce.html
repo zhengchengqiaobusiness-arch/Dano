@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+<body>
+  <label>search<input id="q" aria-label="search"></label>
+  <script>
+    let timer;
+    document.getElementById("q").addEventListener("input", () => {
+      clearTimeout(timer);
+      const value = document.getElementById("q").value;
+      timer = setTimeout(() => {
+        fetch(`/api/items?q=${encodeURIComponent(value)}`);
+      }, 600);
+    });
+  </script>
+</body>
+</html>

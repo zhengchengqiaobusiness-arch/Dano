@@ -9,10 +9,46 @@ const BODY_OMIT_BYTES = 16384;
 const KEY_PARSE_BYTES = 32768;
 
 const NOISE = /sockjs|websocket|favicon\.ico/i;
+const STATIC_TYPE = /^(?:image|font|audio|video)\/|^text\/css\b|javascript|^application\/(?:wasm|font-|x-font)/i;
+const TEXT_TYPE = /json|(?:[/+]xml\b)|^text\/|javascript|x-www-form-urlencoded|graphql|^$/i;
 const bags = new Map();
 
+export function foldNetwork(items) {
+  const kept = [];
+  const folded = { head: 0, static: 0, repeated: [] };
+  const idle = new Map();
+  for (const row of items) {
+    const method = String(row.method || "").toUpperCase();
+    if (method === "HEAD" || method === "OPTIONS") {
+      folded.head += 1;
+      continue;
+    }
+    if (method === "GET" && !row.query && STATIC_TYPE.test(row.content_type || "")) {
+      folded.static += 1;
+      continue;
+    }
+    if (method === "GET" && !row.action_id) {
+      const key = `${row.path}?${row.query || ""}`;
+      idle.set(key, [...(idle.get(key) || []), row]);
+    }
+    kept.push(row);
+  }
+  const drop = new Set();
+  for (const rows of idle.values()) {
+    if (rows.length < 3) continue;
+    for (const row of rows.slice(0, -1)) drop.add(row);
+    rows.at(-1)._repeat = rows.length;
+    folded.repeated.push({ method: "GET", path: rows[0].path, count: rows.length });
+  }
+  return { kept: kept.filter((row) => !drop.has(row)), folded };
+}
+
+export function foldedSummary(recordingId) {
+  return foldNetwork(bag(recordingId).items).folded;
+}
+
 function bag(recordingId) {
-  if (!bags.has(recordingId)) bags.set(recordingId, { items: [], seq: 0, action: null });
+  if (!bags.has(recordingId)) bags.set(recordingId, { items: [], seq: 0, action: null, actions: [] });
   return bags.get(recordingId);
 }
 
@@ -21,12 +57,53 @@ export function beginAction(recordingId, frame, { anyFrame = false } = {}) {
   state.seq += 1;
   const action = { id: `act_${state.seq}`, frame, anyFrame, started: Date.now(), open: true };
   state.action = action;
+  state.actions.push({ id: action.id, started: action.started });
+  if (state.actions.length > 50) state.actions.shift();
   return action.id;
 }
 
 export function endAction(recordingId) {
   const state = bag(recordingId);
   if (state.action) state.action.open = false;
+}
+
+function redactMultipartFiles(raw, contentType) {
+  const text = Buffer.isBuffer(raw) ? raw.toString("latin1") : String(raw || "");
+  if (!/name="/.test(text)) return text;
+  const boundary = (String(contentType || "").match(/boundary=([^;]+)/i) || [])[1];
+  if (!boundary) return text;
+  const token = `--${String(boundary).replace(/^["']|["']$/g, "")}`;
+  return text.split(token).map((part) => {
+    if (!/filename=/i.test(part)) return part;
+    const breakAt = part.search(/\r\n\r\n|\n\n/);
+    if (breakAt < 0) return part;
+    const header = part.slice(0, breakAt);
+    const rest = part.slice(breakAt).replace(/^(?:\r\n\r\n|\n\n)/, "");
+    const body = rest.replace(/\r\n$/, "").replace(/\n$/, "");
+    return `${header}\r\n\r\n[file ${Buffer.byteLength(body, "latin1")}]`;
+  }).join(token);
+}
+
+function readRequestPost(request, contentType) {
+  let post = request.postData() || "";
+  if (!post && typeof request.postDataBuffer === "function") {
+    try {
+      const buf = request.postDataBuffer();
+      if (buf && buf.length) post = Buffer.isBuffer(buf) ? buf.toString("latin1") : String(buf);
+    } catch {
+      post = "";
+    }
+  }
+  if (post && /name="/.test(post) && /multipart\/form-data/i.test(contentType)) {
+    return redactMultipartFiles(post, contentType);
+  }
+  return post;
+}
+
+function markMultipartUnread(item) {
+  if (/multipart\/form-data/i.test(item.request_content_type || "") && !item.post_data) {
+    item.post_data_unreadable = "multipart";
+  }
 }
 
 export function attachNetwork(recordingId, context) {
@@ -40,14 +117,17 @@ export function attachNetwork(recordingId, context) {
     state.seq += 1;
     const id = `req_${state.items.length + 1}`;
     const started = Date.now();
+    const contentType = String(requestHeaders["content-type"] || "");
     const item = {
       id,
       method: request.method(),
       url: request.url(),
       path: new URL(request.url()).pathname,
       query: new URL(request.url()).search.replace(/^\?/, ""),
-      post_data: request.postData() || "",
+      post_data: readRequestPost(request, contentType),
       request_headers: pickCredentialHeaders(requestHeaders),
+      request_content_type: contentType,
+      request_header_names: Object.keys(requestHeaders),
       status: 0,
       response_body: null,
       body_missing: true,
@@ -57,6 +137,7 @@ export function attachNetwork(recordingId, context) {
       frame: request.frame(),
       content_type: "",
     };
+    markMultipartUnread(item);
     const action = state.action;
     if (action?.open && started >= action.started && (action.anyFrame || (action.frame && item.frame === action.frame))) {
       item.action_id = action.id;
@@ -67,6 +148,9 @@ export function attachNetwork(recordingId, context) {
       const merged = { ...requestHeaders, ...(raw && typeof raw === "object" ? raw : {}) };
       item.request_headers = mergePackedHeaders(item.request_headers, pickCredentialHeaders(merged));
       noteRequestHeaders(recordingId, merged);
+      const ctype = String(merged["content-type"] || merged["Content-Type"] || "");
+      if (ctype) item.request_content_type = item.request_content_type || ctype;
+      markMultipartUnread(item);
     };
     Promise.resolve().then(async () => {
       try {
@@ -101,9 +185,22 @@ export function attachNetwork(recordingId, context) {
       item.action_id = action.id;
     }
     try {
-      item.response_body = await response.text();
-      item.body_missing = false;
-      noteLoginBody(recordingId, item.response_body, { method: item.method, url: item.url, headers: item.request_headers });
+      if (!TEXT_TYPE.test(item.content_type)) {
+        const headers = response.headers();
+        const disposition = headers["content-disposition"] || "";
+        const raw = disposition.match(/filename\*=(?:UTF-8'')?([^;]+)/i)?.[1] || disposition.match(/filename="?([^";]+)"?/i)?.[1] || "";
+        let filename = raw.trim();
+        try { filename = decodeURIComponent(filename); } catch { /* 保留原样 */ }
+        let size = Number(headers["content-length"] || 0);
+        if (!size) size = (await response.body().catch(() => Buffer.alloc(0))).length;
+        item.response_body = null;
+        item.body_missing = false;
+        item.response_binary = { content_type: item.content_type, size, filename };
+      } else {
+        item.response_body = await response.text();
+        item.body_missing = false;
+        noteLoginBody(recordingId, item.response_body, { method: item.method, url: item.url, headers: item.request_headers });
+      }
     } catch {
       item.response_body = null;
       item.body_missing = true;
@@ -115,12 +212,17 @@ export function attachNetwork(recordingId, context) {
       path: item.path,
       query: item.query,
       post_data: item.post_data,
+      post_data_unreadable: item.post_data_unreadable || undefined,
+      request_content_type: item.request_content_type || "",
+      request_header_names: item.request_header_names || [],
       status: item.status,
       response_body: item.response_body,
       body_missing: item.body_missing,
       started_at: item.started_at,
       ended_at: item.ended_at,
       action_id: item.action_id,
+      content_type: item.content_type,
+      ...(item.response_binary ? { response_binary: item.response_binary } : {}),
     };
     const file = path.join(recordingDir(recordingId), "blobs", `${item.id}.json`);
     await mkdir(path.dirname(file), { recursive: true });
@@ -162,6 +264,10 @@ export function compactNetworkIndex(rows) {
     ...(row.body_missing ? { body_missing: true } : {}),
     ...(row.issues_credential ? { issues_credential: true } : {}),
     ...(row.empty ? { empty: row.empty } : {}),
+    ...(row.response_binary ? { binary: row.response_binary } : {}),
+    ...(row.binary ? { binary: row.binary } : {}),
+    ...(row.after_action ? { after_action: row.after_action, after_ms: row.after_ms } : {}),
+    ...(row.post_data_unreadable ? { post_data_unreadable: row.post_data_unreadable } : {}),
   }));
 }
 
@@ -195,16 +301,18 @@ export function waitForAction(recordingId, actionId, timeout = 1500) {
   });
 }
 
-export function listNetwork(recordingId, { after_id = "", action_id = "" } = {}) {
+export function listNetwork(recordingId, { after_id = "", action_id = "", all = false } = {}) {
   let rows = bag(recordingId).items;
   if (after_id) {
     const at = rows.findIndex((row) => row.id === after_id);
     rows = at >= 0 ? rows.slice(at + 1) : rows;
   }
   if (action_id) rows = rows.filter((row) => row.action_id === action_id);
+  if (!all) rows = foldNetwork(rows).kept;
   return rows.map((row) => {
     const index = requestIndexRow(row);
     const responseKeys = responseKeysOf(row);
+    const prior = row.action_id ? null : [...bag(recordingId).actions].reverse().find((act) => act.started <= row.started_at);
     return {
       id: row.id,
       method: row.method,
@@ -217,6 +325,10 @@ export function listNetwork(recordingId, { after_id = "", action_id = "" } = {})
       ...(responseKeys.length ? { response_keys: responseKeys } : {}),
       ...(index.empty ? { empty: index.empty } : {}),
       ...(index.issues_credential ? { issues_credential: true } : {}),
+      ...(row._repeat ? { repeat: row._repeat } : {}),
+      ...(row.response_binary ? { binary: row.response_binary } : {}),
+      ...(prior ? { after_action: prior.id, after_ms: row.started_at - prior.started } : {}),
+      ...(row.post_data_unreadable ? { post_data_unreadable: row.post_data_unreadable } : {}),
     };
   });
 }
@@ -229,7 +341,7 @@ function requestAuthFailed(item) {
   if (Number(item?.status) === 401) return true;
   if (Number(item?.status) >= 400) return true;
   const body = String(item?.response_body || "").slice(0, 800);
-  return /"code"\s*:\s*401\b/.test(body) || /账号已经超时|请重新登录|未登录/.test(body);
+  return /"code"\s*:\s*40[13]\b/.test(body);
 }
 
 function applyCredentialHeaders(state, headers) {
@@ -291,6 +403,9 @@ export function getNetwork(recordingId, id) {
     path: item.path,
     query: item.query,
     post_data: item.post_data,
+    ...(item.post_data_unreadable ? { post_data_unreadable: item.post_data_unreadable } : {}),
+    request_content_type: item.request_content_type || "",
+    request_header_names: item.request_header_names || [],
     status: item.status,
     response_body: item.response_body,
     body_missing: item.body_missing,
@@ -298,5 +413,6 @@ export function getNetwork(recordingId, id) {
     ended_at: item.ended_at,
     action_id: item.action_id,
     content_type: item.content_type,
+    ...(item.response_binary ? { response_binary: item.response_binary } : {}),
   };
 }

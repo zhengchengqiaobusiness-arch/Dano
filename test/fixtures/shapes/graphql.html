@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+<body>
+  <button type="button" id="list">list items</button>
+  <button type="button" id="save">save item</button>
+  <script>
+    function send(operationName, query) {
+      fetch("/graphql", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ operationName, query }),
+      });
+    }
+    document.getElementById("list").onclick = () => send("ListItems", "query ListItems { items { id } }");
+    document.getElementById("save").onclick = () => send("SaveItem", "mutation SaveItem { save { id } }");
+  </script>
+</body>
+</html>

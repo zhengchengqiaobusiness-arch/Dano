@@ -6,7 +6,7 @@ const OVERLAY_MODAL = /^(dialog|alertdialog)\b/i;
 const CHROME_LANDMARK = /^(navigation|banner|contentinfo|complementary)$/i;
 const PAGE_CHROME = /^(navigation|banner|contentinfo)$/i;
 const VALUE_ROLES = /^(textbox|searchbox|combobox|spinbutton|checkbox|radio|slider|listbox)$/i;
-const DATE_LIKE = /\d{4}[-/.年]\d{1,2}|日期|时间/;
+const DATE_LIKE = /\d{4}[-/.]\d{1,2}/;
 const NOT_VALUE_ROLE = /^(menuitem|menu|navigation|banner|complementary|link|heading|listitem|option|tab|treeitem|columnheader|row)$/i;
 const ROW_ROLE = /^row\b/i;
 const CELL_ROLE = /^(cell|gridcell|button|link|textbox)\b/i;
@@ -398,18 +398,10 @@ export async function takeSnapshot(recordingId, { budgetMs = 8000 } = {}) {
   return snapshot;
 }
 
-const UNFILLED_PROMPT = /^(请选|请输入|请填写|请填入|placeholder)/i;
-
-export function controlLooksEmpty(value, placeholder = "", ...names) {
+export function controlLooksEmpty(value, ...placeholders) {
   const v = String(value ?? "").trim();
   if (!v) return true;
-  const mark = String(placeholder || "").trim();
-  if (mark && v === mark) return true;
-  if (UNFILLED_PROMPT.test(v)) return true;
-  return names.some((name) => {
-    const label = String(name || "").trim();
-    return Boolean(label) && v === label && UNFILLED_PROMPT.test(label);
-  });
+  return placeholders.flat().some((mark) => String(mark || "").trim() === v);
 }
 
 export function markRequired(ariaRequired, htmlRequired, ...labels) {
@@ -420,11 +412,15 @@ export function markRequired(ariaRequired, htmlRequired, ...labels) {
   return labels.some((label) => /\*/.test(String(label || "")));
 }
 
-export function markReadonly(ariaReadonly, htmlReadonly, ariaDisabled) {
-  if (htmlReadonly) return true;
-  const aria = String(ariaReadonly ?? "").trim().toLowerCase();
-  if (aria === "true") return true;
-  return String(ariaDisabled ?? "").trim().toLowerCase() === "true";
+export function markReadonly(ariaReadonly, htmlReadonly, ariaDisabled, { role = "", ariaHaspopup = null, ariaExpanded = null, htmlDisabled = false } = {}) {
+  if (htmlDisabled) return true;
+  if (String(ariaDisabled ?? "").trim().toLowerCase() === "true") return true;
+  if (String(ariaReadonly ?? "").trim().toLowerCase() === "true") return true;
+  if (!htmlReadonly) return false;
+  const picker = /^(combobox|listbox|tree|treegrid|grid|spinbutton)$/i.test(String(role || ""))
+    || (ariaHaspopup != null && String(ariaHaspopup).trim().toLowerCase() !== "false")
+    || ariaExpanded != null;
+  return !picker;
 }
 
 export function overlayAlignRows(fields) {
@@ -438,6 +434,7 @@ export function overlayAlignRows(fields) {
     empty: Boolean(row.empty),
     required: Boolean(row.required),
     readonly: Boolean(row.readonly),
+    placeholder: row.placeholder || "",
   }));
 }
 
@@ -472,8 +469,11 @@ export function overlayFactLists(overlay_fields) {
   };
 }
 
+const FACT_READ_MS = 1000;
+
 async function readControlFact(locator, meta) {
   try {
+    if (!(await locator.count())) return { skip: true };
     return await locator.evaluate((node, info) => {
       const el = node instanceof Element ? node : null;
       if (!el) return { skip: true };
@@ -487,7 +487,7 @@ async function readControlFact(locator, meta) {
       const inputGuess = nested instanceof HTMLInputElement ? String(nested.type || "") : "";
       const dateLike = Boolean(info.dateLike)
         || /^(date|datetime-local|month|time|week)$/i.test(inputGuess)
-        || /\d{4}[-/.年]\d{1,2}|日期|时间/.test(String(el.getAttribute("aria-label") || el.textContent || ""));
+        || /\d{4}[-/.]\d{1,2}/.test(`${el.getAttribute("aria-label") || ""} ${el.textContent || ""}`);
       if (!info.valueRole && !native && haspopup == null && expanded == null && !info.genericNamed && !dateLike) return { skip: true };
       if (String(el.getAttribute("role") || "").toLowerCase() === "button" && !native && haspopup == null && expanded == null && !dateLike) return { skip: true };
       // 选择类包裹层里的过滤框是同一个控件的一部分，只报包裹层这一行
@@ -501,6 +501,18 @@ async function readControlFact(locator, meta) {
         || el.getAttribute("aria-placeholder")
         || (nested && nested.getAttribute("placeholder"))
         || "";
+      const placeholderTexts = [];
+      const addPlaceholder = (raw) => {
+        const text = String(raw || "").trim();
+        if (text && !placeholderTexts.includes(text)) placeholderTexts.push(text);
+      };
+      addPlaceholder(placeholder);
+      const scope = el.closest('[role="combobox"],[role="listbox"]') || el;
+      for (const node of scope.querySelectorAll('[placeholder],[aria-placeholder],[class*="placeholder" i]')) {
+        addPlaceholder(node.getAttribute("placeholder"));
+        addPlaceholder(node.getAttribute("aria-placeholder"));
+        if (/placeholder/i.test(String(node.className || ""))) addPlaceholder(node.innerText);
+      }
       let value = "";
       if (el.getAttribute("aria-valuenow") != null) value = String(el.getAttribute("aria-valuenow"));
       else if (el.getAttribute("aria-checked") != null) value = String(el.getAttribute("aria-checked"));
@@ -513,24 +525,27 @@ async function readControlFact(locator, meta) {
             host = el.closest('[role="combobox"],[role="listbox"]');
             if (!host || host === el) host = el.parentElement || el;
           }
-          const text = String((host || el).innerText || "").trim();
-          const ph = String(placeholder || "");
-          const parts = text.split(/\s+/).map((part) => part.trim()).filter(Boolean);
-          value = parts.find((part) => part && part !== ph && !/^(请选|请输入|请填写|请填入)/.test(part)) || "";
+          let text = String((host || el).innerText || "");
+          for (const mark of placeholderTexts) text = text.split(mark).join(" ");
+          value = text.replace(/\s+/g, " ").trim();
         }
       } else value = String(el.innerText || "").trim();
       return {
         skip: false,
         value,
         placeholder,
+        placeholderTexts,
         input,
         ariaRequired: el.getAttribute("aria-required"),
         htmlRequired: Boolean(el.required),
         ariaReadonly: el.getAttribute("aria-readonly"),
         htmlReadonly: Boolean(el.readOnly),
         ariaDisabled: el.getAttribute("aria-disabled"),
+        ariaHaspopup: el.getAttribute("aria-haspopup"),
+        ariaExpanded: el.getAttribute("aria-expanded"),
+        htmlDisabled: Boolean(el.disabled),
       };
-    }, meta);
+    }, meta, { timeout: FACT_READ_MS });
   } catch {
     return { skip: true };
   }
@@ -580,9 +595,9 @@ export async function overlayControlFacts(recordingId) {
         ...(raw.placeholder ? { placeholder: raw.placeholder } : {}),
         ...(job.column ? { column: job.column } : {}),
         ...(raw.input ? { input: raw.input } : {}),
-        empty: controlLooksEmpty(raw.value, raw.placeholder, job.label, job.column),
+        empty: controlLooksEmpty(raw.value, raw.placeholder, raw.placeholderTexts || []),
         required: markRequired(raw.ariaRequired, raw.htmlRequired, job.label, job.column, job.name),
-        readonly: markReadonly(raw.ariaReadonly, raw.htmlReadonly, raw.ariaDisabled),
+        readonly: markReadonly(raw.ariaReadonly, raw.htmlReadonly, raw.ariaDisabled, { role: job.role, ariaHaspopup: raw.ariaHaspopup, ariaExpanded: raw.ariaExpanded, htmlDisabled: raw.htmlDisabled }),
       };
     }));
     for (const row of part) if (row) rows.push(row);

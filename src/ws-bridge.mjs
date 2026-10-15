@@ -8,6 +8,7 @@ import { appendSessionThought, createRecording, emit, getRecording, loadRecordin
 import { hostTools } from "./agent/tools.mjs";
 import { startRecordingPi as defaultStart } from "./agent/pi-session.mjs";
 import { armIdleTimer, HUMAN_STEER_IDLE_MS, PREVIEW_DETACH_MS } from "./idle-timer.mjs";
+import { logLine } from "./log.mjs";
 
 function recordingIsLive(recording) {
   return Boolean(recording && !recording.finished && recording.status !== "stopped" && recording.status !== "failed");
@@ -54,8 +55,10 @@ async function steerAfterHumanAct(recording) {
   const listed = compactNetworkIndex(listNetwork(recording.id));
   let overlay_fields = [];
   try {
-    await withPage(recording.id, () => takeSnapshot(recording.id, { budgetMs: 2000 }));
-    overlay_fields = await overlayControlFacts(recording.id);
+    overlay_fields = await withPage(recording.id, async () => {
+      await takeSnapshot(recording.id, { budgetMs: 2000 });
+      return overlayControlFacts(recording.id);
+    });
   } catch {
     overlay_fields = [];
   }
@@ -194,6 +197,12 @@ export function attachWebSocket(server, { startRecordingPi = defaultStart } = {}
           recording.pi = await startRecordingPi({ recordingId: recording.id, tools, recording });
           recording.emit();
         } catch (error) {
+          const detail = String(error?.message || error).slice(0, 300);
+          logLine(`[pi] 启动失败 ${detail}`);
+          recording.emitThought?.({ kind: "tool", phase: "end", ok: false, text: `模型启动失败 ${detail}` });
+          recording.status = "failed";
+          recording.finished = true;
+          recording.emit();
           send({ type: "error", detail: error.message });
         }
         return;

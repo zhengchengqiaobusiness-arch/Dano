@@ -15,6 +15,16 @@ const PROBE_PNG = Buffer.from(
 const ACTIONS = new Set(["open", "snapshot", "click", "fill", "fill_fields", "press", "select", "upload", "screenshot"]);
 export const ACT_WALL_MS = 15000;
 
+async function fileFieldAttrs(el) {
+  if (!el || typeof el.getAttribute !== "function") return {};
+  const name = String(await el.getAttribute("name").catch(() => "") || "").trim();
+  const accept = String(await el.getAttribute("accept").catch(() => "") || "").trim();
+  const field = {};
+  if (name) field.name = name;
+  if (accept) field.accept = accept;
+  return field.name || field.accept ? { file_field: field } : {};
+}
+
 export function fieldFillText(field) {
   if (!field || typeof field !== "object") return null;
   if (typeof field.text === "string") return field.text;
@@ -141,10 +151,12 @@ export function runAction(recordingId, input) {
   return raceWall(
     withPage(recordingId, () => perform(recordingId, input)),
     ACT_WALL_MS,
-    async () => {
-      const snapshot = await takeSnapshot(recordingId, { budgetMs: 2000 }).catch(() => ({ epoch: 0, text: "", refs: [] }));
-      return withOverlayFacts(recordingId, { ok: false, error: "act_timeout", snapshot });
-    },
+    () => ({
+      ok: false,
+      error: "act_timeout",
+      snapshot: browserSession(recordingId)?.lastPublished || { epoch: 0, text: "", refs: [] },
+      hint: "这一下还没结束。下一次页面工具会等它结束；ref 只用之后返回的新树。",
+    }),
   );
 }
 
@@ -349,6 +361,7 @@ async function perform(recordingId, input) {
             hint: `文件没有写入：${String(error?.message || error).split("\n")[0]}。对同一 ref 调用 upload。`,
           };
         }
+        const fileField = await fileFieldAttrs(typeof chooser.element === "function" ? chooser.element() : hit.locator);
         await waitForAction(recordingId, actionId);
         const requests = requestsDuring();
         logLine(`[browser] upload accepted ref=${input.ref || ""} requests=${requests.map((row) => row.path).join(",") || "-"}`);
@@ -358,6 +371,7 @@ async function perform(recordingId, input) {
           clicked: hit.label || "",
           requests,
           snapshot: await snapshotAfter(recordingId),
+          ...fileField,
         };
       }
     }
@@ -382,6 +396,7 @@ async function perform(recordingId, input) {
     if (action === "press") await hit.locator.press(String(input.key || input.text || ""));
     if (action === "select") await hit.locator.selectOption(String(input.text ?? ""));
     let filled = [];
+    let fileField = {};
     if (action === "fill" || action === "select") filled = [hit.label || ""].filter(Boolean);
     if (action === "upload") {
       const dir = path.join(recordingDir(recordingId), "uploads");
@@ -403,10 +418,13 @@ async function perform(recordingId, input) {
       }
       try {
         if (state.pendingFileChooser) {
-          await state.pendingFileChooser.setFiles(filePath);
+          const chooser = state.pendingFileChooser;
+          await chooser.setFiles(filePath);
+          fileField = await fileFieldAttrs(typeof chooser.element === "function" ? chooser.element() : hit.locator);
           state.pendingFileChooser = null;
         } else {
           await hit.locator.setInputFiles(filePath);
+          fileField = await fileFieldAttrs(hit.locator);
         }
       } catch (error) {
         const message = String(error?.message || error);
@@ -454,7 +472,7 @@ async function perform(recordingId, input) {
           ...(layerIdle ? { layer_idle: true } : {}),
           ...(state.pageStall >= 2 ? { page_unchanged: true } : {}),
         })
-      : { ok: true, filled, requests, snapshot };
+      : { ok: true, filled, requests, snapshot, ...fileField };
   } finally {
     state.agentClick = false;
     endAction(recordingId);
