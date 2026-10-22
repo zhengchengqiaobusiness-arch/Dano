@@ -95,6 +95,8 @@ services:
       - "1024"
       - -b
       - "1024"
+      - -ub
+      - "1024"
     volumes:
       - ${DANO_OPENVIKING_MODELS_DIR:?DANO_OPENVIKING_MODELS_DIR is required}:/models:ro
     expose:

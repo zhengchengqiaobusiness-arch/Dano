@@ -66,9 +66,17 @@ For an opt-in deployment, provision these distinct resources before Compose:
   are not successful saves.
   For this candidate its private `reranker` object must set `url` to
   `http://reranker:8080/v1/rerank`, `model` to the manifest model name,
-  `minimumLogit` to `0`, `timeoutMs` to `900`, `maxInputBytes` to `16384`,
-  `maxDocumentBytes` to `4096`, and `maxCandidates` to `1`. These are frozen in
-  [the fifth evaluation configuration](../docs/research/fixtures/issue477-evaluation-candidate5.json).
+  `minimumLogit` to `0`, `timeoutMs` to `12000`, `maxInputBytes` to `16384`,
+  `maxDocumentBytes` to `4096`, and `maxCandidates` to `1`. Set the enclosing
+  `policy.recallTimeoutMs` to `15000`. The relevance and document limits retain
+  [the fifth evaluation configuration](../docs/research/fixtures/issue477-evaluation-candidate5.json);
+  the deadlines allow complete form records, which took 5.3 seconds in a
+  synthetic CPU probe, exceeding that evaluation's 900 ms deadline.
+  The shipped reranker sets both logical (`-b`) and physical (`-ub`) batch size
+  to 1024, matching its context size. Setting only `-b` leaves the physical
+  default at 512: a 668-token form/query pair returned HTTP 500 before scoring.
+  Keep the complete record available to scoring and recall; do not silently
+  truncate form fields to accommodate the server batch default.
   A malformed or unavailable reranker omits memory for that request; it does
   not fall back to the vector-only result that failed the relevance gate.
 
