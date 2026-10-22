@@ -87,7 +87,7 @@ Example collection block (budgets are explicit administrator choices):
     "lifecycleTimeoutMs": 5000,
     "model": {
       "provider": "xiaomi-token-plan-cn",
-      "id": "mimo-v2.5",
+      "id": "mimo-v2.6-flash",
       "maxTokens": 2048,
       "temperature": 0,
       "thinking": "disabled"
@@ -174,3 +174,55 @@ Raw response bodies and credentials are not copied into a collection receipt.
 The extension's existing secret screening still runs before any selected task
 fact is sent to the selection model. Ordinary business requests remain usable
 when optional memory is unconfigured, revoked, timed out or unavailable.
+
+## Unified model configuration (version 2)
+
+New deployments use `memory-service.json` as the only editable memory-model
+configuration. Set `memoryModel.id` once. Its provider/API identity binds the
+local tokenizer and the selection model; the OpenViking extraction model is
+projected from the same ID. Do not add `tokenizers`, `collection.model`, or an
+extraction model override to version 2: the parser rejects them. Version 1
+remains readable for rollback, but is not the current deployment format.
+
+Replace the old `tokenizers` block and `collection.model` with:
+
+```json
+{
+  "version": 2,
+  "memoryModel": {
+    "provider": "xiaomi-token-plan-cn",
+    "api": "openai-completions",
+    "id": "mimo-v2.6-flash",
+    "tokenizer": {"path": "/etc/dano-memory/tokenizers/mimo-v2.6-flash/tokenizer.json", "sha256": "<verified-sha256>"},
+    "config": {"path": "/etc/dano-memory/tokenizers/mimo-v2.6-flash/tokenizer_config.json", "sha256": "<verified-sha256>"},
+    "generation": {"maxTokens": 2048, "temperature": 0, "thinking": "disabled"},
+    "extraction": {"provider": "openai", "apiBase": "<provider-api-base>", "apiKey": "<private-credential>"}
+  },
+  "embedding": {
+    "model": "bge-small-zh-v1.5-f16", "modelFile": "bge-small-zh-v1.5-f16.gguf",
+    "apiBase": "http://embedding:8080/v1", "dimension": 512, "maxInputTokens": 100
+  }
+}
+```
+
+Retain the policy, credentials, schedulers and tokenizer limits. Keep the existing
+`reranker` settings in this file and add its `modelFile` alongside `model`.
+Embedding and reranker are separate model types; neither inherits the Flash ID.
+Their Compose aliases/files and OpenViking's embedding configuration are generated
+from this same file. The release manifest pins tested assets, not a second runtime
+setting. When changing the LLM, supply its verified tokenizer assets in the same
+object; never relabel old assets as a new tokenizer.
+
+From a built image with the private config/control paths mounted, run
+`node deploy/memory-models.mjs sync CONFIG_DIR OV_CONFIG_PATH DEPLOY_ENV_PATH`,
+then repeat with `check` before Compose. The command preserves unrelated settings,
+credentials, ownership and private permissions. It prints only fixed status codes.
+`ov.conf` model fields and `.env` model variables are generated outputs; do not
+edit them independently. A failed or interrupted sync must not pass the check.
+The command does not start services or modify runtime memory/session contents.
+
+The projector edits only canonical single-line `KEY=value` env entries and
+preserves their unrelated bytes. It rejects multiline values, alternate colon
+assignments and whitespace-around-key syntax before any write rather than risking
+credential corruption. Convert such a deploy-control file deliberately before
+using this helper; an error must not be bypassed by blindly rewriting it.

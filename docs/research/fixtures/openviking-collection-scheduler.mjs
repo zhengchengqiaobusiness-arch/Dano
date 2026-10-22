@@ -52,7 +52,7 @@ if (mode === 'enqueue') {
   const credentials = JSON.parse(await readFile(credentialPath, 'utf8'));
   for (const key of ['XIAOMI_TOKEN_PLAN_CN_API_KEY', 'XIAOMI_API_KEY']) if (credentials[key]) process.env[key] = credentials[key];
   const runtime = await ModelRuntime.create({ authPath: join(directory, 'model-auth.json'), modelsPath, refreshOnCreate: false });
-  const model = runtime.getModel('xiaomi-token-plan-cn', 'mimo-v2.5');
+  const model = runtime.getModel('xiaomi-token-plan-cn', 'mimo-v2.6-flash');
   assert(model);
   let modelCalls = 0; let usage;
   const selector = new CollectionFactSelector({ store, maxInputBytes: 16384, maxFacts: 5, timeoutMs: 45000,

@@ -51,7 +51,7 @@ try {
         }
       } }] },
   });
-  const model = services.modelRuntime.getModel('xiaomi-token-plan-cn', 'mimo-v2.5');
+  const model = services.modelRuntime.getModel('xiaomi-token-plan-cn', 'mimo-v2.6-flash');
   assert(model, 'Configured MiMo model missing');
   const created = await pi.createAgentSessionFromServices({ services, sessionManager: manager,
     model, noTools: 'all', thinkingLevel: 'off' });
@@ -87,7 +87,7 @@ try {
   assert.equal(screened[0].userCandidates, 1);
   assert.equal(screened[1].userCandidates, 0);
   assert(screened[1].excludedEntries >= 1);
-  console.log(JSON.stringify({ piVersion: piPackage.version, model: 'mimo-v2.5', realAgentSession: true, completedRequests: requests.length,
+  console.log(JSON.stringify({ piVersion: piPackage.version, model: 'mimo-v2.6-flash', realAgentSession: true, completedRequests: requests.length,
     sourceCounts: requests.map(request => request.sourceEntries.length), observations, screened,
     localCredentialScreeningTested: true,
     remoteMemoryDeliveryTested: false, privacySelectionTested: false }, null, 2));

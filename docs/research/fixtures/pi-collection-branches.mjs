@@ -42,7 +42,7 @@ const runtime = await pi.createAgentSessionRuntime(async ({ sessionManager, sess
     resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
       noContextFiles: true, extensionFactories: [{ name: 'branch-probe', factory: extension }] } });
   modelRuntime = services.modelRuntime;
-  model = modelRuntime.getModel('xiaomi-token-plan-cn', 'mimo-v2.5'); assert(model);
+  model = modelRuntime.getModel('xiaomi-token-plan-cn', 'mimo-v2.6-flash'); assert(model);
   const created = await pi.createAgentSessionFromServices({ services, sessionManager, sessionStartEvent,
     model, noTools: 'all', thinkingLevel: 'off' });
   assert.equal(created.extensionsResult.errors.length, 0);

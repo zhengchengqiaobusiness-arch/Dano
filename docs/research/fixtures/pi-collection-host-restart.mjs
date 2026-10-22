@@ -44,7 +44,7 @@ if (mode === 'chat') {
     settingsManager: pi.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
     resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
       noContextFiles: true, extensionFactories: [{ name: 'collection-host-restart', factory: extension }] } });
-  const model = services.modelRuntime.getModel('xiaomi-token-plan-cn', 'mimo-v2.5'); assert(model);
+  const model = services.modelRuntime.getModel('xiaomi-token-plan-cn', 'mimo-v2.6-flash'); assert(model);
   const { session, extensionsResult } = await pi.createAgentSessionFromServices({ services, sessionManager: manager,
     model, noTools: 'all', thinkingLevel: 'off' });
   assert.equal(extensionsResult.errors.length, 0);
@@ -72,7 +72,7 @@ if (mode === 'chat') {
   assert.equal((await exited)[1], 'SIGKILL'); assert.equal(stderr, '');
   // New process/runtime has no live session manager, viewer or extension context.
   const runtime = await pi.ModelRuntime.create({ authPath: join(root, 'selection-auth.json'), modelsPath, refreshOnCreate: false });
-  const model = runtime.getModel('xiaomi-token-plan-cn', 'mimo-v2.5'); assert(model);
+  const model = runtime.getModel('xiaomi-token-plan-cn', 'mimo-v2.6-flash'); assert(model);
   let modelCalls = 0, wakes = 0; const usages = [];
   const selector = new memory.CollectionFactSelector({ store, maxInputBytes: 16384, maxFacts: 5, timeoutMs: 45000,
     sensitiveValues: () => Object.values(secrets).filter(value => typeof value === 'string' && value.length >= 12),

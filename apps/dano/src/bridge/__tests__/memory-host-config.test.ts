@@ -98,3 +98,26 @@ it("accepts a private bounded reranker endpoint and rejects unsafe overrides", (
     { ...reranker, maxCandidates: 0 },
   ]) expect(() => parseMemoryHostConfig({ ...config(), reranker: changed })).toThrow("INVALID_MEMORY_HOST_CONFIG");
 });
+
+it("derives collection, extraction and tokenizer identity from one memoryModel", () => {
+  const { tokenizers, ...base } = config();
+  const input = { ...base, version: 2,
+    memoryModel: { ...tokenizers[0]!.model, tokenizer: tokenizers[0]!.tokenizer, config: tokenizers[0]!.config,
+      generation: { maxTokens: 512, temperature: 0, thinking: "disabled" },
+      extraction: { provider: "openai", apiBase: "https://models.example.test/v1", apiKey: "SYNTHETIC_KEY" } },
+    embedding: { model: "synthetic-embedding", modelFile: "embedding.gguf", apiBase: "http://embedding:8080/v1", dimension: 512, maxInputTokens: 100 },
+    reranker: { url: "http://reranker:8080/v1/rerank", model: "synthetic-reranker", modelFile: "reranker.gguf",
+      minimumLogit: 0, timeoutMs: 900, maxInputBytes: 16384, maxDocumentBytes: 4096, maxCandidates: 1 },
+    collection: { policyVersion: "collection-v1", lifecycleTimeoutMs: 1000,
+      selector: { maxInputBytes: 8192, maxFacts: 5, timeoutMs: 1000 },
+      scheduler: { pollIntervalMs: 10, mergeWindowMs: 20, maxWaitMs: 50, workTimeoutMs: 2000,
+        leaseMs: 5000, initialBackoffMs: 50, maxBackoffMs: 100, maxAttempts: 2, maxRequestsPerBatch: 5 } } };
+  input.memoryModel.id = "another-model";
+  const parsed = parseMemoryHostConfig(input);
+  expect(parsed.collection?.model.id).toBe("another-model");
+  expect(parsed.tokenizers[0]?.model.id).toBe("another-model");
+  expect(parsed.deployment?.extraction.model).toBe("another-model");
+  expect(() => parseMemoryHostConfig({ ...input, tokenizers })).toThrow("INVALID_MEMORY_HOST_CONFIG");
+  expect(() => parseMemoryHostConfig({ ...input, collection: { ...input.collection, model: { id: "override" } } }))
+    .toThrow("INVALID_MEMORY_HOST_CONFIG");
+});

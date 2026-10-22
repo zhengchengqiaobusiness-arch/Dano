@@ -77,7 +77,7 @@ emit({ type: 'turn_start' });
 const tool = broker.createTool('scope', facts.capture.bind(facts));
 const lifecycle = new memory.CollectionLifecycle(store);
 const modelRuntime = await pi.ModelRuntime.create({ authPath: join(root, 'auth.json'), modelsPath, refreshOnCreate: false });
-const model = modelRuntime.getModel('xiaomi-token-plan-cn', 'mimo-v2.5'); assert(model);
+const model = modelRuntime.getModel('xiaomi-token-plan-cn', 'mimo-v2.6-flash'); assert(model);
 let calls = 0; const usage = [];
 const verifier = new MemoryTaskFacts(factOptions); // Receipts must survive a new verifier instance.
 const selector = new memory.CollectionFactSelector({ store, maxInputBytes: 16384, maxFacts: 5, timeoutMs: 45000,

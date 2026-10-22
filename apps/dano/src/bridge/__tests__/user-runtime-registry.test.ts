@@ -15,6 +15,29 @@ afterEach(() => {
 });
 
 describe("UserRuntimeRegistry owner transfer", () => {
+  it("protects an existing owner session directory before starting collection", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-existing-session-mode-"));
+    runtimeRoots.push(root);
+    const context = userContext(root, "existing-owner");
+    const sessionsRootPath = path.join(root, "protected-sessions");
+    const ownerRoot = path.join(sessionsRootPath, path.basename(context.folderPath));
+    fs.mkdirSync(ownerRoot, { recursive: true, mode: 0o755 });
+    fs.chmodSync(ownerRoot, 0o755);
+    writeText(path.join(ownerRoot, "retained.jsonl"), "retained synthetic bytes\n");
+    const registry = new UserRuntimeRegistry(async () => ({ async dispose() {} }) as never, {
+      sessionsRootPath,
+      async protectedToolsForUser(_context, paths) {
+        expect(fs.statSync(paths.sessionsRootPath).mode & 0o777).toBe(0o700);
+        return { agentDir: path.join(root, "private"), trustedSkillPaths: [],
+          async resolveWorker() { throw new Error("unused"); } };
+      },
+    });
+    try {
+      await registry.get(context);
+      expect(fs.readFileSync(path.join(ownerRoot, "retained.jsonl"), "utf8")).toBe("retained synthetic bytes\n");
+    } finally { await registry.dispose(); }
+  });
+
   it("prepares a cold target before copying uploads without starting its backend", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-cold-transfer-"));
     runtimeRoots.push(root);

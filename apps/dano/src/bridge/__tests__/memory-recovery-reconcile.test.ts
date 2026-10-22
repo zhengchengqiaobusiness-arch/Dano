@@ -1090,7 +1090,7 @@ for (const kind of ["forget", "correct"] as const) {
     vi.spyOn(OwnerMemoryClient.prototype, "replaceMemory").mockImplementation(async (target, body) => { documents.set(target, body); });
     const remove = vi.spyOn(OwnerMemoryClient.prototype, "removeMemory")
       .mockImplementation(async target => { documents.delete(target); });
-    const client = new LazyMemoryClient({ owner: f.owner, baseUrl: "http://localhost:1", timeoutMs: 3000,
+    const client = new LazyMemoryClient({ maxRecallDocumentBytes: 16384, owner: f.owner, baseUrl: "http://localhost:1", timeoutMs: 3000,
       connect: async () => ({ owner: f.owner, apiKey: "synthetic-user-key" }),
       assertToolIsolation: async () => {}, journal: f.journal });
     const governance = new MemoryGovernanceService(store, client,

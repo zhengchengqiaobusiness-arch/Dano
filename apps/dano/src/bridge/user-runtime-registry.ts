@@ -227,6 +227,7 @@ export class UserRuntimeRegistry {
       });
     }
     await ensureSafeDirectory(sessionsRootPath, {
+      ownerPrivate: true,
       unsafeDirectoryError: unsafeRuntimeDirectory,
     });
     const protectedTools = await this.options.protectedToolsForUser?.(userContext, { sessionsRootPath });

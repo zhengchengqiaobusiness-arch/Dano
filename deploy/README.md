@@ -17,6 +17,13 @@ after pull. The Dockerfile uses `pnpm install --frozen-lockfile`; the extension
 and all runtime tools are installed in the image build, never on startup.
 Run `node scripts/check-memory-release.mjs` before building.
 
+Memory models are configured only in the version-2 `memory-service.json`.
+Set `memoryModel.id` once; selection, extraction and tokenizer identity derive
+from it. Embedding/reranker settings live in the same file. Run the built
+`deploy/memory-models.mjs sync` and `check` before Compose to project OpenViking
+and environment outputs; never edit those generated model values independently.
+See [the unified schema](../docs/research/memory-host-configuration.md#unified-model-configuration-version-2).
+
 For an opt-in deployment, provision these distinct resources before Compose:
 
 - A private deploy-control directory `DANO_OPENVIKING_CONFIG_DIR`, mode 0700,
@@ -66,15 +73,23 @@ For an opt-in deployment, provision these distinct resources before Compose:
   are not successful saves.
   For this candidate its private `reranker` object must set `url` to
   `http://reranker:8080/v1/rerank`, `model` to the manifest model name,
-  `minimumLogit` to `0`, `timeoutMs` to `12000`, `maxInputBytes` to `16384`,
+  `minimumLogit` to `0`, `timeoutMs` to `30000`, `maxInputBytes` to `16384`,
   `maxDocumentBytes` to `4096`, and `maxCandidates` to `1`. Set the enclosing
-  `policy.recallTimeoutMs` to `15000`. The relevance and document limits retain
+  `policy.recallTimeoutMs` to `35000`. The relevance and document limits retain
   [the fifth evaluation configuration](../docs/research/fixtures/issue477-evaluation-candidate5.json);
-  the deadlines allow complete form records, which took 5.3 seconds in a
-  synthetic CPU probe, exceeding that evaluation's 900 ms deadline.
+  the deadlines account for a complete 668-token form/query pair measured at
+  8.6 and 15.8 seconds on the deployment CPU. A shorter synthetic probe took
+  5.3 seconds and did not establish a sufficient production deadline.
   The shipped reranker sets both logical (`-b`) and physical (`-ub`) batch size
   to 1024, matching its context size. Setting only `-b` leaves the physical
   default at 512: a 668-token form/query pair returned HTTP 500 before scoring.
+  Size the host capacity override against the complete request as well. On
+  the existing host, a 768 MiB reranker memory limit caused repeated limit
+  hits and a cold request over 30 seconds. A scoped override of `mem_limit:
+  1280m` and `memswap_limit: 1792m` removed the observed limit hits; CPU remained
+  at 1.5. These are measured host settings, not a universal sizing guarantee.
+  Preserve headroom for neighboring services and verify both cold and warm
+  requests before accepting a capacity change.
   Keep the complete record available to scoring and recall; do not silently
   truncate form fields to accommodate the server batch default.
   A malformed or unavailable reranker omits memory for that request; it does
@@ -95,8 +110,9 @@ variables into the container; `DANO_MEMORY_NO_PROXY` must include `embedding`,
 `openviking`, `reranker`, loopback addresses and any model provider reached directly.
 OpenViking `v0.4.20` `/find` uses its QUICK vector path even when a server-side
 reranker is configured. Dano therefore applies the bounded reranker to the
-USER-scoped results before injection, under the existing two-second memory
-wait fuse.
+USER-scoped results before injection, within the configured `policy.recallTimeoutMs` deadline. Matched form records
+are loaded through the owner-bound, byte-limited native read API after ranking;
+search abstracts are not complete form defaults.
 
 When OpenViking rotates an existing owner's USER key, stop Dano but keep the
 internal OpenViking service running. After the remote rotation has revoked the

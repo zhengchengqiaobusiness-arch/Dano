@@ -1,4 +1,4 @@
-/** Real configured MiMo-v2.5 host classifier, synthetic facts only. Node 22. */
+/** Real configured MiMo-v2.6-flash host classifier, synthetic facts only. Node 22. */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
@@ -13,7 +13,7 @@ const manifest = JSON.parse(await readFile(new URL('package.json', base), 'utf8'
 const { ModelRuntime } = await import(new URL(manifest.exports['.'].import, base));
 const [modelsPath, credentialsPath] = process.argv.slice(2);
 assert(modelsPath && credentialsPath);
-const provider = 'xiaomi-token-plan-cn', modelId = 'mimo-v2.5';
+const provider = 'xiaomi-token-plan-cn', modelId = 'mimo-v2.6-flash';
 const configured = JSON.parse(await readFile(modelsPath, 'utf8'));
 const credentials = JSON.parse(await readFile(credentialsPath, 'utf8'));
 const reference = configured.providers[provider].apiKey;

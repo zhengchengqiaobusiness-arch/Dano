@@ -33,6 +33,11 @@ export interface MemoryHostConfig {
   tokenizerLimits: MemoryTokenizerLimits;
   tokenizers: MemoryTokenizerBinding[];
   collection?: MemoryCollectionHostConfig;
+  deployment?: {
+    extraction: { provider: string; model: string; api_base: string; api_key: string };
+    embedding: { model: string; modelFile: string; apiBase: string; dimension: number; maxInputTokens: number };
+    rerankerModelFile: string;
+  };
 }
 const invalid = () => new Error("INVALID_MEMORY_HOST_CONFIG");
 function object(value: unknown, keys: readonly string[]): Record<string, unknown> {
@@ -59,11 +64,17 @@ function asset(value: unknown) {
   return { path, sha256 };
 }
 
-function collectionConfig(value: unknown): MemoryCollectionHostConfig {
-  const raw = object(value, ["policyVersion", "lifecycleTimeoutMs", "model", "selector", "scheduler", "taskFacts"]);
-  const model = object(raw.model, ["provider", "id", "maxTokens", "temperature", "thinking"]);
+function collectionModel(value: unknown): MemoryCollectionHostConfig["model"] {
+  const model = object(value, ["provider", "id", "maxTokens", "temperature", "thinking"]);
   if (typeof model.temperature !== "number" || !Number.isFinite(model.temperature) || model.temperature < 0
     || model.temperature > 2 || (model.thinking !== undefined && model.thinking !== "enabled" && model.thinking !== "disabled")) throw invalid();
+  return { provider: text(model.provider), id: text(model.id), maxTokens: positive(model.maxTokens), temperature: model.temperature,
+    ...(model.thinking === undefined ? {} : { thinking: model.thinking }) };
+}
+
+function collectionConfig(value: unknown): MemoryCollectionHostConfig {
+  const raw = object(value, ["policyVersion", "lifecycleTimeoutMs", "model", "selector", "scheduler", "taskFacts"]);
+  const model = collectionModel(raw.model);
   const selector = object(raw.selector, ["maxInputBytes", "maxFacts", "timeoutMs"]);
   const schedule = object(raw.scheduler, ["pollIntervalMs", "mergeWindowMs", "maxWaitMs", "workTimeoutMs", "leaseMs",
     "initialBackoffMs", "maxBackoffMs", "maxAttempts", "maxRequestsPerBatch"]);
@@ -78,14 +89,16 @@ function collectionConfig(value: unknown): MemoryCollectionHostConfig {
   const policyVersion = text(raw.policyVersion);
   if (!policyVersion.trim()) throw invalid();
   return { policyVersion, lifecycleTimeoutMs: positive(raw.lifecycleTimeoutMs),
-    model: { provider: text(model.provider), id: text(model.id), maxTokens: positive(model.maxTokens), temperature: model.temperature,
-      ...(model.thinking === undefined ? {} : { thinking: model.thinking }) },
+    model,
     selector: { maxInputBytes: positive(selector.maxInputBytes), maxFacts: positive(selector.maxFacts), timeoutMs: positive(selector.timeoutMs) },
     scheduler, ...(raw.taskFacts === undefined ? {} : { taskFacts: parseMemoryTaskFactConfig(raw.taskFacts) }) };
 }
 
 export function parseMemoryHostConfig(input: unknown): MemoryHostConfig {
   try {
+    if (input && typeof input === "object" && (input as { version?: unknown }).version === 2) {
+      return parseUnifiedMemoryHostConfig(input);
+    }
     const raw = object(input, ["version", "baseUrl", "accountId", "managementKey", "encryptionKey", "encryptionKeyVersion",
       "requestTimeoutMs", "maxContentBytes", "policyVersion", "policy", "reranker", "scheduler", "tokenizerLimits", "tokenizers", "collection"]);
     const url = new URL(text(raw.baseUrl));
@@ -136,6 +149,44 @@ export function parseMemoryHostConfig(input: unknown): MemoryHostConfig {
           ? DEFAULT_MAX_QUEUED_REQUESTS : positive(limits.maxQueuedRequests) }, tokenizers,
       ...(raw.collection === undefined ? {} : { collection: collectionConfig(raw.collection) }) };
   } catch { throw invalid(); }
+}
+
+/** One host model identity supplies selection, extraction and tokenizer binding. */
+function parseUnifiedMemoryHostConfig(input: unknown): MemoryHostConfig {
+  const raw = object(input, ["version", "baseUrl", "accountId", "managementKey", "encryptionKey", "encryptionKeyVersion",
+    "requestTimeoutMs", "maxContentBytes", "policyVersion", "policy", "reranker", "scheduler", "tokenizerLimits",
+    "memoryModel", "embedding", "collection"]);
+  const model = object(raw.memoryModel, ["provider", "id", "api", "tokenizer", "config", "generation", "extraction"]);
+  const identity = { provider: text(model.provider), id: text(model.id), api: text(model.api) };
+  const generation = object(model.generation, ["maxTokens", "temperature", "thinking"]);
+  const selectedModel = collectionModel({ provider: identity.provider, id: identity.id, ...generation });
+  const extraction = object(model.extraction, ["provider", "apiBase", "apiKey"]);
+  const embedding = object(raw.embedding, ["model", "modelFile", "apiBase", "dimension", "maxInputTokens"]);
+  const reranker = object(raw.reranker, ["url", "model", "modelFile", "minimumLogit", "timeoutMs", "maxInputBytes", "maxDocumentBytes", "maxCandidates"]);
+  const modelFile = (value: unknown) => {
+    const name = text(value);
+    if (!/^[A-Za-z0-9._-]+\.gguf$/.test(name)) throw invalid();
+    return name;
+  };
+  const apiBase = (value: unknown) => {
+    const url = new URL(text(value));
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw invalid();
+    return url.href.replace(/\/$/, "");
+  };
+  const { memoryModel: _model, embedding: _embedding, collection: collectionInput, ...base } = raw;
+  const { modelFile: rerankerFile, ...rerankerConfig } = reranker;
+  const collection = collectionInput === undefined ? undefined : object(collectionInput,
+    ["policyVersion", "lifecycleTimeoutMs", "selector", "scheduler", "taskFacts"]);
+  const parsed = parseMemoryHostConfig({ ...base, version: 1, reranker: rerankerConfig,
+    tokenizers: [{ model: identity, tokenizer: asset(model.tokenizer), config: asset(model.config) }],
+    ...(collection ? { collection: { ...collection, model: selectedModel } } : {}) });
+  return { ...parsed, deployment: {
+    extraction: { provider: text(extraction.provider), model: identity.id,
+      api_base: apiBase(extraction.apiBase), api_key: text(extraction.apiKey) },
+    embedding: { model: text(embedding.model), modelFile: modelFile(embedding.modelFile),
+      apiBase: apiBase(embedding.apiBase), dimension: positive(embedding.dimension), maxInputTokens: positive(embedding.maxInputTokens) },
+    rerankerModelFile: modelFile(rerankerFile),
+  } };
 }
 
 /** Separate host-owned 0700 configuration directory, outside state and tool workspaces. */

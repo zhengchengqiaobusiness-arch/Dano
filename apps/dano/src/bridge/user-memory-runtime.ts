@@ -91,6 +91,7 @@ export class UserMemoryRuntime implements UserMemoryControls {
       ? await MemoryRecoveryJournal.open(options.recoveryDirectory, owner, await baseStore.read()) : undefined;
     const store = journal ? new RecoveryStateStore(baseStore, journal) : baseStore;
     const client = new LazyMemoryClient({ owner, baseUrl: options.baseUrl, timeoutMs: options.requestTimeoutMs,
+      maxRecallDocumentBytes: options.maxContentBytes,
       connect: () => identity.connect(context), assertToolIsolation: () => worker.assertIsolated(), reranker: options.reranker,
       journal });
     const configured = options.collection;

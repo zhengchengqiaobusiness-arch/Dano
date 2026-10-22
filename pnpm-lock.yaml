@@ -63,8 +63,8 @@ importers:
         specifier: 0.2.17
         version: 0.2.17(@earendil-works/pi-coding-agent@0.99.1(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)(zod@4.4.3))
       '@josephyoung/pi-openviking':
-        specifier: 0.1.21
-        version: 0.1.21(@earendil-works/pi-coding-agent@0.99.1(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)(zod@4.4.3))
+        specifier: 0.1.23
+        version: 0.1.23(@earendil-works/pi-coding-agent@0.99.1(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)(zod@4.4.3))
       '@openviking/sdk':
         specifier: 0.1.0
         version: 0.1.0
@@ -1590,8 +1590,8 @@ packages:
     peerDependencies:
       '@earendil-works/pi-coding-agent': '*'
 
-  '@josephyoung/pi-openviking@0.1.21':
-    resolution: {integrity: sha512-TXBJ/bBlhCjxgyaOYCOPuLY6iglCGz6EtF9ZUrHeckL9CtFr1RgmVneuz3NE1ac6KRJsATT4lS7gKLoLkzsoUg==}
+  '@josephyoung/pi-openviking@0.1.23':
+    resolution: {integrity: sha512-KAGzuk0RnJEHTfksZvR31mIND1VQ93cO8OItPSHvKLx/Zgc7GJewVCZYk8sZ/cxraID1PEEOiIBUyoAylBPMBg==}
     engines: {node: '>=22.19.0'}
     hasBin: true
     peerDependencies:
@@ -6759,7 +6759,7 @@ snapshots:
       '@earendil-works/pi-coding-agent': 0.99.1(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)(zod@4.4.3)
       shell-quote: 1.8.4
 
-  '@josephyoung/pi-openviking@0.1.21(@earendil-works/pi-coding-agent@0.99.1(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)(zod@4.4.3))':
+  '@josephyoung/pi-openviking@0.1.23(@earendil-works/pi-coding-agent@0.99.1(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)(zod@4.4.3))':
     dependencies:
       '@earendil-works/pi-coding-agent': 0.99.1(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)(zod@4.4.3)
       '@openviking/sdk': 0.1.0

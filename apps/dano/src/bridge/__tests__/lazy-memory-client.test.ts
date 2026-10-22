@@ -19,7 +19,7 @@ function harness() {
     return Response.json({ status: "ok", result: { session_id: body.session_id } });
   });
   vi.stubGlobal("fetch", fetch);
-  const client = new LazyMemoryClient({ owner, baseUrl: "https://memory.example.test", timeoutMs: 1000,
+  const client = new LazyMemoryClient({ maxRecallDocumentBytes: 16384, owner, baseUrl: "https://memory.example.test", timeoutMs: 1000,
     connect, assertToolIsolation: isolation });
   return { client, connect, isolation, fetch };
 }
@@ -113,7 +113,7 @@ it("does not initialize credentials for an already cancelled recall", async () =
 it("does not send a remote deletion when its external recovery intent cannot be saved", async () => {
   const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
   const append = vi.fn().mockRejectedValue(new Error("RECOVERY_DISK_FULL"));
-  const client = new LazyMemoryClient({ owner, baseUrl: "https://memory.example.test", timeoutMs: 1000,
+  const client = new LazyMemoryClient({ maxRecallDocumentBytes: 16384, owner, baseUrl: "https://memory.example.test", timeoutMs: 1000,
     connect: async () => ({ owner, apiKey: "synthetic-user-key" }), assertToolIsolation: async () => {},
     journal: { append, assertHealthy: () => {} } as unknown as MemoryRecoveryJournal });
   await expect(client.removeMemory("viking://user/alice/memories/old.md")).rejects.toThrow("RECOVERY_DISK_FULL");
@@ -139,10 +139,33 @@ it("limits USER-scoped retrieval to the reranker inference budget", async () => 
     throw new Error("UNEXPECTED_REQUEST");
   });
   vi.stubGlobal("fetch", fetch);
-  const client = new LazyMemoryClient({ owner, baseUrl: "https://memory.example.test", timeoutMs: 1000,
+  const client = new LazyMemoryClient({ maxRecallDocumentBytes: 16384, owner, baseUrl: "https://memory.example.test", timeoutMs: 1000,
     connect: async () => ({ owner, apiKey: "synthetic-user-key" }), assertToolIsolation: async () => {}, reranker });
   expect(await client.recall("我的项目代号", 5)).toMatchObject([{ uri: "viking://user/alice/memories/one.md" }]);
   const search = fetch.mock.calls.find(([input]) => String(input).includes("/search/find"));
   expect(JSON.parse(String(search?.[1]?.body)).limit).toBe(2);
   await client.close();
+});
+
+it("reads the current form document instead of using its lossy search abstract as defaults", async () => {
+  const uri = "viking://user/alice/memories/form_records/hotel/create.md";
+  const current = 'reason: updated reason\nunitPrice: 499\nspecialReq: ""';
+  const fetch = vi.fn(async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith("/health")) return Response.json({ auth_mode: "api_key", role: "user",
+      account_id: owner.accountId, user_id: owner.userId });
+    if (url.includes("/search/find")) return Response.json({ status: "ok", result: { memories: [
+      { uri, abstract: "Previously used 439, then changed price; hotel form", score: 0.9 },
+    ] } });
+    if (url.includes("/content/read?")) {
+      expect(new URL(url).searchParams.get("uri")).toBe(uri);
+      return Response.json({ status: "ok", result: current });
+    }
+    throw new Error("UNEXPECTED_REQUEST");
+  });
+  vi.stubGlobal("fetch", fetch);
+  const client = new LazyMemoryClient({ maxRecallDocumentBytes: 16384, owner, baseUrl: "https://memory.example.test", timeoutMs: 1000,
+    connect: async () => ({ owner, apiKey: "synthetic-user-key" }), assertToolIsolation: async () => {} });
+  try { expect(await client.recall("hotel form", 1)).toEqual([{ uri, text: current, score: 0.9 }]); }
+  finally { await client.close(); }
 });

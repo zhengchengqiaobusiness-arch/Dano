@@ -30,7 +30,7 @@ const promptHash = createHash('sha256').update(memory.collectionSelectionPrompt)
 const root = await mkdtemp('/private/tmp/dano475-selection-');
 try {
   const runtime = await pi.ModelRuntime.create({ authPath: join(root, 'auth.json'), modelsPath: process.argv[3], refreshOnCreate: false });
-  const model = runtime.getModel('xiaomi-token-plan-cn', 'mimo-v2.5');
+  const model = runtime.getModel('xiaomi-token-plan-cn', 'mimo-v2.6-flash');
   assert(model, 'Configured MiMo model unavailable');
   const results = [];
   for (const [index, item] of cases.entries()) {
@@ -72,7 +72,7 @@ try {
     console.log(JSON.stringify({ datasetHash, promptHash, thinkingMode, temperature: 0, ...results.at(-1) }));
     assert.deepEqual((await store.read()).operations, {});
   }
-  console.log(JSON.stringify({ model: 'mimo-v2.5', thinkingMode, temperature: 0, datasetHash, promptHash, cases: results.length,
+  console.log(JSON.stringify({ model: 'mimo-v2.6-flash', thinkingMode, temperature: 0, datasetHash, promptHash, cases: results.length,
     passed: results.filter(result => result.passed).length, remoteDeliveryTested: false, fullT14Gate: false }));
   assert(results.every(result => result.passed), 'Semantic selection cases failed; do not weaken the fixed expectations');
 } finally { await rm(root, { recursive: true, force: true }); }

@@ -93,6 +93,34 @@ it("keeps paused recall offline and discards results when authorization changes 
   expect(JSON.stringify(late)).not.toContain("private late result");
 });
 
+it("keeps explicit recall when an unrelated collection registration updates state during retrieval", async () => {
+  const h = await harness();
+  const profile = await h.start();
+  const store = new FileStateStore({ owner: { accountId: "account", userId: "alice" },
+    directory: join(h.profile.memoryStateDirectory!, "memory"), policyVersion: "v1" });
+  vi.spyOn(LazyMemoryClient.prototype, "recall").mockImplementation(async () => {
+    await store.transact(state => { state.collectionSessionFiles = { ...state.collectionSessionFiles, synthetic: "/synthetic/session.jsonl" }; });
+    return [{ uri: "memory/current", text: "latest form values", score: 1 }];
+  });
+  const response = await bind(profile, h.worker).tools.get("memory_recall")
+    .execute("recall", { query: "hotel form" }, undefined, undefined, recallContext);
+  expect(response.details).toMatchObject({ status: "ok", memories: [{ text: "latest form values" }] });
+});
+
+it("discards explicit recall across pause and resume even when enabled is true again", async () => {
+  const h = await harness();
+  const profile = await h.start();
+  vi.spyOn(LazyMemoryClient.prototype, "recall").mockImplementation(async () => {
+    await profile.memory!.setEnabled(false);
+    await profile.memory!.setEnabled(true);
+    return [{ uri: "memory/stale", text: "stale result", score: 1 }];
+  });
+  const response = await bind(profile, h.worker).tools.get("memory_recall")
+    .execute("recall", { query: "hotel form" }, undefined, undefined, recallContext);
+  expect(response.details.status).toBe("blocked");
+  expect(JSON.stringify(response)).not.toContain("stale result");
+});
+
 it("bounds stalled recall and sanitizes service errors without blocking ordinary tools", async () => {
   const h = await harness();
   const profile = await h.start();

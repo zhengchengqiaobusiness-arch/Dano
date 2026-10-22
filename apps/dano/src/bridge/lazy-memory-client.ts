@@ -9,6 +9,7 @@ interface Options {
   owner: Owner;
   baseUrl: string;
   timeoutMs: number;
+  maxRecallDocumentBytes: number;
   /** Bound by the host to one authenticated UserContext, never a tool input. */
   connect(): Promise<MemoryUserConnection>;
   assertToolIsolation(): Promise<void>;
@@ -117,7 +118,19 @@ export class LazyMemoryClient implements Client, MemoryGovernanceClient {
     return this.#call(async client => {
       const found = await client.recall(query,
         this.#options.reranker ? Math.min(limit, this.#options.reranker.maxCandidates) : limit, signal);
-      return this.#options.reranker ? this.#options.reranker.filter(query, found, signal) : found;
+      const ranked = this.#options.reranker ? await this.#options.reranker.filter(query, found, signal) : found;
+      const recalled = [];
+      for (const item of ranked) {
+        signal?.throwIfAborted();
+        // Search abstracts are suitable for ranking, but may omit changed or cleared
+        // fields. Read the owner-checked current document before offering defaults.
+        if (item.uri.startsWith(`viking://user/${this.owner.userId}/memories/form_records/`)) {
+          const text = await client.readMemoryLimited(item.uri, this.#options.maxRecallDocumentBytes);
+          signal?.throwIfAborted();
+          recalled.push({ ...item, text });
+        } else recalled.push(item);
+      }
+      return recalled;
     }, signal);
   }
 

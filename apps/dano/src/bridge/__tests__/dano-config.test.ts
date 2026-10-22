@@ -13,7 +13,7 @@ describe("Dano config", () => {
       JSON.stringify({
         productName: " 测试助手 ",
         defaultProvider: "xiaomi-token-plan-cn",
-        defaultModel: "mimo-v2.5",
+        defaultModel: "mimo-v2.6-flash",
         defaultThinkingLevel: "medium",
         defaultProjectTrust: "always",
         fieldAssist: {

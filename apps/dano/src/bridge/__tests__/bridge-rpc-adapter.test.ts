@@ -8702,8 +8702,8 @@ describe("BridgeRpcAdapter", () => {
       const sm = SessionManager.create(tmpDir, tmpDir);
       const existingFile = sm.getSessionFile()!;
       const xiaomiModel = {
-        id: "mimo-v2.5",
-        name: "MiMo V2.5",
+        id: "mimo-v2.6-flash",
+        name: "MiMo V2.6 Flash",
         api: "openai-responses",
         provider: "xiaomi-token-plan-cn",
         reasoning: true,
@@ -8770,7 +8770,7 @@ describe("BridgeRpcAdapter", () => {
       expect(newSessionResponse?.payload.success).toBe(true);
       expect(newSessionResponse?.payload.data.model).toMatchObject({
         provider: "xiaomi-token-plan-cn",
-        id: "mimo-v2.5",
+        id: "mimo-v2.6-flash",
       });
       expect(newSessionResponse?.payload.data.thinkingLevel).toBe("medium");
       expect(typeof sessionPath).toBe("string");
@@ -8803,7 +8803,7 @@ describe("BridgeRpcAdapter", () => {
       expect(stateResponse?.payload.success).toBe(true);
       expect(stateResponse?.payload.data.model).toMatchObject({
         provider: "xiaomi-token-plan-cn",
-        id: "mimo-v2.5",
+        id: "mimo-v2.6-flash",
       });
       expect(stateResponse?.payload.data.thinkingLevel).toBe("medium");
 
