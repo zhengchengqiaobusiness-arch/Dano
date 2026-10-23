@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from 'vitest';
-import { chmod, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initializeMemoryService } from '../../../../../deploy/init-memory-service.mjs';
@@ -65,4 +65,33 @@ it('allows explicit deployment overrides only for initialization', async () => {
   await initializeMemoryService(dir, parseMemoryHostConfig);
   const raw = JSON.parse(await readFile(join(dir, 'memory-service.json'), 'utf8'));
   expect(raw.policy.recallTimeoutMs).toBe(35000); expect(raw.policy.recallLimit).toBe(10);
+});
+
+it('recovers an interrupted publication without rewriting the configuration or credentials', async () => {
+  const dir = await setup(); await initializeMemoryService(dir, parseMemoryHostConfig);
+  const target = join(dir, 'memory-service.json');
+  const before = await readFile(target, 'utf8'), inode = (await stat(target)).ino;
+  const temporary = join(dir, '.memory-service.00000000-0000-4000-8000-000000000001.tmp');
+  await link(target, temporary); // Crash after publication, before temporary unlink.
+  await rm(join(dir, 'memory-service.inputs.json'));
+  expect(await initializeMemoryService(dir, parseMemoryHostConfig)).toBe('MEMORY_CONFIG_PRESERVED');
+  expect(await readFile(target, 'utf8')).toBe(before);
+  expect(await stat(target)).toMatchObject({ ino: inode, nlink: 1 });
+  await expect(stat(temporary)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+it('does not remove unrelated hardlinks or publisher-looking files', async () => {
+  const dir = await setup(); await initializeMemoryService(dir, parseMemoryHostConfig);
+  const target = join(dir, 'memory-service.json'), other = join(dir, 'unrelated-link');
+  const temporary = join(dir, '.memory-service.00000000-0000-4000-8000-000000000002.tmp');
+  await link(target, other); await writeFile(temporary, 'unrelated', { mode: 0o600 });
+  await expect(initializeMemoryService(dir, parseMemoryHostConfig)).rejects.toThrow('MEMORY_CONFIG_INITIALIZATION_FAILED');
+  expect((await stat(target)).nlink).toBe(2);
+  expect(await readFile(temporary, 'utf8')).toBe('unrelated');
+});
+it('concurrent initializers publish once and preserve the winning configuration', async () => {
+  const dir = await setup();
+  const results = await Promise.all(Array.from({ length: 8 }, () => initializeMemoryService(dir, parseMemoryHostConfig)));
+  expect(results.filter(result => result === 'MEMORY_CONFIG_INITIALIZED')).toHaveLength(1);
+  expect(results.filter(result => result === 'MEMORY_CONFIG_PRESERVED')).toHaveLength(7);
+  expect((await stat(join(dir, 'memory-service.json'))).nlink).toBe(1);
 });

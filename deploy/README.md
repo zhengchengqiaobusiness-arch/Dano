@@ -66,7 +66,10 @@ same helper under the deployment lock. The helper prints only
 `MEMORY_CONFIG_INITIALIZED` or `MEMORY_CONFIG_PRESERVED`; invalid existing files
 or incomplete inputs fail without replacing the existing configuration. New
 files are validated and published atomically without overwriting a concurrent
-initializer. After successful initialization, remove only the temporary inputs
+initializer. If publication was interrupted, the helper removes only a matching
+initializer temporary hardlink after verifying it names the same private inode;
+unrelated hardlinks remain an error. Configuration bytes are preserved.
+After successful initialization, remove only the temporary inputs
 file you provisioned; keep `memory-service.json` as the sole runtime source.
 The normal service mount remains read-only.
 

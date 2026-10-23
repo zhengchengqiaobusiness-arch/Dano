@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { constants } from 'node:fs';
-import { open, lstat, realpath, readFile, link, unlink } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { open, lstat, realpath, readFile, readdir, link, unlink } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
@@ -16,11 +16,30 @@ function merge(base, input) {
   }
   return result;
 }
-async function privateJson(path) {
+async function finishPublication(path, file) {
+  let stat = await file.stat();
+  if (stat.nlink !== 2) return;
+  const directory = dirname(path);
+  for (const name of await readdir(directory)) {
+    if (!/^\.memory-service\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/.test(name)) continue;
+    const temporary = join(directory, name);
+    const candidate = await lstat(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    // Recover only this publisher's second name for the very same private inode.
+    if (candidate?.isFile() && candidate.dev === stat.dev && candidate.ino === stat.ino) {
+      await unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; });
+      break;
+    }
+  }
+  stat = await file.stat();
+  if (stat.nlink !== 1) throw fail();
+}
+async function privateJson(path, recoverPublication = false) {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    const stat = await file.stat();
-    if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid() || (stat.mode & 0o077) || stat.size > 1048576) throw fail();
+    let stat = await file.stat();
+    if (!stat.isFile() || stat.uid !== process.getuid() || (stat.mode & 0o077) || stat.size > 1048576) throw fail();
+    if (recoverPublication) { await finishPublication(path, file); stat = await file.stat(); }
+    if (stat.nlink !== 1) throw fail();
     return JSON.parse(await file.readFile('utf8'));
   } finally { await file.close(); }
 }
@@ -33,7 +52,7 @@ export async function initializeMemoryService(directory, validate) {
     if (!stat.isDirectory() || stat.uid !== process.getuid() || (stat.mode & 0o077)) throw fail();
     const target = join(directory, 'memory-service.json');
     try {
-      const existing = await privateJson(target);
+      const existing = await privateJson(target, true);
       validate(existing);
       return 'MEMORY_CONFIG_PRESERVED';
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -52,9 +71,11 @@ export async function initializeMemoryService(directory, validate) {
       await link(temporary, target);
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
-      validate(await privateJson(target));
+      validate(await privateJson(target, true));
       return 'MEMORY_CONFIG_PRESERVED';
-    } finally { await unlink(temporary); }
+    } finally {
+      await unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    }
     return 'MEMORY_CONFIG_INITIALIZED';
   } catch { throw fail(); }
 }
