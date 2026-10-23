@@ -1,0 +1,63 @@
+{
+  "version": 2,
+  "baseUrl": "http://openviking:1933",
+  "accountId": null,
+  "managementKey": null,
+  "encryptionKey": null,
+  "encryptionKeyVersion": null,
+  "requestTimeoutMs": 45000,
+  "maxContentBytes": 65536,
+  "policyVersion": "memory-v1",
+  "policy": {
+    "maxPayloadBytes": 10240,
+    "recallTimeoutMs": 10000,
+    "recallTokenBudget": 15000,
+    "recallLimit": 10,
+    "minimumScore": 0.5
+  },
+  "memoryModel": {
+    "provider": "xiaomi-token-plan-cn",
+    "api": "openai-completions",
+    "id": "mimo-v2.6-flash",
+    "tokenizer": { "path": null, "sha256": null },
+    "config": { "path": null, "sha256": null },
+    "generation": { "maxTokens": 2048, "temperature": 0, "thinking": "disabled" },
+    "extraction": { "provider": "openai", "apiBase": null, "apiKey": null }
+  },
+  "embedding": {
+    "model": "bge-small-zh-v1.5-f16",
+    "modelFile": "bge-small-zh-v1.5-f16.gguf",
+    "apiBase": "http://embedding:8080/v1",
+    "dimension": 512,
+    "maxInputTokens": 100
+  },
+  "reranker": {
+    "url": "http://reranker:8080/v1/rerank",
+    "model": "bge-reranker-v2-m3",
+    "modelFile": "bge-reranker-v2-m3-Q4_K_M.gguf",
+    "minimumLogit": 0,
+    "timeoutMs": 30000,
+    "maxInputBytes": 16384,
+    "maxDocumentBytes": 4096,
+    "maxCandidates": 1
+  },
+  "scheduler": {
+    "pollIntervalMs": 500, "initialBackoffMs": 1000, "maxBackoffMs": 5000,
+    "maxAttemptsPerPhase": 60, "maxOperationsPerTick": 4
+  },
+  "tokenizerLimits": {
+    "maxAssetBytes": 67108864, "maxInputBytes": 262144,
+    "startupTimeoutMs": 30000, "maxQueuedRequests": 8
+  },
+  "collection": {
+    "policyVersion": "collection-v1",
+    "lifecycleTimeoutMs": 5000,
+    "selector": { "maxInputBytes": 16384, "maxFacts": 5, "timeoutMs": 45000 },
+    "scheduler": {
+      "pollIntervalMs": 500, "mergeWindowMs": 1000, "maxWaitMs": 5000,
+      "workTimeoutMs": 50000, "leaseMs": 110000,
+      "initialBackoffMs": 1000, "maxBackoffMs": 5000,
+      "maxAttempts": 3, "maxRequestsPerBatch": 10
+    }
+  }
+}

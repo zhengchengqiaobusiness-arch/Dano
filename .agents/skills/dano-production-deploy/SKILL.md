@@ -72,6 +72,22 @@ Use read-only SSH checks first. Confirm:
 
 Run this skill's `scripts/probe-host.sh` as a diagnostic through `scripts/run-remote-script.mjs` first. Its boolean capabilities select supported Git/Compose/Buildx commands and a Node-in-image fallback. Discover container IDs through the inventoried Compose project/service labels. Keep the capability and ownership receipts with the release record.
 
+When memory is enabled, run the candidate image's `deploy/init-memory-service.mjs`
+before model projection and Compose startup. Follow
+[private memory initialization](../../../deploy/README.md#initialize-private-memory-configuration)
+for private inputs, ownership and mount requirements. The repository's
+`deploy/memory-service.defaults.json` is the authoritative default template;
+use the helper instead of constructing configuration in temporary scripts.
+Under the deployment lock, mount the private configuration directory read-write
+only for this one-off helper, running as the configured host UID/GID. Require
+`MEMORY_CONFIG_PRESERVED` for an existing valid file or `MEMORY_CONFIG_INITIALIZED`
+for a missing one. Invalid existing files require diagnosis, not replacement.
+For first installation, provision credentials and verified assets through the
+private bootstrap input. Remove only that task-created input after initialization.
+Then run model projection/check; the running service keeps a read-only mount.
+New defaults never migrate existing settings, credentials or key versions;
+changing existing values requires explicit task scope.
+
 Before rollback capture or any production mutation, execute the reviewed release script through the file-based runner with kind `mutation`. It acquires the non-blocking exclusive production `flock` on fd 9; fail closed if another deployment owns it. Reuse the inherited descriptor in existing helpers. Under the lock, repeat the mutation-relevant inventory—current container/image IDs, Compose services/mounts/networks, deploy-file state, runtime paths, adjacent-service health, and disk capacity—and reconcile differences by resource responsibility in the execution reference. Hold the same worker and descriptor through source update, build, switch, Browser disposition, rollback if needed, and cleanup. If SSH drops, inspect whether the worker/lock survived, reacquire when available, repeat inventory, and reconcile live state before resuming. A transport or diagnostic error produces an interruption record; rollback follows the explicit acceptance disposition, not a blanket EXIT trap.
 
 ```sh

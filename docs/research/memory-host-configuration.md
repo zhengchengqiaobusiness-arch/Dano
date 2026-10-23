@@ -13,8 +13,11 @@ a new supervisor's host-state root with configuration: fresh worker identity
 initialization checks that associated data roots are empty. The configuration
 path belongs in an administrator launch profile, not in model parameters.
 
-The version-1 schema requires all of the following. Secrets and policy
-settings have no defaults; the tokenizer queue is the sole compatibility
+The version-1 schema requires all of the following. Secrets have no defaults. Runtime parsing requires explicit policy settings;
+new deployments materialize them from the repository-owned
+[`memory-service.defaults.json`](../../deploy/memory-service.defaults.json) via
+[the initialization helper](../../deploy/README.md#initialize-private-memory-configuration).
+Existing files are preserved. For version-1 parsing, the tokenizer queue is the sole compatibility
 default for private configs created before Dano 0.2.42:
 
 - OpenViking origin, account ID and management key.

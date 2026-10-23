@@ -12,7 +12,7 @@ import {
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { preflightProductIdentity } from "./deploy-product-identity.mjs";
 import { prepareBuildContext } from "./deploy-build-context.mjs";
 import { acquireDeploymentLock } from "./deploy-lock.mjs";
@@ -180,6 +180,14 @@ try {
     image,
     buildDir,
   ]);
+
+  const memoryDirectory = process.env.DANO_MEMORY_CONFIG_DIR || savedRuntimeEnv.get("DANO_MEMORY_CONFIG_DIR");
+  if (memoryDirectory?.trim()) {
+    if (!isAbsolute(memoryDirectory) || memoryDirectory.includes(",")) throw new Error("Invalid memory configuration directory");
+    run(composeBin, ["run", "--rm", "--network", "none", "--user", runtimeOwner,
+      "--mount", `type=bind,source=${memoryDirectory},target=/etc/dano-memory`,
+      "--entrypoint", "node", image, "./deploy/init-memory-service.mjs", "/etc/dano-memory"]);
+  }
 
   mkdirSync(join(deployDir, "nginx"), { recursive: true });
   prepareRuntimeDir();

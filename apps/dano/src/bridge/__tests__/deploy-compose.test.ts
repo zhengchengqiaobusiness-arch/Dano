@@ -1187,6 +1187,17 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     expect(existsSync(join(runtimeDir, "default-settings"))).toBe(false);
   });
 
+  it("initializes enabled memory from the candidate image before Compose startup", () => {
+    const { logLines } = runRelease({ env: { DANO_MEMORY_CONFIG_DIR: "/private/memory-config" } });
+    const calls = logLines.filter(line => line.startsWith("[")).map(line => JSON.parse(line) as string[]);
+    const init = calls.findIndex(args => args.includes("./deploy/init-memory-service.mjs"));
+    expect(init).toBeGreaterThan(0);
+    expect(calls[init]).toEqual(["run", "--rm", "--network", "none", "--user", "1000:1000",
+      "--mount", "type=bind,source=/private/memory-config,target=/etc/dano-memory",
+      "--entrypoint", "node", "dano-app:abc123", "./deploy/init-memory-service.mjs", "/etc/dano-memory"]);
+    expect(init).toBeLessThan(calls.findIndex(args => args.includes("--validate-config")));
+  });
+
   it("builds releases from a temporary checkout and cleans it up", () => {
     const { buildParent, deployDir, runtimeDir, nginxConf, logLines } =
       runRelease();

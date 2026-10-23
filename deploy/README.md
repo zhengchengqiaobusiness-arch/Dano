@@ -17,6 +17,66 @@ after pull. The Dockerfile uses `pnpm install --frozen-lockfile`; the extension
 and all runtime tools are installed in the image build, never on startup.
 Run `node scripts/check-memory-release.mjs` before building.
 
+The repository-owned initial configuration is
+[`memory-service.defaults.json`](memory-service.defaults.json). Its `policy`
+contains the default save/recall budgets; edit that file to change defaults for
+new deployments. Runtime parsing still requires a complete explicit configuration.
+Existing installations retain their settings and credentials byte for byte.
+
+### Initialize private memory configuration
+
+Before enabling the memory Compose overlay, provision the private configuration
+directory with mode 0700, owned by the configured Dano host UID/GID. For a new
+installation, place a mode-0600 `memory-service.inputs.json` in that directory,
+owned by the same UID. This is temporary bootstrap input, not another runtime
+configuration. Supply these deployment-specific fields:
+
+```json
+{
+  "accountId": "<existing OpenViking account ID>",
+  "managementKey": "<OpenViking management credential>",
+  "encryptionKey": "<64 hexadecimal characters>",
+  "encryptionKeyVersion": "<credential key version>",
+  "memoryModel": {
+    "tokenizer": { "path": "<absolute in-container asset path>", "sha256": "<verified SHA-256>" },
+    "config": { "path": "<absolute in-container config path>", "sha256": "<verified SHA-256>" },
+    "extraction": { "apiBase": "<provider base URL>", "apiKey": "<provider credential>" }
+  }
+}
+```
+
+The template's null values require real private inputs; placeholders are not
+usable credentials. Provision verified tokenizer assets and matching model
+credentials before startup. Keep credentials out of source, image layers, argv
+and output. Explicit nested overrides may be supplied for a new installation;
+unknown fields fail validation. Bootstrap input is ignored when the runtime
+configuration already exists. Retain existing encryption material on restore;
+initialization never generates or rotates keys.
+
+Run the candidate image's helper as the configured host UID/GID with this
+configuration directory mounted **read-write** at `/etc/dano-memory`:
+
+```sh
+node deploy/init-memory-service.mjs /etc/dano-memory
+```
+
+`deploy:release` runs this helper automatically when `DANO_MEMORY_CONFIG_DIR`
+is enabled, before Compose starts. Custom server deployment paths must run the
+same helper under the deployment lock. The helper prints only
+`MEMORY_CONFIG_INITIALIZED` or `MEMORY_CONFIG_PRESERVED`; invalid existing files
+or incomplete inputs fail without replacing the existing configuration. New
+files are validated and published atomically without overwriting a concurrent
+initializer. After successful initialization, remove only the temporary inputs
+file you provisioned; keep `memory-service.json` as the sole runtime source.
+The normal service mount remains read-only.
+
+The new default recall deadline is 10 seconds. The CPU timing evidence below
+includes slower cold requests: use an explicit initialization override when that
+host needs a longer deadline. The result-count limit is an upper bound, not a
+promise of ten memories: relevance, token budget and the separately maintained
+reranker candidate limit still apply. This change preserves the existing
+reranker policy; evaluate that policy separately before changing it.
+
 Memory models are configured only in the version-2 `memory-service.json`.
 Set `memoryModel.id` once; selection, extraction and tokenizer identity derive
 from it. Embedding/reranker settings live in the same file. Run the built
