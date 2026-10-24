@@ -107,6 +107,38 @@ describe("Anonymous User cleanup store", () => {
     expect(removed).not.toContain(retainedGuest!.userContext.user.id);
   });
 
+  it("skips an idle Anonymous User that still has enabled scheduled tasks", async () => {
+    let now = 40_000;
+    const runtimeRootPath = fs.mkdtempSync(
+      path.join(os.tmpdir(), "dano-anonymous-retain-tasks-"),
+    );
+    runtimeRoots.push(runtimeRootPath);
+    const anonymousUsers = createAnonymousUserContextResolver({
+      runtimeRootPath,
+      secureCookie: false,
+      now: () => now,
+    });
+    const created = await anonymousUsers.resolveForClient!({});
+    const userId = created!.userContext.user.id;
+    now = 41_001;
+    const cleaned: string[] = [];
+    const result = await anonymousUsers.sweepExpired({
+      idleTtlMs: 1_000,
+      beginCleanup: () => () => {},
+      cleanupUser: async user => {
+        cleaned.push(user.user.id);
+      },
+      retainUser: ctx => ctx.user.id === userId,
+    });
+    expect(result).toEqual({ removed: 0, skipped: 1, failed: 0 });
+    expect(cleaned).toEqual([]);
+    expect(
+      await anonymousUsers.resolveAnonymous!({
+        cookie: created!.setCookie!.split(";", 1)[0],
+      }),
+    ).not.toBeNull();
+  });
+
   it("keeps the owner mapping after a failed deletion and retries safely", async () => {
     let now = 20_000;
     const runtimeRootPath = fs.mkdtempSync(

@@ -9,6 +9,7 @@ export interface AnonymousUserCleanupOptions {
   readonly intervalMs: number;
   readonly beginCleanup: (userId: string) => (() => void) | null;
   readonly cleanupUser: (userContext: UserContext) => Promise<void>;
+  readonly retainUser?: (userContext: UserContext) => boolean;
   readonly onError?: (error: unknown) => void;
 }
 
@@ -50,6 +51,7 @@ export class AnonymousUserCleanup {
         idleTtlMs: this.options.idleTtlMs,
         beginCleanup: this.options.beginCleanup,
         cleanupUser: this.options.cleanupUser,
+        retainUser: this.options.retainUser,
       })
       .then(result => {
         if (result.failed > 0) {

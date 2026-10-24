@@ -70,6 +70,7 @@ export interface OAuthAuthenticationOptions {
   readonly sessionAbsoluteTtlMs?: number;
   readonly sessionGcIntervalMs?: number;
   readonly maxPendingTransactions?: number;
+  readonly retainLoginSessionFile?: (recordName: string) => boolean;
 }
 
 export type OAuthAuthSessionState =
@@ -194,6 +195,8 @@ export async function createOAuthAuthentication(
       now(),
       stateTtlMs,
       sessionIdleTtlMs,
+      () => {},
+      options.retainLoginSessionFile,
     ),
   );
   const cleanupInterval = setInterval(() => {
@@ -211,6 +214,7 @@ export async function createOAuthAuthentication(
           knownLoginSessionIds.delete(recordName);
           currentLifecycle?.disconnectLoginSession(sessionId);
         },
+        options.retainLoginSessionFile,
       ),
     ).catch(() => {});
   }, options.sessionGcIntervalMs ?? SESSION_GC_INTERVAL_MS);
@@ -240,14 +244,20 @@ export async function createOAuthAuthentication(
       return null;
     }
     const currentTime = now();
-    if (
-      currentTime - session.lastActiveAt >= sessionIdleTtlMs ||
-      currentTime >= session.absoluteExpiresAt
-    ) {
+    const recordName = path.basename(recordPath);
+    if (currentTime >= session.absoluteExpiresAt) {
       await fs.promises.rm(recordPath, { force: true }).catch(() => {});
-      knownLoginSessionIds.delete(path.basename(recordPath));
+      knownLoginSessionIds.delete(recordName);
       currentLifecycle?.disconnectLoginSession(sessionId);
       return null;
+    }
+    if (currentTime - session.lastActiveAt >= sessionIdleTtlMs) {
+      if (!options.retainLoginSessionFile?.(recordName)) {
+        await fs.promises.rm(recordPath, { force: true }).catch(() => {});
+        knownLoginSessionIds.delete(recordName);
+        currentLifecycle?.disconnectLoginSession(sessionId);
+        return null;
+      }
     }
     if (touch && session.status === "active") {
       session = { ...session, lastActiveAt: currentTime };
@@ -322,7 +332,7 @@ export async function createOAuthAuthentication(
   return {
     resolve,
     async readProviderCredential(loginSessionId) {
-      const session = await loadSession(loginSessionId, true);
+      const session = await loadSession(loginSessionId, false);
       return session?.status === "active" && session.credential
         ? decryptCredential(
             session.credential,
@@ -335,7 +345,7 @@ export async function createOAuthAuthentication(
       const existing = credentialRefreshes.get(loginSessionId);
       if (existing) return existing;
       const refresh = (async () => {
-        const session = await loadSession(loginSessionId, true);
+        const session = await loadSession(loginSessionId, false);
         if (
           !session ||
           session.status !== "active" ||
@@ -1138,6 +1148,7 @@ async function cleanupExpiredRecords(
   stateTtlMs: number,
   sessionIdleTtlMs: number,
   onLoginSessionRemoved: (recordName: string) => void = () => {},
+  retainLoginSessionFile?: (recordName: string) => boolean,
 ): Promise<void> {
   await countPendingTransactions(transactionsPath, "", now, stateTtlMs);
   for (const name of await fs.promises.readdir(sessionsPath)) {
@@ -1147,10 +1158,9 @@ async function cleanupExpiredRecords(
       const session = parseLoginSession(
         await fs.promises.readFile(recordPath, "utf8"),
       );
-      if (
-        now - session.lastActiveAt >= sessionIdleTtlMs ||
-        now >= session.absoluteExpiresAt
-      ) {
+      const absoluteExpired = now >= session.absoluteExpiresAt;
+      const idleExpired = now - session.lastActiveAt >= sessionIdleTtlMs;
+      if (absoluteExpired || (idleExpired && !retainLoginSessionFile?.(name))) {
         await fs.promises.rm(recordPath, { force: true });
         onLoginSessionRemoved(name);
       }

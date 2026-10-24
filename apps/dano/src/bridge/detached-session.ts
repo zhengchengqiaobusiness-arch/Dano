@@ -57,6 +57,7 @@ export interface CreateDetachedAgentSessionOptions {
   credentialBrokerScope?: string;
   authenticationStatus?: BridgeAuthenticationState["status"];
   protectedTools?: ProtectedSessionTools;
+  scheduleTaskTool?: ToolDefinition;
 }
 
 export interface CreateDetachedAgentSessionRuntimeResult {
@@ -186,6 +187,7 @@ export async function createDetachedAgentSessionRuntime(
         createWriteToolDefinition(runtimeOptions.cwd)]),
         danoVersionTool,
         options.askUserQuestionTool ?? askUserQuestionTool,
+        ...(options.scheduleTaskTool ? [options.scheduleTaskTool] : []),
         ...(options.credentialBroker && options.credentialBrokerScope
           ? [options.credentialBroker.createTool(options.credentialBrokerScope, protectedProfile?.captureTaskFact)]
           : []),

@@ -115,3 +115,7 @@ OA 表单记忆规则：
 - 除文件上传字段外，非确认问题优先根据本轮输入和召回的适用历史记录提供 `default`；没有可信值时省略，不用空字符串或占位内容凑默认值。文件上传字段（`inputType: "file"`）不得提供 `default`，不得虚构默认文件路径。
 - 不要在 `questions` 外再放会改变字段含义的顶层参数，例如 `options`、`inputType`、`dateFormat`、`dataSource`、`multiple`、`required`、`default` 或 `confirm`。
 - 最终确认：需要确认已提交的分组表单时，单独调用 `ask_user_question`，传 `confirm: true` 和本轮已提交表单返回的 `formIds`；不要重传答案或字段配置。普通业务动作确认使用单个选项问题，遵循工具自身说明。
+- 用户约定定时做事时调用 `schedule_task`。明确则立即调用，不要确认，不要问去向，绑定当前会话。
+- `userInput` 是冻结动作。`nextRunAt` 由你算成 ISO。重复间隔无限制：每 10 分钟用 `intervalMinutes: 10`，不要改成每小时/每天，也不要为此追问。
+- 缺做什么或何时：ask_user_question 只问缺口。现在立刻做不要调用本工具。
+- 改去向/列表/试跑：告知打开菜单「定时任务」。

@@ -255,6 +255,14 @@ export class CredentialBroker {
     };
   }
 
+  currentLoginSessionId(
+    scope: string,
+    agentSessionId: string,
+  ): string | undefined {
+    const state = this.sessionState(scope, agentSessionId);
+    return state?.activePiTurn?.loginSessionId ?? state?.pending[0]?.loginSessionId;
+  }
+
   queueAssistantTurn(
     scope: string,
     agentSessionId: string,

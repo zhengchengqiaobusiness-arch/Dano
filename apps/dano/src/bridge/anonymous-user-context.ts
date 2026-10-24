@@ -38,6 +38,7 @@ export interface AnonymousUserSweepOptions {
   readonly idleTtlMs: number;
   readonly beginCleanup: (userId: string) => (() => void) | null;
   readonly cleanupUser: (userContext: UserContext) => Promise<void>;
+  readonly retainUser?: (userContext: UserContext) => boolean;
 }
 
 export interface AnonymousUserSweepResult {
@@ -324,6 +325,15 @@ export function createAnonymousUserContextResolver(
           now() - effectiveLastActiveAt(activity, record.session) <
             sweepOptions.idleTtlMs
         ) {
+          continue;
+        }
+        if (
+          sweepOptions.retainUser?.({
+            user: { id: record.session.userId },
+            folderPath: path.join(usersRootPath, record.session.userId),
+          })
+        ) {
+          result.skipped += 1;
           continue;
         }
         const release = sweepOptions.beginCleanup(record.session.userId);

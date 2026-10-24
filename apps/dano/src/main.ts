@@ -27,6 +27,7 @@ import {
 import { createAnonymousUserContextResolver } from "./bridge/anonymous-user-context.js";
 import { CredentialBroker } from "./bridge/credential-broker.js";
 import { createOAuthAuthentication } from "./bridge/oauth-authentication.js";
+import { ScheduledTaskScheduler } from "./bridge/scheduled-task.js";
 import {
   createOAuth2ProviderAdapter,
   type OAuth2ProviderAdapterOptions,
@@ -1045,6 +1046,10 @@ async function runDanoServer(
     resolveStopped = resolve;
   });
 
+  const scheduledTasks = new ScheduledTaskScheduler({
+    usersRoot: join(options.runtimeRootPath, "users"),
+  });
+  await scheduledTasks.restore();
   const oauthProvider = options.oauthAuthentication
     ? createOAuth2ProviderAdapter(options.oauthAuthentication.provider)
     : undefined;
@@ -1061,6 +1066,8 @@ async function runDanoServer(
           options.oauthAuthentication.session.absoluteTtlMs,
         sessionGcIntervalMs:
           options.oauthAuthentication.session.cleanupIntervalMs,
+        retainLoginSessionFile: name =>
+          scheduledTasks.retainedLoginSessionFileNames().has(name),
       })
     : undefined;
   const jwtAuthentication = options.userAuthentication
@@ -1119,9 +1126,11 @@ async function runDanoServer(
       credentialBroker,
       protectedToolsForUser: services.protectedToolsForUser,
       prepareWorkspaceForUser: services.prepareWorkspaceForUser,
+      scheduledTasks,
       onShutdown: () => resolveStopped?.(),
     });
   } catch (error) {
+    await scheduledTasks.dispose();
     await oauthAuthentication?.dispose();
     throw error;
   }

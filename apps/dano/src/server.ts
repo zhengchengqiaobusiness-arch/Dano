@@ -25,6 +25,7 @@ import {
 import type { DanoConfig } from "./bridge/dano-config.js";
 import type { CredentialBroker } from "./bridge/credential-broker.js";
 import type { AnonymousUserContextResolver } from "./bridge/anonymous-user-context.js";
+import type { ScheduledTaskScheduler } from "./bridge/scheduled-task.js";
 
 export interface StartDanoServerOptions {
   cwd?: string;
@@ -44,6 +45,7 @@ export interface StartDanoServerOptions {
   /** Trusted launcher composition; identities come only from the server resolver. */
   protectedToolsForUser?: UserRuntimeRegistryOptions["protectedToolsForUser"];
   prepareWorkspaceForUser?: UserRuntimeRegistryOptions["prepareWorkspaceForUser"];
+  scheduledTasks?: ScheduledTaskScheduler;
 }
 
 export interface DanoServerController {
@@ -73,11 +75,20 @@ export async function startDanoServer(
             ...runtimeOptions,
             danoConfig: options.danoConfig,
             credentialBroker: options.credentialBroker,
+            scheduledTasks: options.scheduledTasks,
           }),
-        { sessionsRootPath: options.sessionsRootPath, protectedToolsForUser: options.protectedToolsForUser,
-          prepareWorkspaceForUser: options.prepareWorkspaceForUser },
+        {
+          sessionsRootPath: options.sessionsRootPath,
+          protectedToolsForUser: options.protectedToolsForUser,
+          prepareWorkspaceForUser: options.prepareWorkspaceForUser,
+          scheduledTasks: options.scheduledTasks,
+        },
       )
     : undefined;
+  options.scheduledTasks?.attach({
+    userRuntimeRegistry,
+    credentialBroker: options.credentialBroker,
+  });
   const backend = userRuntimeRegistry
     ? undefined
     : options.backend ??
@@ -164,6 +175,7 @@ export async function startDanoServer(
     userRuntimeRegistry,
     options.anonymousUsers,
     options.anonymousUserCleanup,
+    options.scheduledTasks,
   );
   let state: BridgeState = { status: "starting", port: config.port };
 
@@ -179,6 +191,7 @@ export async function startDanoServer(
       await backend?.dispose();
     }
     await userRuntimeRegistry?.dispose();
+    await options.scheduledTasks?.dispose();
     eventBus.dispose();
     throw error;
   }
@@ -209,6 +222,7 @@ export async function startDanoServer(
           await backend?.dispose();
         }
         await userRuntimeRegistry?.dispose();
+        await options.scheduledTasks?.dispose();
         state = { status: "stopped" };
         emitEvent({ type: "shutdown_complete" });
       } catch (error) {

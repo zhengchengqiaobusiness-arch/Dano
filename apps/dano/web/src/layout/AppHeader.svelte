@@ -5,6 +5,7 @@
   import Menu from "@lucide/svelte/icons/menu";
   import Brain from "@lucide/svelte/icons/brain";
   import Palette from "@lucide/svelte/icons/palette";
+  import CalendarClock from "@lucide/svelte/icons/calendar-clock";
   import SquarePen from "@lucide/svelte/icons/square-pen";
   import * as AlertDialog from "../components/ui/alert-dialog";
   import { Button } from "../components/ui/button";
@@ -24,6 +25,7 @@
     showNewSession = true,
     authentication,
     onOpenTheme,
+    onOpenScheduledTasks,
     onOpenMemory,
     onLogin,
     onLogout,
@@ -36,6 +38,7 @@
     showNewSession?: boolean;
     authentication: BrowserAuthenticationState;
     onOpenTheme?: () => void;
+    onOpenScheduledTasks?: () => void;
     onOpenMemory?: () => void;
     onLogin?: () => void;
     onLogout?: () => void | Promise<void>;
@@ -117,6 +120,12 @@
           <Palette size={16} aria-hidden="true" />
           <span>{t("appHeader.themeColor")}</span>
         </Button>
+        {#if onOpenScheduledTasks}
+          <Button class="header-menu-item scheduled-tasks-menu-item" variant="ghost" type="button" onclick={() => { menuOpen = false; onOpenScheduledTasks?.(); }}>
+            <CalendarClock data-icon="inline-start" aria-hidden="true" />
+            <span>{t("scheduledTasks.title")}</span>
+          </Button>
+        {/if}
         {#if onOpenMemory}
           <Button class="header-menu-item" variant="ghost" onclick={() => { menuOpen = false; onOpenMemory?.(); }}>
             <Brain data-icon="inline-start" aria-hidden="true" />

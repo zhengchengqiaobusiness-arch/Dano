@@ -31,6 +31,9 @@ import type {
 } from "../types/protocol.js";
 import type { CredentialBroker } from "./bridge/credential-broker.js";
 import type { ProtectedSessionTools } from "./bridge/protected-session-tools.js";
+import type { ScheduledTaskScheduler } from "./bridge/scheduled-task.js";
+import { createScheduleTaskTool } from "./bridge/scheduled-task-tool.js";
+import type { UserContext } from "./bridge/user-context.js";
 
 export interface DanoBackend {
   readonly context: BridgeRpcAdapterContext;
@@ -48,6 +51,8 @@ export interface CreateDanoBackendOptions {
   credentialBrokerScope?: string;
   authenticationStatus?: BridgeAuthenticationState["status"];
   protectedTools?: ProtectedSessionTools;
+  userContext?: UserContext;
+  scheduledTasks?: ScheduledTaskScheduler;
 }
 
 function listSessionCommands(session: AgentSession): RpcSlashCommand[] {
@@ -295,6 +300,15 @@ export async function createDanoBackend(
     maxRetries: danoConfig.askUserQuestion?.maxRetries,
     defaultTitle: danoConfig.askUserQuestion?.defaultTitle,
   });
+  const scheduleTaskTool =
+    options.userContext && options.scheduledTasks
+      ? createScheduleTaskTool({
+          scheduler: options.scheduledTasks,
+          userContext: options.userContext,
+          credentialBroker: options.credentialBroker,
+          credentialBrokerScope: options.credentialBrokerScope,
+        })
+      : undefined;
   const result = await createDetachedAgentSessionRuntime(
     sessionManager.getCwd() || cwd,
     sessionManager,
@@ -304,6 +318,7 @@ export async function createDanoBackend(
       credentialBrokerScope: options.credentialBrokerScope,
       authenticationStatus: options.authenticationStatus,
       protectedTools: options.protectedTools,
+      scheduleTaskTool,
     },
   );
 
@@ -317,6 +332,7 @@ export async function createDanoBackend(
       credentialBrokerScope: options.credentialBrokerScope,
       authenticationStatus: options.authenticationStatus,
       protectedTools: options.protectedTools,
+      scheduleTaskTool,
     },
   );
   await sessionRegistry.adoptRuntime(

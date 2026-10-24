@@ -13,6 +13,7 @@
   import { Button } from "$lib/components/ui/button";
   import Info from "@lucide/svelte/icons/info";
   import MemoryManagementDialog from "./components/MemoryManagementDialog.svelte";
+  import ScheduledTasksDialog from "./components/ScheduledTasksDialog.svelte";
   import ThemeSettingsDialog from "./components/ThemeSettingsDialog.svelte";
   import { hasActiveCenterFocusStage } from "./layout/centerFocusStage";
   import {
@@ -73,6 +74,7 @@
   let outlineSidebarOpen = $state(false);
   let themeSettingsOpen = $state(false);
   let memoryManagementOpen = $state(false);
+  let scheduledTasksOpen = $state(false);
   let newSessionPending = $state(false);
   let activeRightSidebarTabId = $state<RightSidebarTabId>(TREE_TAB_ID);
   let fileViewerTabs = $state<FileViewerTab[]>([]);
@@ -1226,6 +1228,7 @@
       {showNewSession}
       authentication={bridge.authentication}
       onOpenTheme={openThemeSettings}
+      onOpenScheduledTasks={() => { scheduledTasksOpen = true; }}
       onLogin={bridge.login}
       onLogout={bridge.logout}
     />
@@ -1360,6 +1363,19 @@
     operationsUrl={bridge.memoryOperationsUrl}
     governanceUrl={bridge.memoryGovernanceUrl} exportUrl={bridge.memoryExportUrl} themeStyle={allStyle}
     onClose={() => { memoryManagementOpen = false; }} />
+
+  <ScheduledTasksDialog
+    open={scheduledTasksOpen}
+    tasksUrl={bridge.scheduledTasksUrl}
+    sessionPath={bridge.sessionState?.sessionFile ?? bridge.activeSessionPath}
+    sessionId={bridge.sessionState?.sessionId}
+    themeStyle={allStyle}
+    onClose={() => { scheduledTasksOpen = false; }}
+    onOpenSession={async (sessionPath) => {
+      await bridge.switchSession(sessionPath);
+      scheduledTasksOpen = false;
+    }}
+  />
 
   <ThemeSettingsDialog
     open={themeSettingsOpen}

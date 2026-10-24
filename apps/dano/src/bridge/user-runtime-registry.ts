@@ -9,6 +9,7 @@ import { browserAuthentication, type UserContext } from "./user-context.js";
 import { workspaceSessionDirectoryPath } from "./runtime-layout.js";
 import { ensureSafeDirectory } from "./safe-directory.js";
 import type { ProtectedSessionTools } from "./protected-session-tools.js";
+import type { ScheduledTaskScheduler } from "./scheduled-task.js";
 
 export interface UserRuntimeContext {
   readonly userId: string;
@@ -30,6 +31,7 @@ export interface UserRuntimeRegistryOptions {
   /** Trusted launcher capability; prepares managed access without starting a backend. */
   readonly prepareWorkspaceForUser?: (context: UserContext, workspace: string) => Promise<void>;
   readonly protectedToolsForUser?: (context: UserContext, paths: { sessionsRootPath: string }) => Promise<ProtectedSessionTools>;
+  readonly scheduledTasks?: ScheduledTaskScheduler;
 }
 
 export interface UserOwnershipPathMap {
@@ -144,6 +146,15 @@ export class UserRuntimeRegistry {
           target.folderPath,
           journal,
         );
+        await this.options.scheduledTasks?.rewriteCopiedTasks(target.folderPath, {
+          ownerUserId: target.user.id,
+          ownerUsername:
+            "username" in target.user ? target.user.username : undefined,
+          sourceFolderPath: source.folderPath,
+          targetFolderPath: target.folderPath,
+          sourceSessionsRoot,
+          targetSessionsRoot,
+        });
         await options.commitOwnership({
           sourceUserId: source.user.id,
           targetUserId: target.user.id,
@@ -190,6 +201,7 @@ export class UserRuntimeRegistry {
         await memory?.retire();
         await this.disposers.get(context)!();
       }
+      this.options.scheduledTasks?.unloadUser(userContext.user.id);
       await fs.promises.rm(userContext.folderPath, { recursive: true, force: true });
       const sessionsRootPath = this.sessionsRootPath(userContext);
       if (!isPathInsideRoot(userContext.folderPath, sessionsRootPath)) {
@@ -242,6 +254,8 @@ export class UserRuntimeRegistry {
           sessionsRootPath,
           defaultWorkspacePath,
         ),
+        userContext,
+        scheduledTasks: this.options.scheduledTasks,
       });
     } catch (error) {
       try { await protectedTools?.dispose?.(); }

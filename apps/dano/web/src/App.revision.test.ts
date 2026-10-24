@@ -92,6 +92,7 @@ const bridge = vi.hoisted(() => ({
   workspaceSessionLoading: {},
   workspaceSessions: {},
   workspaces: [],
+  scheduledTasksUrl: null,
 }));
 
 vi.mock("./composables/bridgeStore.svelte", () => ({
@@ -116,6 +117,9 @@ vi.mock("./components/ThemeSettingsDialog.svelte", async () => ({
   default: (await import("./test/EmptyComponentHarness.svelte")).default,
 }));
 vi.mock("./components/MemoryManagementDialog.svelte", async () => ({
+  default: (await import("./test/EmptyComponentHarness.svelte")).default,
+}));
+vi.mock("./components/ScheduledTasksDialog.svelte", async () => ({
   default: (await import("./test/EmptyComponentHarness.svelte")).default,
 }));
 vi.mock("./layout/AppNotifications.svelte", async () => ({

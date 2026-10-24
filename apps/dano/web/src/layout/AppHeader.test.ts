@@ -20,6 +20,7 @@ type AppHeaderProps = {
         user: { id: string; username: string; avatarUrl?: string };
       };
   onOpenTheme?: () => void;
+  onOpenScheduledTasks?: () => void;
   onLogin?: () => void;
   onLogout?: () => void | Promise<void>;
 };
@@ -203,6 +204,24 @@ describe("AppHeader", () => {
       expect(document.querySelector(".login-menu-item")).toBeNull();
       expect(document.querySelector(".logout-menu-item")).toBeNull();
       expect(document.querySelector(".header-user-summary")).toBeNull();
+    } finally {
+      await unmount(component);
+    }
+  });
+
+  it("shows scheduled tasks in the existing Menu", async () => {
+    const onOpenScheduledTasks = vi.fn();
+    const { component, target } = await renderHeader({ onOpenScheduledTasks });
+
+    try {
+      target.querySelector<HTMLButtonElement>(".menu-button")!.click();
+      await tick();
+      const item = document.querySelector<HTMLButtonElement>(".scheduled-tasks-menu-item")!;
+      expect(item.textContent).toContain("定时任务");
+      item.click();
+      await tick();
+      expect(onOpenScheduledTasks).toHaveBeenCalledOnce();
+      expect(document.querySelector('.header-menu[data-state="open"]')).toBeNull();
     } finally {
       await unmount(component);
     }

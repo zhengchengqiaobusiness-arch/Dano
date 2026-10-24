@@ -57,6 +57,7 @@ async function startOAuthServer(
       | "sessionGcIntervalMs"
       | "sessionIdleTtlMs"
       | "stateTtlMs"
+      | "retainLoginSessionFile"
     >
   > = {},
   anonymousCleanup?: {
@@ -2243,6 +2244,32 @@ describe("OAuth authentication over HTTP", () => {
     expect(
       fs.readdirSync(path.join(runtimeRootPath, "auth", "login-sessions")),
     ).toEqual([]);
+  });
+
+  it("keeps an idle Login Session when retainLoginSessionFile matches", async () => {
+    let currentTime = 1_000;
+    let retain = false;
+    const provider = successfulProvider("retain-idle-user", "retain-token");
+    const { authentication, origin, runtimeRootPath } = await startOAuthServer(
+      provider,
+      undefined,
+      {
+        now: () => currentTime,
+        sessionIdleTtlMs: 100,
+        sessionAbsoluteTtlMs: 10_000,
+        retainLoginSessionFile: () => retain,
+      },
+    );
+    const loginCookie = await completeLogin(origin);
+    const loginSessionId = loginCookie.slice("dano_login=".length);
+    retain = true;
+    currentTime += 150;
+    await expect(
+      authentication.readProviderCredential(loginSessionId),
+    ).resolves.toEqual({ accessToken: "retain-token" });
+    expect(
+      fs.readdirSync(path.join(runtimeRootPath, "auth", "login-sessions")),
+    ).toHaveLength(1);
   });
 
   it("expires Login Sessions after eight idle hours", async () => {

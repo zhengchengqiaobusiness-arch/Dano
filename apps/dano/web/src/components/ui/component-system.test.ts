@@ -79,6 +79,7 @@ describe("shadcn-svelte component boundary", () => {
       "tooltip/tooltip-portal.svelte",
       "select/select-portal.svelte",
       "date-picker/date-picker-portal.svelte",
+      "dropdown-menu/dropdown-menu-portal.svelte",
     ];
 
     for (const relativePath of portalFiles) {
@@ -135,6 +136,8 @@ describe("shadcn-svelte component boundary", () => {
       "date-picker/date-picker-content.svelte",
       "tooltip/tooltip-content.svelte",
       "sonner/sonner.svelte",
+      "dropdown-menu/dropdown-menu-content.svelte",
+      "dropdown-menu/dropdown-menu-sub-content.svelte",
     ];
 
     for (const relativePath of wrapperFiles) {

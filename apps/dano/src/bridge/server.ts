@@ -34,6 +34,10 @@ import type { UserRuntimeRegistry } from "./user-runtime-registry.js";
 import { AnonymousUserCleanup } from "./anonymous-user-cleanup.js";
 import type { AnonymousUserContextResolver } from "./anonymous-user-context.js";
 import {
+  handleScheduledTaskHttp,
+  type ScheduledTaskScheduler,
+} from "./scheduled-task.js";
+import {
   parseThemeColorPreference,
   readThemeColorPreference,
   saveThemeColorPreference,
@@ -149,6 +153,7 @@ export class BridgeServer {
     private readonly userRuntimeRegistry?: UserRuntimeRegistry,
     private readonly anonymousUsers?: AnonymousUserContextResolver,
     anonymousUserCleanup?: { idleTtlMs: number; intervalMs: number },
+    private readonly scheduledTasks?: ScheduledTaskScheduler,
   ) {
     const transferTimeout = config.userTransferTimeoutMs;
     if (transferTimeout !== undefined && (!Number.isSafeInteger(transferTimeout) || transferTimeout <= 0)) {
@@ -167,6 +172,7 @@ export class BridgeServer {
         ...anonymousUserCleanup,
         beginCleanup: userId => this.beginAnonymousUserCleanup(userId),
         cleanupUser: userContext => this.cleanupAnonymousUser(userContext),
+        retainUser: ctx => this.scheduledTasks?.hasEnabledTasks(ctx.user.id) === true,
         onError: error => {
           console.warn("Dano Anonymous User cleanup failed:", error);
         },
@@ -214,6 +220,7 @@ export class BridgeServer {
     }
 
     this.startUploadCleanupInterval();
+    await this.scheduledTasks?.start();
     await this.anonymousUserCleanup?.start();
     this.host = this.config.host;
     this.port = boundPort;
@@ -307,6 +314,7 @@ export class BridgeServer {
       this.cleanupInterval = undefined;
     }
     this.anonymousUserCleanup?.dispose();
+    await this.scheduledTasks?.dispose();
     await this.uploadRegistry.dispose();
 
     this.emitEvent({ type: "server_stop" });
@@ -684,6 +692,32 @@ export class BridgeServer {
         });
         writeJson(res, 200, preference);
         return;
+      }
+
+      if (this.scheduledTasks && pathname.includes("/scheduled-tasks")) {
+        const clientIdMatch = /^\/api\/clients\/([^/]+)\/scheduled-tasks/.exec(
+          pathname,
+        );
+        const scheduled = await handleScheduledTaskHttp({
+          method: req.method,
+          pathname,
+          userContext: clientIdMatch?.[1]
+            ? this.clientUsers.get(decodeURIComponent(clientIdMatch[1]))
+            : undefined,
+          loginSessionId: clientIdMatch?.[1]
+            ? this.clientLoginSessions.get(decodeURIComponent(clientIdMatch[1]))
+            : undefined,
+          defaultWorkspacePath: clientIdMatch?.[1]
+            ? this.handlers.get(decodeURIComponent(clientIdMatch[1]))
+                ?.defaultWorkspacePath
+            : undefined,
+          scheduler: this.scheduledTasks,
+          readJsonBody: () => readJsonBody(req),
+        });
+        if (scheduled) {
+          writeJson(res, scheduled.status, scheduled.body, "no-store");
+          return;
+        }
       }
 
       const clientMessagesMatch = /^\/api\/clients\/([^/]+)\/messages$/.exec(

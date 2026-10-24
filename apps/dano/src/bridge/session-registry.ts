@@ -422,6 +422,7 @@ export class DetachedSessionRegistry {
           this.newSessionRuntimeOptions.credentialBrokerScope,
         authenticationStatus: this.newSessionRuntimeOptions.authenticationStatus,
         protectedTools: this.newSessionRuntimeOptions.protectedTools,
+        scheduleTaskTool: this.newSessionRuntimeOptions.scheduleTaskTool,
       },
     );
     const handle = new DetachedSessionHandle(
@@ -509,13 +510,14 @@ export class DetachedSessionRegistry {
     if (path.resolve(effectiveCwd) === path.resolve(this.fallbackCwd)) {
       return this.newSessionRuntimeOptions;
     }
-    return this.newSessionRuntimeOptions.credentialBroker || this.newSessionRuntimeOptions.protectedTools || this.newSessionRuntimeOptions.authenticationStatus
+    return this.newSessionRuntimeOptions.credentialBroker || this.newSessionRuntimeOptions.protectedTools || this.newSessionRuntimeOptions.authenticationStatus || this.newSessionRuntimeOptions.scheduleTaskTool
       ? {
           credentialBroker: this.newSessionRuntimeOptions.credentialBroker,
           credentialBrokerScope:
             this.newSessionRuntimeOptions.credentialBrokerScope,
           authenticationStatus: this.newSessionRuntimeOptions.authenticationStatus,
           protectedTools: this.newSessionRuntimeOptions.protectedTools,
+          scheduleTaskTool: this.newSessionRuntimeOptions.scheduleTaskTool,
         }
       : {};
   }

@@ -3316,6 +3316,9 @@ if (!eventSource && !disposed) {
 
 export function initBridge() {
   return {
+    get scheduledTasksUrl() {
+      return clientId ? `/api/clients/${encodeURIComponent(clientId)}/scheduled-tasks` : null;
+    },
     get memoryOperationsUrl() {
       return clientId ? `/api/clients/${encodeURIComponent(clientId)}/memory/operations` : null;
     },
