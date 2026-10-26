@@ -265,7 +265,7 @@ it("pins each existing session turn to current operator skills through Pi input 
     const runner = runtime.session.extensionRunner;
     const options = () => ({ cwd: h.workspace, selectedTools: [], skills: [], toolSnippets: {}, toolGuidelines: {},
       promptGuidelines: [], appendSystemPrompt: "", sections: {}, contextFiles: [] });
-    const first = await runner.emitBeforeAgentStart("test", undefined, options());
+    const first = await runner.emitBeforeAgentStart({ messageType: "user", prompt: "test" }, options());
     expect(first.systemPromptOptions.skills[0]?.description).toBe("A");
     const getter = h.resolveWorker.mock.calls[0]?.[1] as (() => number) | undefined;
     const previous = getter?.();
@@ -276,7 +276,7 @@ it("pins each existing session turn to current operator skills through Pi input 
       .toMatchObject({ block: true, reason: expect.stringContaining("OPERATOR_SKILLS_CHANGED") });
     await runner.emitInput("next", undefined, "interactive");
     expect(runtime.session.resourceLoader.getSkills().skills[0]?.description).toBe("B");
-    const next = await runner.emitBeforeAgentStart("next", undefined, options());
+    const next = await runner.emitBeforeAgentStart({ messageType: "user", prompt: "next" }, options());
     expect(next.systemPromptOptions.skills[0]?.description).toBe("B");
     expect(getter?.()).toBeGreaterThan(previous!);
     expect(await runner.emitToolCall({ type: "tool_call", toolName: "ask_user_question", toolCallId: "current-native", input: {} }))

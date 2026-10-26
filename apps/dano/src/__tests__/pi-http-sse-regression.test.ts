@@ -179,7 +179,7 @@ async function createFieldAssistHttpHarness(
   };
 }
 
-describe("Pi 0.99.1 HTTP/SSE regression baseline", () => {
+describe("Pi 1.4.0 HTTP/SSE regression baseline", () => {
   it("projects a real Pi runtime configured through package-root interfaces", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "dano-pi-http-sse-"));
     const provider = fauxProvider({ provider: "dano-regression" });

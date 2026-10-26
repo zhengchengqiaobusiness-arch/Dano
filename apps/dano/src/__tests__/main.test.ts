@@ -157,19 +157,19 @@ describe("Dano main", () => {
     };
 
     expect(appPackage.dependencies?.["@josephyoung/pi-heimdall"]).toBe(
-      "0.2.17",
+      "0.2.21",
     );
     expect(appPackage.dependencies?.["@earendil-works/pi-coding-agent"]).toBe(
-      "0.99.1",
+      "1.4.0",
     );
     expect(appPackage.dependencies?.["@earendil-works/pi-ai"]).toBe(
-      "0.99.1",
+      "1.4.0",
     );
     expect(
       appPackage.dependencies?.["@mariozechner/pi-coding-agent"],
     ).toBeUndefined();
     expect(heimdallPackage.peerDependencies).toEqual({
-      "@earendil-works/pi-coding-agent": "*",
+      "@earendil-works/pi-coding-agent": "^1.4.0",
     });
     expect(heimdall.sandbox?.enabled).toBe(true);
     expect(heimdall.sandbox?.userNamespace).toBe(false);
@@ -200,8 +200,6 @@ describe("Dano main", () => {
     expect(sandboxGuard).toContain("HEIMDALL_BWRAP_BIND_KERNEL_FS");
     expect(sandboxGuard).toContain("HEIMDALL_BWRAP_BIND_PROC");
     expect(sandboxGuard).toContain("HEIMDALL_BWRAP_BIND_ROOT");
-    expect(sandboxGuard).toContain("function bwrapBindRoot()");
-    expect(sandboxGuard).toContain("writeMounts.push(bindRoot");
     expect(sandboxGuard).toContain("function expandPath(path: string)");
     expect(sandboxGuard).toContain("process.env[name] ?? \"\"");
     expect(sandboxGuard).toContain(

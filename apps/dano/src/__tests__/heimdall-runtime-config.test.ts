@@ -23,6 +23,7 @@ describe("Dano Heimdall runtime config", () => {
     const config = normalizeSandboxConfig({
       enabled: true,
       paths: {
+        "/opt": [],
         "/opt/dano/runtime-data/.pi/agent/skills": {},
         "/opt/dano/runtime-data/.pi": { mode: "deny" },
       },
@@ -38,6 +39,29 @@ describe("Dano Heimdall runtime config", () => {
       path: resolve(workspaceConfig),
       content: "",
     });
+  });
+
+  it("masks denied config when a broader real mount can still expose it", () => {
+    const root = mkdtempSync(join(tmpdir(), "dano-heimdall-parent-mount-"));
+    try {
+      const privateDir = join(root, "private");
+      const configPath = join(privateDir, "heimdall.json");
+      const syntheticDir = join(root, "synthetic");
+      mkdirSync(privateDir); mkdirSync(syntheticDir);
+      writeFileSync(configPath, '{"testOnly":true}');
+      const config = protectHeimdallConfigPaths(normalizeSandboxConfig({
+        enabled: true,
+        paths: { [root]: {}, [privateDir]: { mode: "deny" } },
+      }), [configPath], root);
+
+      expect(config.paths[configPath]).toContainEqual({ path: configPath, content: "" });
+      const args = buildBwrapArgs(config, root, syntheticDir, "true");
+      const targetIndex = args.lastIndexOf(configPath);
+      expect(args[targetIndex - 2]).toBe("--ro-bind");
+      expect(readFileSync(args[targetIndex - 1], "utf8")).toBe("");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   describe("shipped sandbox policy", () => {
