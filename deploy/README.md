@@ -10,12 +10,19 @@ for propagation, cancellation, safety checks and generated-resource cleanup.
 
 The opt-in release combination is recorded in
 [`memory-release.json`](memory-release.json): the Dano product version recorded there,
-the exact `@josephyoung/pi-openviking` version recorded there, and upstream OpenViking `v0.4.20`
+the exact `@josephyoung/pi-openviking` version recorded there, and upstream OpenViking `v0.5.2.1`
 at the recorded multi-platform OCI index digest. The platform manifests are
 recorded alongside the index so the selected Linux architecture can be checked
 after pull. The Dockerfile uses `pnpm install --frozen-lockfile`; the extension
 and all runtime tools are installed in the image build, never on startup.
 Run `node scripts/check-memory-release.mjs` before building.
+
+For an OpenViking upgrade, resolve the latest non-draft, non-prerelease official
+release at implementation time and recheck it before the production switch.
+The manifest then pins that selected release and its official OCI digests; it
+does not define a permanent upper version limit. The 0.4.20 → 0.5.2.1 review
+and reproducible old-volume probe are recorded in
+[`issue533-openviking-upgrade.md`](../docs/research/issue533-openviking-upgrade.md).
 
 The repository-owned initial configuration is
 [`memory-service.defaults.json`](memory-service.defaults.json). Its `policy`

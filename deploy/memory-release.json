@@ -1,11 +1,11 @@
 {
-  "danoVersion": "1.0.25",
+  "danoVersion": "1.0.26",
   "piOpenVikingVersion": "0.1.24",
-  "openVikingVersion": "v0.4.20",
-  "openVikingImage": "ghcr.io/volcengine/openviking:v0.4.20@sha256:b9827753d035f4157b5b318865907fd18f738924ad6398c86feb1182f209825b",
+  "openVikingVersion": "v0.5.2.1",
+  "openVikingImage": "ghcr.io/volcengine/openviking:v0.5.2.1@sha256:7c26f9777c7632fd4b771be77471634bffb6ec8d6338b39f53deb2da1b1d34b3",
   "platformDigests": {
-    "linux/amd64": "sha256:571fb4e12c66365d3552464617cc9aee8edbdec63e0f7d3ced3beb19db15b742",
-    "linux/arm64": "sha256:d1f3730128f3bde654e7996a88909cb47e4ec08d407806a464da5d91aa64c870"
+    "linux/amd64": "sha256:87dca9a104efc001685c1d968f1a206d236ea14c04c4a4f3b9fda3551f32e7be",
+    "linux/arm64": "sha256:6809b6959f1bbcb1d6cbe1f619388ceb54eaec5d412ba8f30c1426d73c77b337"
   },
   "embedding": {
     "imageVersion": "b11118",
