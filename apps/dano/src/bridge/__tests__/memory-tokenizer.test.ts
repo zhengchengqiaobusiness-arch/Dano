@@ -96,3 +96,17 @@ it("keeps an otherwise idle process alive until its pending token count settles"
   const result = await promisify(execFile)(process.execPath, [script], { timeout: 10000 });
   expect(result.stdout.trim()).toBe("2");
 });
+
+it("shares one bounded worker for exact asset aliases while retaining model identity checks", async () => {
+  const binding = await fixture();
+  const alias = { ...model, provider: "same-asset-provider" };
+  const service = await MemoryTokenizers.create([binding, { ...binding, model: alias }], { ...limits, maxQueuedRequests: 1 });
+  services.push(service);
+  const signal = new AbortController().signal;
+  const first = service.countTokens("hello world", { model, signal });
+  const second = service.countTokens("hello world", { model: alias, signal });
+  await expect(service.countTokens("hello", { model, signal })).rejects.toThrow("MEMORY_TOKENIZER_BUSY");
+  expect(await Promise.all([first, second])).toEqual([2, 2]);
+  await expect(service.countTokens("hello", { model: { ...alias, id: "unbound" }, signal })).rejects.toThrow("MEMORY_TOKENIZER_UNAVAILABLE");
+  await service.close();
+});
