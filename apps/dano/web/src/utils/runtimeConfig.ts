@@ -73,6 +73,10 @@ export function getRuntimeSlashCommandsAndMentionsEnabled(): boolean {
   return runtimeConfig()?.slashCommandsAndMentionsEnabled === true;
 }
 
+export function getRuntimeShortcutLinks() {
+  return runtimeConfig()?.shortcutLinks ?? danoConfig.shortcutLinks;
+}
+
 export function getRuntimeTranscriptProcessSummaryEnabled(): boolean {
   return runtimeConfig()?.transcriptProcessSummaryEnabled === true;
 }

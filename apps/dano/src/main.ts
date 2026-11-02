@@ -1230,6 +1230,7 @@ export async function runDanoMain(services: DanoMainServices = {}): Promise<numb
       emptyState: options.emptyState,
       upload: options.upload,
       quickActions: danoConfig.quickActions ?? [],
+      shortcutLinks: danoConfig.shortcutLinks ?? [],
       slashCommandsAndMentionsEnabled:
         danoConfig.slashCommandsAndMentionsEnabled ?? false,
       transcriptProcessSummaryEnabled:

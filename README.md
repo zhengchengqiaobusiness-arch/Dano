@@ -20,6 +20,14 @@ deploy/runtime-defaults
 This repo intentionally does not include the old Pi extension target or
 Electron target.
 
+## Composer shortcuts
+
+Composer shortcuts are configured with `shortcutLinks` in `dano.config.json`.
+Each entry has a `label`, a same-origin absolute `href` (such as `/web`), and a
+six-digit hex `color`. Entries appear in configuration order above the composer
+in both new and existing conversations, and open in a new tab. Set the list to
+`[]` to hide the shortcuts.
+
 ## Requirements
 
 - Node.js `>=22.19.0`

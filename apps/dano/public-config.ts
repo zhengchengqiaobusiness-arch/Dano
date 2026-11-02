@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { Plugin } from "vite";
+import { readShortcutLinks } from "./src/bridge/dano-config.js";
 
 /** This allowlist runs before Vite's module graph sees any product config. */
 export function publicConfigPlugin(): Plugin {
@@ -10,7 +11,7 @@ export function publicConfigPlugin(): Plugin {
     load(source) {
       if (source !== `\0${id}`) return;
       const config = JSON.parse(readFileSync(new URL("../../dano.config.json", import.meta.url), "utf8"));
-      return `export default ${JSON.stringify({ productName: config.productName })};`;
+      return `export default ${JSON.stringify({ productName: config.productName, shortcutLinks: readShortcutLinks(config.shortcutLinks) ?? [] })};`;
     },
     // Never serve the raw configuration through Vite's dev filesystem route.
     configureServer(server) {

@@ -1171,6 +1171,13 @@ export interface BridgeQuickActionConfig {
   readonly prompt: string;
 }
 
+export interface BridgeShortcutLinkConfig {
+  readonly label: string;
+  /** Same-origin absolute path. */
+  readonly href: string;
+  readonly color: string;
+}
+
 /** Browser-safe projection of the server-authenticated User. */
 export interface BridgeUserSummary {
   /** Opaque canonical Dano User ID; display data must never replace it. */
@@ -1237,6 +1244,7 @@ export interface BridgeBrowserRuntimeConfig {
   readonly productName?: string;
   readonly emptyState?: Partial<BridgeEmptyStateConfig>;
   readonly quickActions?: readonly BridgeQuickActionConfig[];
+  readonly shortcutLinks?: readonly BridgeShortcutLinkConfig[];
   readonly slashCommandsAndMentionsEnabled?: boolean;
   readonly transcriptProcessSummaryEnabled?: boolean;
 }

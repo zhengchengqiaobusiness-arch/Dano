@@ -2,9 +2,25 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadDanoConfig } from "../dano-config.js";
+import { loadDanoConfig, readShortcutLinks } from "../dano-config.js";
 
 describe("Dano config", () => {
+  it("keeps ordered same-origin shortcut links and rejects unsafe destinations/styles", () => {
+    const valid = { label: "介绍", href: "/web", color: "#007aff" };
+    expect(readShortcutLinks([
+      { label: " 介绍 ", href: " /web ", color: " #007aff " },
+      null,
+      { ...valid, href: "javascript:alert(1)" },
+      { ...valid, href: "//example.com" },
+      { ...valid, href: "/\\example.com" },
+      { ...valid, href: "/\n/example.com" },
+      { ...valid, color: "red; background:url(https://example.com)" },
+      { ...valid, label: "" },
+      { label: "平台", href: "/oa", color: "#ff9500" },
+    ])).toEqual([valid, { label: "平台", href: "/oa", color: "#ff9500" }]);
+    expect(readShortcutLinks([])).toEqual([]);
+    expect(readShortcutLinks(undefined)).toBeUndefined();
+  });
   it("leaves Pi-owned session defaults out of Dano config", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-config-"));
     const configPath = path.join(tmpDir, "dano.config.json");
@@ -30,6 +46,7 @@ describe("Dano config", () => {
           { label: "", prompt: "ignored" },
           { label: "ignored", prompt: " " },
         ],
+        shortcutLinks: [{ label: " 介绍 ", href: " /web ", color: " #007aff " }],
       }),
     );
 
@@ -50,6 +67,7 @@ describe("Dano config", () => {
       slashCommandsAndMentionsEnabled: true,
       transcriptProcessSummaryEnabled: true,
       quickActions: [{ label: "请假", prompt: "帮我申请请假" }],
+      shortcutLinks: [{ label: "介绍", href: "/web", color: "#007aff" }],
     });
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
