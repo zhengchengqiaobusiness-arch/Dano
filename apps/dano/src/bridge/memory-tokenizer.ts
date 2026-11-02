@@ -43,12 +43,19 @@ export class MemoryTokenizers {
     if (![limits.maxAssetBytes, limits.maxInputBytes, limits.startupTimeoutMs, limits.maxQueuedRequests]
       .every(value => Number.isSafeInteger(value) && value > 0)) throw new Error("INVALID_MEMORY_TOKENIZER_LIMITS");
     const service = new MemoryTokenizers(limits);
+    const shared = new Map<string, Slot>();
     try {
       for (const binding of bindings) {
         if (![binding.model.provider, binding.model.api, binding.model.id].every(value => typeof value === "string" && value.length > 0)
           || [binding.tokenizer, binding.config].some(asset => !isAbsolute(asset.path) || !/^[a-f0-9]{64}$/.test(asset.sha256))
           || service.#slots.has(key(binding.model))) throw new Error("INVALID_MEMORY_TOKENIZER_BINDING");
-        await service.#start(binding);
+        const assetKey = JSON.stringify([binding.tokenizer, binding.config]);
+        const existing = shared.get(assetKey);
+        if (existing) service.#slots.set(key(binding.model), existing);
+        else {
+          await service.#start(binding);
+          shared.set(assetKey, service.#slots.get(key(binding.model))!);
+        }
       }
       return service;
     } catch (error) { await service.close(); throw error; }
@@ -150,7 +157,7 @@ export class MemoryTokenizers {
   close(): Promise<void> {
     if (this.#closing) return this.#closing;
     this.#closed = true;
-    for (const slot of this.#slots.values()) {
+    for (const slot of new Set(this.#slots.values())) {
       if (slot.pending) {
         const pending = slot.pending;
         slot.pending = undefined;
@@ -159,7 +166,7 @@ export class MemoryTokenizers {
       }
       for (const queued of slot.queue.splice(0)) this.#settle(queued, new Error("MEMORY_TOKENIZERS_CLOSED"));
     }
-    this.#closing = Promise.all([...this.#slots.values()].map(slot => slot.worker.terminate()))
+    this.#closing = Promise.all([...new Set(this.#slots.values())].map(slot => slot.worker.terminate()))
       .then(() => { this.#slots.clear(); });
     return this.#closing;
   }
