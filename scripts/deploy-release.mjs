@@ -342,6 +342,15 @@ try {
     }
   }
 
+  if (memoryDirectory?.trim()) {
+    const effective = [...composeArgs, "-f", "docker-compose.yml", "-f", "docker-compose.exposure.yml",
+      ...productNameArgs(), "--env-file", ".env"];
+    // Keep the TLS frontend alive: self-hosted OAuth origins are validated
+    // while the app starts. Drain app work before activating model projections.
+    run(composeBin, [...effective, "stop", "app"], { cwd: deployDir });
+    run(composeBin, [...effective, "up", "-d", "--no-build", "--force-recreate", "openviking"], { cwd: deployDir });
+  }
+
   run(
     composeBin,
     [
@@ -356,12 +365,15 @@ try {
       "up",
       "-d",
       "--no-build",
-      ...(memoryDirectory?.trim() ? ["--force-recreate", "--always-recreate-deps"] : []),
       "app",
       "nginx",
     ],
     { cwd: deployDir },
   );
+  run(composeBin, [...composeArgs, "-f", "docker-compose.yml", "-f", "docker-compose.exposure.yml",
+    ...productNameArgs(), "--env-file", ".env", "exec", "-T", "nginx", "nginx", "-t"], { cwd: deployDir });
+  run(composeBin, [...composeArgs, "-f", "docker-compose.yml", "-f", "docker-compose.exposure.yml",
+    ...productNameArgs(), "--env-file", ".env", "exec", "-T", "nginx", "nginx", "-s", "reload"], { cwd: deployDir });
   restoreMemoryProjections = undefined;
   run(process.execPath, [join(buildDir, "scripts/smoke-dano-deploy.mjs")], {
     env: {
