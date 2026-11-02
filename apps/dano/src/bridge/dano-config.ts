@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { BridgeQuickActionConfig } from "./types.js";
+import type { BridgeQuickActionConfig, BridgeShortcutLinkConfig } from "./types.js";
 
 const DANO_CONFIG_FILE_NAME = "dano.config.json";
 
@@ -19,6 +19,7 @@ export interface DanoConfig {
   slashCommandsAndMentionsEnabled?: boolean;
   transcriptProcessSummaryEnabled?: boolean;
   quickActions?: BridgeQuickActionConfig[];
+  shortcutLinks?: BridgeShortcutLinkConfig[];
 }
 
 export const DANO_DEFAULT_CONFIG = {
@@ -32,6 +33,7 @@ export const DANO_DEFAULT_CONFIG = {
   slashCommandsAndMentionsEnabled: false,
   transcriptProcessSummaryEnabled: false,
   quickActions: [],
+  shortcutLinks: [],
 } satisfies Required<Omit<DanoConfig, "productName" | "openVikingSettings">>;
 
 export interface LoadDanoConfigOptions {
@@ -112,6 +114,22 @@ function readQuickActions(value: unknown): BridgeQuickActionConfig[] | undefined
   return actions.length > 0 ? actions : undefined;
 }
 
+export function readShortcutLinks(value: unknown): BridgeShortcutLinkConfig[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.flatMap(item => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const record = item as Record<string, unknown>;
+    const label = readString(record.label);
+    const href = readString(record.href);
+    const color = readString(record.color);
+    if (!label || !href || !color) return [];
+    // Only same-origin paths and plain hex colors can enter link/style attributes.
+    if (!href.startsWith("/") || href.startsWith("//") || /[\\\s]/.test(href)) return [];
+    if (!/^#[\da-f]{6}$/i.test(color)) return [];
+    return [{ label, href, color }];
+  });
+}
+
 function normalizeDanoConfig(raw: unknown): DanoConfig {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return {};
@@ -128,6 +146,7 @@ function normalizeDanoConfig(raw: unknown): DanoConfig {
     record.transcriptProcessSummaryEnabled,
   );
   const quickActions = readQuickActions(record.quickActions);
+  const shortcutLinks = readShortcutLinks(record.shortcutLinks);
 
   return {
     ...(record.openVikingSettings === undefined ? {} : { openVikingSettings: readOpenVikingSettings(record.openVikingSettings) }),
@@ -141,6 +160,7 @@ function normalizeDanoConfig(raw: unknown): DanoConfig {
       ? { transcriptProcessSummaryEnabled }
       : {}),
     ...(quickActions ? { quickActions } : {}),
+    ...(shortcutLinks ? { shortcutLinks } : {}),
   };
 }
 

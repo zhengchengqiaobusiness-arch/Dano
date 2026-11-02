@@ -1,5 +1,6 @@
 <script lang="ts">
   import * as Select from "./ui/select";
+  import { Button } from "./ui/button";
   import Brain from "@lucide/svelte/icons/brain";
   import Zap from "@lucide/svelte/icons/zap";
   import { tick } from "svelte";
@@ -21,7 +22,7 @@
   import type { RpcModelInfo } from "../utils/models";
   import type { HistoricalMessageRevisionPayload } from "../utils/messageRevision";
   import type { ComposerSubmissionPayload } from "../utils/composerSubmission";
-  import { getRuntimeProductName } from "../utils/runtimeConfig";
+  import { getRuntimeProductName, getRuntimeShortcutLinks } from "../utils/runtimeConfig";
   import CommandPalette from "./CommandPalette.svelte";
   import FilePreviewDialog from "./FilePreviewDialog.svelte";
   import WorkspaceMentionPalette from "./WorkspaceMentionPalette.svelte";
@@ -44,6 +45,7 @@
 
   const COMPOSER_LAYOUT_ANIMATION_MS = 180;
   const productName = getRuntimeProductName();
+  const shortcutLinks = getRuntimeShortcutLinks();
 
   let {
     connectionStatus = "disconnected" as ConnectionStatus,
@@ -376,6 +378,24 @@
 </script>
 
 <div bind:this={composerRootRef} class="composer-bar" data-center-focus-composer>
+  {#if shortcutLinks.length > 0}
+    <nav class="composer-shortcuts" aria-label={t("composer.shortcuts.label")}>
+      {#each shortcutLinks as link}
+        <Button
+          variant="ghost"
+          size="sm"
+          href={link.href}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={t("composer.shortcuts.openInNewTab", { label: link.label })}
+          class="composer-shortcut"
+          style={`--shortcut-color: ${link.color}`}
+        >
+          {link.label}
+        </Button>
+      {/each}
+    </nav>
+  {/if}
   <div class="composer-inner-wrap">
     {#if composer.showCommandPalette}
       <CommandPalette
@@ -599,10 +619,38 @@
 
 <style>
   .composer-bar {
+    --composer-surface-shadow: rgba(0, 0, 0, 0.04) 0px 0px 0px 1px,
+      rgba(0, 0, 0, 0.04) 0px 2px 8px 0px;
     position: relative;
     flex-shrink: 0;
     width: min(960px, calc(100% - 48px));
     margin: 0 auto max(36px, env(safe-area-inset-bottom));
+  }
+
+  .composer-shortcuts {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 4px 12px;
+    margin: -4px -4px 0;
+    overflow-x: auto;
+  }
+
+  :global(.composer-shortcut) {
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--shortcut-color);
+    box-shadow: var(--composer-surface-shadow);
+  }
+
+  :global(.composer-shortcut:hover) {
+    background: transparent;
+    color: var(--shortcut-color);
+  }
+
+  :global([data-theme-mode="dark"] .composer-shortcut) {
+    color: color-mix(in srgb, var(--shortcut-color), var(--text) 70%);
   }
 
   .composer-bar::before {
@@ -674,13 +722,7 @@
     border-radius: 30px;
     border: none;
     background: var(--panel);
-    box-shadow:
-      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
-      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
-      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
-      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
-      rgba(0, 0, 0, 0.04) 0px 0px 0px 1px,
-      rgba(0, 0, 0, 0.04) 0px 2px 8px 0px;
+    box-shadow: var(--composer-surface-shadow);
     transition:
       border-radius 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
       background 0.15s ease,
@@ -1149,6 +1191,8 @@
   }
 
   @media (max-width: 640px) {
+    .composer-shortcuts { gap: 6px; }
+    :global(.composer-shortcut) { padding: 0 8px; font-size: 12px; }
     .composer-bar {
       width: calc(100% - 24px);
       margin: 0 auto max(10px, env(safe-area-inset-bottom));

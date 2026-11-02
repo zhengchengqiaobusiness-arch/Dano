@@ -1624,6 +1624,7 @@ describe("BridgeServer HTTP/SSE transport", () => {
         port: 0,
         staticDir,
         productName: "Custom Agent",
+        shortcutLinks: [{ label: "介绍", href: "/web", color: "#007aff" }],
         emptyState: {
           mode: "html",
           content: "<strong>给{产品名称}发消息</strong>",
@@ -1650,6 +1651,7 @@ describe("BridgeServer HTTP/SSE transport", () => {
     expect(spaHtml).toContain("<title></title>");
     expect(spaHtml).toContain("window.__PI_WEB_CONFIG__=");
     expect(spaHtml).toContain('"productName":"Custom Agent"');
+    expect(spaHtml).toContain('"shortcutLinks":[{"label":"介绍","href":"/web","color":"#007aff"}]');
     expect(spaHtml).toContain(
       '"emptyState":{"mode":"html","content":"\\u003cstrong>给{产品名称}发消息\\u003c/strong>"}',
     );

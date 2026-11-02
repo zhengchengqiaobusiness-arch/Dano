@@ -1866,6 +1866,7 @@ function injectRuntimeConfig(html: string, config: BridgeConfig): string {
     productName: config.productName,
     emptyState: config.emptyState,
     quickActions: config.quickActions,
+    shortcutLinks: config.shortcutLinks,
     slashCommandsAndMentionsEnabled:
       config.slashCommandsAndMentionsEnabled,
     transcriptProcessSummaryEnabled:

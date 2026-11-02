@@ -5,6 +5,7 @@ import {
   getRuntimeLocale,
   getRuntimeProductName,
   getRuntimeQuickActions,
+  getRuntimeShortcutLinks,
   getRuntimeSlashCommandsAndMentionsEnabled,
   getRuntimeTranscriptProcessSummaryEnabled,
 } from "./runtimeConfig";
@@ -14,6 +15,18 @@ function stubRuntimeConfig(config: NonNullable<Window["__PI_WEB_CONFIG__"]>) {
 }
 
 describe("runtimeConfig", () => {
+  it("uses the server shortcut list, including an explicit empty list", () => {
+    const shortcutLinks = [{ label: "自定义入口", href: "/custom", color: "#123456" }];
+    stubRuntimeConfig({ shortcutLinks });
+    expect(getRuntimeShortcutLinks()).toEqual(shortcutLinks);
+    stubRuntimeConfig({ shortcutLinks: [] });
+    expect(getRuntimeShortcutLinks()).toEqual([]);
+  });
+
+  it("uses shipped shortcuts when no server config was injected", () => {
+    vi.stubGlobal("window", {});
+    expect(getRuntimeShortcutLinks().map(link => link.href)).toEqual(["/web", "/page-desk", "/oa"]);
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
   });

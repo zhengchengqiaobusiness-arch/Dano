@@ -8,6 +8,11 @@
     "defaultTitle": "表单"
   },
   "transcriptProcessSummaryEnabled": false,
+  "shortcutLinks": [
+    { "label": "小络助手介绍", "href": "/web", "color": "#007aff" },
+    { "label": "skill系统页面台", "href": "/page-desk", "color": "#000000" },
+    { "label": "OA业务管理平台", "href": "/oa", "color": "#ff9500" }
+  ],
   "quickActions": [
     {
       "label": "请假",

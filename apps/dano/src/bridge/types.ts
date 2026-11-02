@@ -1,6 +1,7 @@
 import type {
   BridgeEmptyStateConfig,
   BridgeQuickActionConfig,
+  BridgeShortcutLinkConfig,
 } from "../../types/protocol.js";
 
 export type * from "../../types/protocol.js";
@@ -55,6 +56,8 @@ export interface BridgeConfig {
   readonly emptyState: BridgeEmptyStateConfig;
   /** Prompt shortcuts shown below the composer before the first message. */
   readonly quickActions: readonly BridgeQuickActionConfig[];
+  /** Links shown above the composer in every conversation. */
+  readonly shortcutLinks: readonly BridgeShortcutLinkConfig[];
   /** Whether browser users may invoke slash commands and mention providers. */
   readonly slashCommandsAndMentionsEnabled: boolean;
   /** Whether completed Assistant Turn process work is collapsed into a summary. */
@@ -83,6 +86,7 @@ export const DEFAULT_BRIDGE_CONFIG: BridgeConfig = {
     content: "给{产品名称}发消息",
   },
   quickActions: [],
+  shortcutLinks: [],
   slashCommandsAndMentionsEnabled: false,
   transcriptProcessSummaryEnabled: false,
   uiRequestTimeout: 60_000,
