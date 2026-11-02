@@ -1204,6 +1204,9 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     expect(calls[projection]).toContain("--volume");
     expect(calls[projection]).not.toContain("--mount");
     expect(projection).toBeLessThan(calls.findIndex(args => args.includes("up")));
+    expect(calls.some(args => args.includes("stop") && args.includes("app"))).toBe(true);
+    expect(calls.some(args => args.includes("--force-recreate") && args.includes("nginx"))).toBe(false);
+    expect(calls.some(args => args.includes("nginx") && args.includes("reload"))).toBe(true);
   });
 
   it("builds releases from a temporary checkout and cleans it up", () => {
