@@ -291,6 +291,7 @@ export class CredentialBroker {
     handle: AssistantTurnBindingHandle | undefined,
     queuedEntries: () => readonly object[],
     enqueue: () => Promise<void>,
+    startedTurn: () => boolean = () => false,
   ): Promise<void> {
     if (!handle) {
       await enqueue();
@@ -315,7 +316,7 @@ export class CredentialBroker {
       const queueEntry = queuedEntries().find(entry => !before.has(entry));
       if (queueEntry) {
         this.associateQueuedAssistantTurn(handle, queueEntry);
-      } else {
+      } else if (!startedTurn()) {
         this.cancelQueuedAssistantTurn(handle);
       }
     } catch (error) {
