@@ -6450,14 +6450,6 @@ export class BridgeRpcAdapter {
         const promptExpansionOptions = this.slashCommandsAndMentionsEnabled
           ? {}
           : { expandPromptTemplates: false as const };
-        const defaultPromptOptions = session.isStreaming
-          ? {
-              source: "rpc" as const,
-              images,
-              streamingBehavior: command.streamingBehavior ?? "steer",
-              ...promptExpansionOptions,
-            }
-          : { source: "rpc" as const, images, ...promptExpansionOptions };
         const injectedMessage = appendProjectFileReferences(
           command.message,
           projectFiles,
@@ -6487,38 +6479,47 @@ export class BridgeRpcAdapter {
               !session.isStreaming || isQueuedFollowUp
                 ? this.queueAssistantTurn(session.sessionId)
                 : undefined;
-            const promptOptions = this.credentialBroker
-              ? session.isStreaming
-                ? {
-                    source: "rpc" as const,
-                    images,
-                    streamingBehavior: command.streamingBehavior ?? "steer",
-                    ...promptExpansionOptions,
-                  }
-                : {
-                    source: "rpc" as const,
-                    images,
-                    ...promptExpansionOptions,
-                    preflightResult: (disposition: Parameters<NonNullable<PromptOptions["preflightResult"]>>[0]) => {
-                      if (disposition === "handled") {
-                        this.cancelQueuedAssistantTurn(binding);
-                      }
-                    },
-                  }
-              : defaultPromptOptions;
+            // Pi can become busy during asynchronous input handlers. Preserve the
+            // caller's queue policy even when this snapshot is idle.
+            let startedTurn = false;
+            let finishPreflight!: () => void;
+            const preflight = new Promise<void>(resolve => {
+              finishPreflight = resolve;
+            });
+            const promptOptions: PromptOptions = {
+              source: "rpc",
+              images,
+              streamingBehavior: command.streamingBehavior ?? "steer",
+              ...promptExpansionOptions,
+              preflightResult: disposition => {
+                startedTurn = disposition === "started";
+                if (disposition === "handled" ||
+                    (disposition === "queued" && command.streamingBehavior !== "followUp")) {
+                  this.cancelQueuedAssistantTurn(binding);
+                }
+                finishPreflight();
+              },
+            };
             let promptOperation!: Promise<void>;
             const executePrompt = () =>
               Promise.resolve().then(() =>
                 this.dispatchMemoryInput(session, command.message, injectedMessage,
                   () => session.prompt(injectedMessage, promptOptions)),
               );
+            let enqueuedPrompt: Promise<void> | undefined;
             const startedPrompt =
-              isQueuedFollowUp && this.credentialBroker
+              command.streamingBehavior === "followUp" && this.credentialBroker
                 ? this.credentialBroker.enqueueAssociatedAssistantTurn(
                     binding,
                     () => queuedFollowUpEntries(session),
-                    executePrompt,
-                  )
+                    () => {
+                      enqueuedPrompt = executePrompt();
+                      // Serialize through Pi's queue/start decision, not through
+                      // an entire running turn (which would block later input).
+                      return Promise.race([enqueuedPrompt, preflight]);
+                    },
+                    () => startedTurn,
+                  ).then(() => enqueuedPrompt)
                 : executePrompt().then(() => {
                     this.cancelQueuedAssistantTurn(binding);
                   });
@@ -6548,7 +6549,9 @@ export class BridgeRpcAdapter {
                   correlationId,
                   error: message,
                 });
-                this.sendEvent(toRpcAgentEndEvent({}, sessionPath));
+                if (!session.isStreaming) {
+                  this.sendEvent(toRpcAgentEndEvent({}, sessionPath));
+                }
                 if (sessionPath) this.sessionStatsPusher.queue(sessionPath);
               })
               .finally(() => {

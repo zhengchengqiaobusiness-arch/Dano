@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  AgentSession,
   SessionManager,
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
@@ -877,6 +878,153 @@ describe("BridgeRpcAdapter", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
+    it.each([
+      ["steer", false], ["followUp", false],
+      ["steer", true], ["followUp", true],
+    ] as const)(
+      "preserves %s across asynchronous idle-to-streaming input (broker=%s)",
+      async (streamingBehavior, withBroker) => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-prompt-race-"));
+        const sessionManager = SessionManager.create(tmpDir, tmpDir);
+        vi.mocked(context.state.sessionManager.getSessionDir).mockReturnValue(tmpDir);
+        vi.mocked(context.state.sessionManager.getCwd).mockReturnValue(tmpDir);
+        vi.mocked(context.state.sessionManager.getSessionFile).mockReturnValue(sessionManager.getSessionFile());
+        const entries: object[] = [];
+        const queued = vi.fn(async () => { entries.push({ role: "user" }); });
+        const session = {
+          agent: { followUpQueue: { messages: entries } },
+          sessionManager,
+          sessionId: sessionManager.getSessionId(),
+          sessionFile: sessionManager.getSessionFile(),
+          isStreaming: false,
+          bindExtensions: vi.fn().mockResolvedValue(undefined),
+          subscribe: vi.fn().mockReturnValue(() => {}),
+          _runInputHandlers: async (text: string) => {
+            await Promise.resolve();
+            session.isStreaming = true;
+            return { text, images: [] };
+          },
+          _expandSkillCommand: (text: string) => text,
+          promptTemplates: [],
+          _queueFollowUp: queued,
+          _queueSteer: queued,
+          prompt: AgentSession.prototype.prompt,
+        };
+        createAgentSessionMock.mockResolvedValue({ session });
+        const broker = new CredentialBroker({ providerApiOrigin: "https://example.com", readCredential: async () => null });
+        const disposeBinding = broker.observe("user-a", session);
+        const associate = vi.spyOn(broker, "associateQueuedAssistantTurn");
+        if (withBroker) {
+          adapter.dispose();
+          adapter = new BridgeRpcAdapter(client, message => ws.send(JSON.stringify(message)),
+            context, DEFAULT_BRIDGE_CONFIG, eventBus, emitEvent as any, uploadRegistry as any,
+            undefined, { userId: "user-a", sessionsRootPath: tmpDir,
+              ownsSessionPath: () => true, ownsWorkspacePath: () => true },
+            broker, "login-a", undefined, "authenticated");
+        }
+        await adapter.handleClientMessage({
+          type: "command",
+          payload: { id: "race", type: "prompt", message: "synthetic", streamingBehavior },
+        });
+        await vi.waitFor(() => expect(queued).toHaveBeenCalledOnce());
+        expect(ws.send.mock.calls.map(([data]) => JSON.parse(data)))
+          .not.toEqual(expect.arrayContaining([
+            expect.objectContaining({ payload: expect.objectContaining({ type: "command_error" }) }),
+          ]));
+        if (withBroker && streamingBehavior === "followUp") {
+          await vi.waitFor(() => expect(associate).toHaveBeenCalledWith(
+            expect.objectContaining({ scope: "user-a", agentSessionId: session.sessionId }), entries[0],
+          ));
+        }
+        adapter.dispose();
+        disposeBinding();
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      },
+    );
+
+    it("releases prompt preflight before turn completion and preserves the starting owner", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-prompt-start-"));
+      const sessionManager = SessionManager.create(tmpDir, tmpDir);
+      vi.mocked(context.state.sessionManager.getSessionDir).mockReturnValue(tmpDir);
+      vi.mocked(context.state.sessionManager.getCwd).mockReturnValue(tmpDir);
+      vi.mocked(context.state.sessionManager.getSessionFile).mockReturnValue(sessionManager.getSessionFile());
+      const entries: object[] = [];
+      const listeners = new Set<(event: AgentSessionEvent) => void>();
+      let complete!: () => void;
+      const running = new Promise<void>(resolve => { complete = resolve; });
+      const session = {
+        sessionManager, sessionId: sessionManager.getSessionId(),
+        sessionFile: sessionManager.getSessionFile(), isStreaming: false,
+        agent: { followUpQueue: { messages: entries } },
+        bindExtensions: vi.fn().mockResolvedValue(undefined),
+        subscribe: (listener: (event: AgentSessionEvent) => void) => {
+          listeners.add(listener); return () => listeners.delete(listener);
+        },
+        prompt: vi.fn(async (message: string, options: { preflightResult?: (value: "started" | "queued") => void }) => {
+          if (session.isStreaming) {
+            entries.push({ role: "user", content: message });
+            options.preflightResult?.("queued");
+            return;
+          }
+          session.isStreaming = true;
+          options.preflightResult?.("started");
+          await running;
+        }),
+      };
+      createAgentSessionMock.mockResolvedValue({ session });
+      const readCredential = vi.fn(async () => null);
+      const broker = new CredentialBroker({ providerApiOrigin: "https://example.com", readCredential });
+      const disposeBinding = broker.observe("user-a", session);
+      const cancel = vi.spyOn(broker, "cancelQueuedAssistantTurn");
+      const associate = vi.spyOn(broker, "associateQueuedAssistantTurn");
+      adapter.dispose();
+      adapter = new BridgeRpcAdapter(client, message => ws.send(JSON.stringify(message)),
+        context, DEFAULT_BRIDGE_CONFIG, eventBus, emitEvent as any, uploadRegistry as any,
+        undefined, { userId: "user-a", sessionsRootPath: tmpDir,
+          ownsSessionPath: () => true, ownsWorkspacePath: () => true }, broker, "login-a", undefined, "authenticated");
+      for (const message of ["first", "second"]) {
+        await adapter.handleClientMessage({ type: "command", payload: { type: "prompt", message, streamingBehavior: "followUp" } });
+        await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledWith(message, expect.anything()));
+      }
+      await vi.waitFor(() => expect(associate).toHaveBeenCalledOnce());
+      expect(cancel).not.toHaveBeenCalled();
+      for (const event of [
+        { type: "message_start", message: { role: "user", content: "first", timestamp: 1 } },
+        { type: "turn_start" },
+      ]) for (const listener of listeners) listener(event as AgentSessionEvent);
+      await broker.request("user-a", session.sessionId, { method: "GET", path: "/synthetic" });
+      expect(readCredential).toHaveBeenCalledWith("login-a");
+      complete();
+      adapter.dispose(); disposeBinding();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it.each([true, false])("only ends a rejected prompt when the session is idle (%s)", async busy => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-prompt-reject-"));
+      const sessionManager = SessionManager.create(tmpDir, tmpDir);
+      vi.mocked(context.state.sessionManager.getSessionDir).mockReturnValue(tmpDir);
+      vi.mocked(context.state.sessionManager.getCwd).mockReturnValue(tmpDir);
+      vi.mocked(context.state.sessionManager.getSessionFile).mockReturnValue(sessionManager.getSessionFile());
+      const session = {
+        sessionManager,
+        sessionId: sessionManager.getSessionId(),
+        sessionFile: sessionManager.getSessionFile(),
+        isStreaming: busy,
+        bindExtensions: vi.fn().mockResolvedValue(undefined),
+        subscribe: vi.fn().mockReturnValue(() => {}),
+        prompt: vi.fn().mockRejectedValue(new Error("synthetic rejection")),
+      };
+      createAgentSessionMock.mockResolvedValue({ session });
+      await adapter.handleClientMessage({ type: "command", payload: { id: "reject", type: "prompt", message: "synthetic" } });
+      const events = () => ws.send.mock.calls.map(([data]) => JSON.parse(data).payload);
+      await vi.waitFor(() => expect(events()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "command_error", correlationId: "reject" }),
+      ])));
+      expect(events().filter(event => event?.type === "agent_end")).toHaveLength(busy ? 0 : 1);
+      adapter.dispose();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
     it("keeps disabled slash commands literal for idle and streaming prompts", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-prompt-"));
       const sessionFile = path.join(tmpDir, "session.jsonl");
@@ -1184,6 +1332,8 @@ describe("BridgeRpcAdapter", () => {
         `Inspect this image\n\nProject file references:\n- ${path.join(tmpDir, "uploads", "sample.pdf")} (sample.pdf)`,
         {
           source: "rpc",
+          streamingBehavior: "steer",
+          preflightResult: expect.any(Function),
           images: [
             {
               type: "image",
@@ -1560,6 +1710,8 @@ describe("BridgeRpcAdapter", () => {
       expect(createAgentSessionMock).toHaveBeenCalledTimes(1);
       expect(promptSpy).toHaveBeenCalledWith("Continue here", {
         source: "rpc",
+          streamingBehavior: "steer",
+          preflightResult: expect.any(Function),
       });
 
       resumedSessionManager.appendMessage({
@@ -1708,6 +1860,8 @@ describe("BridgeRpcAdapter", () => {
 
       expect(promptSpy).toHaveBeenCalledWith("Continue with context", {
         source: "rpc",
+          streamingBehavior: "steer",
+          preflightResult: expect.any(Function),
         images: [
           {
             type: "image",
@@ -9759,6 +9913,8 @@ describe("BridgeRpcAdapter", () => {
         "Activate first detached session",
         {
           source: "rpc",
+          streamingBehavior: "steer",
+          preflightResult: expect.any(Function),
         },
       );
       expect(firstPromptSpy).toHaveBeenNthCalledWith(
@@ -9766,6 +9922,8 @@ describe("BridgeRpcAdapter", () => {
         "Resume first detached session",
         {
           source: "rpc",
+          streamingBehavior: "steer",
+          preflightResult: expect.any(Function),
         },
       );
 
