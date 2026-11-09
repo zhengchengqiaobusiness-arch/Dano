@@ -3,6 +3,7 @@ import { open } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { measureMemoryStage, withMemoryLatencyObserver } from "./memory-latency-span.js";
 
 type Control = { runId: string; sessionId: string; expiresAt: string };
 type RecordData = Record<string, string | number | boolean>;
@@ -11,13 +12,14 @@ const digest = (text: string) => createHash("sha256").update(text).digest("hex")
 /** Host-only, short-lived opt-in for one exact session. Never exports payloads,
  * queries, memory text, URIs, headers, or answers. Removing the control stops it. */
 export function registerMemoryAcceptanceTrace(pi: ExtensionAPI, stateDirectory: string,
-  emit?: (record: RecordData) => void): void {
+  emit?: (record: RecordData) => void): ExtensionAPI {
   let sequence = 0;
   let request = 0;
   let activeKey = "";
   let memoryDigests: string[] = [];
   let contextObserved = false;
   let emitted = 0;
+  let firstTextObserved = false;
   async function control(ctx: ExtensionContext): Promise<Control | undefined> {
     let file;
     try {
@@ -57,6 +59,18 @@ export function registerMemoryAcceptanceTrace(pi: ExtensionAPI, stateDirectory: 
     } catch { /* Diagnostics cannot break chat. */ }
     finally { await file?.close().catch(() => {}); }
   }
+  pi.on("agent_start", async (_event, ctx) => {
+    firstTextObserved = false;
+    const c = await control(ctx); if (!c) return;
+    await record(c, { event: "agent_start", monotonicMs: performance.now() });
+  });
+  pi.on("message_update", async (event, ctx) => {
+    if (firstTextObserved || event.assistantMessageEvent.type !== "text_delta" || !event.assistantMessageEvent.delta) return;
+    firstTextObserved = true;
+    const at = performance.now();
+    const c = await control(ctx); if (!c) return;
+    await record(c, { event: "first_text", monotonicMs: at });
+  });
   pi.on("context_with_system", async (event, ctx) => {
     const c = await control(ctx); if (!c) { memoryDigests = []; contextObserved = false; return; }
     memoryDigests = event.messages.flatMap(message => message.role === "custom"
@@ -82,7 +96,7 @@ export function registerMemoryAcceptanceTrace(pi: ExtensionAPI, stateDirectory: 
         seen.add(value); pending.push(...Object.values(value));
       }
     }
-    await record(c, { event: "provider_request", contextObserved, automaticMemoryMessages: memoryDigests.length,
+    await record(c, { event: "provider_request", monotonicMs: performance.now(), contextObserved, automaticMemoryMessages: memoryDigests.length,
       payloadMatchedMemoryMessages: memoryDigests.filter(hash => found.has(hash)).length,
       inspectionComplete: pending.length === 0 && bytes <= 4 * 1024 * 1024 });
   });
@@ -95,5 +109,30 @@ export function registerMemoryAcceptanceTrace(pi: ExtensionAPI, stateDirectory: 
     if (event.toolName !== "memory_recall" && event.toolName !== "ask_user_question") return;
     const c = await control(ctx); if (!c) return;
     await record(c, { event: "tool_result", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError });
+  });
+  // Wrap only this memory extension's handlers, not unrelated extensions or
+  // background delivery. AsyncLocalStorage keeps concurrent sessions isolated.
+  return new Proxy(pi, {
+    get(target, key) {
+      if (key !== "on") return Reflect.get(target, key, target);
+      return (name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
+        const register = target.on as (name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => void;
+        if (name !== "before_agent_start" && name !== "context") return register.call(target, name, handler);
+        register.call(target, name, async (event, ctx) => {
+          const c = await control(ctx);
+          if (!c) return handler(event, ctx);
+          const spans: RecordData[] = [];
+          try {
+            return await withMemoryLatencyObserver(span => { if (spans.length < 100) spans.push({ event: "latency_span", ...span }); },
+              () => measureMemoryStage(`memory.${name}`, () => handler(event, ctx)));
+          } finally {
+            const current = await control(ctx);
+            if (current && current.runId === c.runId && current.expiresAt === c.expiresAt) {
+              for (const span of spans) await record(c, span);
+            }
+          }
+        });
+      };
+    },
   });
 }

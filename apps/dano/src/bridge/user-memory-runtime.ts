@@ -20,6 +20,7 @@ import { MemoryTaskFacts, type ProviderTaskFactInput } from "./memory-task-facts
 import { memoryWriterClassifier } from "./memory-writer-classifier.js";
 import { MemoryRecoveryJournal, RecoveryStateStore } from "./memory-recovery-journal.js";
 import { registerMemoryRecall } from "./memory-recall-tool.js";
+import { measureMemoryMethods, measureMemoryStage } from "./memory-latency-span.js";
 import { registerMemoryAcceptanceTrace } from "./memory-acceptance-trace.js";
 import type { GovernanceStateStore } from "@josephyoung/pi-openviking/host";
 import type { MemoryModelIdentity } from "./memory-tokenizer.js";
@@ -154,8 +155,11 @@ export class UserMemoryRuntime implements UserMemoryControls {
 
   extension(worker: IsolatedToolExecutor) {
     if (this.#closed) throw new Error("MEMORY_RUNTIME_CLOSED");
-    const memory = createOpenVikingExtension({ owner: this.#store.owner, client: this.#client, stateStore: this.#store,
-      policy: this.#options.policy, collection: this.#collection?.extension,
+    const memory = createOpenVikingExtension({ owner: this.#store.owner, client: measureMemoryMethods(this.#client, { recall: "memory.recall" }),
+      stateStore: measureMemoryMethods(this.#store, { read: "state.read", transact: "state.transact" }),
+      policy: { ...this.#options.policy, countTokens: (...args) => measureMemoryStage("memory.countTokens", () => this.#options.policy.countTokens(...args)) },
+      collection: this.#collection ? { ...this.#collection.extension,
+        sessions: measureMemoryMethods(this.#collection.extension.sessions, { begin: "collection.begin", register: "collection.register" }) } : undefined,
       governance: {
         owner: this.#store.owner,
         scope: this.#client.scope,
@@ -166,7 +170,7 @@ export class UserMemoryRuntime implements UserMemoryControls {
         status: id => this.#governance.status(id),
         wake: () => this.#governanceScheduler.wake(),
       },
-      assertToolIsolation: async () => { this.#assertOpen(); await worker.assertIsolated(); },
+      assertToolIsolation: async () => { this.#assertOpen(); await measureMemoryStage("memory.isolation", () => worker.assertIsolated()); },
       wakeDelivery: () => { if (!this.#closed) this.#scheduler.wake(); } });
     return ((pi) => {
       pi.on("agent_settled", (_event, ctx) => {
@@ -183,10 +187,10 @@ export class UserMemoryRuntime implements UserMemoryControls {
           appendCustomEntry: (type, data) => { pi.appendEntry(type, data); return ""; },
         });
       });
-      memory(pi);
+      const tracedPi = registerMemoryAcceptanceTrace(pi, this.#stateDirectory);
+      memory(tracedPi);
       registerMemoryRecall(pi, { client: this.#client, stateStore: this.#store, policy: this.#options.policy,
         scope: this.#client.scope, assertToolIsolation: async () => { this.#assertOpen(); await worker.assertIsolated(); } });
-      registerMemoryAcceptanceTrace(pi, this.#stateDirectory);
     }) satisfies ReturnType<typeof createOpenVikingExtension>;
   }
 

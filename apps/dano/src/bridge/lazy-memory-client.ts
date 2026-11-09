@@ -1,3 +1,4 @@
+import { measureMemoryStage } from "./memory-latency-span.js";
 import { OwnerMemoryClient, type MemoryExtensionOptions, type MemoryGovernanceClient,
   type Owner } from "@josephyoung/pi-openviking/host";
 import type { MemoryUserConnection } from "./memory-identity-service.js";
@@ -59,11 +60,11 @@ export class LazyMemoryClient implements Client, MemoryGovernanceClient {
     if (this.#closed) return Promise.reject(new Error("MEMORY_RUNTIME_CLOSED"));
     const pending = (async () => {
       this.#options.journal?.assertHealthy();
-      await this.#options.assertToolIsolation();
+      await measureMemoryStage("client.isolation", () => this.#options.assertToolIsolation());
       signal?.throwIfAborted();
       if (this.#closed) throw new Error("MEMORY_RUNTIME_CLOSED");
-      const client = await this.#connection();
-      await this.#options.assertToolIsolation();
+      const client = await measureMemoryStage("client.connection", () => this.#connection());
+      await measureMemoryStage("client.isolation", () => this.#options.assertToolIsolation());
       if (this.#closed) throw new Error("MEMORY_RUNTIME_CLOSED");
       signal?.throwIfAborted();
       this.#options.journal?.assertHealthy();
@@ -116,16 +117,16 @@ export class LazyMemoryClient implements Client, MemoryGovernanceClient {
   }); }
   recall(query: string, limit: number, signal?: AbortSignal): ReturnType<Client["recall"]> {
     return this.#call(async client => {
-      const found = await client.recall(query,
-        this.#options.reranker ? Math.min(limit, this.#options.reranker.maxCandidates) : limit, signal);
-      const ranked = this.#options.reranker ? await this.#options.reranker.filter(query, found, signal) : found;
+      const found = await measureMemoryStage("recall.search", () => client.recall(query,
+        this.#options.reranker ? Math.min(limit, this.#options.reranker.maxCandidates) : limit, signal));
+      const ranked = this.#options.reranker ? await measureMemoryStage("recall.rerank", () => this.#options.reranker!.filter(query, found, signal)) : found;
       const recalled = [];
       for (const item of ranked) {
         signal?.throwIfAborted();
         // Search abstracts are suitable for ranking, but may omit changed or cleared
         // fields. Read the owner-checked current document before offering defaults.
         if (item.uri.startsWith(`viking://user/${this.owner.userId}/memories/form_records/`)) {
-          const text = await client.readMemoryLimited(item.uri, this.#options.maxRecallDocumentBytes, signal);
+          const text = await measureMemoryStage("recall.readDocument", () => client.readMemoryLimited(item.uri, this.#options.maxRecallDocumentBytes, signal));
           signal?.throwIfAborted();
           recalled.push({ ...item, text });
         } else recalled.push(item);
