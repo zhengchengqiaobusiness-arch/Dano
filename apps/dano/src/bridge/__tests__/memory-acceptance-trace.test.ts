@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerMemoryAcceptanceTrace } from "../memory-acceptance-trace.js";
+import { measureMemoryMethods } from "../memory-latency-span.js";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
@@ -11,14 +12,49 @@ async function fixture(useFile = false) {
   const directory = await mkdtemp(join(tmpdir(), "memory-trace-")); directories.push(directory);
   const handlers = new Map<string, (event: any, ctx: any) => Promise<unknown>>();
   const records: unknown[] = [];
-  registerMemoryAcceptanceTrace({ on: (name: string, handler: any) => handlers.set(name, handler) } as unknown as ExtensionAPI,
+  const traced = registerMemoryAcceptanceTrace({ on: (name: string, handler: any) => handlers.set(name, handler) } as unknown as ExtensionAPI,
     directory, useFile ? undefined : record => records.push(record));
   const ctx = (sessionId: string) => ({ sessionManager: { getSessionId: () => sessionId } });
   const arm = (extra = {}) => writeFile(join(directory, "acceptance-trace.json"), JSON.stringify({
     runId: "trace-test", sessionId: "target-session", expiresAt: new Date(Date.now() + 60_000).toISOString(), ...extra,
   }), { mode: 0o600 });
-  return { handlers, records, ctx, arm, directory };
+  return { handlers, records, ctx, arm, directory, traced };
 }
+
+it("isolates overlapping handler spans and preserves private receivers, results and failures", async () => {
+  const f = await fixture(); await f.arm();
+  class Service {
+    #value = "private result";
+    async read() { await new Promise(resolve => setTimeout(resolve, 5)); return this.#value; }
+    async fail() { throw new Error("private error"); }
+  }
+  const service = measureMemoryMethods(new Service(), { read: "state.read", fail: "state.fail" });
+  f.traced.on("context", async () => { await service.read(); await service.fail(); });
+  const results = await Promise.allSettled([
+    f.handlers.get("context")!({}, f.ctx("target-session")),
+    f.handlers.get("context")!({}, f.ctx("other-session")),
+    service.read(),
+  ]);
+  expect(results[0]).toMatchObject({ status: "rejected", reason: new Error("private error") });
+  expect(results[1]).toMatchObject({ status: "rejected" });
+  expect(results[2]).toEqual({ status: "fulfilled", value: "private result" });
+  expect(f.records).toHaveLength(3);
+  expect(f.records).toEqual(expect.arrayContaining([
+    expect.objectContaining({ event: "latency_span", stage: "state.read", outcome: "ok", durationMs: expect.any(Number) }),
+    expect.objectContaining({ stage: "state.fail", outcome: "error" }),
+    expect.objectContaining({ stage: "memory.context", outcome: "error" }),
+  ]));
+  expect(JSON.stringify(f.records)).not.toMatch(/private result|private error|other-session/);
+});
+
+it("does not emit handler spans when disabled or disarmed during execution", async () => {
+  const f = await fixture();
+  f.traced.on("context", async () => { await rm(join(f.directory, "acceptance-trace.json"), { force: true }); });
+  await f.handlers.get("context")!({}, f.ctx("target-session"));
+  await f.arm();
+  await f.handlers.get("context")!({}, f.ctx("target-session"));
+  expect(f.records).toEqual([]);
+});
 
 it("records actual payload inclusion and explicit calls only for the armed session, without contents", async () => {
   const f = await fixture();
