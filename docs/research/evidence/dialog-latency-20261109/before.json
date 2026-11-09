@@ -1,0 +1,72 @@
+{
+  "runId": "latency-20261109-before",
+  "source": "Codex in-app Browser CDP Network/SSE sanitized timestamps",
+  "image": "dano-app:17a037a44961",
+  "commit": "17a037a44961b459408e972970f6f3de2b5747de",
+  "model": "deepseek-flash",
+  "thinking": "off",
+  "warmup": 1,
+  "samples": [
+    {
+      "n": 1,
+      "case": "简单回复 A",
+      "startedAt": "2026-11-09T03:00:18.612Z",
+      "requestMonotonicSeconds": 4876.810984,
+      "firstTextMonotonicSeconds": 4879.573808,
+      "firstTextMs": 2762.824,
+      "sessionId": "01a1be3f-4ad8-77cc-a41d-9fd20f894d5e",
+      "truncated": false
+    },
+    {
+      "n": 2,
+      "case": "请假 A",
+      "startedAt": "2026-11-09T03:01:30.099Z",
+      "requestMonotonicSeconds": 4948.296532,
+      "firstTextMonotonicSeconds": 4953.990646,
+      "firstTextMs": 5694.114,
+      "sessionId": "01a1be40-7b34-77cc-a41d-9fd45a15925f",
+      "truncated": false
+    },
+    {
+      "n": 3,
+      "case": "公章 A",
+      "startedAt": "2026-11-09T03:03:46.078Z",
+      "requestMonotonicSeconds": 5084.389834,
+      "firstTextMonotonicSeconds": 5087.611007,
+      "firstTextMs": 3221.173,
+      "sessionId": "01a1be42-8d4a-77cc-a41d-9fd786806640",
+      "truncated": false
+    },
+    {
+      "n": 4,
+      "case": "简单回复 B",
+      "startedAt": "2026-11-09T03:06:28.568Z",
+      "requestMonotonicSeconds": 5246.880641,
+      "firstTextMonotonicSeconds": 5249.818359,
+      "firstTextMs": 2937.718,
+      "sessionId": "01a1be44-e7d1-77cc-a41d-9fd9fc16bc08",
+      "truncated": false
+    },
+    {
+      "n": 5,
+      "case": "请假 B",
+      "startedAt": "2026-11-09T03:07:45.533Z",
+      "requestMonotonicSeconds": 5323.846048,
+      "firstTextMonotonicSeconds": 5328.923429,
+      "firstTextMs": 5077.381,
+      "sessionId": "01a1be45-fbd2-77cc-a41d-9fda5e9d1d20",
+      "truncated": false
+    },
+    {
+      "n": 6,
+      "case": "公章 B",
+      "startedAt": "2026-11-09T03:09:32.410Z",
+      "requestMonotonicSeconds": 5430.724025,
+      "firstTextMonotonicSeconds": 5434.067638,
+      "firstTextMs": 3343.613,
+      "sessionId": "01a1be48-087f-77cc-a41d-9fdc3ae75b38",
+      "truncated": false
+    }
+  ],
+  "meanFirstTextMs": 3839.4705
+}

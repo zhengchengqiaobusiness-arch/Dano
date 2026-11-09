@@ -125,7 +125,7 @@ export class LazyMemoryClient implements Client, MemoryGovernanceClient {
         // Search abstracts are suitable for ranking, but may omit changed or cleared
         // fields. Read the owner-checked current document before offering defaults.
         if (item.uri.startsWith(`viking://user/${this.owner.userId}/memories/form_records/`)) {
-          const text = await client.readMemoryLimited(item.uri, this.#options.maxRecallDocumentBytes);
+          const text = await client.readMemoryLimited(item.uri, this.#options.maxRecallDocumentBytes, signal);
           signal?.throwIfAborted();
           recalled.push({ ...item, text });
         } else recalled.push(item);

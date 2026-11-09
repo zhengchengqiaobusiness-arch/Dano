@@ -169,3 +169,36 @@ it("reads the current form document instead of using its lossy search abstract a
   try { expect(await client.recall("hotel form", 1)).toEqual([{ uri, text: current, score: 0.9 }]); }
   finally { await client.close(); }
 });
+
+it("cancels an in-flight form document read with the recall deadline", async () => {
+  const uri = "viking://user/alice/memories/form_records/leave/create.md";
+  const started = deferred<void>();
+  let readSignal: AbortSignal | null | undefined;
+  vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith("/health")) return Response.json({ auth_mode: "api_key", role: "user",
+      account_id: owner.accountId, user_id: owner.userId });
+    if (url.includes("/search/find")) return Response.json({ status: "ok", result: {
+      memories: [{ uri, abstract: "Synthetic form", score: 0.9 }],
+    } });
+    if (url.includes("/content/read?")) {
+      readSignal = init?.signal;
+      started.resolve();
+      return new Promise<Response>((_resolve, reject) => {
+        readSignal?.addEventListener("abort", () => reject(readSignal?.reason), { once: true });
+      });
+    }
+    throw new Error("UNEXPECTED_REQUEST");
+  }));
+  const client = new LazyMemoryClient({ maxRecallDocumentBytes: 16384, owner,
+    baseUrl: "https://memory.example.test", timeoutMs: 1000,
+    connect: async () => ({ owner, apiKey: "synthetic-user-key" }), assertToolIsolation: async () => {} });
+  const controller = new AbortController();
+  const pending = client.recall("leave form", 1, controller.signal);
+  const rejected = expect(pending).rejects.toThrow("CANCELLED");
+  await started.promise;
+  controller.abort(new Error("CANCELLED"));
+  await rejected;
+  expect(readSignal?.aborted).toBe(true);
+  await client.close();
+});
