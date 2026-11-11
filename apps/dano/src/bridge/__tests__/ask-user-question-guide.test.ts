@@ -52,6 +52,7 @@ const requiredCapabilities = [
   "field-assist.main-turn-isolation",
   "date.date-only",
   "date.date-time-minute",
+  "date.date-time-second",
   "date.default-format",
   "date.result-string",
   "choice.radio",

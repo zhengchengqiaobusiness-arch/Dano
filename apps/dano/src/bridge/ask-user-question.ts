@@ -84,7 +84,7 @@ const askUserQuestionFields = {
   dateFormat: Type.Optional(
     Type.Any({
       description:
-        "Required when inputType is \"date\". A frontend date-control format such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\".",
+        "Required when inputType is \"date\". Seconds formats are accepted; picker edits set seconds to 00. A frontend date-control format such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\".",
     }),
   ),
   dataSource: Type.Optional(Type.Any()),

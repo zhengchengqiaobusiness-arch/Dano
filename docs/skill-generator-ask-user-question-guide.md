@@ -360,7 +360,7 @@
 - `text` 的 Field Assist 默认关闭，`textarea` 默认开启；只在文本控件上使用
   boolean `fieldAssist`。
 - `date` 必须提供 `dateFormat`。格式必须包含年、月、日；时间格式必须同时包含
-  24 小时制小时和分钟，不支持秒与时区。非空 `default` 必须匹配格式。
+  24 小时制小时和分钟；接受秒级格式（如 `yyyy-MM-dd HH:mm:ss`）。日期控件仍按分钟编辑，编辑输出的秒为 `00`，不提供秒选择；不编辑的默认值原样保留。不支持小数秒与时区。非空 `default` 必须匹配格式。
 - `radio` 是静态单选，`checkbox` 是静态多选；`select` 与 `treeSelect` 可使用
   静态 `options` 或 `dataSource`。`multiple:true` 返回 ID 数组。
 - 选项 label 为“其他”或 `Other` 时，用户可以提交一个不在 options 中的自定义
@@ -1899,6 +1899,7 @@ Submitted Form 只读，Confirmation Card 展示已提交文件；Form Revision 
 | `field-assist.safety-preflight` | 明显 secret 模型前拒绝 | [E18](#e18-field-assist-生成润色与安全预检) | `FIELD_ASSIST_NOT_ALLOWED` |
 | `field-assist.main-turn-isolation` | 主 Assistant Turn 无副作用 | [E18](#e18-field-assist-生成润色与安全预检) | 不创建 session 或写入 JSONL |
 | `date.date-only` | 仅日期 | [E03](#e03-一次填写完整分组表单) | `dateFormat:yyyy-MM-dd` |
+| `date.date-time-second` | 秒级格式接入、分钟编辑后补00秒 | [E21](#e21-秒级日期格式兼容) | `dateFormat:yyyy-MM-dd HH:mm:ss` |
 | `date.date-time-minute` | 日期时间到分钟 | [E03](#e03-一次填写完整分组表单) | `dateFormat:yyyy-MM-dd HH:mm` |
 | `date.default-format` | default 匹配 dateFormat | [E03](#e03-一次填写完整分组表单) | 两个 date Card items |
 | `date.result-string` | 日期提交值保持字符串 | [E03](#e03-一次填写完整分组表单) | grouped result strings |
@@ -1960,3 +1961,17 @@ Submitted Form 只读，Confirmation Card 展示已提交文件；Form Revision 
 主机限定会话 acceptance trace 可记录 question_failure（code/category/retryable）和最多 20 条 question_issue（code/安全字段路径）。未知路径脱敏，不记录参数值、错误消息或业务正文。该记录用于确定实际失败原因，不代表已修复间歇性失败。
 
 日期格式失败时，限定会话 trace 增加 question_date_format：字段路径、格式值类型，以及仅由格式 token 和分隔符构成的最多64字符原值。任意字面量与字段答案不记录；缺失值明确标记 missing。用于复现具体校验失败，日期控件行为不变。
+
+## E21 秒级日期格式兼容
+
+<!-- example:E21 kind:request -->
+```json
+{"question":"预计用章时间","inputType":"date","dateFormat":"yyyy-MM-dd HH:mm:ss","default":"2026-11-11 10:20:37"}
+```
+
+使用现有分钟控件编辑后可返回 `2026-11-11 10:21:00`，不因带秒格式要求模型重试。
+
+<!-- example:E21 kind:card -->
+```json
+{"id":"answer","question":"预计用章时间","kind":"date","dateFormat":"yyyy-MM-dd HH:mm:ss","default":"2026-11-11 10:20:37","batch":false}
+```

@@ -4,7 +4,7 @@ const FORMAT_REFERENCE_DATE = new Date(2026, 6, 3, 9, 30, 0, 0);
 const DATE_PARTS = [/y/, /M/, /d/];
 const TIME_PARTS = [/H/, /m/];
 const AMBIGUOUS_HOUR_PARTS = /[hKk]/;
-const OUT_OF_SCOPE_TIME_PARTS = /[sSaXxOzZ]/;
+const OUT_OF_SCOPE_TIME_PARTS = /[SaXxOzZ]/;
 
 export function validateAskUserQuestionDateFormat(value: unknown): string | null {
   if (typeof value !== "string" || !value.trim()) {
@@ -14,7 +14,7 @@ export function validateAskUserQuestionDateFormat(value: unknown): string | null
   if (!DATE_PARTS.every(part => part.test(formatString))) {
     return "dateFormat must include year, month, and day tokens, for example \"yyyy-MM-dd\".";
   }
-  const hasTime = TIME_PARTS.some(part => part.test(formatString));
+  const hasTime = TIME_PARTS.some(part => part.test(formatString)) || /s/.test(formatString);
   if (AMBIGUOUS_HOUR_PARTS.test(formatString)) {
     return "dateFormat time formats must use 24-hour H/HH tokens; 12-hour h/K/k tokens are not supported.";
   }
@@ -22,7 +22,7 @@ export function validateAskUserQuestionDateFormat(value: unknown): string | null
     return "dateFormat time formats must use 24-hour hour and minute tokens, for example \"yyyy-MM-dd HH:mm\".";
   }
   if (OUT_OF_SCOPE_TIME_PARTS.test(formatString)) {
-    return "dateFormat supports date-only or date-time-to-minute formats; seconds and time zones are not supported.";
+    return "dateFormat supports date-only or date-time-to-second formats; fractional seconds and time zones are not supported.";
   }
   try {
     format(FORMAT_REFERENCE_DATE, formatString);

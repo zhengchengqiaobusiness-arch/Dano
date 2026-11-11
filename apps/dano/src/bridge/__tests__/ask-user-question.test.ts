@@ -1039,6 +1039,14 @@ describe("ask_user_question tool", () => {
     });
   });
 
+  it("accepts the captured seconds format without a model retry", async () => {
+    const execution = executeQuestion("date-seconds", {
+      question: "Expected use time?", inputType: "date", dateFormat: "yyyy-MM-dd HH:mm:ss", default: "2026-11-11 10:20:37",
+    });
+    askUserQuestionCoordinator.answer("date-seconds", { cancelled: false, answer: "2026-11-11 10:21:00" });
+    await expect(execution).resolves.toMatchObject({ details: { status: "answered", answer: "2026-11-11 10:21:00" } });
+  });
+
   it("accepts custom dateFormat strings supported by the frontend formatter", async () => {
     const execution = executeQuestion("date-custom-format", {
       question: "Start time?",
@@ -1066,14 +1074,6 @@ describe("ask_user_question tool", () => {
   });
 
   it("rejects unsupported dateFormat values before rendering", async () => {
-    await expect(
-      executeQuestion("date-format-seconds", {
-        question: "Start time?",
-        inputType: "date",
-        dateFormat: "yyyy-MM-dd HH:mm:ss",
-      }),
-    ).rejects.toThrow('"code":"invalid_date_format"');
-
     await expect(
       executeQuestion("date-format-missing-day", {
         question: "Start month?",
