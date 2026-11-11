@@ -1952,3 +1952,9 @@ Submitted Form 只读，Confirmation Card 展示已提交文件；Form Revision 
 | `failure.presentation-stop` | 展示失败后停止 | [E15](#e15-e17-终止与取消) | non-retryable failure |
 | `failure.validation-stop` | 校验重试耗尽后停止 | [E16](#e15-e17-终止与取消) | non-retryable failure |
 | `failure.cancel-stop` | 取消后停止 | [E17](#e15-e17-终止与取消) | cancelled/terminal failure |
+
+### 问题卡失败诊断
+
+浏览器按结构化错误码区分参数校验、确认来源、重复调用及呈现超时；缺少错误码时使用中性说明，不推断模型参数错误。重试策略及规范参数不变。
+
+主机限定会话 acceptance trace 可记录 question_failure（code/category/retryable）和最多 20 条 question_issue（code/安全字段路径）。未知路径脱敏，不记录参数值、错误消息或业务正文。该记录用于确定实际失败原因，不代表已修复间歇性失败。
