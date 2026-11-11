@@ -150,3 +150,15 @@ it("records scoped question error codes and safe paths without messages or busin
   ]));
   expect(JSON.stringify(f.records)).not.toMatch(/private/);
 });
+
+it.each(["yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd h:mm", "private business text", undefined])("records only safe failing date formats: %s", async value => {
+  const f = await fixture(); await f.arm();
+  const event = { toolName: "ask_user_question", toolCallId: "date-test", isError: true,
+    input: { questions: JSON.stringify([{ inputType: "date", dateFormat: value, default: "private answer" }]) },
+    details: { status: "invalid", error: { code: "invalid_question_arguments", category: "validation", message: "private error", retryable: true,
+      issues: [{ code: "invalid_date_format", path: "questions[0].dateFormat", message: "private reason" }] } }, content: [] };
+  await f.handlers.get("tool_result")!(event, f.ctx("target-session"));
+  expect(f.records).toContainEqual(expect.objectContaining({ event: "question_date_format", path: "questions[0].dateFormat",
+    formatType: value === undefined ? "missing" : "string", format: value?.startsWith("yyyy") ? value : "redacted" }));
+  expect(JSON.stringify(f.records)).not.toMatch(/private/);
+});
