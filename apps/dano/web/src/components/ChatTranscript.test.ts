@@ -1130,6 +1130,26 @@ describe("ChatTranscript Activity Trail", () => {
     }
   });
 
+  it.each([
+    ["duplicate_question_call", "同一响应中已有待处理的问题卡"],
+    ["invalid_confirmation_source", "确认卡缺少已提交的分组表单来源"],
+    ["question_presentation_timeout", "问题卡未能在规定时间内完成显示确认"],
+    ["invalid_question_arguments", "问题卡字段参数未通过校验"],
+  ])("shows the actual question failure cause for %s", async (code, expected) => {
+    const target = document.createElement("div"); document.body.appendChild(target);
+    const component = mount(ChatTranscript, { target, props: { messages: [{
+      id: "failure", role: "assistant", content: [{ type: "toolCall", id: "q", name: "ask_user_question",
+        arguments: {}, questionState: "retrying", questionError: { code, category: "validation", retryable: true, message: "private detail" } },
+        { type: "toolResult", text: "private detail", isError: true, sourceMessageId: "result-q" }],
+    }] as never } });
+    try {
+      await tick(); target.querySelector<HTMLButtonElement>(".tool-activity-trigger")?.click(); await tick();
+      expect(target.textContent).toContain(expected);
+      expect(target.textContent).not.toContain("private detail");
+      expect(target.textContent).not.toContain("模型刚才生成的问题卡参数不符合要求");
+    } finally { await unmount(component); target.remove(); }
+  });
+
   it("hides recovered question-card retry failures", async () => {
     const target = document.createElement("div");
     document.body.appendChild(target);

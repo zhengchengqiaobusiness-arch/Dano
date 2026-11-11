@@ -131,3 +131,22 @@ it("does not mistake context presence for payload inclusion and stops on expiry"
   await f.handlers.get("tool_call")!({ toolName: "memory_recall", toolCallId: "call-expired" }, f.ctx("target-session"));
   expect(f.records).toHaveLength(count);
 });
+
+it("records scoped question error codes and safe paths without messages or business keys", async () => {
+  const f = await fixture(); await f.arm();
+  const details = { status: "invalid", error: { code: "invalid_question_arguments", category: "validation",
+    message: "private message", retryable: true, issues: [
+      { code: "invalid_question_item", path: "questions[0].inputType", message: "private value" },
+      { code: "invalid_question_item", path: "questions[0].privateBusinessKey", message: "private value" },
+    ] } };
+  const event = { toolName: "ask_user_question", toolCallId: "question-test", isError: true, details, content: [] };
+  await f.handlers.get("tool_result")!(event, f.ctx("other-session"));
+  expect(f.records).toEqual([]);
+  await f.handlers.get("tool_result")!(event, f.ctx("target-session"));
+  expect(f.records).toEqual(expect.arrayContaining([
+    expect.objectContaining({ event: "question_failure", code: "invalid_question_arguments", retryable: true }),
+    expect.objectContaining({ event: "question_issue", path: "questions[0].inputType" }),
+    expect.objectContaining({ event: "question_issue", path: "redacted" }),
+  ]));
+  expect(JSON.stringify(f.records)).not.toMatch(/private/);
+});

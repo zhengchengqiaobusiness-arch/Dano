@@ -37,7 +37,7 @@ describe("i18n", () => {
   it.each([
     [
       "chatTranscript.askUserQuestionRetryFailureDetail",
-      "模型刚才生成的问题卡参数不符合要求，测试助手已触发自动重试。若多次出现，说明模型还没有按问题卡格式修正调用。",
+      "问题卡调用未完成，请重试。",
     ],
     [
       "chatTranscript.askUserQuestionTerminalFailureDetail",

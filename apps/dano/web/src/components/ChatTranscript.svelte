@@ -593,7 +593,15 @@
           ? "chatTranscript.askUserQuestionTerminalFailure"
           : "chatTranscript.askUserQuestionRetryFailure"),
       details: [t(
-        validationTerminal
+        block.questionError?.code === "duplicate_question_call"
+          ? "chatTranscript.questionDuplicateDetail"
+          : block.questionError?.code === "invalid_confirmation_source"
+          ? "chatTranscript.questionConfirmationDetail"
+          : block.questionError?.code === "question_presentation_timeout"
+          ? "chatTranscript.questionPresentationTimeoutDetail"
+          : block.questionError?.code === "invalid_question_arguments"
+          ? "chatTranscript.questionArgumentsDetail"
+          : validationTerminal
           ? "chatTranscript.askUserQuestionValidationFailureDetail"
           : terminal
             ? "chatTranscript.askUserQuestionTerminalFailureDetail"

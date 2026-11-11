@@ -5,6 +5,8 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { measureMemoryStage, withMemoryLatencyObserver } from "./memory-latency-span.js";
 
+import { parseAskUserQuestionFailure } from "./ask-user-question-errors.js";
+
 type Control = { runId: string; sessionId: string; expiresAt: string };
 type RecordData = Record<string, string | number | boolean>;
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -109,6 +111,22 @@ export function registerMemoryAcceptanceTrace(pi: ExtensionAPI, stateDirectory: 
     if (event.toolName !== "memory_recall" && event.toolName !== "ask_user_question") return;
     const c = await control(ctx); if (!c) return;
     await record(c, { event: "tool_result", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError });
+    if (event.toolName === "ask_user_question") {
+      const failure = parseAskUserQuestionFailure(event.details)
+        ?? event.content.filter(block => block.type === "text")
+          .map(block => parseAskUserQuestionFailure(block.text)).find(Boolean);
+      if (failure) {
+        await record(c, { event: "question_failure", toolCallId: event.toolCallId,
+          code: failure.error.code, category: failure.error.category, retryable: failure.error.retryable });
+        for (const issue of failure.error.issues.slice(0, 20)) {
+          // Paths originate in model input: allow only canonical field structure,
+          // never IDs, arbitrary keys, messages, or values.
+          const path = issue.path && /^questions\[\d{1,3}\](?:\.(?:id|question|kind|options|value|inputType|dataSource|fieldConfig|required|multiple|defaultValue)(?:\[\d{1,3}\])?)*$/.test(issue.path)
+            ? issue.path : "redacted";
+          await record(c, { event: "question_issue", toolCallId: event.toolCallId, code: issue.code, path });
+        }
+      }
+    }
   });
   // Wrap only this memory extension's handlers, not unrelated extensions or
   // background delivery. AsyncLocalStorage keeps concurrent sessions isolated.
