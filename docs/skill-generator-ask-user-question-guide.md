@@ -1958,3 +1958,5 @@ Submitted Form 只读，Confirmation Card 展示已提交文件；Form Revision 
 浏览器按结构化错误码区分参数校验、确认来源、重复调用及呈现超时；缺少错误码时使用中性说明，不推断模型参数错误。重试策略及规范参数不变。
 
 主机限定会话 acceptance trace 可记录 question_failure（code/category/retryable）和最多 20 条 question_issue（code/安全字段路径）。未知路径脱敏，不记录参数值、错误消息或业务正文。该记录用于确定实际失败原因，不代表已修复间歇性失败。
+
+日期格式失败时，限定会话 trace 增加 question_date_format：字段路径、格式值类型，以及仅由格式 token 和分隔符构成的最多64字符原值。任意字面量与字段答案不记录；缺失值明确标记 missing。用于复现具体校验失败，日期控件行为不变。

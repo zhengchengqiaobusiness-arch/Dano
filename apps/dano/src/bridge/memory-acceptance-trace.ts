@@ -121,9 +121,27 @@ export function registerMemoryAcceptanceTrace(pi: ExtensionAPI, stateDirectory: 
         for (const issue of failure.error.issues.slice(0, 20)) {
           // Paths originate in model input: allow only canonical field structure,
           // never IDs, arbitrary keys, messages, or values.
-          const path = issue.path && /^questions\[\d{1,3}\](?:\.(?:id|question|kind|options|value|inputType|dataSource|fieldConfig|required|multiple|defaultValue)(?:\[\d{1,3}\])?)*$/.test(issue.path)
+          const path = issue.path && /^questions\[\d{1,3}\](?:\.(?:id|question|kind|options|value|inputType|dataSource|fieldConfig|required|multiple|defaultValue|dateFormat)(?:\[\d{1,3}\])?)*$/.test(issue.path)
             ? issue.path : "redacted";
           await record(c, { event: "question_issue", toolCallId: event.toolCallId, code: issue.code, path });
+          if (issue.code === "invalid_date_format") {
+            let questions: unknown = event.input.questions;
+            if (typeof questions === "string" && questions.length <= 64 * 1024) {
+              try { questions = JSON.parse(questions); } catch { questions = undefined; }
+            }
+            const index = issue.path?.match(/^questions\[(\d{1,3})\]\.dateFormat$/)?.[1];
+            const question = index !== undefined
+              ? Array.isArray(questions) ? questions[Number(index)] : questions
+              : event.input;
+            const value = question && typeof question === "object" ? (question as Record<string, unknown>).dateFormat : undefined;
+            // Only formatter tokens and separators may leave the host. Never log
+            // answers, arbitrary literals, exception messages or other arguments.
+            const safe = typeof value === "string" && value.length <= 64
+              && /^(?:yyyy|YYYY|yy|YY|MM|M|dd|DD|d|D|HH|H|hh|h|mm|m|ss|s|SSS|a|XXX|XX|X|xxx|xx|x|zzz|zz|z|ZZ|Z|K|k|'T'|[ T:/. ,_+-])+$/.test(value);
+            await record(c, { event: "question_date_format", toolCallId: event.toolCallId, path,
+              formatType: value === undefined ? "missing" : value === null ? "null" : typeof value,
+              format: safe ? value as string : "redacted" });
+          }
         }
       }
     }
