@@ -29,6 +29,18 @@ async function rejectedFailure(promise: Promise<unknown>) {
 
 describe("ask_user_question executable error compatibility matrix", () => {
   it.each([
+    { question: "Expected time?", inputType: "date", dateFormat: "yyyy-MM-dd HH:mm:ss", default: "2026-11-11 10:20:37" },
+    { questions: [{ id: "expectedUseTime", question: "Expected time?", inputType: "date", dateFormat: "yyyy-MM-dd HH:mm:ss", default: "2026-11-11 10:20:37" }] },
+    { questions: JSON.stringify([{ id: "expectedUseTime", question: "Expected time?", input_type: "date", dateFormat: "yyyy-MM-dd HH:mm:ss", default: "2026-11-11 10:20:37" }]) },
+  ])("accepts captured seconds formats in canonical and compatible shapes", request => {
+    expect(normalizeAskUserQuestionCardRequestResult(request)).not.toHaveProperty("error");
+  });
+
+  it.each(["yyyy-MM-dd HH:mm:ss.SSS", "yyyy-MM-dd HH:mm:ss XXX", "yyyy-MM-dd ss"])("still rejects incomplete or out-of-scope time formats: %s", dateFormat => {
+    expect(normalizeFailure({ question: "When?", inputType: "date", dateFormat }).error.issues).toEqual(expect.arrayContaining([expect.objectContaining({code: "invalid_date_format"})]));
+  });
+
+  it.each([
     ["invalid request shape", "not an object", "invalid_request_shape", undefined],
     ["invalid questions JSON", { questions: '[{"id":"x"' }, "invalid_questions_json", "questions"],
     ["invalid questions shape", { questions: 7 }, "invalid_questions_shape", "questions"],

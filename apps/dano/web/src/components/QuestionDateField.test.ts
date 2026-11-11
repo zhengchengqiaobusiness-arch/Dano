@@ -132,4 +132,22 @@ describe("QuestionDateField", () => {
       unmount(component);
     }
   });
+  it("accepts seconds formats while mobile picker edits return zero seconds", async () => {
+    mockMobilePicker(true);
+    const onValueChange = vi.fn();
+    const target = createAppTarget();
+    const component = mount(QuestionDateField, { target, props: {
+      id: "seconds", value: "2026-11-11 10:20:37", dateFormat: "yyyy-MM-dd HH:mm:ss", onValueChange,
+    } });
+    await tick();
+    try {
+      const input = target.querySelector<HTMLInputElement>('input[type="datetime-local"]')!;
+      expect(input.step).toBe("60");
+      expect(input.value).toBe("2026-11-11T10:20");
+      input.value = "2026-11-11T10:21";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      expect(onValueChange).toHaveBeenLastCalledWith("2026-11-11 10:21:00");
+    } finally { unmount(component); }
+  });
+
 });
