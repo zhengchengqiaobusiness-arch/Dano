@@ -42,6 +42,10 @@ async function helpCatalog(root: string) {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  configured = configured.map(item => ({ ...item,
+    ...(typeof item.file === "string" ? { file: path.posix.normalize(item.file) } : {}),
+    ...(typeof item.video === "string" ? { video: path.posix.normalize(item.video) } : {}),
+  }));
   const explicitVideos = new Set(configured.map(item => item.video));
   configured = configured.flatMap(item => {
     const file = typeof item.file === "string" && files.includes(item.file) ? item.file : undefined;

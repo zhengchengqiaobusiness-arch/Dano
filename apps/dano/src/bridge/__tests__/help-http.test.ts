@@ -70,7 +70,7 @@ it("discovers Markdown and standalone videos without an index, pairs matching fi
     expect(paired).toHaveLength(2);
     expect(paired).toContainEqual(expect.objectContaining({ file: "演示.md", video: "演示.mp4" }));
     await writeFile(join(root, "index.json"), JSON.stringify([
-      { id: "file:介绍.md", title: "产品演示", file: "演示.md", group: "入门" },
+      { id: "file:介绍.md", title: "产品演示", file: "./演示.md", group: "入门" },
     ]));
     await mkdir(join(root, "指南"));
     await writeFile(join(root, "指南", "操作.MD"), "# 操作");
