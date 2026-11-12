@@ -70,16 +70,22 @@ it("discovers Markdown and standalone videos without an index, pairs matching fi
     expect(paired).toHaveLength(2);
     expect(paired).toContainEqual(expect.objectContaining({ file: "演示.md", video: "演示.mp4" }));
     await writeFile(join(root, "index.json"), JSON.stringify([
-      { id: "custom", title: "产品演示", file: "演示.md", video: "演示.mp4", group: "入门" },
+      { id: "file:介绍.md", title: "产品演示", file: "演示.md", group: "入门" },
     ]));
     await mkdir(join(root, "指南"));
     await writeFile(join(root, "指南", "操作.MD"), "# 操作");
     await symlink(root, join(root, "loop"));
     const customized = await (await fetch(base + "index.json")).json() as { title: string }[];
     expect(customized).toHaveLength(3);
-    expect(customized[0]).toMatchObject({ id: "custom", title: "产品演示" });
+    expect(customized[0]).toMatchObject({ title: "产品演示", video: "演示.mp4" });
     expect(customized).toContainEqual(expect.objectContaining({ title: "操作", file: "指南/操作.MD", group: "指南" }));
+    expect(new Set(customized.map(item => (item as { id?: string }).id)).size).toBe(3);
+    await rm(join(root, "演示.md"));
+    await rm(join(root, "演示.mp4"));
+    expect(await (await fetch(base + "index.json")).json()).toHaveLength(2);
     await rm(join(root, "index.json"));
+    await writeFile(join(root, "演示.md"), "视频说明");
+    await writeFile(join(root, "演示.mp4"), "video");
     await rm(join(root, "演示.mp4"));
     expect(await (await fetch(base + "index.json")).json()).toContainEqual(
       expect.objectContaining({ title: "演示", file: "演示.md" }),

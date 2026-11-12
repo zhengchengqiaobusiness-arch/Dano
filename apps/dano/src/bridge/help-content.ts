@@ -42,7 +42,18 @@ async function helpCatalog(root: string) {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  const explicitVideos = new Set(configured.map(item => item.video));
+  configured = configured.flatMap(item => {
+    const file = typeof item.file === "string" && files.includes(item.file) ? item.file : undefined;
+    const explicitVideo = typeof item.video === "string" && files.includes(item.video) ? item.video : undefined;
+    const stem = file?.slice(0, -path.extname(file).length);
+    const companion = file && item.video === undefined ? files.find(candidate =>
+      /\.(mp4|webm)$/i.test(candidate) && candidate.slice(0, -path.extname(candidate).length) === stem && !explicitVideos.has(candidate)) : undefined;
+    const video = explicitVideo ?? companion;
+    return file || video ? [{ ...item, file, video }] : [];
+  });
   const referenced = new Set(configured.flatMap(item => [item.file, item.video]));
+  const ids = new Set(configured.map(item => item.id));
   const discovered: Record<string, unknown>[] = [];
   for (const file of files) {
     if (referenced.has(file)) continue;
@@ -51,8 +62,12 @@ async function helpCatalog(root: string) {
     const title = path.posix.basename(stem);
     const group = path.posix.dirname(file);
     if (extension.toLowerCase() !== ".md" && files.some(candidate => /\.md$/i.test(candidate) && candidate.slice(0, -path.extname(candidate).length) === stem && !referenced.has(candidate))) continue;
+    let id = "file:" + file;
+    let suffix = 0;
+    while (ids.has(id)) id = "file:" + file + "#" + (++suffix);
+    ids.add(id);
     const article: Record<string, unknown> = {
-      id: "file:" + file, title, ...(group === "." ? {} : { group }),
+      id, title, ...(group === "." ? {} : { group }),
     };
     if (extension.toLowerCase() === ".md") {
       article.file = file;
