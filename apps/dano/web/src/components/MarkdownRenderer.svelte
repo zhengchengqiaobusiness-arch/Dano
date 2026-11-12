@@ -72,7 +72,13 @@
     for (const node of nodes) {
       if (typeof node === "string" || node[0] === null) continue;
       const [tag, props, ...children] = node;
-      const attribute = tag === "a" ? "href" : tag === "img" ? "src" : null;
+      if (tag === "video" || tag === "audio") {
+        delete props.autoplay;
+        props.controls = true;
+        props.preload = "metadata";
+      }
+      if (tag === "video" && typeof props.poster === "string" && !/^(?:[a-z][a-z0-9+.-]*:|\/|#)/i.test(props.poster)) props.poster = new URL(props.poster, resourceBase).href;
+      const attribute = tag === "a" ? "href" : ["img", "video", "audio", "source", "track"].includes(tag) ? "src" : null;
       if (attribute && typeof props[attribute] === "string") {
         const value = props[attribute] as string;
         if (!/^(?:[a-z][a-z0-9+.-]*:|\/|#)/i.test(value)) {

@@ -5,6 +5,7 @@
   import Menu from "@lucide/svelte/icons/menu";
   import { Button } from "./ui/button";
   import { Input } from "./ui/input";
+  import * as Alert from "./ui/alert";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import ImageLightbox from "./ImageLightbox.svelte";
   import { getRuntimeProductName } from "../utils/runtimeConfig";
@@ -62,6 +63,7 @@
       const response = await fetch(asset(article.file), { cache: "no-store" });
       if (!response.ok) throw Error();
       const text = await response.text();
+      if (!text.trim()) throw Error();
       if (token !== generation) return;
       content = text;
       await tick();
@@ -124,6 +126,8 @@
     void load();
     const observer = new MutationObserver(() => {
       for (const img of body?.querySelectorAll("img") ?? []) {
+        img.onerror = () => { mediaError = "图片暂不可用，请联系维护者。"; };
+        if (img.complete && !img.naturalWidth) mediaError = "图片暂不可用，请联系维护者。";
         if (img.closest("button")) continue;
         img.tabIndex = 0;
         img.setAttribute("role", "button");
@@ -195,13 +199,13 @@
           {#if active.summary}<p>{active.summary}</p>{/if}
         </div>{/if}
       {#if loading}<p role="status">正在加载手册…</p>{/if}
-      {#if error}<div role="alert">
-          <p>{error}</p>
+      {#if error}<Alert.Root>
+          <Alert.Description>{error}</Alert.Description>
           <Button
             variant="outline"
             onclick={() => (active ? select(active) : load())}>重试</Button
           >
-        </div>{/if}
+        </Alert.Root>{/if}
       <div
         class="article"
         bind:this={body}
@@ -252,7 +256,7 @@
             </figure>{/if}
         {/if}
       </div>
-      {#if mediaError}<p role="alert">{mediaError}</p>{/if}
+      {#if mediaError}<Alert.Root><Alert.Description>{mediaError}</Alert.Description></Alert.Root>{/if}
       {#if active}<footer>
           {#if index > 0}<Button
               variant="outline"
@@ -351,7 +355,7 @@
   .intro,
   .article,
   footer,
-  main > [role="alert"] {
+  main > :global([role="alert"]) {
     max-width: 760px;
     margin: 0 auto;
   }
