@@ -28,6 +28,7 @@
     "date-fns": "^4.4.0",
     "fs-ext": "2.1.1",
     "openid-client": "^6.8.4",
+    "send": "^1.2.1",
     "typebox": "1.2.7",
     "unbash": "4.0.3"
   },
@@ -41,6 +42,7 @@
     "@tsconfig/svelte": "^5.0.8",
     "@types/fs-ext": "2.0.3",
     "@types/node": "^25.8.0",
+    "@types/send": "^1.2.1",
     "beautiful-mermaid": "^1.1.3",
     "clsx": "^2.1.1",
     "dompurify": "^3.4.3",

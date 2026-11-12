@@ -48,6 +48,8 @@ export interface BridgeConfig {
   readonly portMax: number;
   /** Directory containing static files to serve (for the web UI bundle). Default: undefined */
   readonly staticDir?: string;
+  /** Host-managed read-only help content directory. */
+  readonly helpDir?: string;
   /** Workspace path used by browser clients when opening a fresh page. Default: "/tmp/dano" */
   readonly defaultWorkspacePath?: string;
   /** Browser product name used in branded UI. */

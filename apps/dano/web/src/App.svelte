@@ -1,4 +1,6 @@
 <script lang="ts">
+  import HelpCenter from "./components/HelpCenter.svelte";
+  let helpOpen = $state(false);
   import type {
     RpcImageContent,
     RpcThinkingLevel,
@@ -1216,7 +1218,8 @@
   data-accent-color-preset={bridge.accentColorPreset}
   style={allStyle}
 >
-  <div class="app-main-column">
+  {#if helpOpen}<HelpCenter onClose={() => helpOpen = false}/>{/if}
+  <div class="app-main-column" inert={helpOpen}>
     <AppHeader
       connectionStatus={bridge.connectionStatus}
       disconnectReason={bridge.lastDisconnectReason}
@@ -1224,6 +1227,8 @@
       onNewSession={handleExplicitNewSession}
       {newSessionPending}
       {showNewSession}
+      onOpenHelp={() => helpOpen = true}
+      showHelpHint={isEmptyConversation}
       authentication={bridge.authentication}
       onOpenTheme={openThemeSettings}
       onLogin={bridge.login}
