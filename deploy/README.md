@@ -1557,3 +1557,47 @@ The smoke test checks:
 - `POST /api/clients/<id>/messages`
 - a matching SSE `response` or `event`
 - client disconnect
+
+### Host-managed help manual
+
+Set `DANO_HELP_DIR` in the deployment environment to an absolute host directory.
+Compose mounts it at `/opt/dano/help` read-only. Without Compose, `DANO_HELP_DIR`
+selects the server's content directory and defaults to `DANO_RUNTIME_DIR/help`.
+Create the directory before starting Compose and make it readable by the app
+service user. Upload and edit files there using existing host administration tools
+(e.g. SFTP). The application does not provide a write/upload API for manuals.
+Restarts and releases never initialize, synchronize or delete this directory.
+
+Create `index.json` containing an ordered array of chapters:
+
+```json
+[
+  {
+    "id": "getting-started",
+    "title": "开始使用",
+    "group": "入门",
+    "summary": "了解基本操作",
+    "keywords": ["消息", "图片"],
+    "file": "getting-started.md",
+    "video": "media/demo.mp4",
+    "poster": "media/poster.png",
+    "captions": "media/demo.vtt",
+    "image": "media/steps.png",
+    "imageAlt": "操作步骤示意"
+  }
+]
+```
+
+Only `id`, `title`, and the Markdown `file` are required. Other fields are optional.
+Use unique chapter IDs. Markdown can contain standard headings, tables, lists,
+code, and images; relative image/link references resolve against its directory.
+Optional chapter video appears above the Markdown; the optional image follows it.
+Do not put secrets or user files in this shared, publicly readable content root.
+Supported file types: JSON, Markdown, MP4, WebM, PNG, JPEG, GIF, WebP and VTT.
+HTML, SVG, hidden paths, and symlinks escaping the configured root are not served.
+
+Use atomic file replacement (upload to a temporary filename, then rename) for
+updates. Refresh the help page to reload the index and current files without a
+server restart or image rebuild. Videos stream on demand and support byte ranges.
+Missing/invalid content displays a recoverable error instead of falling back to
+an application HTML page. No sample business manual is installed automatically.

@@ -97,6 +97,7 @@ export interface DanoServerOptions {
   };
   guestCookieSecure: boolean;
   staticDir?: string;
+  helpDir: string;
   help: boolean;
   validateConfig: boolean;
   userAuthentication?: {
@@ -920,6 +921,7 @@ export function parseDanoServerOptions(
     },
     anonymousUserCleanup,
     guestCookieSecure,
+    helpDir: resolve(cwd, env.DANO_HELP_DIR?.trim() || resolve(resolvedRuntimeRootPath, "help")),
     staticDir: staticDirOverride
       ? resolve(cwd, staticDirOverride)
       : resolveDefaultStaticDir(fileURLToPath(import.meta.url)),
@@ -1236,6 +1238,7 @@ export async function runDanoMain(services: DanoMainServices = {}): Promise<numb
       transcriptProcessSummaryEnabled:
         danoConfig.transcriptProcessSummaryEnabled ?? false,
       staticDir: options.staticDir,
+      helpDir: options.helpDir,
     };
 
     const reloadRequested = await runDanoServer(

@@ -20,6 +20,8 @@ type AppHeaderProps = {
         user: { id: string; username: string; avatarUrl?: string };
       };
   onOpenTheme?: () => void;
+  onOpenHelp?: () => void;
+  showHelpHint?: boolean;
   onLogin?: () => void;
   onLogout?: () => void | Promise<void>;
 };
@@ -242,3 +244,10 @@ describe("AppHeader", () => {
     }
   });
 });
+
+ it.each([true,false])("opens the same help action from the menu and empty-only hint (%s)",async(showHelpHint)=>{
+ const onOpenHelp=vi.fn();const {component,target}=await renderHeader({onOpenHelp,showHelpHint});
+ try {const hint=[...target.querySelectorAll("button")].find(b=>b.textContent?.includes("帮助中心"));expect(Boolean(hint)).toBe(showHelpHint);if(hint){hint.click();expect(onOpenHelp).toHaveBeenCalledOnce();}
+ target.querySelector<HTMLButtonElement>(".menu-button")!.click();await tick();const item=[...document.querySelectorAll<HTMLButtonElement>(".header-menu button")].find(b=>b.textContent?.includes("帮助中心"))!;item.click();await tick();expect(onOpenHelp).toHaveBeenCalledTimes(showHelpHint?2:1);expect(document.querySelector('.header-menu[data-state="open"]')).toBeNull();
+ }finally{await unmount(component);document.body.replaceChildren();}
+ });

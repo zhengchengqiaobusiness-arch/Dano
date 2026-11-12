@@ -12,6 +12,7 @@ services:
       DANO_HOST: 0.0.0.0
       DANO_PORT: 8080
       DANO_RUNTIME_DIR: /opt/dano/runtime-data
+      DANO_HELP_DIR: /opt/dano/help
       DANO_HOST_DATA_DIR: /var/lib/dano-host
       DANO_HOST_UID: ${DANO_HOST_UID:-1000}
       DANO_HOST_GID: ${DANO_HOST_GID:-1000}
@@ -84,6 +85,7 @@ services:
       - "8080"
     volumes:
       - ${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/opt/dano/runtime-data
+      - ${DANO_HELP_DIR:-/opt/dano/help}:/opt/dano/help:ro
       - host-state:/var/lib/dano-host
       - agent-config:/opt/dano/runtime-data/.pi
       - workspaces:/opt/dano/runtime-data/workspaces

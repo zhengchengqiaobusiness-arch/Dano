@@ -223,3 +223,8 @@ describe("MarkdownRenderer tables", () => {
     }
   });
 });
+
+ it("resolves help-relative images without rewriting code samples", async () => {
+ const target=document.createElement("div");const component=mount(MarkdownRenderer,{target,props:{resourceBase:"https://example.test/api/help/guide/start.md",content:"![示意](../media/demo.png)\n\n`![示意](../media/demo.png)`"}});
+ try {await vi.waitFor(()=>expect(target.querySelector("img")?.getAttribute("src")).toBe("https://example.test/api/help/media/demo.png"));expect(target.querySelector("code")?.textContent).toBe("![示意](../media/demo.png)");} finally {await unmount(component);}
+ });

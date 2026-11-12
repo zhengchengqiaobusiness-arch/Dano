@@ -22,6 +22,7 @@
   let {
     class: className = "",
     content = "",
+    resourceBase = "",
     fallbackText = "",
     streaming = false,
     deferMermaidErrors = false,
@@ -31,6 +32,7 @@
   }: {
     class?: string;
     content?: string;
+    resourceBase?: string;
     fallbackText?: string;
     streaming?: boolean;
     deferMermaidErrors?: boolean;
@@ -62,9 +64,24 @@
       name: "sanitize-markdown-html",
       async post(state: { tree: { nodes: MarkdownTreeNode[] } }) {
         state.tree.nodes = await sanitizeMarkdownHtml(state.tree.nodes);
+        if (resourceBase) resolveResources(state.tree.nodes);
       },
     },
   ];
+  function resolveResources(nodes: MarkdownTreeNode[]) {
+    for (const node of nodes) {
+      if (typeof node === "string" || node[0] === null) continue;
+      const [tag, props, ...children] = node;
+      const attribute = tag === "a" ? "href" : tag === "img" ? "src" : null;
+      if (attribute && typeof props[attribute] === "string") {
+        const value = props[attribute] as string;
+        if (!/^(?:[a-z][a-z0-9+.-]*:|\/|#)/i.test(value)) {
+          props[attribute] = new URL(value, resourceBase).href;
+        }
+      }
+      resolveResources(children as MarkdownTreeNode[]);
+    }
+  }
   const MERMAID_MIN_WIDTH = 420;
   const MERMAID_MAX_WIDTH = 900;
   const MERMAID_MIN_ZOOM = 0.5;

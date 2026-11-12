@@ -2,6 +2,7 @@
   import CircleUserRound from "@lucide/svelte/icons/circle-user-round";
   import LogIn from "@lucide/svelte/icons/log-in";
   import LogOut from "@lucide/svelte/icons/log-out";
+  import BookOpen from "@lucide/svelte/icons/book-open";
   import Menu from "@lucide/svelte/icons/menu";
   import Brain from "@lucide/svelte/icons/brain";
   import Palette from "@lucide/svelte/icons/palette";
@@ -24,6 +25,8 @@
     showNewSession = true,
     authentication,
     onOpenTheme,
+    onOpenHelp,
+    showHelpHint = false,
     onOpenMemory,
     onLogin,
     onLogout,
@@ -36,6 +39,8 @@
     showNewSession?: boolean;
     authentication: BrowserAuthenticationState;
     onOpenTheme?: () => void;
+    onOpenHelp?: () => void;
+    showHelpHint?: boolean;
     onOpenMemory?: () => void;
     onLogin?: () => void;
     onLogout?: () => void | Promise<void>;
@@ -123,6 +128,7 @@
             <span>{t("memory.title")}</span>
           </Button>
         {/if}
+        {#if onOpenHelp}<Button class="header-menu-item" variant="ghost" onclick={() => { menuOpen = false; onOpenHelp?.(); }}><BookOpen data-icon="inline-start"/><span>帮助中心</span></Button>{/if}
         <div class="header-menu-separator" role="separator"></div>
         {#if currentUser}
           <div class="header-user-summary">
@@ -181,6 +187,7 @@
     </Button>
   </div>
   <div class="header-trailing">
+    {#if showHelpHint}<Button variant="outline" class="rounded-full" onclick={() => onOpenHelp?.()}><BookOpen data-icon="inline-start"/>帮助中心</Button>{/if}
     {#if showNewSession}
       <Button
         class="new-session-button"

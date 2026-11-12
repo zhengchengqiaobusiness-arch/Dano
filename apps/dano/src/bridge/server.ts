@@ -9,6 +9,7 @@
  */
 
 import * as fs from "node:fs";
+import { serveHelp } from "./help-content.js";
 import * as http from "node:http";
 import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -711,6 +712,11 @@ export class BridgeServer {
         await readJsonBody(req);
         this.disconnectClient(clientId);
         writeJson(res, 202, { status: "disconnected" });
+        return;
+      }
+
+      if (pathname.startsWith("/api/help/")) {
+        await serveHelp(req, res, this.config.helpDir);
         return;
       }
 
