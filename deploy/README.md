@@ -1568,7 +1568,17 @@ service user. Upload and edit files there using existing host administration too
 (e.g. SFTP). The application does not provide a write/upload API for manuals.
 Restarts and releases never initialize, synchronize or delete this directory.
 
-Create `index.json` containing an ordered array of chapters:
+Drop Markdown (`.md`) and videos (`.mp4`, `.webm`) into this folder, then refresh
+the help page. They appear automatically, including files in subfolders. The
+filename supplies the default title and the subfolder supplies the group. A
+Markdown file and a video with the same stem in the same folder become one
+chapter; a standalone video needs no Markdown wrapper. Hidden files and symlinks
+are ignored during discovery. Images and captions remain supporting assets.
+
+Optionally create `index.json` to customize chapter titles, grouping, ordering
+and media references. Configured chapters come first; remaining discovered
+files are appended in filename order, without duplicating referenced files:
+
 
 ```json
 [
@@ -1588,7 +1598,8 @@ Create `index.json` containing an ordered array of chapters:
 ]
 ```
 
-Only `id`, `title`, and the Markdown `file` are required. Other fields are optional.
+For configured chapters, `id` and `title` are required, plus a Markdown `file` or
+a standalone `video`. Other fields are optional. No index is required for discovery.
 Use unique chapter IDs. Markdown can contain standard headings, tables, lists,
 code, and images; relative image/link references resolve against its directory.
 Optional chapter video appears above the Markdown; the optional image follows it.

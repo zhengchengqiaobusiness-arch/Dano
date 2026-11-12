@@ -43,3 +43,20 @@ it("opens host chapters, filters by keyword and returns without sending a prompt
     fetcher.mockRestore();
   }
 });
+
+it("opens a discovered standalone video without requiring a Markdown file", async () => {
+  const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify([
+    { id: "file:介绍视频.mp4", title: "介绍视频", video: "介绍视频.mp4" },
+  ])));
+  const target = document.createElement("div");
+  document.body.append(target);
+  const component = mount(HelpCenter, { target, props: { onClose: vi.fn() } });
+  try {
+    await vi.waitFor(() => expect(target.querySelector("video")?.getAttribute("src")).toBe("/api/help/%E4%BB%8B%E7%BB%8D%E8%A7%86%E9%A2%91.mp4"));
+    expect(target.textContent).not.toContain("暂不可用");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(target.querySelector("video")?.autoplay).toBe(false);
+  } finally {
+    await unmount(component); target.remove(); fetcher.mockRestore();
+  }
+});
