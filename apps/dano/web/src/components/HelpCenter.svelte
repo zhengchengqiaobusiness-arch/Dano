@@ -12,7 +12,7 @@
   type Article = {
     id: string;
     title: string;
-    file: string;
+    file?: string;
     group?: string;
     summary?: string;
     keywords?: string[];
@@ -60,6 +60,7 @@
     headings = [];
     loading = true;
     try {
+      if (!article.file) return;
       const response = await fetch(asset(article.file), { cache: "no-store" });
       if (!response.ok) throw Error();
       const text = await response.text();
@@ -91,8 +92,8 @@
             a &&
             typeof a.id === "string" &&
             typeof a.title === "string" &&
-            typeof a.file === "string" &&
-            a.file.endsWith(".md") &&
+            ((typeof a.file === "string" && /\.md$/i.test(a.file)) ||
+              (a.file === undefined && typeof a.video === "string" && /\.(mp4|webm)$/i.test(a.video))) &&
             a.id.length > 0 &&
             a.title.length > 0 &&
             data.filter((b) => b?.id === a.id).length === 1 &&
@@ -235,11 +236,11 @@
               >
               <figcaption>操作演示</figcaption>
             </figure>{/if}
-          <MarkdownRenderer
+          {#if active.file}<MarkdownRenderer
             {content}
             resourceBase={new URL(asset(active.file), location.origin).href}
             interactiveRoot={false}
-          />
+          />{/if}
           {#if active.image}<figure>
               <Button
                 variant="ghost"
