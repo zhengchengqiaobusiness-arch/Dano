@@ -31,12 +31,16 @@ it("opens host chapters, filters by keyword and returns without sending a prompt
     input.value = "图片";
     input.dispatchEvent(new Event("input", { bubbles: true }));
     await tick();
-    expect(target.querySelector("nav")?.textContent).toContain("第一章");
-    expect(target.querySelector("nav")?.textContent).not.toContain("第二章");
+    expect(target.querySelector('nav[aria-label="帮助手册章节"]')?.textContent).toContain("第一章");
+    expect(target.querySelector('nav[aria-label="帮助手册章节"]')?.textContent).not.toContain("第二章");
     [...target.querySelectorAll("button")]
       .find((b) => b.textContent?.includes("返回对话"))!
       .click();
     expect(close).toHaveBeenCalledOnce();
+    const breadcrumb = target.querySelector('nav[aria-label="帮助导航"]')!;
+    expect(breadcrumb.querySelector('[aria-current="page"]')?.textContent).toBe("帮助中心");
+    (breadcrumb.querySelector("button") as HTMLButtonElement).click();
+    expect(close).toHaveBeenCalledTimes(2);
   } finally {
     await unmount(component);
     target.remove();

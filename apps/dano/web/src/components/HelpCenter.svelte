@@ -156,10 +156,14 @@
 
 <div class="help-center">
   <header>
-    <div class="brand">
-      <BookOpen size={22} /><strong>{getRuntimeProductName()} / 帮助中心</strong
-      >
-    </div>
+    <nav class="brand" aria-label="帮助导航">
+      <BookOpen size={22} aria-hidden="true" />
+      <Button variant="ghost" class="px-1" onclick={onClose}
+        aria-label={getRuntimeProductName() + "，返回对话"}
+        ><strong>{getRuntimeProductName()}</strong></Button>
+      <span aria-hidden="true">/</span>
+      <strong aria-current="page">帮助中心</strong>
+    </nav>
     <Button variant="ghost" onclick={onClose}
       ><ArrowLeft data-icon="inline-start" />返回对话</Button
     >
