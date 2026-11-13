@@ -38,7 +38,7 @@ it("opens host chapters, filters by keyword and returns without sending a prompt
       .click();
     expect(close).toHaveBeenCalledOnce();
     const breadcrumb = target.querySelector('nav[aria-label="帮助导航"]')!;
-    expect(breadcrumb.querySelector('[aria-current="page"]')?.textContent).toBe("帮助中心");
+    expect(breadcrumb.querySelector('[aria-current="page"]')?.textContent).toBe("帮助手册");
     (breadcrumb.querySelector("button") as HTMLButtonElement).click();
     expect(close).toHaveBeenCalledTimes(2);
   } finally {

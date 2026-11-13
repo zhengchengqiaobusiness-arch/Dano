@@ -162,7 +162,7 @@
         aria-label={getRuntimeProductName() + "，返回对话"}
         ><strong>{getRuntimeProductName()}</strong></Button>
       <span aria-hidden="true">/</span>
-      <strong aria-current="page">帮助中心</strong>
+      <strong aria-current="page">帮助手册</strong>
     </nav>
     <Button variant="ghost" onclick={onClose}
       ><ArrowLeft data-icon="inline-start" />返回对话</Button

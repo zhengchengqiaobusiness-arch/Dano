@@ -1,6 +1,7 @@
 <script lang="ts">
   import * as Select from "./ui/select";
   import { Button } from "./ui/button";
+  import BookOpen from "@lucide/svelte/icons/book-open";
   import Brain from "@lucide/svelte/icons/brain";
   import Zap from "@lucide/svelte/icons/zap";
   import { tick } from "svelte";
@@ -22,7 +23,7 @@
   import type { RpcModelInfo } from "../utils/models";
   import type { HistoricalMessageRevisionPayload } from "../utils/messageRevision";
   import type { ComposerSubmissionPayload } from "../utils/composerSubmission";
-  import { getRuntimeProductName, getRuntimeShortcutLinks } from "../utils/runtimeConfig";
+  import { getRuntimeProductName } from "../utils/runtimeConfig";
   import CommandPalette from "./CommandPalette.svelte";
   import FilePreviewDialog from "./FilePreviewDialog.svelte";
   import WorkspaceMentionPalette from "./WorkspaceMentionPalette.svelte";
@@ -45,7 +46,6 @@
 
   const COMPOSER_LAYOUT_ANIMATION_MS = 180;
   const productName = getRuntimeProductName();
-  const shortcutLinks = getRuntimeShortcutLinks();
 
   let {
     connectionStatus = "disconnected" as ConnectionStatus,
@@ -71,6 +71,7 @@
     onSubmit = ((_: ComposerSubmissionPayload) => true) as (
       payload: ComposerSubmissionPayload
     ) => boolean | Promise<boolean>,
+    onOpenHelp = (() => {}) as () => void,
     onAbort = (() => {}) as () => void,
     onCancelRevision = (() => {}) as () => void,
     onSelectModel = ((_: RpcModelInfo) => {}) as (model: RpcModelInfo) => void,
@@ -378,24 +379,11 @@
 </script>
 
 <div bind:this={composerRootRef} class="composer-bar" data-center-focus-composer>
-  {#if shortcutLinks.length > 0}
-    <nav class="composer-shortcuts" aria-label={t("composer.shortcuts.label")}>
-      {#each shortcutLinks as link}
-        <Button
-          variant="ghost"
-          size="sm"
-          href={link.href}
-          target="_blank"
-          rel="noopener noreferrer"
-          title={t("composer.shortcuts.openInNewTab", { label: link.label })}
-          class="composer-shortcut"
-          style={`--shortcut-color: ${link.color}`}
-        >
-          {link.label}
-        </Button>
-      {/each}
-    </nav>
-  {/if}
+  <nav class="composer-shortcuts" aria-label="帮助手册入口">
+    <Button variant="ghost" size="sm" class="composer-shortcut" onclick={onOpenHelp}>
+      <BookOpen data-icon="inline-start" aria-hidden="true" />帮助手册
+    </Button>
+  </nav>
   <div class="composer-inner-wrap">
     {#if composer.showCommandPalette}
       <CommandPalette
@@ -640,17 +628,13 @@
     border: none;
     border-radius: 999px;
     background: transparent;
-    color: var(--shortcut-color);
+    color: var(--text);
     box-shadow: var(--composer-surface-shadow);
   }
 
   :global(.composer-shortcut:hover) {
     background: transparent;
-    color: var(--shortcut-color);
-  }
-
-  :global([data-theme-mode="dark"] .composer-shortcut) {
-    color: color-mix(in srgb, var(--shortcut-color), var(--text) 70%);
+    color: var(--text);
   }
 
   .composer-bar::before {

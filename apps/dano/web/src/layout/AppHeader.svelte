@@ -128,7 +128,7 @@
             <span>{t("memory.title")}</span>
           </Button>
         {/if}
-        {#if onOpenHelp}<Button class="header-menu-item" variant="ghost" onclick={() => { menuOpen = false; onOpenHelp?.(); }}><BookOpen data-icon="inline-start"/><span>帮助中心</span></Button>{/if}
+        {#if onOpenHelp}<Button class="header-menu-item" variant="ghost" onclick={() => { menuOpen = false; onOpenHelp?.(); }}><BookOpen data-icon="inline-start"/><span>帮助手册</span></Button>{/if}
         <div class="header-menu-separator" role="separator"></div>
         {#if currentUser}
           <div class="header-user-summary">
@@ -187,7 +187,7 @@
     </Button>
   </div>
   <div class="header-trailing">
-    {#if showHelpHint}<Button variant="outline" class="rounded-full" onclick={() => onOpenHelp?.()}><BookOpen data-icon="inline-start"/>帮助中心</Button>{/if}
+    {#if showHelpHint}<Button variant="outline" class="rounded-full" onclick={() => onOpenHelp?.()}><BookOpen data-icon="inline-start"/>帮助手册</Button>{/if}
     {#if showNewSession}
       <Button
         class="new-session-button"
