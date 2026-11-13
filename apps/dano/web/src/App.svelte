@@ -1,6 +1,7 @@
 <script lang="ts">
   import HelpCenter from "./components/HelpCenter.svelte";
-  let helpOpen = $state(false);
+  import { createAppNavigation } from "./utils/appNavigation.svelte";
+  const navigation = createAppNavigation();
   import type {
     RpcImageContent,
     RpcThinkingLevel,
@@ -1203,6 +1204,8 @@
 </script>
 
 <svelte:window
+  onpopstate={navigation.sync}
+  onclick={navigation.handleLinkClick}
   onresize={syncCompactLayout}
   onkeydown={handleGlobalKeydown}
   ondragover={handleGlobalFileDrag}
@@ -1218,8 +1221,8 @@
   data-accent-color-preset={bridge.accentColorPreset}
   style={allStyle}
 >
-  {#if helpOpen}<HelpCenter onClose={() => helpOpen = false}/>{/if}
-  <div class="app-main-column" inert={helpOpen}>
+  {#if navigation.isHelp}<HelpCenter onClose={navigation.returnToChat}/>{/if}
+  <div class="app-main-column" inert={navigation.isHelp}>
     <AppHeader
       connectionStatus={bridge.connectionStatus}
       disconnectReason={bridge.lastDisconnectReason}
@@ -1227,7 +1230,7 @@
       onNewSession={handleExplicitNewSession}
       {newSessionPending}
       {showNewSession}
-      onOpenHelp={() => helpOpen = true}
+      onOpenHelp={() => navigation.openHelp()}
       showHelpHint={isEmptyConversation}
       authentication={bridge.authentication}
       onOpenTheme={openThemeSettings}
@@ -1303,7 +1306,6 @@
         pendingMessageCount={displayedPendingMessageCount}
         queuedUserMessages={displayedQueuedUserMessages}
         {editQueuedPayload}
-        onOpenHelp={() => helpOpen = true}
         onSubmit={handlePrompt}
         onLoadOlderTranscript={bridge.loadOlderTranscriptPage}
         onAbort={handleAbort}

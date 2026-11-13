@@ -126,7 +126,7 @@ export function readShortcutLinks(value: unknown): BridgeShortcutLinkConfig[] | 
     // Only same-origin paths and plain hex colors can enter link/style attributes.
     if (!href.startsWith("/") || href.startsWith("//") || /[\\\s]/.test(href)) return [];
     if (!/^#[\da-f]{6}$/i.test(color)) return [];
-    return [{ label, href, color }];
+    return [{ label, href, color, ...(record.target === "_self" || record.target === "_blank" ? { target: record.target } : {}) }];
   });
 }
 

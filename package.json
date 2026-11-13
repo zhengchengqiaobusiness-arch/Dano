@@ -1,6 +1,6 @@
 {
   "name": "@dano/dano",
-  "version": "1.0.41",
+  "version": "1.0.42",
   "private": true,
   "description": "Dano P0 web LLM chat",
   "type": "module",

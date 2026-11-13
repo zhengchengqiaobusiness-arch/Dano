@@ -1612,3 +1612,18 @@ updates. Refresh the help page to reload the index and current files without a
 server restart or image rebuild. Videos stream on demand and support byte ranges.
 Missing/invalid content displays a recoverable error instead of falling back to
 an application HTML page. No sample business manual is installed automatically.
+
+### Help route and configured shortcuts
+
+The help manual uses `/help`; direct visits and refreshes render the manual,
+while browser Back/Forward switches between chat and help without unmounting
+the chat. The product breadcrumb and Return to chat restore the previous chat
+address (or `/` after a direct visit).
+
+Composer shortcuts continue to come from `dano.config.json.shortcutLinks`.
+Each entry accepts `label`, `href`, `color`, and an optional standard link
+`target` (`_self` or `_blank`; defaults to `_blank`). The shipped manual shortcut
+uses `/help` and `_self`, so normal clicks use in-app browser-history navigation;
+modified clicks retain normal browser behavior. An explicit empty list hides
+shortcuts. Existing deployment config overrides must update only this list;
+preserve all unrelated settings and recreate the app after changing a file bind.

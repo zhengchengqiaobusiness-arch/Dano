@@ -1172,6 +1172,7 @@ export interface BridgeQuickActionConfig {
 }
 
 export interface BridgeShortcutLinkConfig {
+  readonly target?: "_self" | "_blank";
   readonly label: string;
   /** Same-origin absolute path. */
   readonly href: string;

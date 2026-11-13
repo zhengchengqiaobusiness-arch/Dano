@@ -25,7 +25,7 @@ describe("runtimeConfig", () => {
 
   it("uses shipped shortcuts when no server config was injected", () => {
     vi.stubGlobal("window", {});
-    expect(getRuntimeShortcutLinks().map(link => link.href)).toEqual(["/web", "/page-desk", "/oa"]);
+    expect(getRuntimeShortcutLinks().map(link => link.href)).toEqual(["/help"]);
   });
   afterEach(() => {
     vi.unstubAllGlobals();

@@ -9,9 +9,7 @@
   },
   "transcriptProcessSummaryEnabled": false,
   "shortcutLinks": [
-    { "label": "小络助手介绍", "href": "/web", "color": "#007aff" },
-    { "label": "skill系统页面台", "href": "/page-desk", "color": "#000000" },
-    { "label": "OA业务管理平台", "href": "/oa", "color": "#ff9500" }
+    { "label": "帮助手册", "href": "/help", "color": "#000000", "target": "_self" }
   ],
   "quickActions": [
     {
