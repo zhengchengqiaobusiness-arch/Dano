@@ -633,20 +633,23 @@ it('restores the authoritative selection when a mode request does not change the
   } finally {await unmount(component);target.remove();}
 });
 
-it("opens the manual from the only shortcut without submitting or clearing the draft", async () => {
-  const onOpenHelp = vi.fn(), onSubmit = vi.fn();
+it("renders shortcut labels, destinations, colors and browsing targets from runtime configuration", async () => {
+  const original = window.__PI_WEB_CONFIG__;
+  window.__PI_WEB_CONFIG__ = { shortcutLinks: [
+    { label: "配置中的手册", href: "/help", color: "#123456", target: "_self" },
+    { label: "配置中的业务", href: "/custom", color: "#abcdef" },
+  ] };
   const target = document.createElement("div"); document.body.append(target);
-  const component = mount(ComposerBar, { target, props: { connectionStatus: "connected", onOpenHelp, onSubmit } });
+  const component = mount(ComposerBar, { target, props: { connectionStatus: "connected" } });
   try {
     await tick();
-    const input = target.querySelector("textarea")!;
-    input.value = "保留未发送的草稿"; input.dispatchEvent(new Event("input", { bubbles: true })); await tick();
-    const shortcuts = target.querySelector('nav[aria-label="帮助手册入口"]')!;
-    expect(shortcuts.querySelectorAll("a")).toHaveLength(0);
-    expect(shortcuts.querySelectorAll("button")).toHaveLength(1);
-    expect(shortcuts.textContent).toContain("帮助手册");
-    (shortcuts.querySelector("button") as HTMLButtonElement).click();
-    expect(onOpenHelp).toHaveBeenCalledOnce(); expect(onSubmit).not.toHaveBeenCalled();
-    expect(input.value).toBe("保留未发送的草稿");
-  } finally { await unmount(component); target.remove(); }
+    const links = [...target.querySelectorAll<HTMLAnchorElement>(".composer-shortcuts a")];
+    expect(links.map(link => link.textContent?.trim())).toEqual(["配置中的手册", "配置中的业务"]);
+    expect(links.map(link => link.getAttribute("href"))).toEqual(["/help", "/custom"]);
+    expect(links.map(link => link.target)).toEqual(["_self", "_blank"]);
+    expect(links[0].style.getPropertyValue("--shortcut-color")).toBe("#123456");
+    expect(target.querySelector(".composer-shortcuts button")).toBeNull();
+  } finally {
+    await unmount(component); target.remove(); window.__PI_WEB_CONFIG__ = original;
+  }
 });

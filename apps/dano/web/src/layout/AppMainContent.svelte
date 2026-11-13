@@ -82,7 +82,6 @@
       images: RpcImageContent[];
     } | null,
     onSubmit = (_: ComposerSubmissionPayload) => true,
-    onOpenHelp = () => {},
     onAbort = () => {},
     onLoadOlderTranscript = () => false,
     onSelectModel = (_: RpcModelInfo) => {},
@@ -147,7 +146,6 @@
     onSubmit?: (
       payload: ComposerSubmissionPayload
     ) => boolean | Promise<boolean>;
-    onOpenHelp?: () => void;
     onAbort?: () => void;
     onLoadOlderTranscript?: () => boolean | Promise<boolean>;
     onSelectModel?: (model: RpcModelInfo) => void;
@@ -297,7 +295,6 @@
     {editQueuedPayload}
     onInteraction={() => transcriptRef?.preserveBottomPosition()}
     {onSubmit}
-    {onOpenHelp}
     onAbort={onAbort}
     onCancelRevision={onCancelRevision}
     onSelectModel={onSelectModel}

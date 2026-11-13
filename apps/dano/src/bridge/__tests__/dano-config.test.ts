@@ -46,7 +46,7 @@ describe("Dano config", () => {
           { label: "", prompt: "ignored" },
           { label: "ignored", prompt: " " },
         ],
-        shortcutLinks: [{ label: " 介绍 ", href: " /web ", color: " #007aff " }],
+        shortcutLinks: [{ label: " 介绍 ", href: " /web ", color: " #007aff ", target: "_self" }],
       }),
     );
 
@@ -67,7 +67,7 @@ describe("Dano config", () => {
       slashCommandsAndMentionsEnabled: true,
       transcriptProcessSummaryEnabled: true,
       quickActions: [{ label: "请假", prompt: "帮我申请请假" }],
-      shortcutLinks: [{ label: "介绍", href: "/web", color: "#007aff" }],
+      shortcutLinks: [{ label: "介绍", href: "/web", color: "#007aff", target: "_self" }],
     });
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
