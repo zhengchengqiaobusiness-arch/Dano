@@ -632,3 +632,21 @@ it('restores the authoritative selection when a mode request does not change the
     expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain('快速回答');
   } finally {await unmount(component);target.remove();}
 });
+
+it("opens the manual from the only shortcut without submitting or clearing the draft", async () => {
+  const onOpenHelp = vi.fn(), onSubmit = vi.fn();
+  const target = document.createElement("div"); document.body.append(target);
+  const component = mount(ComposerBar, { target, props: { connectionStatus: "connected", onOpenHelp, onSubmit } });
+  try {
+    await tick();
+    const input = target.querySelector("textarea")!;
+    input.value = "保留未发送的草稿"; input.dispatchEvent(new Event("input", { bubbles: true })); await tick();
+    const shortcuts = target.querySelector('nav[aria-label="帮助手册入口"]')!;
+    expect(shortcuts.querySelectorAll("a")).toHaveLength(0);
+    expect(shortcuts.querySelectorAll("button")).toHaveLength(1);
+    expect(shortcuts.textContent).toContain("帮助手册");
+    (shortcuts.querySelector("button") as HTMLButtonElement).click();
+    expect(onOpenHelp).toHaveBeenCalledOnce(); expect(onSubmit).not.toHaveBeenCalled();
+    expect(input.value).toBe("保留未发送的草稿");
+  } finally { await unmount(component); target.remove(); }
+});

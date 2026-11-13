@@ -1303,6 +1303,7 @@
         pendingMessageCount={displayedPendingMessageCount}
         queuedUserMessages={displayedQueuedUserMessages}
         {editQueuedPayload}
+        onOpenHelp={() => helpOpen = true}
         onSubmit={handlePrompt}
         onLoadOlderTranscript={bridge.loadOlderTranscriptPage}
         onAbort={handleAbort}
