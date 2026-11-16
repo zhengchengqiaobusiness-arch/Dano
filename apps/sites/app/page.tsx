@@ -53,7 +53,7 @@ export default function Home() {
           <Link href="#scenes">业务场景</Link>
           <Link href="#integration">系统接入</Link>
         </div>
-        <a className="nav-cta" href="https://1.15.173.22/" target="_blank" rel="noreferrer">
+        <a className="nav-cta" href="/" target="_blank" rel="noreferrer">
           进入小络助手 <span aria-hidden="true">↗</span>
         </a>
       </nav>
@@ -284,7 +284,7 @@ export default function Home() {
           <span>从下一项员工业务开始</span>
           <h2>让员工直接说出要办的事</h2>
           <p>选择一个高频场景，接入现有系统，把复杂流程变成可确认、可执行、可追踪的一段对话。</p>
-          <a className="button primary" href="https://1.15.173.22/" target="_blank" rel="noreferrer">进入小络助手 <span>↗</span></a>
+          <a className="button primary" href="/" target="_blank" rel="noreferrer">进入小络助手 <span>↗</span></a>
         </div>
       </section>
 
