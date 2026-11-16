@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 import { publicConfigPlugin } from "./apps/dano/public-config.js";
 
 const typesRoot = fileURLToPath(new URL("./apps/dano/types/", import.meta.url));
@@ -33,6 +33,11 @@ export default defineConfig({
     ],
   },
   test: {
+    setupFiles: ["./scripts/test-setup.ts"],
+    exclude: [
+      ...configDefaults.exclude,
+      ...(process.env.DANO_TEST_PROFILE === "container" ? [] : ["**/*.container.test.ts"]),
+    ],
     include: [
       "apps/dano/src/**/*.test.ts",
       "apps/dano/web/src/**/*.test.ts",

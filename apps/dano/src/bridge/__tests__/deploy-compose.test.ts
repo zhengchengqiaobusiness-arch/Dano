@@ -14,7 +14,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Each release fixture launches several real Node/Git subprocesses. Keep a
+// bounded integration-test budget instead of the 5s unit-test default.
+vi.setConfig({ testTimeout: 30_000 });
 
 const deployScript = new URL(
   "../../../../../scripts/deploy-compose.mjs",
@@ -1322,6 +1326,55 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
         "--env-file", ".env", "exec", "-T", "nginx", "nginx", "-s", "reload"],
       "smoke",
     ]);
+  });
+
+  it("initializes Dano-owned OAuth credential encryption before the production gate", () => {
+    const markerRoot = mkdtempSync(join(tmpdir(), "dano-release-oauth-key-"));
+    tempDirs.push(markerRoot);
+    const deployDir = join(markerRoot, "deploy");
+    mkdirSync(deployDir);
+    writeFileSync(join(deployDir, ".env"), "DANO_OPERATOR_VALUE=preserve-me\n", {
+      mode: 0o600,
+    });
+
+    const firstRelease = runRelease({
+      deployDir,
+      env: { DANO_FAKE_REQUIRE_OAUTH_CREDENTIAL_PAIR: "1" },
+    });
+
+    const firstEnv = readFileSync(join(deployDir, ".env"), "utf8");
+    const key = firstEnv.match(
+      /^DANO_OAUTH_CREDENTIAL_KEY=([A-Za-z0-9_-]+)$/m,
+    )?.[1];
+    expect(Buffer.from(key ?? "", "base64url")).toHaveLength(32);
+    expect(firstEnv).toContain(
+      "DANO_OAUTH_CREDENTIAL_KEY_VERSION=dano-deploy-v1",
+    );
+    expect(firstEnv).toContain("DANO_OPERATOR_VALUE=preserve-me");
+    expect(statSync(join(deployDir, ".env")).mode & 0o777).toBe(0o600);
+    expect(firstRelease.output).toContain(
+      "initialized Dano-owned OAuth credential encryption material",
+    );
+    expect(firstRelease.output).not.toContain(key);
+
+    const secondRelease = runRelease({
+      deployDir,
+      env: { DANO_FAKE_REQUIRE_OAUTH_CREDENTIAL_PAIR: "1" },
+    });
+    const secondEnv = readFileSync(join(deployDir, ".env"), "utf8");
+    const credentialLines = (env: string) =>
+      env
+        .split("\n")
+        .filter(line => line.startsWith("DANO_OAUTH_CREDENTIAL_KEY"));
+    expect(credentialLines(secondEnv)).toEqual(credentialLines(firstEnv));
+    expect(secondEnv).toContain(`DANO_OAUTH_CREDENTIAL_KEY=${key}`);
+    expect(secondEnv).toContain(
+      "DANO_OAUTH_CREDENTIAL_KEY_VERSION=dano-deploy-v1",
+    );
+    expect(secondRelease.output).toContain(
+      "preserved Dano-owned OAuth credential encryption material",
+    );
+    expect(secondRelease.output).not.toContain(key);
   });
 
   it.each([
