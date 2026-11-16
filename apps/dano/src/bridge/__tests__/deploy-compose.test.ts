@@ -119,6 +119,7 @@ writeFileSync(process.env.DANO_COMPOSE_ENV_LOG, JSON.stringify({
     DANO_COMPOSE: composePath,
     DANO_COMPOSE_LOG: logPath,
     DANO_COMPOSE_ENV_LOG: composeEnvPath,
+    DANO_HELP_DIR: join(cwd, "help"),
   };
   delete env.DANO_IMAGE;
   delete env.DANO_EXPOSURE_MODE;
@@ -170,6 +171,7 @@ function runRelease(
       : tlsKeyPath;
 
   mkdirSync(join(fakeRepo, "deploy/compose"), { recursive: true });
+  cpSync(join(deployRoot, "help"), join(fakeRepo, "deploy/help"), { recursive: true });
   writeFileSync(join(fakeRepo, "deploy/compose/memory.yml"), "services: {}\n");
   mkdirSync(join(fakeRepo, "deploy/nginx/shared"), { recursive: true });
   mkdirSync(join(fakeRepo, "scripts"), { recursive: true });
@@ -311,6 +313,7 @@ appendFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(["chown", ...process
       DANO_BUILD_PARENT_DIR: buildParent,
       DANO_DEPLOY_DIR: deployDir,
       DANO_RUNTIME_DIR: runtimeDir,
+      DANO_HELP_DIR: join(cwd, "help"),
       DANO_SECRETS_DIR: secretsDir,
       DANO_NGINX_CONF: nginxConf,
       DANO_EXPOSURE_MODE: options.exposureMode,
@@ -1213,6 +1216,9 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     const { buildParent, deployDir, runtimeDir, nginxConf, logLines } =
       runRelease();
 
+    const helpDir = join(runtimeDir, "..", "help");
+    expect(readFileSync(join(helpDir, "demo.md"), "utf8")).toContain("约需30分钟");
+    expect(readFileSync(join(deployDir, ".env"), "utf8")).toContain(`DANO_HELP_DIR=${helpDir}`);
     expect(readdirSync(buildParent)).toEqual([]);
     expect(readFileSync(join(deployDir, "docker-compose.yml"), "utf8")).toContain(
       "services:",

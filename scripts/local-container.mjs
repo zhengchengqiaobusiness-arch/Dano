@@ -29,6 +29,7 @@ const result = spawnSync(
       ...process.env,
       DANO_COMPOSE: "podman",
       DANO_RUNTIME_DIR: runtimeDir,
+      DANO_HELP_DIR: process.env.DANO_HELP_DIR?.trim() || join(localRoot, "help"),
       DANO_SECRETS_DIR: secretsDir,
       DANO_NGINX_PORT: "18082",
       DANO_EXPOSURE_MODE: "http",

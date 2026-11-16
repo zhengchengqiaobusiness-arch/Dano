@@ -1563,10 +1563,22 @@ The smoke test checks:
 Set `DANO_HELP_DIR` in the deployment environment to an absolute host directory.
 Compose mounts it at `/opt/dano/help` read-only. Without Compose, `DANO_HELP_DIR`
 selects the server's content directory and defaults to `DANO_RUNTIME_DIR/help`.
-Create the directory before starting Compose and make it readable by the app
+`pnpm deploy:release` and `pnpm deploy:up` initialize a missing or empty host
+directory from the versioned `deploy/help/` defaults before starting Compose.
+An existing nonempty directory is left entirely unchanged, including files a
+maintainer has edited or deleted. With direct `docker compose up`, first copy
+`deploy/help/` into a new host directory yourself. Make it readable by the app
 service user. Upload and edit files there using existing host administration tools
 (e.g. SFTP). The application does not provide a write/upload API for manuals.
-Restarts and releases never initialize, synchronize or delete this directory.
+Application restarts never write this directory; releases only initialize an
+empty directory and never synchronize or delete an existing manual.
+
+The defaults include the video description, maintenance guide, three application
+entry Markdown files and optional `index.json` metadata. Application links use
+`target="_blank"` with `rel="noopener noreferrer"`. The existing `dano.config.json`
+`shortcutLinks` remains the default for the chat help entry. Video binaries are
+not bundled: upload `demo.mp4` alongside `demo.md` to show the demo video; the
+description remains readable when the video is absent.
 
 Drop Markdown (`.md`) and videos (`.mp4`, `.webm`) into this folder, then refresh
 the help page. They appear automatically, including files in subfolders. The
