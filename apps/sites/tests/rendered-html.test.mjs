@@ -45,6 +45,13 @@ test("server-renders the Xiaoluo assistant product site", async () => {
   assert.doesNotMatch(html, /Your site is taking shape|Building your site/);
 });
 
+test("links to the same-origin assistant without a deployment-specific host", async () => {
+  const html = await (await render()).text();
+  assert.match(html, /class="nav-cta" href="\/"/);
+  assert.match(html, /class="button primary" href="\/"/);
+  assert.doesNotMatch(html, /https?:\/\/(?:\d{1,3}\.){3}\d{1,3}(?:[:/])/);
+});
+
 test("ships the complete production-demo flow and share metadata", async () => {
   const response = await render();
   const html = await response.text();
