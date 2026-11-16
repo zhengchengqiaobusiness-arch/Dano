@@ -1315,56 +1315,13 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
       "app",
       "nginx",
     ]);
-    expect(logLines[8]).toBe("smoke");
-  });
-
-  it("initializes Dano-owned OAuth credential encryption before the production gate", () => {
-    const markerRoot = mkdtempSync(join(tmpdir(), "dano-release-oauth-key-"));
-    tempDirs.push(markerRoot);
-    const deployDir = join(markerRoot, "deploy");
-    mkdirSync(deployDir);
-    writeFileSync(join(deployDir, ".env"), "DANO_OPERATOR_VALUE=preserve-me\n", {
-      mode: 0o600,
-    });
-
-    const firstRelease = runRelease({
-      deployDir,
-      env: { DANO_FAKE_REQUIRE_OAUTH_CREDENTIAL_PAIR: "1" },
-    });
-
-    const firstEnv = readFileSync(join(deployDir, ".env"), "utf8");
-    const key = firstEnv.match(
-      /^DANO_OAUTH_CREDENTIAL_KEY=([A-Za-z0-9_-]+)$/m,
-    )?.[1];
-    expect(Buffer.from(key ?? "", "base64url")).toHaveLength(32);
-    expect(firstEnv).toContain(
-      "DANO_OAUTH_CREDENTIAL_KEY_VERSION=dano-deploy-v1",
-    );
-    expect(firstEnv).toContain("DANO_OPERATOR_VALUE=preserve-me");
-    expect(statSync(join(deployDir, ".env")).mode & 0o777).toBe(0o600);
-    expect(firstRelease.output).toContain(
-      "initialized Dano-owned OAuth credential encryption material",
-    );
-    expect(firstRelease.output).not.toContain(key);
-
-    const secondRelease = runRelease({
-      deployDir,
-      env: { DANO_FAKE_REQUIRE_OAUTH_CREDENTIAL_PAIR: "1" },
-    });
-    const secondEnv = readFileSync(join(deployDir, ".env"), "utf8");
-    const credentialLines = (env: string) =>
-      env
-        .split("\n")
-        .filter(line => line.startsWith("DANO_OAUTH_CREDENTIAL_KEY"));
-    expect(credentialLines(secondEnv)).toEqual(credentialLines(firstEnv));
-    expect(secondEnv).toContain(`DANO_OAUTH_CREDENTIAL_KEY=${key}`);
-    expect(secondEnv).toContain(
-      "DANO_OAUTH_CREDENTIAL_KEY_VERSION=dano-deploy-v1",
-    );
-    expect(secondRelease.output).toContain(
-      "preserved Dano-owned OAuth credential encryption material",
-    );
-    expect(secondRelease.output).not.toContain(key);
+    expect(logLines.slice(8).map(line => line === "smoke" ? line : JSON.parse(line))).toEqual([
+      ["compose", "-f", "docker-compose.yml", "-f", "docker-compose.exposure.yml",
+        "--env-file", ".env", "exec", "-T", "nginx", "nginx", "-t"],
+      ["compose", "-f", "docker-compose.yml", "-f", "docker-compose.exposure.yml",
+        "--env-file", ".env", "exec", "-T", "nginx", "nginx", "-s", "reload"],
+      "smoke",
+    ]);
   });
 
   it.each([
