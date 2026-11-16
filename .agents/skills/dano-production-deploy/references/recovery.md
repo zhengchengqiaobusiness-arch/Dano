@@ -15,7 +15,7 @@ not immutable host facts: the capability probe and current Dockerfile decide.
   using an ASCII default. Consume probe capabilities: `cd` plus plain Git,
   public helpers in the accepted Node image, and explicit UTF-8 file encoding.
 - Pin the exact inventoried Compose file list once. Bind every receipt and
-  Browser fixture to target SHA/image ID/container ID; resume the unfinished
+  optional acceptance fixture to target SHA/image ID/container ID; resume the unfinished
   stage. Use the normalized `deploy-build-context.mjs archive` output for test
   source mounted under `/app`; root-only or writable raw checkout metadata can
   correctly fail the installation guard. Keep that guard unchanged.
@@ -66,8 +66,7 @@ pass it to the waiting worker without repeating a failed server network route.
    `RUNTIME_BASE`; replace complete `/app/dist` plus root product-version metadata,
    with the target OCI revision/version labels. Never transfer local
    `node_modules`, overwrite native dependencies, or reuse an unproven base.
-   Repeat the candidate's built config/sandbox/PR-specific preflights and real
-   Browser acceptance. Report this as artifact recovery, not a full Dockerfile
+   Repeat the candidate's built config/sandbox/PR-specific preflights and machine smoke. Report this as artifact recovery, not a full Dockerfile
    source build. A blocked planner selects a compatible Linux builder or reports
    the dependency/source blocker; do not widen the allowlist for convenience.
 
@@ -75,7 +74,7 @@ pass it to the waiting worker without repeating a failed server network route.
 
 Compose the shipped `deploy/system-prompt.mjs backup/restore/discard` commands
 under the deployment lock and effective app user. Keep the transaction through
-Browser disposition. A `docker cp` round trip was observed to change SYSTEM to
+machine smoke. A `docker cp` round trip was observed to change SYSTEM to
 root ownership; use the shipped atomic restore and verify UID/GID/mode/content.
 Derive route checks from the preserved port projection (the observed deployment
 published only 443). Finish with one candidate-bound evidence export and scoped

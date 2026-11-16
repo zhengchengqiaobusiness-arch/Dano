@@ -1438,11 +1438,11 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     expect(existsSync(marker)).toBe(false);
   });
 
-  it("refuses a release while SYSTEM browser acceptance is pending", () => {
+  it("refuses a release while a SYSTEM recovery transaction is unfinished", () => {
     const root = mkdtempSync(join(tmpdir(), "dano-pending-system-"));
     tempDirs.push(root);
     mkdirSync(join(root, ".system-rollback-pending"));
-    expect(() => runRelease({ deployDir: root })).toThrow("Resolve pending SYSTEM browser acceptance");
+    expect(() => runRelease({ deployDir: root })).toThrow("Resolve unfinished SYSTEM recovery transaction");
   });
 
   it.each(["sync", "check"])("stops release before Compose switch when SYSTEM %s fails", phase => {

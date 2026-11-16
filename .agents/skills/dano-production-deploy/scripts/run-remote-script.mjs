@@ -2,8 +2,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+
+import { productionSshArguments } from "../../../../scripts/production-profile.mjs";
 
 const [kind, scriptPath, ...extra] = process.argv.slice(2);
 const kinds = ["diagnostic", "mutation", "acceptance"];
@@ -15,9 +15,7 @@ const emit = value => console.log(JSON.stringify({ kind: kinds.includes(kind) ? 
 // Child output remains on the host; only validated transport receipts leave it.
 function ssh(command, input = "", timeoutMs) {
   return new Promise(resolve => {
-    const child = spawn("ssh", ["-i", join(homedir(), ".ssh/id_rsa"),
-      "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=15",
-      "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "root@1.15.173.22", command],
+    const child = spawn("ssh", [...productionSshArguments(), command],
     { stdio: ["pipe", "pipe", "pipe"] });
     let output = "";
     let overflow = false;

@@ -42,7 +42,8 @@
     "test:auth-release": "DANO_NGINX_RUNTIME_TEST=1 vitest run apps/dano/src/__tests__/main.test.ts apps/dano/src/__tests__/oauth-login-http.test.ts apps/dano/src/__tests__/anonymous-user-http.test.ts apps/dano/src/__tests__/user-runtime-isolation-http.test.ts apps/dano/src/bridge/__tests__/credential-broker.test.ts apps/dano/src/bridge/__tests__/anonymous-user-cleanup.test.ts apps/dano/src/bridge/__tests__/detached-session.test.ts apps/dano/src/bridge/__tests__/heimdall-extension.test.ts apps/dano/web/src/layout/AppHeader.test.ts apps/dano/web/src/components/ReauthenticationDialog.test.ts apps/dano/web/src/composables/bridgeStore.prompt.test.ts apps/dano/src/bridge/__tests__/production-auth-deploy.test.ts && vitest run apps/dano/src/bridge/__tests__/deploy-compose.test.ts -t \"builds releases|stops a release|removes only fixed Demo\" && pnpm run test:auth-built-entrypoint && vitest run apps/dano/src/bridge/__tests__/bridge-rpc-adapter.test.ts -t \"projects provider_request results as JSON-safe transcript data\"",
     "test:watch": "vitest",
     "test:prepare": "node scripts/prepare-test-python.mjs",
-    "test:container": "node scripts/run-tests.mjs --container"
+    "test:container": "node scripts/run-tests.mjs --container",
+    "deploy:production": "node scripts/deploy-production.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.1.2",

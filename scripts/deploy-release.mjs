@@ -154,7 +154,7 @@ function ensureOAuthCredentialEncryption() {
 try {
   unlock = acquireDeploymentLock();
   if (existsSync(deployDir) && readdirSync(deployDir).some(name => name.startsWith(".system-rollback-"))) {
-    throw new Error("Resolve pending SYSTEM browser acceptance before release");
+    throw new Error("Resolve unfinished SYSTEM recovery transaction before release");
   }
   const repoUrl = requireValue(
     "DANO_REPO_URL",

@@ -2,7 +2,7 @@
 
 Use the existing deployment helpers and Compose contract. The transport below
 adds checksum verification, private output and inherited locking; the caller's
-reviewed script remains responsible for staging and acceptance.
+reviewed script remains responsible for staging and machine checks.
 
 ## Prepare a file, then execute it
 
@@ -23,18 +23,18 @@ receipts across context compaction; the directory is a cleanup ownership record.
 
 Both connections use `ConnectTimeout=15`, `ServerAliveInterval=15` and
 `ServerAliveCountMax=3`. OpenSSH detects a lost connection without imposing a
-short runtime limit on a healthy build or Browser wait. Upload additionally has
+short runtime limit on a healthy machine operation. Upload additionally has
 a 30-second local bound. An interrupted execution is unconfirmed: the remote
 worker may still hold the lock, so inspect its receipt and ownership before
-resuming. Bound build execution and Browser decision waits inside the payload.
+resuming. Bound individual machine commands and health waits inside the payload.
 
-`mutation` and `acceptance` executions acquire the production lock on fd 9 and
-export `DANO_DEPLOY_LOCK_FD=9` for existing helpers. Reuse that descriptor inside
-the payload. Keep the same worker alive through Browser disposition and cleanup;
-coordinate its bounded wait using a private, candidate-bound on-host decision
-file. Validate its target SHA/image ID before applying any decision. Record a
-pending Browser phase before waiting. Do not finish a switch script and release
-its lock before Browser acceptance.
+`mutation` executions acquire the production lock on fd 9 and export
+`DANO_DEPLOY_LOCK_FD=9` for existing helpers. Hold the same worker through image
+preflight, switch, machine health/smoke, rollback if necessary, receipt and
+cleanup. Do not wait for a Browser decision. After machine success, release the
+lock and ask about optional feature acceptance, defaulting to no acceptance.
+The `acceptance` runner kind is retained for explicit maintenance operations;
+a Browser run does not need to hold the deployment lock.
 
 The runner has **no rollback trap**. CLI exit 0 means a valid execution receipt
 was obtained: check `exitCode` and `disposition`, not the wrapper exit alone.
@@ -46,12 +46,11 @@ was obtained: check `exitCode` and `disposition`, not the wrapper exit alone.
 | Failed mutation/acceptance, `stop-and-classify` | Stop dependent mutations, inspect actual state and apply the skill's acceptance/rollback rules. |
 | CLI exit 2, `incomplete` | Execution is unconfirmed. Inspect/reacquire the lock and reconcile container/config state before another mutation. |
 
-An inventory typo, unsupported option, read-only fetch timeout, evidence-export
-failure or transport failure is not itself a release regression. An unknown
-required acceptance failure remains incomplete: retry safely, then use Phase 8's
-explicit disposition. Confirmed regression still requires immediate rollback.
-Use EXIT/signal traps for scoped cleanup and recording interruption; decide
-rollback explicitly from phase, health and acceptance evidence.
+A failed diagnostic or transport interruption is not itself a product regression.
+Inspect the candidate-bound machine receipt and live lock/state before resuming.
+A failed health/smoke check triggers the recorded rollback. Optional acceptance,
+a browser timeout or an unanswered question does not roll back a smoke-passed
+release. A later confirmed product regression is a separate recovery operation.
 
 ## Capability and input handling
 
@@ -79,7 +78,7 @@ JSON-filter pipelines consume only their producer's pipe.
 
 Persist a private on-host release record with `targetSha`, immutable image ID,
 previous image, approved Compose files, candidate criteria and phase receipts.
-Track `prepared`, `switched`, `machine-passed`, `browser-passed`, `accepted` or
+Track `prepared`, `switched`, `machine-passed`, `deployed` or
 `rolled-back`; write a transition only after its evidence passes. Record
 `readiness_timestamp` after real healthy/smoke checks, never before a wait.
 
@@ -90,8 +89,8 @@ server HEAD, clean build context and OCI revision still prove the same target.
 Keep upstream checks outside traffic mutation and acceptance completion logic.
 
 Reuse completed PR-specific proof only for the identical candidate and unaffected
-session/material scope. After a container restart, repeat machine smoke and the
-current-process Browser text/bash/image baseline plus relevant persistence checks.
+session/material scope. After a container restart, repeat machine smoke. Browser checks belong only
+to a separately requested feature acceptance.
 After Browser-control reconnection alone, retain completed evidence and resume
 the unfinished interaction in the same in-app tab. A changed candidate invalidates
 candidate-specific evidence.
@@ -146,6 +145,6 @@ Record stage start/end and selected path in the existing release receipt. Use a
 and one attempt per unchanged route as default work budgets. Measurable download
 progress can continue within the reviewed build deadline. An exhausted budget
 selects the documented alternative or reports the specific blocker; it never
-waives a safety or acceptance gate. Poll phase changes rather than unchanged
+waives a machine safety gate. Poll phase changes rather than unchanged
 logs. Reconnection reuses completed evidence for the same candidate; a changed
-candidate repeats its required acceptance.
+candidate repeats its machine checks; optional feature acceptance remains separate.
