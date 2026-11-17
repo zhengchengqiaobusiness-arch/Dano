@@ -34,6 +34,7 @@ class Release:
         self.timings = {}
         self.receipt = {key: manifest[key] for key in ['attemptId', 'targetSha', 'version', 'image']}
         self.receipt['acceptance'] = 'not_requested'
+        self.receipt['browserSmoke'] = 'pending'
         self.receipt['ci'] = manifest.get('ci')
 
     def command(self, args, capture=False, input_data=None, timeout=None):
@@ -86,6 +87,10 @@ class Release:
             raise RuntimeError('COMPOSE_PROFILE_DRIFT')
         return value
 
+    def image_artifacts(self, image):
+        return json.loads(self.command(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'node', image, '-e',
+            'const fs=require("fs");const p=JSON.parse(fs.readFileSync("/app/package-versions/package.json"));const h=fs.readFileSync("/app/dist/web/index.html","utf8");console.log(JSON.stringify({version:p.version,assets:[...h.matchAll(/assets\\/([^" ]+\\.(?:js|css))/g)].map(x=>x[1])}));'], capture=True))
+
     def prepare(self):
         if not os.environ.get('DANO_DEPLOY_LOCK_FD'):
             raise RuntimeError('DEPLOY_LOCK_REQUIRED')
@@ -119,9 +124,7 @@ class Release:
         self.candidate_id = candidate['Id']
         self.receipt['imageId'] = self.candidate_id
         self.receipt['previousImageId'] = self.old_image
-        manifest = self.command(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'node', self.candidate_id, '-e',
-                                 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("/app/package-versions/package.json"));const h=fs.readFileSync("/app/dist/web/index.html","utf8");console.log(JSON.stringify({version:p.version,assets:[...h.matchAll(/assets\\/([^" ]+\\.(?:js|css))/g)].map(x=>x[1])}));'], capture=True)
-        packaged = json.loads(manifest)
+        packaged = self.image_artifacts(self.candidate_id)
         if packaged['version'] != self.m['version'] or not packaged['assets']:
             raise RuntimeError('IMAGE_ARTIFACT_MISMATCH')
         self.receipt['assets'] = packaged['assets']
@@ -183,6 +186,7 @@ class Release:
             self.command(self.compose + ['exec', '-T', self.p['nginxService'], 'nginx'] + action)
         self.command(['docker', 'run', '--rm', '--network', 'host', '--entrypoint', 'node',
                       '-e', 'DANO_SMOKE_BASE_URL=' + self.p['baseUrl'],
+                      '-e', 'DANO_SMOKE_EXPECTED_ASSETS_JSON=' + json.dumps(self.image_artifacts(expected_image)['assets']),
                       '-e', 'DANO_EXPOSURE_MODE=https', '-v', str(self.work / 'smoke.mjs') + ':/smoke.mjs:ro',
                       expected_image, '/smoke.mjs'], timeout=self.p['smokeTimeoutSeconds'])
         self.command(['curl', '--fail', '--silent', '--show-error', '--max-time', '15', self.p['baseUrl'].rstrip('/') + '/web/'])

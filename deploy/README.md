@@ -30,11 +30,25 @@ and rollback material stay private under the configured receipt directory.
 The previous image is retained. Cleanup-only failure is recorded without rolling
 back a healthy deployment.
 
-**Deployment ends after health and smoke pass, receipt is saved and lock released.**
-Browser/model/feature acceptance is separate. After deployment, ask whether to
-accept this change; default is **不验收**. Only an affirmative answer starts that
-separate flow. No pending question or browser timeout rolls back a completed
-deployment. Report `status=deployed` separately from `acceptance=not_requested`.
+**Machine deployment ends after health and machine smoke pass, receipt is saved and lock released.**
+The deployment workflow then runs baseline browser smoke: real model chat and the
+existing OA login flow, followed by another chat while logged in. Use the Codex
+in-app Browser and [the browser smoke procedure](../.agents/skills/dano-production-deploy/references/browser-smoke.md).
+The machine receipt records `browserSmoke=pending`; report browser results separately,
+bound to the receipt's target SHA and image ID. An API response or an already logged-in
+menu alone does not prove the browser login flow. User-only login steps may require a handoff.
+
+Machine smoke requires a successful, structurally valid `get_state` response and
+fetches every homepage JavaScript/CSS reference with the correct MIME type and a
+nonempty body. The production worker supplies `DANO_SMOKE_EXPECTED_ASSETS_JSON`
+from the image being verified, including during rollback; the homepage asset paths
+must match it exactly. Standalone smoke without this variable checks availability
+and explicitly reports that image-manifest comparison was not performed.
+
+Full feature acceptance remains separate and defaults to **不验收**. Ask about it
+after baseline browser smoke. Browser blockage is reported as incomplete browser
+smoke while preserving machine deployment status; it does not cause an automatic
+time-delayed rollback. A confirmed product regression needs an explicit repair or rollback.
 
 This directory contains deployment-specific defaults and proxy config.
 

@@ -32,7 +32,8 @@ resuming. Bound individual machine commands and health waits inside the payload.
 `DANO_DEPLOY_LOCK_FD=9` for existing helpers. Hold the same worker through image
 preflight, switch, machine health/smoke, rollback if necessary, receipt and
 cleanup. Do not wait for a Browser decision. After machine success, release the
-lock and ask about optional feature acceptance, defaulting to no acceptance.
+lock and complete baseline browser smoke, then ask about optional full feature
+acceptance, defaulting to no acceptance.
 The `acceptance` runner kind is retained for explicit maintenance operations;
 a Browser run does not need to hold the deployment lock.
 
@@ -89,8 +90,8 @@ server HEAD, clean build context and OCI revision still prove the same target.
 Keep upstream checks outside traffic mutation and acceptance completion logic.
 
 Reuse completed PR-specific proof only for the identical candidate and unaffected
-session/material scope. After a container restart, repeat machine smoke. Browser checks belong only
-to a separately requested feature acceptance.
+session/material scope. After a container restart, repeat machine smoke and baseline browser smoke.
+Additional feature checks require a separately requested acceptance.
 After Browser-control reconnection alone, retain completed evidence and resume
 the unfinished interaction in the same in-app tab. A changed candidate invalidates
 candidate-specific evidence.

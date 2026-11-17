@@ -1,15 +1,14 @@
 ---
 name: dano-production-deploy
-description: Deploy a prepared Dano image to the existing service on 1.15.173.22, finish health checks and machine smoke, and report completion. Browser acceptance is separate and runs only when explicitly requested.
+description: Deploy a prepared Dano image to the existing service on 1.15.173.22, finish machine smoke, then verify real chat and OA login in the Codex in-app Browser. Full feature acceptance remains optional.
 ---
 
 # Deploy Dano
 
-Deployment and feature acceptance are separate operations. Default deployment
-completion means the intended immutable image is running, health and machine
-smoke pass, the receipt is saved, and the deployment lock is released. Do not
-open a browser, send model prompts, upload images, or wait for acceptance as part
-of a deployment-only request.
+Machine deployment and browser smoke have separate results. After machine health
+and smoke pass, save the receipt and release the lock. Then complete baseline
+browser smoke (real chat, OA login, logged-in chat). Full feature acceptance is
+optional and starts only when requested.
 
 ## Fixed production entry
 
@@ -55,13 +54,15 @@ pnpm deploy:production --image <prepared-image> --plan
    Report version, image, receipt and timings. A transport interruption is
    unconfirmed; inspect that attempt's on-host receipt and lock before retrying.
    Never rebuild an already verified candidate solely to repeat deployment.
-5. Deployment is now complete. Ask whether the user wants acceptance of this
-   change, with **不验收** as the default/first option. Use the async question
-   tool when available. This question does not keep the worker or lock alive.
-   Silence means no acceptance is started; it does not undo deployment.
-6. Only an affirmative answer starts [feature acceptance](references/acceptance.md).
-   Acceptance failure or cancellation never triggers a delayed deployment timer.
-   A confirmed product regression is handled as a new repair/rollback operation.
+5. Complete [baseline browser smoke](references/browser-smoke.md) without another
+   permission question. The machine receipt's `browserSmoke=pending` is a handoff,
+   not proof that browser smoke passed. Bind browser evidence to its target/image.
+   If login needs user input, continue independent checks and hand off that step;
+   report the remaining browser check explicitly instead of declaring it passed.
+6. After baseline smoke, ask whether the user wants full feature acceptance, with
+   **不验收** first/default. Only an affirmative answer starts
+   [feature acceptance](references/acceptance.md). Browser blockage does not keep
+   the deployment lock or automatically roll back a machine-healthy deployment.
 
 ## Boundaries
 

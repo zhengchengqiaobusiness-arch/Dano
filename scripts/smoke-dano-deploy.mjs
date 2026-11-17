@@ -144,12 +144,49 @@ function requestHeaders(cookie, values = {}) {
   return cookie ? { Cookie: cookie, ...values } : values;
 }
 
+async function checkAssets(html) {
+  const assets = [...new Set([...html.matchAll(/\b(?:src|href)\s*=\s*["']([^"']+)["']/gi)]
+    .map(match => new URL(match[1], baseUrl))
+    .filter(asset => /\.(?:js|css)$/.test(asset.pathname))
+    .map(asset => {
+      assert(asset.origin === baseUrl.origin, "entry asset must use the deployment origin");
+      return asset.pathname;
+    }))].sort();
+  assert(assets.some(path => path.endsWith(".js")), "homepage has no JavaScript entry");
+  assert(assets.some(path => path.endsWith(".css")), "homepage has no stylesheet");
+  const expectedJson = process.env.DANO_SMOKE_EXPECTED_ASSETS_JSON;
+  if (expectedJson !== undefined) {
+    const expected = JSON.parse(expectedJson);
+    assert(Array.isArray(expected) && expected.length > 0 &&
+      expected.every(name => typeof name === "string" && /^[^/]+\.(?:js|css)$/.test(name)),
+    "candidate asset manifest is invalid");
+    assert(JSON.stringify(assets) === JSON.stringify([...new Set(expected.map(name => `/assets/${name}`))].sort()),
+      "homepage assets differ from the expected image manifest");
+    console.log("[smoke] homepage assets match image manifest");
+  } else {
+    console.log("[smoke] image manifest not supplied; checking asset availability only");
+  }
+  for (const path of assets) {
+    await withTimeout("GET entry asset", async signal => {
+      const response = await fetch(url(path), { cache: "no-store", signal });
+      assert(response.ok, "entry asset request failed");
+      const contentType = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+      assert(path.endsWith(".css") ? contentType === "text/css" :
+        /^(?:text|application)\/(?:javascript|ecmascript)$/.test(contentType ?? ""),
+      "entry asset has an incorrect Content-Type");
+      assert((await response.arrayBuffer()).byteLength > 0, "entry asset is empty");
+    });
+  }
+  console.log("[smoke] JavaScript and CSS assets loaded");
+}
+
 console.log(`[smoke] base url: ${baseUrl.toString()}`);
 
 const root = await expectResponse("GET /", "/", {}, response => response.ok);
 const rootText = await root.text();
 assert(/<html/i.test(rootText), "GET / did not return HTML");
 console.log("[smoke] / loaded");
+await checkAssets(rootText);
 
 const health = await expectResponse(
   "GET /api/health",
@@ -180,51 +217,62 @@ assert(!created.currentUser, "Anonymous client exposed a current User");
 console.log("[smoke] Anonymous User cookie verified");
 console.log("[smoke] client created");
 
-const sse = await expectResponse(
-  "GET eventsUrl",
-  created.eventsUrl,
-  { headers: requestHeaders(guestCookie) },
-  response =>
-    response.ok &&
-    response.headers.get("content-type")?.includes("text/event-stream"),
-);
-console.log("[smoke] SSE connected");
+let sse;
+try {
+  sse = await expectResponse(
+    "GET eventsUrl",
+    created.eventsUrl,
+    { headers: requestHeaders(guestCookie) },
+    response =>
+      response.ok &&
+      response.headers.get("content-type")?.includes("text/event-stream"),
+  );
+  console.log("[smoke] SSE connected");
 
-const commandId = `smoke-${Date.now()}`;
-const posted = await expectResponse(
-  "POST messagesUrl",
-  created.messagesUrl,
-  {
-    method: "POST",
-    headers: requestHeaders(guestCookie, { "Content-Type": "application/json" }),
-    body: JSON.stringify({
-      type: "command",
-      payload: { id: commandId, type: "get_state" },
-    }),
-  },
-  response => response.status === 202,
-);
-assert((await posted.json()).status === "accepted", "message was not accepted");
-console.log("[smoke] message accepted");
+  const commandId = `smoke-${Date.now()}`;
+  const posted = await expectResponse(
+    "POST messagesUrl",
+    created.messagesUrl,
+    {
+      method: "POST",
+      headers: requestHeaders(guestCookie, { "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        type: "command",
+        payload: { id: commandId, type: "get_state" },
+      }),
+    },
+    response => response.status === 202,
+  );
+  assert((await posted.json()).status === "accepted", "message was not accepted");
+  console.log("[smoke] message accepted");
 
-const message = await waitForSseMessage(
-  sse,
-  event => event.type === "response" && event.payload?.id === commandId,
-);
-assert(
-  typeof message.payload?.success === "boolean",
-  "response did not include success state",
-);
-console.log(`[smoke] SSE response received: success=${message.payload.success}`);
-
-await expectResponse(
-  "POST disconnect",
-  `/api/clients/${encodeURIComponent(created.client.id)}/disconnect`,
-  {
-    method: "POST",
-    headers: requestHeaders(guestCookie, { "Content-Type": "application/json" }),
-    body: "{}",
-  },
-  response => response.status === 202,
-);
-console.log("[smoke] disconnect ok");
+  const message = await waitForSseMessage(
+    sse,
+    event => event.type === "response" && event.payload?.id === commandId,
+  );
+  assert(
+    message.payload?.type === "response" && message.payload.command === "get_state" &&
+      message.payload.success === true,
+    "get_state did not return a successful response",
+  );
+  const state = message.payload.data;
+  assert(state && typeof state === "object" && !Array.isArray(state) &&
+    typeof state.sessionId === "string" && state.sessionId.length > 0 &&
+    Number.isSafeInteger(state.messageCount) && state.messageCount >= 0 &&
+    typeof state.isStreaming === "boolean",
+  "get_state returned an invalid session state");
+  console.log(`[smoke] SSE response received: success=${message.payload.success}`);
+} finally {
+  await sse?.body?.cancel().catch(() => {});
+  await expectResponse(
+    "POST disconnect",
+    `/api/clients/${encodeURIComponent(created.client.id)}/disconnect`,
+    {
+      method: "POST",
+      headers: requestHeaders(guestCookie, { "Content-Type": "application/json" }),
+      body: "{}",
+    },
+    response => response.status === 202,
+  );
+  console.log("[smoke] disconnect ok");
+}

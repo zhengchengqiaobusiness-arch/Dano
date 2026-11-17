@@ -1,8 +1,8 @@
 # Feature acceptance after deployment
 
 Start only when the user explicitly requests acceptance, including an affirmative
-answer to the post-deployment question. Deployment has already completed and its
-lock is released. Default is no acceptance.
+answer to the post-deployment question. Machine deployment and baseline browser smoke have already completed; the
+deployment lock is released. Default is no full feature acceptance.
 
 Read the current PR/issue and select only acceptance steps relevant to this change.
 Do not automatically add unrelated model, bash, upload, OA or memory journeys.

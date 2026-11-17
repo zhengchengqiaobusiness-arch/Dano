@@ -81,7 +81,7 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 - When browser validation temporarily changes the theme, record the initial theme before testing and restore it before handoff. Do not leave a test theme preference in the user's browser, including when the current UI does not expose the theme selector.
 - 用户要求“生产环境验收”或“直接部署，再验收”时，先合入已完成代码验证的修复，更新指定服务器上的现有 Dano 服务，再通过该服务的现有网址完成验收。环境用途以用户说明为准；文档中的“生产”名称不额外增加隔离环境或审批步骤。
 - 容器验收在用户指定的服务器执行。仅在用户明确要求隔离验收时建立独立容器、数据和回环入口；本地 Podman 也仅用于用户明确要求的本地验收。保留目标服务的数据、凭据及相邻服务。
-- 部署以目标镜像运行、健康检查和机器冒烟通过为完成条件；完成后释放部署锁，再询问是否验收本次改动，默认不验收。只有用户明确选择验收时，才按本次改动运行独立的浏览器/工具/上传等验收；不因等待验收超时回滚已通过冒烟的部署。
+- 机器部署通过健康检查和机器冒烟后保存收据并释放锁；随后默认通过 Codex in-app Browser 完成真实模型聊天、现有 OA 登录流程及登录后聊天的基础冒烟，按部署技能记录独立结果。再询问是否进行本次改动的完整功能验收，默认不验收；浏览器阻塞不触发已通过机器冒烟的服务定时回滚。
 - 直接部署验收后保留目标服务运行。隔离验收完成后仅清理本轮明确创建的临时容器、镜像、数据和隧道，保留可复用基础镜像及现有服务数据。
 
 ### 镜像验收入口、上传与审批

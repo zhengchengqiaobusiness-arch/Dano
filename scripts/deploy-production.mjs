@@ -25,7 +25,7 @@ try {
   if (plan) {
     console.log(JSON.stringify({ status: "plan", host: productionProfile.sshHost, image,
       stages: ["image-and-topology-preflight", "backup-and-system-sync", "switch-app", "health", "nginx-reload", "smoke", "receipt-and-unlock"],
-      buildsImage: false, downloadsDependencies: false, browserAcceptance: "not_requested" }));
+      buildsImage: false, downloadsDependencies: false, browserSmoke: "required", browserAcceptance: "not_requested" }));
   } else {
     if (output("git", ["status", "--porcelain"]) || output("git", ["branch", "--show-current"]) !== "main") throw new Error("CLEAN_MAIN_REQUIRED");
     const loadedHead = output("git", ["rev-parse", "HEAD"]);
