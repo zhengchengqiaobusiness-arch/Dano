@@ -1,5 +1,6 @@
 """Fixed-host image deployment. Python 3.6 compatible; private output stays on host."""
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -7,6 +8,41 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
+
+
+def publish_document(source, target, expected_hash):
+    """Atomically publish one public document, never follow destination symlinks."""
+    data = Path(source).read_bytes()
+    if hashlib.sha256(data).hexdigest() != expected_hash:
+        raise RuntimeError('DOCUMENT_HASH_MISMATCH')
+    target = Path(target)
+    if not target.is_absolute():
+        raise RuntimeError('DOCUMENT_TARGET_INVALID')
+    for directory in reversed((target.parent,) + tuple(target.parent.parents)):
+        if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+            raise RuntimeError('DOCUMENT_TARGET_INVALID')
+        if not directory.exists():
+            directory.mkdir(mode=0o755)
+            os.chmod(str(directory), 0o755)
+    if target.parent.is_symlink() or target.is_symlink() or (target.exists() and not target.is_file()):
+        raise RuntimeError('DOCUMENT_TARGET_INVALID')
+    pending = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=str(target.parent), prefix='.' + target.name + '.', delete=False) as output:
+            pending = output.name
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+            os.fchmod(output.fileno(), 0o644)
+        os.replace(pending, str(target))
+        pending = None
+        if hashlib.sha256(target.read_bytes()).hexdigest() != expected_hash:
+            raise RuntimeError('DOCUMENT_READBACK_FAILED')
+    finally:
+        if pending is not None:
+            os.unlink(pending)
+    return expected_hash
 
 
 class Release:
@@ -35,6 +71,7 @@ class Release:
         self.receipt = {key: manifest[key] for key in ['attemptId', 'targetSha', 'version', 'image']}
         self.receipt['acceptance'] = 'not_requested'
         self.receipt['ci'] = manifest.get('ci')
+        self.receipt['documentPublication'] = dict(manifest.get('documentPublication', {}), status='pending')
 
     def command(self, args, capture=False, input_data=None, timeout=None):
         with (self.receipts / 'commands.log').open('ab') as log:
@@ -235,6 +272,13 @@ class Release:
         self.run_app(['./deploy/system-prompt.mjs', 'discard', self.m['attemptId']])
         self.backup.unlink()
 
+    def publish_document(self):
+        publication = self.m['documentPublication']
+        if publication['sourceCommit'] != self.m['targetSha']:
+            raise RuntimeError('DOCUMENT_COMMIT_MISMATCH')
+        publish_document(self.work / 'question-guide.md', publication['targetPath'], publication['sha256'])
+        self.receipt['documentPublication'] = dict(publication, status='synced')
+
     def record(self, status):
         self.receipt.update(status=status, phase=self.phase, timings=self.timings,
                             durationSeconds=round(time.monotonic() - self.started, 3),
@@ -275,6 +319,15 @@ class Release:
             self.record('deployed')
         except Exception:
             return 1
+        document_failed = False
+        started = time.monotonic()
+        try:
+            self.publish_document()
+        except Exception as error:
+            document_failed = True
+            code = str(error) if str(error) in ['DOCUMENT_COMMIT_MISMATCH', 'DOCUMENT_HASH_MISMATCH', 'DOCUMENT_TARGET_INVALID', 'DOCUMENT_READBACK_FAILED'] else 'DOCUMENT_PUBLICATION_FAILED'
+            self.receipt['documentPublication'] = dict(self.m.get('documentPublication', {}), status='failed', errorCode=code)
+        self.timings['document-publication'] = round(time.monotonic() - started, 3)
         try:
             self.finish()
             self.receipt['cleanup'] = 'complete'
@@ -284,7 +337,7 @@ class Release:
             self.record('deployed')
         except Exception:
             pass  # The durable deployed receipt above still records cleanup pending.
-        return 0
+        return 1 if document_failed else 0
 
 
 if __name__ == '__main__':

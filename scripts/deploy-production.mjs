@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -16,15 +16,15 @@ if (!image || !/^[a-zA-Z0-9][a-zA-Z0-9./:_@-]+$/.test(image) || (args.length !==
   process.exit(1);
 }
 let temporary;
-function output(command, argv, timeout = 120_000) {
+function output(command, argv, timeout = 120_000, trim = true) {
   const result = spawnSync(command, argv, { cwd: root, encoding: "utf8", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeout, maxBuffer: 1024 * 1024 });
   if (result.error || result.status !== 0) throw new Error("DEPLOY_COMMAND_FAILED");
-  return result.stdout.trim();
+  return trim ? result.stdout.trim() : result.stdout;
 }
 try {
   if (plan) {
     console.log(JSON.stringify({ status: "plan", host: productionProfile.sshHost, image,
-      stages: ["image-and-topology-preflight", "backup-and-system-sync", "switch-app", "health", "nginx-reload", "smoke", "receipt-and-unlock"],
+      stages: ["image-and-topology-preflight", "backup-and-system-sync", "switch-app", "health", "nginx-reload", "smoke", "publish-question-guide", "receipt-and-unlock"],
       buildsImage: false, downloadsDependencies: false, browserAcceptance: "not_requested" }));
   } else {
     if (output("git", ["status", "--porcelain"]) || output("git", ["branch", "--show-current"]) !== "main") throw new Error("CLEAN_MAIN_REQUIRED");
@@ -49,8 +49,11 @@ try {
     const hasWorkflows = output("git", ["ls-tree", "-r", "--name-only", targetSha, ".github/workflows"]).split("\n").some(path => /\.ya?ml$/.test(path));
     const ci = validateProductionChecks(pages, productionProfile.ci, hasWorkflows);
     const version = JSON.parse(output("git", ["show", `${targetSha}:package.json`])).version;
+    const documentPublication = { ...productionProfile.documentPublication, sourceCommit: targetSha };
+    const guide = output("git", ["show", `${targetSha}:${documentPublication.sourcePath}`], 120_000, false);
+    documentPublication.sha256 = createHash("sha256").update(guide).digest("hex");
     const attemptId = randomUUID();
-    const manifest = { targetSha, version, image, attemptId, checkedAt: new Date().toISOString(), ci, profile: productionProfile };
+    const manifest = { targetSha, version, image, attemptId, checkedAt: new Date().toISOString(), ci, profile: productionProfile, documentPublication };
     temporary = mkdtempSync(join(tmpdir(), "dano-production-release-"));
     const encode = value => Buffer.from(value).toString("base64");
     const files = {
@@ -58,6 +61,7 @@ try {
       "release.py": readFileSync(join(root, "deploy/production/release.py"), "utf8"),
       "compose-filter.mjs": readFileSync(join(root, ".agents/skills/dano-production-deploy/scripts/summarize-compose-config.mjs"), "utf8"),
       "smoke.mjs": readFileSync(join(root, "scripts/smoke-dano-deploy.mjs"), "utf8"),
+      "question-guide.md": guide,
     };
     const script = ["#!/bin/bash", "set -euo pipefail", "umask 077", 'work=$(mktemp -d /tmp/dano-production-release.XXXXXX)'];
     for (const [name, content] of Object.entries(files)) script.push(`printf %s '${encode(content)}' | base64 -d > "$work/${name}"`);
