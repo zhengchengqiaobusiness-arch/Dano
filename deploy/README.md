@@ -46,9 +46,9 @@ must match it exactly. Standalone smoke without this variable checks availabilit
 and explicitly reports that image-manifest comparison was not performed.
 
 Full feature acceptance remains separate and defaults to **不验收**. Ask about it
-after baseline browser smoke. Browser blockage is reported as incomplete browser
-smoke while preserving machine deployment status; it does not cause an automatic
-time-delayed rollback. A confirmed product regression needs an explicit repair or rollback.
+after baseline browser smoke. Browser/network failures remain pending while diagnosis and repair continue,
+followed by a rerun of the original flow. An incomplete record is a checkpoint;
+it does not finish the work or cause an automatic time-delayed rollback. A confirmed product regression needs an explicit repair or rollback.
 
 This directory contains deployment-specific defaults and proxy config.
 

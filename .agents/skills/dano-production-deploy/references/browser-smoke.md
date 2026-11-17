@@ -29,6 +29,15 @@ acceptance remains optional.
    `failed`. Report it alongside the machine receipt, whose pending field is the
    original handoff state. Keep credentials and cookies out of evidence.
 
-Recover a browser-control interruption on the same in-app surface. A browser or
-provider blocker does not undo successful machine deployment. Diagnose a proven
-product failure and handle repair/rollback as a separate operation.
+When navigation, refresh or chat fails (including ERR_CONNECTION_CLOSED), keep
+working: reproduce the failure on the same in-app surface, compare the existing
+IP/domain routes, and distinguish browser transport, DNS/TLS, proxy/nginx, backend
+and provider causes using scoped diagnostics. Establish the cause, apply the
+supported repair, then rerun the original failed flow and affected baseline checks.
+A transient browser/network error or an `incomplete` record is a checkpoint, not
+an endpoint. Continue unaffected work during any user-only step. Ask for needed
+input only when a concrete access, credential or approval boundary prevents further
+progress; name that boundary and the required input. Preserve TLS, authentication,
+existing data and adjacent services throughout recovery. Machine success remains
+recorded separately; a timer or browser-control error never triggers rollback.
+Handle a confirmed product regression with a separately recorded repair/rollback.

@@ -58,7 +58,8 @@ pnpm deploy:production --image <prepared-image> --plan
    permission question. The machine receipt's `browserSmoke=pending` is a handoff,
    not proof that browser smoke passed. Bind browser evidence to its target/image.
    If login needs user input, continue independent checks and hand off that step;
-   report the remaining browser check explicitly instead of declaring it passed.
+   report the pending check and continue diagnosis/recovery instead of ending on
+   a transient browser/network error. Follow the recovery procedure in that reference.
 6. After baseline smoke, ask whether the user wants full feature acceptance, with
    **不验收** first/default. Only an affirmative answer starts
    [feature acceptance](references/acceptance.md). Browser blockage does not keep
