@@ -29,10 +29,20 @@ acceptance remains optional.
    `failed`. Report it alongside the machine receipt, whose pending field is the
    original handoff state. Keep credentials and cookies out of evidence.
 
-When navigation, refresh or chat fails (including ERR_CONNECTION_CLOSED), keep
-working: reproduce the failure on the same in-app surface, compare the existing
-IP/domain routes, and distinguish browser transport, DNS/TLS, proxy/nginx, backend
-and provider causes using scoped diagnostics. Establish the cause, apply the
+When navigation, refresh or chat fails, check your Browser Use operation first:
+verify the current browser/tab binding, inspect fresh state, use the documented
+reload operation, then reopen the existing service URL in a fresh in-app tab.
+Check that a previous failed navigation or stale handle is not preventing the
+next action. Record the exact call, visible result and reproducibility before
+opening a service investigation. A tool error alone does not establish a product
+or server failure.
+
+Investigate our own implementation and deployment only when the observations
+support that boundary: browser workflow, frontend initialization/reconnect,
+nginx/TLS, OAuth callback and session restoration. Tie each diagnostic to a
+specific observed failure and change one variable at a time. Treat an unproven
+cause as unknown; do not attribute failure to filing, providers or outside
+networks from a connection error alone. Establish a proven cause, apply the
 supported repair, then rerun the original failed flow and affected baseline checks.
 A transient browser/network error or an `incomplete` record is a checkpoint, not
 an endpoint. Continue unaffected work during any user-only step. Ask for needed
