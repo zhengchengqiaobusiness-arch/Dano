@@ -33,8 +33,13 @@ When navigation, refresh or chat fails, check your Browser Use operation first:
 verify the current browser/tab binding, inspect fresh state, use the documented
 reload operation, then reopen the existing service URL in a fresh in-app tab.
 Check that a previous failed navigation or stale handle is not preventing the
-next action. Preserve the active diagnostic tab with `markHandoff()` before a
-user-only recovery step; temporary tabs otherwise disappear at turn completion.
+next action. Handle routine reload/reopen recovery yourself; do not assign it to
+the user. If an application-generated error page blocks navigation, reopen the
+original allowed URL in a fresh in-app tab and preserve failure evidence. Do not
+relax URL policy or use private application commands. Preserve an active
+unfinished diagnostic tab with `markHandoff()`; temporary tabs otherwise disappear
+at turn completion. A screenshot or successful user Chrome page is comparison
+evidence, not permission to claim, refresh or take over that browser.
 Continue the workflow after intermediate findings instead of ending the turn on
 a tentative diagnosis. Record the exact call, visible result and reproducibility
 before opening a service investigation. A tool error alone does not establish a product
