@@ -687,8 +687,7 @@ it("keeps provider origin and authentication headers server-owned and does not f
   expect(h.refreshCount()).toBe(0);
 });
 
-it("the real Dano session retains Heimdall's fail-closed bash boundary on unsupported platforms", async () => {
-  if (process.platform === "linux") return;
+it.runIf(process.platform !== "linux")("the real Dano session retains Heimdall's fail-closed bash boundary on unsupported platforms", async () => {
   const { fauxProvider, fauxAssistantMessage, fauxToolCall } = await import(
     "@earendil-works/pi-ai"
   );

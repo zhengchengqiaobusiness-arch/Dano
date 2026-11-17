@@ -14,7 +14,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Each release fixture launches several real Node/Git subprocesses. Keep a
+// bounded integration-test budget instead of the 5s unit-test default.
+vi.setConfig({ testTimeout: 30_000 });
 
 const deployScript = new URL(
   "../../../../../scripts/deploy-compose.mjs",
@@ -119,6 +123,7 @@ writeFileSync(process.env.DANO_COMPOSE_ENV_LOG, JSON.stringify({
     DANO_COMPOSE: composePath,
     DANO_COMPOSE_LOG: logPath,
     DANO_COMPOSE_ENV_LOG: composeEnvPath,
+    DANO_HELP_DIR: join(cwd, "help"),
   };
   delete env.DANO_IMAGE;
   delete env.DANO_EXPOSURE_MODE;
@@ -170,6 +175,7 @@ function runRelease(
       : tlsKeyPath;
 
   mkdirSync(join(fakeRepo, "deploy/compose"), { recursive: true });
+  cpSync(join(deployRoot, "help"), join(fakeRepo, "deploy/help"), { recursive: true });
   writeFileSync(join(fakeRepo, "deploy/compose/memory.yml"), "services: {}\n");
   mkdirSync(join(fakeRepo, "deploy/nginx/shared"), { recursive: true });
   mkdirSync(join(fakeRepo, "scripts"), { recursive: true });
@@ -311,6 +317,7 @@ appendFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(["chown", ...process
       DANO_BUILD_PARENT_DIR: buildParent,
       DANO_DEPLOY_DIR: deployDir,
       DANO_RUNTIME_DIR: runtimeDir,
+      DANO_HELP_DIR: join(cwd, "help"),
       DANO_SECRETS_DIR: secretsDir,
       DANO_NGINX_CONF: nginxConf,
       DANO_EXPOSURE_MODE: options.exposureMode,
@@ -1213,6 +1220,9 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     const { buildParent, deployDir, runtimeDir, nginxConf, logLines } =
       runRelease();
 
+    const helpDir = join(runtimeDir, "..", "help");
+    expect(readFileSync(join(helpDir, "demo.md"), "utf8")).toContain("约需30分钟");
+    expect(readFileSync(join(deployDir, ".env"), "utf8")).toContain(`DANO_HELP_DIR=${helpDir}`);
     expect(readdirSync(buildParent)).toEqual([]);
     expect(readFileSync(join(deployDir, "docker-compose.yml"), "utf8")).toContain(
       "services:",
@@ -1309,7 +1319,13 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
       "app",
       "nginx",
     ]);
-    expect(logLines[8]).toBe("smoke");
+    expect(logLines.slice(8).map(line => line === "smoke" ? line : JSON.parse(line))).toEqual([
+      ["compose", "-f", "docker-compose.yml", "-f", "docker-compose.exposure.yml",
+        "--env-file", ".env", "exec", "-T", "nginx", "nginx", "-t"],
+      ["compose", "-f", "docker-compose.yml", "-f", "docker-compose.exposure.yml",
+        "--env-file", ".env", "exec", "-T", "nginx", "nginx", "-s", "reload"],
+      "smoke",
+    ]);
   });
 
   it("initializes Dano-owned OAuth credential encryption before the production gate", () => {
@@ -1422,11 +1438,11 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     expect(existsSync(marker)).toBe(false);
   });
 
-  it("refuses a release while SYSTEM browser acceptance is pending", () => {
+  it("refuses a release while a SYSTEM recovery transaction is unfinished", () => {
     const root = mkdtempSync(join(tmpdir(), "dano-pending-system-"));
     tempDirs.push(root);
     mkdirSync(join(root, ".system-rollback-pending"));
-    expect(() => runRelease({ deployDir: root })).toThrow("Resolve pending SYSTEM browser acceptance");
+    expect(() => runRelease({ deployDir: root })).toThrow("Resolve unfinished SYSTEM recovery transaction");
   });
 
   it.each(["sync", "check"])("stops release before Compose switch when SYSTEM %s fails", phase => {

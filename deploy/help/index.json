@@ -1,0 +1,27 @@
+[
+  {
+    "id": "demo",
+    "title": "操作演示",
+    "group": "快速入门",
+    "file": "demo.md",
+    "video": "demo.mp4",
+    "keywords": [
+      "demo",
+      "演示",
+      "视频",
+      "入门"
+    ]
+  },
+  {
+    "id": "maintenance",
+    "title": "帮助手册维护说明",
+    "group": "使用指南",
+    "file": "maintenance.md",
+    "keywords": [
+      "替换",
+      "上传",
+      "Markdown",
+      "视频"
+    ]
+  }
+]

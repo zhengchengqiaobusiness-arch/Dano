@@ -18,6 +18,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { initializeHelp } from "./initialize-help.mjs";
 import { preflightProductIdentity } from "./deploy-product-identity.mjs";
 import { prepareBuildContext } from "./deploy-build-context.mjs";
 import { acquireDeploymentLock } from "./deploy-lock.mjs";
@@ -153,7 +154,7 @@ function ensureOAuthCredentialEncryption() {
 try {
   unlock = acquireDeploymentLock();
   if (existsSync(deployDir) && readdirSync(deployDir).some(name => name.startsWith(".system-rollback-"))) {
-    throw new Error("Resolve pending SYSTEM browser acceptance before release");
+    throw new Error("Resolve unfinished SYSTEM recovery transaction before release");
   }
   const repoUrl = requireValue(
     "DANO_REPO_URL",
@@ -197,6 +198,8 @@ try {
 
   mkdirSync(join(deployDir, "nginx"), { recursive: true });
   prepareRuntimeDir();
+  const helpDirectory = process.env.DANO_HELP_DIR?.trim() || savedRuntimeEnv.get("DANO_HELP_DIR")?.trim() || "/opt/dano/help";
+  initializeHelp(helpDirectory, join(buildDir, "deploy/help"));
   mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
   cpSync(join(buildDir, "docker-compose.yml"), join(deployDir, "docker-compose.yml"));
   cpSync(join(buildDir, "deploy/compose/memory.yml"), join(deployDir, "docker-compose.memory.yml"));
@@ -214,6 +217,7 @@ try {
   updateEnvFile(envPath, {
     DANO_IMAGE: image,
     DANO_RUNTIME_DIR: runtimeDir,
+    DANO_HELP_DIR: helpDirectory,
     DANO_SECRETS_DIR: secretsDir,
     DANO_NGINX_CONF: nginxConf,
     DANO_NGINX_SHARED_DIR: nginxSharedDir,
@@ -380,6 +384,7 @@ try {
       ...process.env,
       DANO_IMAGE: image,
       DANO_RUNTIME_DIR: runtimeDir,
+      DANO_HELP_DIR: helpDirectory,
       DANO_SECRETS_DIR: secretsDir,
       DANO_NGINX_CONF: nginxConf,
     },

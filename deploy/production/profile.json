@@ -1,0 +1,37 @@
+{
+  "sshHost": "root@1.15.173.22",
+  "sshIdentity": ".ssh/id_rsa",
+  "deployDirectory": "/opt/dano/deploy",
+  "receiptDirectory": "/opt/dano/deploy/releases",
+  "baseUrl": "https://1.15.173.22/",
+  "composeFiles": [
+    "docker-compose.yml",
+    "docker-compose.exposure.yml",
+    "docker-compose.memory.yml",
+    "docker-compose.production-capacity.yml",
+    "docker-compose.memory-config.json"
+  ],
+  "composeProject": "dano",
+  "appService": "app",
+  "nginxService": "nginx",
+  "preservedContainers": [
+    "dano-site",
+    "dano-openviking-1"
+  ],
+  "healthTimeoutSeconds": 180,
+  "commandTimeoutSeconds": 120,
+  "smokeTimeoutSeconds": 90,
+  "githubRepository": "zhengchengqiaobusiness-arch/Dano",
+  "githubCli": "/opt/homebrew/bin/gh",
+  "nginxHashRoots": [
+    "/root/Dano-source/deploy/nginx",
+    "/opt/dano/deploy/nginx"
+  ],
+  "optionalComposeFiles": [
+    "docker-compose.product-name.json"
+  ],
+  "ci": {
+    "requiredChecks": [],
+    "allowNoChecks": true
+  }
+}

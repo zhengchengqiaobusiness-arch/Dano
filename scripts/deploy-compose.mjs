@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { initializeHelp } from "./initialize-help.mjs";
 import { resolveDeploymentExposure } from "./deploy-exposure.mjs";
 
 const command = process.argv[2] ?? "up";
@@ -70,6 +71,7 @@ switch (command) {
     if (shouldPullImage) {
       run(["pull", "app"]);
     }
+    initializeHelp(process.env.DANO_HELP_DIR?.trim() || "/opt/dano/help", join(sourceRoot, "deploy/help"));
     run(["up", "-d", "--no-build"]);
     break;
   }

@@ -136,7 +136,11 @@ try {
     stage = "restart";
     await restartAndCheck(metadata.recreate);
     compose(["exec", "-T", "app", "node", "./deploy/system-prompt.mjs", "check"]);
-    console.log(`[deploy-system-prompt] pending browser acceptance: ${transaction}; retain rollback until accept or rollback`);
+    stage = "finalize";
+    try { discard(); } catch {
+      console.error(`[deploy-system-prompt] machine checks passed; cleanup pending for transaction ${transaction}`);
+    }
+    console.log(`[deploy-system-prompt] machine complete: ${transaction}; acceptance not requested`);
   }
 } catch {
   if (backedUp) {

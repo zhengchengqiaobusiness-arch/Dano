@@ -1,5 +1,41 @@
 # Dano Deployment
 
+## Existing production: one-command image deployment
+
+```sh
+pnpm deploy:production --image dano-app:<commit>
+# Preview the stages without network access or mutation:
+pnpm deploy:production --image dano-app:<commit> --plan
+```
+
+The fixed public environment lives in `deploy/production/profile.json`; credentials
+remain in the existing SSH key and server-managed files. Prepare/build the image
+before deploying. This command does not clone source, install dependencies, build,
+or replace the existing Compose/nginx files. It supports image updates to this
+profile; new installations or topology/configuration migrations require their
+explicit preparation workflow. The candidate must already exist and match the
+synchronized upstream commit and root package version. CI runs are read across
+all pages; declared required checks must exist and pass. This repository currently
+has no workflows/check gate, explicitly represented by `ci.allowNoChecks` with
+no required checks; its receipt says `not_configured`, not `passed`. Adding a
+workflow requires configuring its required check names before deployment.
+Deployment pins its image
+ID, preserving runtime data, OA/TLS, secrets, help and adjacent services.
+
+A single locked worker runs image/config/sandbox/SYSTEM preflight, recreates only
+app, waits for health, reloads nginx, runs deployment smoke and checks `/web/`.
+Machine failure restores the previous image/env/SYSTEM and repeats health/smoke.
+The receipt records each stage duration, image IDs, health and smoke; raw output
+and rollback material stay private under the configured receipt directory.
+The previous image is retained. Cleanup-only failure is recorded without rolling
+back a healthy deployment.
+
+**Deployment ends after health and smoke pass, receipt is saved and lock released.**
+Browser/model/feature acceptance is separate. After deployment, ask whether to
+accept this change; default is **不验收**. Only an affirmative answer starts that
+separate flow. No pending question or browser timeout rolls back a completed
+deployment. Report `status=deployed` separately from `acceptance=not_requested`.
+
 This directory contains deployment-specific defaults and proxy config.
 
 Administrator Skills update in the running unified container. See
@@ -643,8 +679,8 @@ switching, repeat preflight and require all three fields to match the manifest;
 the release script does this automatically. The production deployment Skill uses
 this same executable gate even when preserving environment-owned staging files.
 The existing atomic sync, read-back, ownership checks and rollback contract remain
-in force. Changes to SYSTEM, product name, or repaired prompt drift require a new
-Codex in-app Browser session for identity acceptance.
+in force. When the user requests acceptance of SYSTEM/product-name changes, use a new
+Codex in-app Browser session for identity acceptance; this is not a deployment gate.
 
 ### Supported product-name update and SYSTEM repair
 
@@ -671,7 +707,7 @@ on `/var/lock/dano-production-deploy.lock`. An isolated local deployment can set
 `DANO_DEPLOY_LOCK_PATH` to its own lock file. If the production operator already
 holds that lock on fd 9, pass `DANO_DEPLOY_LOCK_FD=9`; the helper verifies the
 inherited file identity and lock before proceeding. Keep that descriptor open
-through browser acceptance and the final disposition. `DANO_DEPLOY_COMPOSE_FILES`
+through machine checks and the final receipt; release it before asking about optional acceptance. `DANO_DEPLOY_COMPOSE_FILES`
 may be a JSON array of the exact environment-owned Compose files; set
 `DANO_COMPOSE=podman` for Podman. The helper does not stage nginx or touch adjacent
 services, TLS, credentials, settings, Heimdall configuration, sessions, or uploads.
@@ -686,27 +722,17 @@ Failure restores the previous overlay and SYSTEM, restarts app if needed, and
 verifies health. The private host rollback directory also saves the prior
 non-secret product-name overlay and transaction metadata. Rollback failure retains the SYSTEM backup in the agent
 config directory for recovery under the same lock; the command exits nonzero.
-Machine success leaves a pending transaction and retains both rollback copies.
-Further scripted updates/releases are blocked until it is disposed. After the
-required browser acceptance, finalize using the printed transaction identifier:
+Machine success discards the completed transaction automatically and releases the
+lock. Ask whether to accept the change afterward, defaulting to no acceptance.
+If cleanup was interrupted, the printed transaction identifier supports explicit
+`accept`, `rollback` or `abort` recovery; these commands are not a mandatory
+browser disposition phase. Preparation failures clean partial backups before
+mutation; rollback failures retain recovery material.
 
-```bash
-node scripts/deploy-system-prompt.mjs accept <transaction>
-# If browser acceptance fails, restore the retained state instead:
-node scripts/deploy-system-prompt.mjs rollback <transaction>
-```
-
-Only accepted or successfully rolled-back transactions remove completed backups.
-Failed preparation cleans its partial backup before any mutation. If that cleanup
-is interrupted, use `abort <transaction>` under the same lock; abort is accepted
-only for transactions still in the preparing phase. This transaction covers
-SYSTEM and the managed product-name overlay, not externally edited configuration.
-
-After any SYSTEM/product-name change, open a **new session** in the Codex in-app
-Browser and ask the assistant to identify itself. Require the effective product
-name and no placeholder; also complete text, image read/description, and
-model-triggered `bash ls` acceptance. Existing conversations are not identity
-acceptance evidence. Machine health alone does not complete this gate.
+Only when identity acceptance is requested, open a new conversation and verify
+the effective product name and absence of placeholders. Select other flows only
+when relevant to this change. Existing conversations do not prove a new SYSTEM
+prompt was loaded, but deployment health/smoke does not wait for this check.
 
 The shared renderer uses the mature `atomically` package for complete
 temporary-file writes followed by atomic publication. Missing-file
@@ -1563,10 +1589,22 @@ The smoke test checks:
 Set `DANO_HELP_DIR` in the deployment environment to an absolute host directory.
 Compose mounts it at `/opt/dano/help` read-only. Without Compose, `DANO_HELP_DIR`
 selects the server's content directory and defaults to `DANO_RUNTIME_DIR/help`.
-Create the directory before starting Compose and make it readable by the app
+`pnpm deploy:release` and `pnpm deploy:up` initialize a missing or empty host
+directory from the versioned `deploy/help/` defaults before starting Compose.
+An existing nonempty directory is left entirely unchanged, including files a
+maintainer has edited or deleted. With direct `docker compose up`, first copy
+`deploy/help/` into a new host directory yourself. Make it readable by the app
 service user. Upload and edit files there using existing host administration tools
 (e.g. SFTP). The application does not provide a write/upload API for manuals.
-Restarts and releases never initialize, synchronize or delete this directory.
+Application restarts never write this directory; releases only initialize an
+empty directory and never synchronize or delete an existing manual.
+
+The defaults include the video description, maintenance guide, three application
+entry Markdown files and optional `index.json` metadata. Application links use
+`target="_blank"` with `rel="noopener noreferrer"`. The existing `dano.config.json`
+`shortcutLinks` remains the default for the chat help entry. Video binaries are
+not bundled: upload `demo.mp4` alongside `demo.md` to show the demo video; the
+description remains readable when the video is absent.
 
 Drop Markdown (`.md`) and videos (`.mp4`, `.webm`) into this folder, then refresh
 the help page. They appear automatically, including files in subfolders. The

@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -46,17 +46,16 @@ describe("supported SYSTEM configuration repair", () => {
     expect(result.status, result.stderr).toBe(0);
     const calls = f.calls();
     const actions = calls.filter(a => a.includes("./deploy/system-prompt.mjs")).map(a => a[a.indexOf("./deploy/system-prompt.mjs") + 1]);
-    expect(actions).toEqual(["backup", "sync", "check", "check"]);
+    expect(actions).toEqual(["backup", "sync", "check", "check", "discard"]);
     const switchIndex = calls.findIndex(a => a.includes("up"));
     expect(calls[switchIndex - 1]).toContain("check");
     expect(calls[switchIndex].slice(-6)).toEqual(["up", "-d", "--no-build", "--no-deps", "--force-recreate", "app"]);
     expect(calls.some(a => a.slice(-4).join(" ") === "nginx nginx -s reload")).toBe(true);
     expect(calls.every(a => !a.includes("down"))).toBe(true);
-    const transaction = result.stdout.match(/acceptance: ([a-f0-9-]+)/)![1];
-    expect(existsSync(join(f.root, `.system-rollback-${transaction}`, "transaction.json"))).toBe(true);
-    expect(f.run(["repair"]).status).toBe(1);
-    expect(f.run(["accept", transaction]).status).toBe(0);
+    const transaction = result.stdout.match(/machine complete: ([a-f0-9-]+)/)![1];
+    expect(result.stdout).toContain("acceptance not requested");
     expect(existsSync(join(f.root, `.system-rollback-${transaction}`))).toBe(false);
+    expect(f.run(["repair"]).status).toBe(0);
     expect(readFileSync(join(f.root, "docker-compose.product-name.json"), "utf8")).toContain("配置$$助手");
   });
   it.each(["sync", "check", "--force-recreate"])("rolls back when %s fails without leaking child output", phase => {
@@ -81,11 +80,12 @@ describe("supported SYSTEM configuration repair", () => {
     expect(f.calls().some(a => a.includes("up"))).toBe(false);
     expect(existsSync(join(f.root, "docker-compose.product-name.json"))).toBe(false);
   });
-  it("retains rollback through browser rejection and restores it explicitly", () => {
+  it("can explicitly restore an unfinished recovery transaction", () => {
     const f = fixture();
-    const result = f.run(["set-name", "新助手"]);
-    expect(result.status).toBe(0);
-    const transaction = result.stdout.match(/acceptance: ([a-f0-9-]+)/)![1];
+    const transaction = "00000000-0000-4000-8000-000000000001";
+    const directory = join(f.root, `.system-rollback-${transaction}`);
+    mkdirSync(directory, { mode: 0o700 });
+    writeFileSync(join(directory, "transaction.json"), JSON.stringify({ transaction, phase: "prepared", overlayExisted: false, recreate: true }));
     expect(f.run(["rollback", transaction]).status).toBe(0);
     expect(existsSync(join(f.root, "docker-compose.product-name.json"))).toBe(false);
     expect(f.calls().some(a => a.includes("restore"))).toBe(true);
