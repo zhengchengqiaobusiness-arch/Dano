@@ -30,6 +30,19 @@ and rollback material stay private under the configured receipt directory.
 The previous image is retained. Cleanup-only failure is recorded without rolling
 back a healthy deployment.
 
+After health/smoke, while still holding the deployment lock, the command publishes
+`docs/skill-generator-ask-user-question-guide.md` from the exact deployed Git
+commit to `/opt/page-desk/doc/skill-generator-ask-user-question-guide.md`.
+Source and destination are configured in `deploy/production/profile.json`.
+The public document is transferred separately from the image, SHA-256 checked,
+atomically replaced with mode `0644`, and read back. A missing `doc` directory
+is created with mode `0755`; symlink destinations are rejected. Other documents
+are untouched and page-desk does not need a restart. The receipt includes the
+source commit/path, destination, hash and `documentPublication.status`.
+Publication failure returns nonzero with `status=deployed` and document status
+`failed`: report the incomplete document step, retry it from the same commit,
+and do not roll back the healthy app. Browser acceptance is not started.
+
 **Deployment ends after health and smoke pass, receipt is saved and lock released.**
 Browser/model/feature acceptance is separate. After deployment, ask whether to
 accept this change; default is **不验收**. Only an affirmative answer starts that

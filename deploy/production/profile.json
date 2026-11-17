@@ -3,6 +3,10 @@
   "sshIdentity": ".ssh/id_rsa",
   "deployDirectory": "/opt/dano/deploy",
   "receiptDirectory": "/opt/dano/deploy/releases",
+  "documentPublication": {
+    "sourcePath": "docs/skill-generator-ask-user-question-guide.md",
+    "targetPath": "/opt/page-desk/doc/skill-generator-ask-user-question-guide.md"
+  },
   "baseUrl": "https://1.15.173.22/",
   "composeFiles": [
     "docker-compose.yml",
