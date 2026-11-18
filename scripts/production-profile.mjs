@@ -2,9 +2,33 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, isAbsolute } from "node:path";
 
-export const productionProfile = JSON.parse(readFileSync(new URL("../deploy/production/profile.json", import.meta.url), "utf8"));
-export function productionSshArguments(profile = productionProfile) {
-  if (!/^[a-zA-Z0-9_.@-]+$/.test(profile.sshHost) || isAbsolute(profile.sshIdentity) || profile.sshIdentity.includes(".."))
+export const profileErrors = [
+  "DANO_PRODUCTION_PROFILE_REQUIRED", "INVALID_PRODUCTION_PROFILE_PATH",
+  "PRODUCTION_PROFILE_UNREADABLE", "INVALID_PRODUCTION_SSH_PROFILE",
+  "INVALID_PRODUCTION_BASE_URL",
+];
+
+export function loadProductionProfile(path = process.env.DANO_PRODUCTION_PROFILE) {
+  if (!path) throw new Error("DANO_PRODUCTION_PROFILE_REQUIRED");
+  if (!isAbsolute(path)) throw new Error("INVALID_PRODUCTION_PROFILE_PATH");
+  let profile;
+  try {
+    profile = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    throw new Error("PRODUCTION_PROFILE_UNREADABLE");
+  }
+  productionSshArguments(profile);
+  if (typeof profile.baseUrl !== "string") throw new Error("INVALID_PRODUCTION_BASE_URL");
+  let baseUrl;
+  try { baseUrl = new URL(profile.baseUrl); } catch { throw new Error("INVALID_PRODUCTION_BASE_URL"); }
+  if (baseUrl.protocol !== "https:" || baseUrl.href !== baseUrl.origin + "/")
+    throw new Error("INVALID_PRODUCTION_BASE_URL");
+  return { ...profile, baseUrl: baseUrl.href };
+}
+
+export function productionSshArguments(profile) {
+  if (typeof profile?.sshHost !== "string" || !/^(?:[a-zA-Z0-9_][a-zA-Z0-9_.-]*@)?[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(profile.sshHost)
+    || typeof profile.sshIdentity !== "string" || !profile.sshIdentity || isAbsolute(profile.sshIdentity) || profile.sshIdentity.includes(".."))
     throw new Error("INVALID_PRODUCTION_SSH_PROFILE");
   return ["-i", join(homedir(), profile.sshIdentity), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=15",
     "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", profile.sshHost];

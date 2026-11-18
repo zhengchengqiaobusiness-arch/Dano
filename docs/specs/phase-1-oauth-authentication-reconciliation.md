@@ -204,7 +204,7 @@ sequenceDiagram
         D-->>B: authorization_required + same-origin loginPath
         B->>D: top-level GET /api/auth/login
         D-->>B: 303 to real OA authorization origin
-        B->>O: GET http://admin.dianshixinxi.com:90/sso?...state...
+        B->>O: GET configured OA authorization endpoint with state
         O-->>B: login/consent or authorization code redirect
         B->>D: GET /api/auth/callback?code=...&state=...
         D->>O: POST token endpoint using client_secret_basic
@@ -367,7 +367,7 @@ B5 是“OA logout → Dano 有限同步”声明的发布门槛。只有生产�
 第一阶段实现预计只增加：
 
 ```text
-DANO_OAUTH_CHECK_TOKEN_ENDPOINT=http://h5.dianshixinxi.com:90/admin-api/system/oauth2/check-token
+DANO_OAUTH_CHECK_TOKEN_ENDPOINT=<目标部署的 OA check-token 完整 URL>
 ```
 
 该 endpoint：
@@ -375,8 +375,8 @@ DANO_OAUTH_CHECK_TOKEN_ENDPOINT=http://h5.dianshixinxi.com:90/admin-api/system/o
 - 仅由 Dano Server 访问；
 - 必须与 issuer/token/identity/revocation 一样经过生产配置校验；
 - 生产 HTTP 访问依赖 #449 的 `DANO_OAUTH_ALLOW_INSECURE_SERVER_ENDPOINTS=true` 明确 opt-in；
-- 继续使用真实浏览器 authorization origin `http://admin.dianshixinxi.com:90/sso`；
-- 继续使用 `danoProduction` 与 `client_secret_basic`；secret 只由部署 secret 管理提供。
+- 浏览器使用目标部署中 `DANO_OAUTH_AUTHORIZATION_ENDPOINT` 配置的真实 OA 授权页；
+- 使用目标部署登记的 OAuth Client 和认证方式；secret 只由部署 secret 管理提供。
 
 未配置 check-token endpoint 时，Production Authentication Gate 必须拒绝启用第一阶段自动协调；不能静默退回 identity endpoint 并宣称已实现本 Spec。
 

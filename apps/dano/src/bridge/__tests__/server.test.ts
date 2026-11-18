@@ -1609,13 +1609,16 @@ describe("BridgeServer HTTP/SSE transport", () => {
     );
   });
 
-  it("serves static assets and falls back to index.html for SPA routes", async () => {
+  it("serves static assets without falling back to HTML for missing assets", async ({ onTestFinished }) => {
     const staticDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-static-"));
+    onTestFinished(() => fs.rmSync(staticDir, { recursive: true, force: true }));
     fs.writeFileSync(
       path.join(staticDir, "index.html"),
       "<html><head><title></title></head><body><main>index</main></body></html>",
     );
     fs.writeFileSync(path.join(staticDir, "asset.txt"), "asset");
+    fs.mkdirSync(path.join(staticDir, "assets"));
+    fs.writeFileSync(path.join(staticDir, "assets", "index-test.css"), "body { margin: 0; }");
     const eventBus = new BridgeEventBus(DEFAULT_BRIDGE_CONFIG);
     const server = new BridgeServer(
       {
@@ -1646,7 +1649,21 @@ describe("BridgeServer HTTP/SSE transport", () => {
     await expect(fetch(`${origin}/asset.txt`).then(r => r.text())).resolves.toBe(
       "asset",
     );
-    const spaHtml = await fetch(`${origin}/missing/route`).then(r => r.text());
+    const css = await fetch(`${origin}/assets/index-test.css`);
+    expect(css.status).toBe(200);
+    expect(css.headers.get("content-type")).toBe("text/css");
+    expect(await css.text()).toBe("body { margin: 0; }");
+    const missingCss = await fetch(`${origin}/assets/old.css?v=1`);
+    expect(missingCss.status).toBe(404);
+    expect(missingCss.headers.get("content-type")).toBe("text/plain");
+    expect(missingCss.headers.get("cache-control")).toBe("no-store");
+    expect(await missingCss.text()).toBe("Not Found");
+    const missingJs = await fetch(`${origin}/assets/old.js`, { method: "HEAD" });
+    expect(missingJs.status).toBe(404);
+    expect(await missingJs.text()).toBe("");
+    const spaResponse = await fetch(`${origin}/missing/route`);
+    expect(spaResponse.status).toBe(200);
+    const spaHtml = await spaResponse.text();
     expect(spaHtml).toContain("<main>index</main>");
     expect(spaHtml).toContain("<title></title>");
     expect(spaHtml).toContain("window.__PI_WEB_CONFIG__=");

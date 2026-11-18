@@ -1,7 +1,7 @@
 # Baseline browser smoke
 
 Run after machine deployment releases its lock. Use the Codex in-app Browser at
-the profile's existing service URL and reuse the existing OA client, TLS and
+the machine receipt's `baseUrl` and reuse the existing OA client, TLS and
 browser tab. This baseline is part of the deployment workflow; full feature
 acceptance remains optional.
 

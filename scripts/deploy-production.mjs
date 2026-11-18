@@ -5,25 +5,26 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { productionProfile, productionSshArguments, quoteRemoteArgument, validateProductionChecks } from "./production-profile.mjs";
+import { loadProductionProfile, productionSshArguments, profileErrors, quoteRemoteArgument, validateProductionChecks } from "./production-profile.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const args = process.argv.slice(2);
 const image = args[0] === "--image" ? args[1] : undefined;
 const plan = args[2] === "--plan";
 if (!image || !/^[a-zA-Z0-9][a-zA-Z0-9./:_@-]+$/.test(image) || (args.length !== 2 && !(args.length === 3 && plan))) {
-  console.error("Usage: pnpm deploy:production --image <prepared-image-tag-or-digest> [--plan]");
+  console.error("Usage: DANO_PRODUCTION_PROFILE=/absolute/path/profile.json pnpm deploy:production --image <prepared-image-tag-or-digest> [--plan]");
   process.exit(1);
 }
 let temporary;
-function output(command, argv, timeout = 120_000, trim = true) {
-  const result = spawnSync(command, argv, { cwd: root, encoding: "utf8", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeout, maxBuffer: 1024 * 1024 });
+function output(command, argv, timeout = 120_000, trim = true, env = process.env) {
+  const result = spawnSync(command, argv, { cwd: root, encoding: "utf8", env: { ...env, GIT_TERMINAL_PROMPT: "0" }, timeout, maxBuffer: 1024 * 1024 });
   if (result.error || result.status !== 0) throw new Error("DEPLOY_COMMAND_FAILED");
   return trim ? result.stdout.trim() : result.stdout;
 }
 try {
+  const productionProfile = loadProductionProfile();
   if (plan) {
-    console.log(JSON.stringify({ status: "plan", host: productionProfile.sshHost, image,
+    console.log(JSON.stringify({ status: "plan", host: productionProfile.sshHost, baseUrl: productionProfile.baseUrl, image,
       stages: ["image-and-topology-preflight", "backup-and-system-sync", "switch-app", "health", "nginx-reload", "smoke", "publish-question-guide", "receipt-and-unlock"],
       buildsImage: false, downloadsDependencies: false, browserSmoke: "required", browserAcceptance: "not_requested" }));
   } else {
@@ -68,17 +69,20 @@ try {
     script.push("trap 'rm -rf \"$work\"' EXIT");
     script.push('python3 "$work/release.py" "$work/manifest.json" "$work"');
     const payload = join(temporary, "release.sh"); writeFileSync(payload, script.join("\n") + "\n", { mode: 0o600 });
-    const receipt = output(process.execPath, [join(root, ".agents/skills/dano-production-deploy/scripts/run-remote-script.mjs"), "mutation", payload], 0)
+    const profileSnapshot = join(temporary, "profile.json");
+    writeFileSync(profileSnapshot, JSON.stringify(productionProfile), { mode: 0o600 });
+    const receipt = output(process.execPath, [join(root, ".agents/skills/dano-production-deploy/scripts/run-remote-script.mjs"), "mutation", payload], 0, true,
+      { ...process.env, DANO_PRODUCTION_PROFILE: profileSnapshot })
       .split("\n").filter(Boolean).map(line => JSON.parse(line)).at(-1);
     if (receipt?.stage !== "completed") throw new Error("REMOTE_DEPLOYMENT_INCOMPLETE");
     const receiptPath = `${productionProfile.receiptDirectory}/${attemptId}/receipt.json`;
-    const remote = JSON.parse(output("ssh", [...productionSshArguments(), `cat -- ${quoteRemoteArgument(receiptPath)}`]));
-    if (remote.attemptId !== attemptId || remote.targetSha !== targetSha || !["deployed", "rolled_back", "failed_before_switch", "rollback_failed"].includes(remote.status)) throw new Error("INVALID_DEPLOYMENT_RECEIPT");
+    const remote = JSON.parse(output("ssh", [...productionSshArguments(productionProfile), `cat -- ${quoteRemoteArgument(receiptPath)}`]));
+    if (remote.attemptId !== attemptId || remote.targetSha !== targetSha || remote.baseUrl !== productionProfile.baseUrl || !["deployed", "rolled_back", "failed_before_switch", "rollback_failed"].includes(remote.status)) throw new Error("INVALID_DEPLOYMENT_RECEIPT");
     console.log(JSON.stringify(remote));
     if (remote.status !== "deployed" || receipt.exitCode !== 0) process.exitCode = 1;
   }
 } catch (error) {
-  const allowed = ["REQUIRED_CHECKS_NOT_CONFIGURED", "UPSTREAM_CHECKS_NOT_PASSED", "CLEAN_MAIN_REQUIRED", "MAIN_NOT_SYNCHRONIZED", "UPSTREAM_ADVANCED", "INVALID_DEPLOYMENT_RECEIPT", "REMOTE_DEPLOYMENT_INCOMPLETE"];
+  const allowed = [...profileErrors, "REQUIRED_CHECKS_NOT_CONFIGURED", "UPSTREAM_CHECKS_NOT_PASSED", "CLEAN_MAIN_REQUIRED", "MAIN_NOT_SYNCHRONIZED", "UPSTREAM_ADVANCED", "INVALID_DEPLOYMENT_RECEIPT", "REMOTE_DEPLOYMENT_INCOMPLETE"];
   console.error(allowed.includes(error.message) ? error.message : "PRODUCTION_DEPLOY_FAILED: inspect the private host receipt/logs; no browser acceptance was started.");
   process.exitCode = 1;
 } finally {
