@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { once } from "node:events";
+import { createConnection } from "node:net";
 import {
   fauxAssistantMessage,
   fauxProvider,
@@ -24,18 +25,30 @@ const repositoryRoot = path.resolve(import.meta.dirname, "../../../..");
 const gateScript = path.join(repositoryRoot, "scripts/check-provider-skill-release-gate.mjs");
 const browserProducer = path.join(repositoryRoot, "scripts/provider-skill-release-gate-browser.mjs");
 const gateEnvironment = { DANO_PROVIDER_ACCEPTANCE_PATH: "/acceptance/profile" };
+const startupTimeoutMs = 5_000;
+const captureTimeoutMs = 10_000;
+const shutdownTimeoutMs = 5_000;
+const commandTimeoutMs = 5_000;
+const captureTestTimeoutMs = startupTimeoutMs + captureTimeoutMs + shutdownTimeoutMs + commandTimeoutMs;
 
 afterEach(async () => {
   for (const child of children.splice(0)) {
-    if (child.exitCode === null) child.kill("SIGTERM");
-    if (child.exitCode === null) await once(child, "exit").catch(() => {});
+    if (child.exitCode !== null || child.signalCode !== null) continue;
+    const exit = once(child, "exit");
+    child.kill("SIGTERM");
+    try {
+      await bounded(exit, 1_000, "cleanup SIGTERM");
+    } catch {
+      child.kill("SIGKILL");
+      await bounded(exit, 1_000, "cleanup SIGKILL");
+    }
   }
   for (const root of roots.splice(0)) {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-describe("real provider Skill release gate", () => {
+describe("provider Skill collector protocol with synthetic transcript", () => {
   it("installs a provider-independent Skill that holds each Turn with a public question", () => {
     const root = temporaryRoot();
     const agentDir = path.join(root, "agent");
@@ -187,7 +200,7 @@ describe("real provider Skill release gate", () => {
     await expect(unsettled).resolves.toBe(true);
   });
 
-  it("emits live HTTP/SSE/Pi collector PASS without claiming browser surface provenance", async () => {
+  it("validates the collector PASS and redacted audit contract, not real browser acceptance", async () => {
     const fixture = await completeCapture({ sameUser: true });
     expect(fixture.output()).toContain("LIVE HTTP/SSE/Pi COLLECTOR PASS:");
     expect(fixture.output()).toContain("external IAB/Chrome acceptance record");
@@ -204,7 +217,7 @@ describe("real provider Skill release gate", () => {
     );
     expect(audit.status).toBe(0);
     expect(audit.stdout).toContain("AUDIT ONLY (NOT LIVE COLLECTOR PASS)");
-  }, 10_000);
+  }, captureTestTimeoutMs);
 
   it("accepts the model-compatible question arguments emitted by the live Pi transcript", async () => {
     const fixture = await completeCapture({
@@ -213,14 +226,31 @@ describe("real provider Skill release gate", () => {
     });
 
     expect(fixture.output()).toContain("LIVE HTTP/SSE/Pi COLLECTOR PASS:");
-  }, 10_000);
+  }, captureTestTimeoutMs);
+
+  it("exits after capture completion even with an unfinished HTTP connection", async () => {
+    const fixture = await completeCapture({ sameUser: true, unfinishedConnection: true });
+    expect(fixture.output()).toContain("COLLECTOR PASS:");
+    const timing = fixture.error().split("\n").find(line => line.includes('"kind":"provider-gate-timings"'));
+    expect(JSON.parse(timing!)).toMatchObject({ kind: "provider-gate-timings" });
+  }, captureTestTimeoutMs);
+
+  it("bounds capture timeout cleanup and does not emit PASS for an incomplete run", async () => {
+    const root = temporaryRoot();
+    const capture = await startCapture(path.join(root, "evidence.json"), 1_000);
+    const result = await bounded(capture.exit, shutdownTimeoutMs, "incomplete capture exit");
+    expect(result.code).not.toBe(0);
+    expect(capture.error()).toContain("provider Skill capture timed out");
+    expect(capture.error()).toContain('"kind":"provider-gate-timings"');
+    expect(capture.output()).not.toContain("COLLECTOR PASS:");
+  }, startupTimeoutMs + shutdownTimeoutMs);
 
   it("rejects different Users before writing a live audit record", async () => {
     const fixture = await completeCapture({ sameUser: false, expectFailure: true });
     expect(fixture.output()).not.toContain("COLLECTOR PASS:");
     expect(fixture.error()).toContain("same canonical User");
     expect(fs.existsSync(fixture.evidencePath)).toBe(false);
-  });
+  }, captureTestTimeoutMs);
 
   it("rejects different real runner models before writing a live audit record", async () => {
     const fixture = await completeCapture({
@@ -231,7 +261,7 @@ describe("real provider Skill release gate", () => {
     expect(fixture.output()).not.toContain("COLLECTOR PASS:");
     expect(fixture.error()).toContain("same selected Pi model");
     expect(fs.existsSync(fixture.evidencePath)).toBe(false);
-  });
+  }, captureTestTimeoutMs);
 
   it("does not let A logout before B's persistent viewer observed the held question", async () => {
     const fixture = await completeCapture({
@@ -240,7 +270,7 @@ describe("real provider Skill release gate", () => {
     });
     expect(fixture.earlyLogoutStatus).toBe(400);
     expect(fixture.output()).toContain("LIVE HTTP/SSE/Pi COLLECTOR PASS:");
-  }, 10_000);
+  }, captureTestTimeoutMs);
 
   it("refuses prepare and offline verify instead of reconstructing a live collector PASS", () => {
     const root = temporaryRoot();
@@ -260,10 +290,12 @@ async function completeCapture(options: {
   compatibleQuestionArguments?: boolean;
   probeEarlyLogout?: boolean;
   expectFailure?: boolean;
+  unfinishedConnection?: boolean;
 }) {
   const root = temporaryRoot();
   const evidencePath = path.join(root, "evidence.json");
   const transcriptPath = path.join(root, "shared-session.jsonl");
+  const started = performance.now();
   const capture = await startCapture(evidencePath);
   const config = await collectorJson(capture.urls.a, "/config");
   writeTranscript(
@@ -302,8 +334,31 @@ async function completeCapture(options: {
     logoutHttpStatus: 200,
     oldClientHttpStatus: 404,
   });
-  await post(capture.urls.b, "/b-complete", { status: "authenticated" });
-  const result = await capture.exit;
+  const socket = options.unfinishedConnection
+    ? createConnection({ host: capture.urls.a.hostname, port: Number(capture.urls.a.port) })
+    : undefined;
+  if (socket) {
+    await once(socket, "connect");
+    socket.write("GET /unfinished HTTP/1.1\r\nHost: localhost\r\n");
+  }
+  let result;
+  try {
+    await post(capture.urls.b, "/b-complete", { status: "authenticated" });
+    if (options.unfinishedConnection) {
+      const deadline = performance.now() + captureTimeoutMs;
+      while (!capture.error().includes('"phase":"shutdown"')) {
+        if (performance.now() > deadline) throw new Error("capture validation did not reach shutdown");
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    }
+    result = await bounded(capture.exit, options.unfinishedConnection ? shutdownTimeoutMs : captureTimeoutMs + shutdownTimeoutMs,
+      "capture exit after b-complete");
+  } catch (error) {
+    const timing = capture.error().split("\n").find(line => line.includes('"kind":"provider-gate-timings"'));
+    throw new Error(`collector completion failed after ${Math.round(performance.now() - started)}ms (startup=${capture.startupMs}ms, timing=${timing ?? "pending"}): ${error instanceof Error ? error.message : "unknown failure"}`);
+  } finally {
+    socket?.destroy();
+  }
   if (options.expectFailure) expect(result.code).not.toBe(0);
   else expect(result.code).toBe(0);
   return { ...capture, evidencePath, transcriptPath, earlyLogoutStatus };
@@ -321,10 +376,11 @@ function turnMessages(
     .map(entry => entry.message);
 }
 
-async function startCapture(evidencePath: string) {
+async function startCapture(evidencePath: string, timeoutMs = captureTimeoutMs) {
+  const started = performance.now();
   const child = spawn(
     process.execPath,
-    [gateScript, "capture", evidencePath, "--port", "0", "--timeout-ms", "10000"],
+    [gateScript, "capture", evidencePath, "--port", "0", "--timeout-ms", String(timeoutMs)],
     {
       cwd: repositoryRoot,
       env: {
@@ -335,16 +391,19 @@ async function startCapture(evidencePath: string) {
     },
   );
   children.push(child);
+  const exit = once(child, "close").then(([code]) => ({ code }));
+  // Register before readiness; an early spawn error must not become unhandled.
+  void exit.catch(() => {});
   let stdout = "";
   let stderr = "";
   child.stdout!.setEncoding("utf8");
   child.stderr!.setEncoding("utf8");
   child.stdout!.on("data", chunk => { stdout += chunk; });
   child.stderr!.on("data", chunk => { stderr += chunk; });
-  const deadline = Date.now() + 5_000;
+  const deadline = performance.now() + startupTimeoutMs;
   while (!stdout.includes("SLOT_B=")) {
-    if (child.exitCode !== null) throw new Error(stderr || stdout);
-    if (Date.now() > deadline) throw new Error("capture did not start");
+    if (child.exitCode !== null || child.signalCode !== null) throw new Error("collector startup: child exited before readiness");
+    if (performance.now() > deadline) throw new Error(`collector startup exceeded ${startupTimeoutMs}ms`);
     await new Promise(resolve => setTimeout(resolve, 10));
   }
   const url = (name: "A" | "B") => new URL(
@@ -354,7 +413,8 @@ async function startCapture(evidencePath: string) {
     urls: { a: url("A"), b: url("B") },
     output: () => stdout,
     error: () => stderr,
-    exit: once(child, "exit").then(([code]) => ({ code })),
+    exit,
+    startupMs: Math.round(performance.now() - started),
   };
 }
 
@@ -395,15 +455,15 @@ function turnEntries(marker: string, outcome: "success" | "authentication_requir
 }
 
 async function collectorJson(url: URL, route: string) {
-  const response = await fetch(`${url.origin}${route}${url.search}`, {
+  const response = await collectorFetch(url, route, {
     headers: { Origin: "http://localhost:5173" },
   });
   expect(response.status).toBe(200);
-  return response.json() as Promise<any>;
+  return JSON.parse(response.body);
 }
 
 async function post(url: URL, route: string, body: unknown) {
-  const response = await fetch(`${url.origin}${route}${url.search}`, {
+  const response = await collectorFetch(url, route, {
     method: "POST",
     headers: { Origin: "http://localhost:5173", "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -412,11 +472,25 @@ async function post(url: URL, route: string, body: unknown) {
 }
 
 async function postStatus(url: URL, route: string, body: unknown) {
-  return (await fetch(`${url.origin}${route}${url.search}`, {
+  const response = await collectorFetch(url, route, {
     method: "POST",
     headers: { Origin: "http://localhost:5173", "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  })).status;
+  });
+  return response.status;
+}
+
+async function collectorFetch(url: URL, route: string, init: RequestInit) {
+  const started = performance.now();
+  try {
+    const response = await fetch(`${url.origin}${route}${url.search}`, {
+      ...init, signal: AbortSignal.timeout(commandTimeoutMs),
+    });
+    return { status: response.status, body: await response.text() };
+  } catch {
+    // Do not include the slot token or raw fetch error URL in diagnostics.
+    throw new Error(`collector HTTP ${init.method ?? "GET"} ${route} failed after ${Math.round(performance.now() - started)}ms`);
+  }
 }
 
 function temporaryRoot() {
@@ -426,11 +500,27 @@ function temporaryRoot() {
 }
 
 function runGate(mode: string, env: Record<string, string>, args: string[] = []) {
-  return spawnSync(process.execPath, [gateScript, mode, ...args], {
+  const started = performance.now();
+  const result = spawnSync(process.execPath, [gateScript, mode, ...args], {
     cwd: repositoryRoot,
     env: { ...process.env, ...gateEnvironment, ...env },
     encoding: "utf8",
+    timeout: commandTimeoutMs,
+    killSignal: "SIGKILL",
   });
+  if (result.error) throw new Error(`collector command ${mode} failed after ${Math.round(performance.now() - started)}ms: ${result.error.name}`);
+  return result;
+}
+
+async function bounded<T>(task: Promise<T>, timeoutMs: number, stage: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([task, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${stage} exceeded ${timeoutMs}ms`)), timeoutMs);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function waitUntil(predicate: () => boolean) {

@@ -1127,6 +1127,17 @@ pnpm run test:auth-real-provider-skill -- audit \
   /path/to/provider-skill-evidence.json
 ```
 
+The Vitest collector-protocol tests use synthetic transcripts and local HTTP
+clients; their PASS is not real browser or model-provider acceptance. Their
+outer timeout covers startup, the capture deadline, shutdown and audit separately.
+Requests and subprocesses are bounded, response bodies are consumed, and failed
+stages report safe route/timing diagnostics without slot tokens. The collector
+closes its listener once, allows a one-second drain, then destroys lingering
+connections (including incomplete HTTP headers). It emits PASS only after
+shutdown completes and writes numeric `provider-gate-timings` diagnostics for
+capture, validation and shutdown. Regression coverage includes an unfinished
+connection and an incomplete capture that must time out without PASS.
+
 The producer waits for each Turn's settled transcript snapshot instead of
 advancing on an intermediate tool-result event. The verifier requires the
 Skill's exact canonical `ask_user_question` call and its answered `continue`
