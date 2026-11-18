@@ -30,7 +30,20 @@ and rollback material stay private under the configured receipt directory.
 The previous image is retained. Cleanup-only failure is recorded without rolling
 back a healthy deployment.
 
-**Machine deployment ends after health and machine smoke pass, receipt is saved and lock released.**
+After health/smoke, while still holding the deployment lock, the command publishes
+`docs/skill-generator-ask-user-question-guide.md` from the exact deployed Git
+commit to `/opt/page-desk/doc/skill-generator-ask-user-question-guide.md`.
+Source and destination are configured in `deploy/production/profile.json`.
+The public document is transferred separately from the image, SHA-256 checked,
+atomically replaced with mode `0644`, and read back. A missing `doc` directory
+is created with mode `0755`; symlink destinations are rejected. Other documents
+are untouched and page-desk does not need a restart. The receipt includes the
+source commit/path, destination, hash and `documentPublication.status`.
+Publication failure returns nonzero with `status=deployed` and document status
+`failed`: report the incomplete document step, retry it from the same commit,
+and do not roll back the healthy app. The browser smoke step is not started.
+
+**Machine deployment ends after health and machine smoke pass, the guide is published, the receipt is saved and the lock is released.**
 The deployment workflow then runs baseline browser smoke: real model chat and the
 existing OA login flow, followed by another chat while logged in. Use the Codex
 in-app Browser and [the browser smoke procedure](../.agents/skills/dano-production-deploy/references/browser-smoke.md).
@@ -1127,6 +1140,17 @@ DANO_PROVIDER_GATE_SESSION=/path/to/shared-session.jsonl \
 pnpm run test:auth-real-provider-skill -- audit \
   /path/to/provider-skill-evidence.json
 ```
+
+The Vitest collector-protocol tests use synthetic transcripts and local HTTP
+clients; their PASS is not real browser or model-provider acceptance. Their
+outer timeout covers startup, the capture deadline, shutdown and audit separately.
+Requests and subprocesses are bounded, response bodies are consumed, and failed
+stages report safe route/timing diagnostics without slot tokens. The collector
+closes its listener once, allows a one-second drain, then destroys lingering
+connections (including incomplete HTTP headers). It emits PASS only after
+shutdown completes and writes numeric `provider-gate-timings` diagnostics for
+capture, validation and shutdown. Regression coverage includes an unfinished
+connection and an incomplete capture that must time out without PASS.
 
 The producer waits for each Turn's settled transcript snapshot instead of
 advancing on an intermediate tool-result event. The verifier requires the

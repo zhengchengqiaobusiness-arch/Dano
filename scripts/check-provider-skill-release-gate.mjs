@@ -128,6 +128,8 @@ async function captureGate(evidencePath) {
     throw new Error("provider Skill audit record already exists");
   }
   const options = captureOptions(process.argv.slice(4));
+  const started = performance.now();
+  const timings = {};
   const browserSource = readFileSync(
     join(root, "scripts/provider-skill-release-gate-browser.mjs"),
     "utf8",
@@ -151,6 +153,7 @@ async function captureGate(evidencePath) {
     fail = rejectCompletion;
   });
   let finalizing = false;
+  const connections = new Set();
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
@@ -247,13 +250,14 @@ async function captureGate(evidencePath) {
         if (!finalizing) {
           finalizing = true;
           setImmediate(() => {
+            const validating = performance.now();
             try {
               finalizeSkillCapture(evidencePath, evidence, run);
               finish();
             } catch (error) {
               fail(error);
             } finally {
-              server.close();
+              timings.validationMs = Math.round(performance.now() - validating);
             }
           });
         }
@@ -269,6 +273,10 @@ async function captureGate(evidencePath) {
       );
     }
   });
+  server.on("connection", socket => {
+    connections.add(socket);
+    socket.once("close", () => connections.delete(socket));
+  });
   server.on("error", fail);
   await new Promise((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
@@ -280,19 +288,32 @@ async function captureGate(evidencePath) {
   console.log(`SLOT_A=${collector}/gate.mjs?slot=a&token=${run.tokens.a}`);
   console.log(`SLOT_B=${collector}/gate.mjs?slot=b&token=${run.tokens.b}`);
   const timeout = setTimeout(() => {
-    server.close();
     fail(new Error("provider Skill capture timed out"));
   }, options.timeoutMs);
   try {
     await completion;
-    console.log(
-      "LIVE HTTP/SSE/Pi COLLECTOR PASS: active collector verified same User/two Login Sessions, shared Agent Session, A logout authentication_required, and unaffected B success from the live Pi transcript; browser surface provenance requires an external IAB/Chrome acceptance record",
-    );
-    console.log(`Wrote redacted audit record: ${evidencePath}`);
   } finally {
     clearTimeout(timeout);
-    if (server.listening) await new Promise(resolveClose => server.close(resolveClose));
+    timings.captureMs = Math.round(performance.now() - started);
+    const closing = performance.now();
+    console.error(JSON.stringify({ kind: "provider-gate-phase", phase: "shutdown" }));
+    // Allow the final response to drain, then bound lingering HTTP connections.
+    const forceClose = setTimeout(() => {
+      // Also close sockets that have not finished sending their HTTP headers.
+      for (const socket of connections) socket.destroy();
+    }, 1_000);
+    try {
+      await new Promise((resolveClose, rejectClose) => server.close(error => error ? rejectClose(error) : resolveClose()));
+    } finally {
+      clearTimeout(forceClose);
+      timings.shutdownMs = Math.round(performance.now() - closing);
+      console.error(JSON.stringify({ kind: "provider-gate-timings", ...timings }));
+    }
   }
+  console.log(
+    "LIVE HTTP/SSE/Pi COLLECTOR PASS: active collector verified same User/two Login Sessions, shared Agent Session, A logout authentication_required, and unaffected B success from the live Pi transcript; browser surface provenance requires an external IAB/Chrome acceptance record",
+  );
+  console.log(`Wrote redacted audit record: ${evidencePath}`);
 }
 
 function captureOptions(argv) {

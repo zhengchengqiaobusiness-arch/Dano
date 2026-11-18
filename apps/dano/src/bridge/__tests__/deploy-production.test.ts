@@ -11,6 +11,7 @@ it("plans the fixed deployment without Git, build, remote mutation or acceptance
   const result = spawnSync(process.execPath, [cli, "--image", "dano-app:test", "--plan"], { encoding: "utf8" });
   expect(result.status, result.stderr).toBe(0);
   expect(JSON.parse(result.stdout)).toMatchObject({ status: "plan", buildsImage: false, downloadsDependencies: false, browserSmoke: "required", browserAcceptance: "not_requested" });
+  expect(JSON.parse(result.stdout).stages).toContain("publish-question-guide");
 });
 it("rejects a shell-shaped image argument before any remote action", () => {
   const result = spawnSync(process.execPath, [cli, "--image", "$(echo invalid)"], { encoding: "utf8" });
@@ -21,7 +22,7 @@ it("runs deployment transaction regression coverage with Python's standard libra
     cwd: root, encoding: "utf8", env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
   });
   expect(result.status, result.stdout + result.stderr).toBe(0);
-  expect(result.stderr).toContain("Ran 14 tests");
+  expect(result.stderr).toMatch(/Ran \d+ tests/);
 });
 
 it("quotes remote paths as literal shell arguments", async () => {

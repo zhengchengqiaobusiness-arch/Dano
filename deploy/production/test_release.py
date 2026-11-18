@@ -3,13 +3,15 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from release import Release
+from release import Release, publish_document
+import hashlib
 
 
 class FakeRelease(Release):
     def __init__(self, directory, fail=None):
         self.calls = []
         self.fail = fail
+        self.m = {}
         self.receipts = Path(directory)
         self.receipt = {'acceptance': 'not_requested'}
         self.started = time.monotonic()
@@ -39,6 +41,12 @@ class FakeRelease(Release):
         if self.fail == 'cleanup':
             raise RuntimeError('COMMAND_FAILED')
 
+    def publish_document(self):
+        self.calls.append('document-publication')
+        if self.fail == 'document-publication':
+            raise RuntimeError('DOCUMENT_HASH_MISMATCH')
+        self.receipt['documentPublication'] = {'status': 'synced'}
+
     def rollback(self):
         self.calls.append('rollback')
         if self.fail == 'rollback':
@@ -56,7 +64,7 @@ class TransactionTests(unittest.TestCase):
     def test_finishes_after_machine_checks_without_acceptance_wait(self):
         result, calls, receipt = self.run_release()
         self.assertEqual(result, 0)
-        self.assertEqual(calls, ['preflight', 'switch', 'health-and-smoke', 'cleanup'])
+        self.assertEqual(calls, ['preflight', 'switch', 'health-and-smoke', 'document-publication', 'cleanup'])
         self.assertEqual(receipt['status'], 'deployed')
         self.assertEqual(receipt['acceptance'], 'not_requested')
 
@@ -81,6 +89,14 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(receipt['status'], 'deployed')
         self.assertEqual(receipt['cleanup'], 'pending')
 
+    def test_document_failure_reports_incomplete_without_traffic_rollback(self):
+        result, calls, receipt = self.run_release('document-publication')
+        self.assertEqual(result, 1)
+        self.assertNotIn('rollback', calls)
+        self.assertEqual(receipt['status'], 'deployed')
+        self.assertEqual(receipt['documentPublication']['status'], 'failed')
+        self.assertEqual(receipt['cleanup'], 'complete')
+
     def test_rollback_failure_is_explicit(self):
         with tempfile.TemporaryDirectory() as directory:
             release = FakeRelease(directory, 'rollback')
@@ -97,6 +113,80 @@ class TransactionTests(unittest.TestCase):
 from unittest.mock import patch
 import os
 import datetime
+
+
+class DocumentTests(unittest.TestCase):
+    def test_creates_readable_document_and_preserves_other_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / 'source.md'
+            data = '表单指南\n'.encode('utf8')
+            source.write_bytes(data)
+            target = root / 'doc' / 'guide.md'
+            digest = hashlib.sha256(data).hexdigest()
+            publish_document(source, target, digest)
+            self.assertEqual(target.read_bytes(), data)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+            other = target.parent / 'other.md'
+            other.write_text('keep')
+            target.write_text('old')
+            publish_document(source, target, digest)
+            self.assertEqual(target.read_bytes(), data)
+            self.assertEqual(other.read_text(), 'keep')
+
+    def test_hash_failure_preserves_existing_document(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'source.md'
+            target = Path(directory) / 'guide.md'
+            source.write_text('new')
+            target.write_text('old')
+            with self.assertRaisesRegex(RuntimeError, 'DOCUMENT_HASH_MISMATCH'):
+                publish_document(source, target, '0' * 64)
+            self.assertEqual(target.read_text(), 'old')
+
+    def test_rejects_symlink_file_and_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / 'source.md'
+            source.write_text('source')
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            link = root / 'link.md'
+            link.symlink_to(source)
+            parent = root / 'linked'
+            parent.symlink_to(root, target_is_directory=True)
+            for target in [link, parent / 'guide.md']:
+                with self.assertRaisesRegex(RuntimeError, 'DOCUMENT_TARGET_INVALID'):
+                    publish_document(source, target, digest)
+
+    def test_replace_failure_preserves_old_document_and_removes_temp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory).resolve() / 'source.md'
+            target = Path(directory).resolve() / 'guide.md'
+            source.write_text('new')
+            target.write_text('old')
+            with patch('release.os.replace', side_effect=OSError('fixture')):
+                with self.assertRaises(OSError):
+                    publish_document(source, target, hashlib.sha256(source.read_bytes()).hexdigest())
+            self.assertEqual(target.read_text(), 'old')
+            self.assertEqual(list(Path(directory).glob('.guide.md.*')), [])
+
+    def test_receipt_proves_exact_source_commit_and_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / 'question-guide.md'
+            source.write_bytes(b'guide\n')
+            release = Release.__new__(Release)
+            release.work = root
+            publication = dict(sourceCommit='a' * 40, sourcePath='docs/guide.md',
+                               targetPath=str(root / 'doc' / 'guide.md'),
+                               sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+            release.m = dict(targetSha='a' * 40, documentPublication=publication)
+            release.receipt = {}
+            release.publish_document()
+            self.assertEqual(release.receipt['documentPublication'], dict(publication, status='synced'))
+            release.m['targetSha'] = 'b' * 40
+            with self.assertRaisesRegex(RuntimeError, 'DOCUMENT_COMMIT_MISMATCH'):
+                release.publish_document()
 
 
 class CommandRelease(Release):
