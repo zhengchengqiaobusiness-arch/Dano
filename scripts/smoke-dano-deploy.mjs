@@ -9,7 +9,9 @@ const baseUrl = new URL(process.env.DANO_SMOKE_BASE_URL || defaultSmokeUrl);
 const timeoutMs = Number.parseInt(process.env.DANO_SMOKE_TIMEOUT_MS || "15000", 10);
 
 function url(path) {
-  return new URL(path, baseUrl).toString();
+  const target = new URL(path, baseUrl);
+  assert(target.origin === baseUrl.origin, "smoke request must use the deployment origin");
+  return target.toString();
 }
 
 async function withTimeout(label, task) {
@@ -27,7 +29,7 @@ async function withTimeout(label, task) {
 
 async function expectResponse(label, path, init, predicate) {
   const response = await withTimeout(label, signal =>
-    fetch(url(path), { ...init, signal }),
+    fetch(url(path), { ...init, redirect: "error", signal }),
   );
   if (!predicate(response)) {
     const detail = (await response.clone().text().catch(() => ""))
@@ -168,7 +170,7 @@ async function checkAssets(html) {
   }
   for (const path of assets) {
     await withTimeout("GET entry asset", async signal => {
-      const response = await fetch(url(path), { cache: "no-store", signal });
+      const response = await fetch(url(path), { cache: "no-store", redirect: "error", signal });
       assert(response.ok, "entry asset request failed");
       const contentType = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
       assert(path.endsWith(".css") ? contentType === "text/css" :

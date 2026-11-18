@@ -69,6 +69,7 @@ class Release:
         self.started = time.monotonic()
         self.timings = {}
         self.receipt = {key: manifest[key] for key in ['attemptId', 'targetSha', 'version', 'image']}
+        self.receipt['baseUrl'] = self.p['baseUrl']
         self.receipt['acceptance'] = 'not_requested'
         self.receipt['browserSmoke'] = 'pending'
         self.receipt['ci'] = manifest.get('ci')
@@ -226,7 +227,11 @@ class Release:
                       '-e', 'DANO_SMOKE_EXPECTED_ASSETS_JSON=' + json.dumps(self.image_artifacts(expected_image)['assets']),
                       '-e', 'DANO_EXPOSURE_MODE=https', '-v', str(self.work / 'smoke.mjs') + ':/smoke.mjs:ro',
                       expected_image, '/smoke.mjs'], timeout=self.p['smokeTimeoutSeconds'])
-        self.command(['curl', '--fail', '--silent', '--show-error', '--max-time', '15', self.p['baseUrl'].rstrip('/') + '/web/'])
+        site_status = self.command(['curl', '--disable', '--fail', '--silent', '--show-error', '--max-time', '15',
+                                    '--output', '/dev/null', '--write-out', '%{http_code}',
+                                    self.p['baseUrl'] + 'web/'], capture=True)
+        if len(site_status) != 3 or not site_status.isdigit() or not site_status.startswith('2'):
+            raise RuntimeError('SITE_SMOKE_NOT_SUCCESSFUL')
         current = {c['Id']: c['Image'] for c in self.containers() if c['Id'] != app['Id']}
         if current != self.before_containers:
             raise RuntimeError('ADJACENT_SERVICE_CHANGED')
@@ -303,7 +308,7 @@ class Release:
                 action()
                 self.timings[name] = round(time.monotonic() - started, 3)
         except Exception as error:
-            known = ['COMMAND_FAILED', 'APP_TOPOLOGY_MISMATCH', 'DEPLOY_LOCK_REQUIRED', 'DEPLOY_DIRECTORY_INVALID', 'COMPOSE_PROFILE_DRIFT', 'LIVE_CONFIG_DRIFT', 'BASELINE_UNHEALTHY', 'NEIGHBOR_UNHEALTHY', 'PREPARED_IMAGE_UNAVAILABLE', 'IMAGE_PROVENANCE_MISMATCH', 'IMAGE_ARTIFACT_MISMATCH', 'SANDBOX_PROTECTION_DISABLED', 'IMAGE_ENV_INVALID', 'UPSTREAM_PROOF_EXPIRED', 'RUNNING_IMAGE_MISMATCH', 'HEALTH_TIMEOUT', 'APP_RESTARTED_OR_OOM', 'ADJACENT_SERVICE_CHANGED']
+            known = ['COMMAND_FAILED', 'APP_TOPOLOGY_MISMATCH', 'DEPLOY_LOCK_REQUIRED', 'DEPLOY_DIRECTORY_INVALID', 'COMPOSE_PROFILE_DRIFT', 'LIVE_CONFIG_DRIFT', 'BASELINE_UNHEALTHY', 'NEIGHBOR_UNHEALTHY', 'PREPARED_IMAGE_UNAVAILABLE', 'IMAGE_PROVENANCE_MISMATCH', 'IMAGE_ARTIFACT_MISMATCH', 'SANDBOX_PROTECTION_DISABLED', 'IMAGE_ENV_INVALID', 'UPSTREAM_PROOF_EXPIRED', 'RUNNING_IMAGE_MISMATCH', 'HEALTH_TIMEOUT', 'APP_RESTARTED_OR_OOM', 'ADJACENT_SERVICE_CHANGED', 'SITE_SMOKE_NOT_SUCCESSFUL']
             self.receipt['error'] = str(error) if str(error) in known else 'DEPLOY_STEP_FAILED'
             failed_phase = self.phase
             try:

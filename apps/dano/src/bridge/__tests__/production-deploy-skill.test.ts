@@ -24,6 +24,8 @@ function remoteFixture(script: string) {
   const bin = join(root, "bin"); mkdirSync(bin);
   const calls = join(root, "calls.jsonl");
   const payload = join(root, "payload.sh"); writeFileSync(payload, script);
+  const profile = { sshHost: "deploy@ssh.test", sshIdentity: ".ssh/test_key", baseUrl: "https://public.test/" };
+  const profilePath = join(root, "profile.json"); writeFileSync(profilePath, JSON.stringify(profile));
   const executable = (name: string, source: string) => {
     const path = join(bin, name); writeFileSync(path, `#!${process.execPath}\n${source}`); chmodSync(path, 0o755);
   };
@@ -38,13 +40,13 @@ let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',s=>input+
 process.stdin.on('end',()=>{const command=process.argv.at(-1).replaceAll('/var/lock/dano-production-deploy.lock',process.env.TEST_LOCK_PATH);const result=cp.spawnSync('/bin/bash',['-c',command],{input,encoding:'utf8',env:process.env});process.stdout.write(result.stdout||'');process.stderr.write(result.stderr||'');process.exit(result.status??1);});`);
   const run = (kind = "diagnostic", extra: NodeJS.ProcessEnv = {}) => {
     const result = spawnSync(process.execPath, [new URL("run-remote-script.mjs", skill).pathname, kind, payload], {
-      encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TEST_SSH_CALLS: calls, TEST_LOCK_PATH: join(root, "release.lock"), ...extra }, timeout: 10000,
+      encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, DANO_PRODUCTION_PROFILE: profilePath, TEST_SSH_CALLS: calls, TEST_LOCK_PATH: join(root, "release.lock"), ...extra }, timeout: 10000,
     });
     const receipts = result.stdout.trim().split("\n").filter(Boolean).map(row => JSON.parse(row));
     for (const receipt of receipts) if (receipt.runDirectory) temporary.push(receipt.runDirectory);
     return { ...result, receipts, calls: existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n").map(row => JSON.parse(row)) : [] };
   };
-  return { root, payload, run };
+  return { root, payload, profile, run };
 }
 
 describe("production deployment log evidence", () => {
@@ -166,7 +168,13 @@ describe("production deployment remote script execution", () => {
     expect(result.receipts.at(-1)).toMatchObject({ kind: "diagnostic", exitCode: 0, disposition: "passed" });
     expect(result.stdout + result.stderr).not.toContain("never-print-this");
     expect(result.calls).toHaveLength(2);
-    for (const call of result.calls) expect(call.slice(0, -1)).toEqual(["-i", join(process.env.HOME!, ".ssh/id_rsa"), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "root@1.15.173.22"]);
+    for (const call of result.calls) expect(call.slice(0, -1)).toEqual(["-i", join(process.env.HOME!, f.profile.sshIdentity), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", f.profile.sshHost]);
+  });
+  it("does not connect when the target profile was not supplied", () => {
+    const result = remoteFixture("exit 0\n").run("diagnostic", { DANO_PRODUCTION_PROFILE: "" });
+    expect(result.status).toBe(2);
+    expect(result.calls).toHaveLength(0);
+    expect(result.receipts.at(-1)).toMatchObject({ error: "DANO_PRODUCTION_PROFILE_REQUIRED" });
   });
   it("records a failed diagnostic without running any rollback or forwarding raw errors", () => {
     const f = remoteFixture("printf 'never-print-this' >&2\nexit 7\n");

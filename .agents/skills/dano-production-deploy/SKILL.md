@@ -1,6 +1,6 @@
 ---
 name: dano-production-deploy
-description: Deploy a prepared Dano image to the existing service on 1.15.173.22, finish machine smoke, then verify real chat and OA login in the Codex in-app Browser. Full feature acceptance remains optional.
+description: Deploy a prepared Dano image to the service selected by the environment's deployment profile, then verify machine health, real chat and OA login. Use for updates to an existing deployment.
 ---
 
 # Deploy Dano
@@ -10,7 +10,7 @@ and smoke pass, save the receipt and release the lock. Then complete baseline
 browser smoke (real chat, OA login, logged-in chat). Full feature acceptance is
 optional and starts only when requested.
 
-## Fixed production entry
+## Production entry
 
 Use the checked-in entry instead of constructing a release script per task:
 
@@ -18,7 +18,10 @@ Use the checked-in entry instead of constructing a release script per task:
 pnpm deploy:production --image <prepared-image-tag-or-digest>
 ```
 
-The public server profile is `deploy/production/profile.json`. The command
+Set `DANO_PRODUCTION_PROFILE` to the absolute path of the selected environment's
+profile outside the repository. See [profile setup](../../../deploy/README.md).
+Use its SSH target for transport and its public URL for smoke. Do not infer
+the public URL from the SSH target or fall back to another environment. The command
 requires clean synchronized main, checks upstream CI and commit, and resolves
 the supplied already-built server image to its immutable ID. It preserves the
 existing Compose files, nginx/TLS, secrets, runtime data and adjacent services.
@@ -40,7 +43,7 @@ pnpm deploy:production --image <prepared-image> --plan
    discard them. Deploy only a merged target on main. The entry runs
    `git sync-upstream` and verifies main/origin/main/upstream/main equality.
 2. Run the entry with the prepared image. Use the repository's file-based SSH
-   runner and the fixed profile, not ad hoc SSH build commands. The worker holds
+   runner and the selected profile, not ad hoc SSH build commands. The worker holds
    the production lock only through preflight, SYSTEM transaction, app switch,
    bounded health wait, nginx reload, smoke and receipt.
 3. The worker validates image revision and packaged version/assets, effective
@@ -50,7 +53,7 @@ pnpm deploy:production --image <prepared-image> --plan
    health/smoke. A cleanup-only problem is recorded without rolling back a
    healthy app. Raw command output and rollback copies remain root-only on host.
 4. Require the returned candidate-bound receipt: `status=deployed`, correct
-   target/image, `health=healthy`, `smoke=passed`, `acceptance=not_requested`.
+   target/image and `baseUrl`, `health=healthy`, `smoke=passed`, `acceptance=not_requested`.
    Report version, image, receipt and timings. A transport interruption is
    unconfirmed; inspect that attempt's on-host receipt and lock before retrying.
    Never rebuild an already verified candidate solely to repeat deployment.

@@ -192,8 +192,9 @@ class DocumentTests(unittest.TestCase):
 class CommandRelease(Release):
     def __init__(self, directory, drift=False, wrong_revision=False, overlay=False):
         root = Path(directory)
-        profile = json.loads((Path(__file__).parent / 'profile.json').read_text())
-        profile.update(deployDirectory=str(root), receiptDirectory=str(root / 'receipts'))
+        profile = json.loads((Path(__file__).parent / 'profile.example.json').read_text())
+        profile.update(deployDirectory=str(root), receiptDirectory=str(root / 'receipts'),
+                       baseUrl='https://public.test/')
         for name in profile['composeFiles']:
             (root / name).write_text('services: {}')
         (root / '.env').write_text('DANO_IMAGE=old-image\nTEST_PRIVATE_VALUE=synthetic-kept\n')
@@ -230,6 +231,8 @@ class CommandRelease(Release):
 
     def command(self, args, capture=False, **kwargs):
         self.calls.append(args)
+        if capture and args[0] == 'curl':
+            return '200'
         if capture and 'package-versions/package.json' in args[-1]:
             return json.dumps({'version': '1.2.3', 'assets': ['index.js', 'index.css']})
         if capture and 'resolveProductName' in args[-1]:
@@ -249,6 +252,19 @@ class PreparationTests(unittest.TestCase):
             value = next(arg for arg in smoke if arg.startswith('DANO_SMOKE_EXPECTED_ASSETS_JSON='))
             self.assertEqual(json.loads(value.split('=', 1)[1]),
                              ['sha256:previous.js', 'sha256:previous.css'])
+            self.assertIn('DANO_SMOKE_BASE_URL=' + release.p['baseUrl'], smoke)
+            site = next(call for call in release.calls if call[0] == 'curl')
+            self.assertEqual(site[-1], release.p['baseUrl'] + 'web/')
+            self.assertEqual(release.receipt['baseUrl'], release.p['baseUrl'])
+
+    def test_site_redirect_does_not_pass_as_smoke_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            release = CommandRelease(directory)
+            original = release.command
+            release.before_containers = {}
+            release.command = lambda args, **kwargs: '308' if args[0] == 'curl' else original(args, **kwargs)
+            with self.assertRaisesRegex(RuntimeError, 'SITE_SMOKE_NOT_SUCCESSFUL'):
+                release.verify('sha256:previous')
 
     def test_changes_only_image_and_checks_system_identity(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryFile() as lock:

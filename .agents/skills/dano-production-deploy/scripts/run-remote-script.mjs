@@ -3,19 +3,20 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 
-import { productionSshArguments } from "../../../../scripts/production-profile.mjs";
+import { loadProductionProfile, productionSshArguments, profileErrors } from "../../../../scripts/production-profile.mjs";
 
 const [kind, scriptPath, ...extra] = process.argv.slice(2);
 const kinds = ["diagnostic", "mutation", "acceptance"];
 let runDirectory;
 let scriptSha256;
+let sshArguments;
 const emit = value => console.log(JSON.stringify({ kind: kinds.includes(kind) ? kind : undefined, scriptSha256, runDirectory, ...value }));
 
 // SSH receives a file through a pipe, never through a canonical terminal.
 // Child output remains on the host; only validated transport receipts leave it.
 function ssh(command, input = "", timeoutMs) {
   return new Promise(resolve => {
-    const child = spawn("ssh", [...productionSshArguments(), command],
+    const child = spawn("ssh", [...sshArguments, command],
     { stdio: ["pipe", "pipe", "pipe"] });
     let output = "";
     let overflow = false;
@@ -38,6 +39,7 @@ function ssh(command, input = "", timeoutMs) {
 
 try {
   if (!kinds.includes(kind) || !scriptPath || extra.length) throw new Error("INVALID_ARGUMENTS");
+  sshArguments = productionSshArguments(loadProductionProfile());
   if (!lstatSync(scriptPath).isFile() || lstatSync(scriptPath).isSymbolicLink()) throw new Error("INVALID_SCRIPT");
   const script = readFileSync(scriptPath);
   if (!script.length || script.length > 1024 * 1024) throw new Error("INVALID_SCRIPT");
@@ -83,7 +85,7 @@ cat "$run_dir/step-result.json"`);
   emit({ stage: "completed", exitCode: result.exitCode,
     disposition: result.exitCode === 0 ? "passed" : kind === "diagnostic" ? "retry-diagnostic" : "stop-and-classify" });
 } catch (error) {
-  const allowed = ["INVALID_ARGUMENTS", "INVALID_SCRIPT", "LOCAL_SYNTAX_FAILED", "SSH_UPLOAD_FAILED",
+  const allowed = [...profileErrors, "INVALID_ARGUMENTS", "INVALID_SCRIPT", "LOCAL_SYNTAX_FAILED", "SSH_UPLOAD_FAILED",
     "SSH_EXECUTION_UNCONFIRMED", "INVALID_EXECUTION_RECEIPT"];
   emit({ stage: "incomplete", error: allowed.includes(error.message) ? error.message : "REMOTE_SCRIPT_FAILED",
     execution: "unconfirmed", disposition: "inspect-before-mutation" });

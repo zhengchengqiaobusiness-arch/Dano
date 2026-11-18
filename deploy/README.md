@@ -3,13 +3,24 @@
 ## Existing production: one-command image deployment
 
 ```sh
+export DANO_PRODUCTION_PROFILE=/absolute/path/to/environment-profile.json
 pnpm deploy:production --image dano-app:<commit>
 # Preview the stages without network access or mutation:
 pnpm deploy:production --image dano-app:<commit> --plan
 ```
 
-The fixed public environment lives in `deploy/production/profile.json`; credentials
-remain in the existing SSH key and server-managed files. Prepare/build the image
+Keep one profile per environment outside the checkout, based on
+[`deploy/production/profile.example.json`](production/profile.example.json).
+Set `sshHost` to the SSH alias, host or `user@host` and `sshIdentity` to the key
+path relative to the operator's home. Set `baseUrl` to the public HTTPS origin
+that users actually open, with no path other than `/`, query or fragment. Review
+the template's deployment paths and Compose topology for the selected environment.
+The same profile is required for the deployment Skill's remote-script helper.
+Do not put secrets in the profile; credentials remain in the SSH key and
+server-managed files. Existing automation must supply `DANO_PRODUCTION_PROFILE`
+before using this entry; there is no checked-in target fallback.
+
+Prepare/build the image
 before deploying. This command does not clone source, install dependencies, build,
 or replace the existing Compose/nginx files. It supports image updates to this
 profile; new installations or topology/configuration migrations require their
@@ -23,17 +34,27 @@ Deployment pins its image
 ID, preserving runtime data, OA/TLS, secrets, help and adjacent services.
 
 A single locked worker runs image/config/sandbox/SYSTEM preflight, recreates only
-app, waits for health, reloads nginx, runs deployment smoke and checks `/web/`.
+app, waits for health, reloads nginx, runs deployment smoke and checks `/web/`
+using the configured public URL. Use the receipt's `baseUrl` for browser smoke.
 Machine failure restores the previous image/env/SYSTEM and repeats health/smoke.
 The receipt records each stage duration, image IDs, health and smoke; raw output
 and rollback material stay private under the configured receipt directory.
 The previous image is retained. Cleanup-only failure is recorded without rolling
 back a healthy deployment.
 
+For intermittent Dano stylesheet or script loads, enable Network **Preserve log**
+before reproducing and note the failed request's `X-Dano-Asset-Request-Id`
+response header. Find the matching `dano_asset` JSON record in nginx's container
+logs. Compare `sent` with `upstreamBytes`, `contentLength`, and `encoding`;
+check `complete`, both status fields, and the timing before assigning a cause.
+If no response headers arrived, use the asset pathname and failure time to
+find candidates, but do not treat that match as conclusive. These records omit
+query strings, cookies, referrers, and client IP addresses.
+
 After health/smoke, while still holding the deployment lock, the command publishes
 `docs/skill-generator-ask-user-question-guide.md` from the exact deployed Git
 commit to `/opt/page-desk/doc/skill-generator-ask-user-question-guide.md`.
-Source and destination are configured in `deploy/production/profile.json`.
+Source and destination are configured in the selected environment profile.
 The public document is transferred separately from the image, SHA-256 checked,
 atomically replaced with mode `0644`, and read back. A missing `doc` directory
 is created with mode `0755`; symlink destinations are rejected. Other documents

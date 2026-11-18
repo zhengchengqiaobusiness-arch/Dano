@@ -1629,6 +1629,11 @@ export class BridgeServer {
 
     fs.stat(filePath, (err, stats) => {
       if (err || !stats.isFile()) {
+        if (pathname === "/assets" || pathname.startsWith("/assets/")) {
+          res.writeHead(404, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
+          res.end(req.method === "HEAD" ? undefined : "Not Found");
+          return;
+        }
         const indexPath = path.join(this.config.staticDir!, "index.html");
         fs.stat(indexPath, (indexErr, indexStats) => {
           if (indexErr || !indexStats.isFile()) {

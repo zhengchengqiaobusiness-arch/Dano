@@ -1,5 +1,5 @@
 {
-  "sshHost": "root@1.15.173.22",
+  "sshHost": "",
   "sshIdentity": ".ssh/id_rsa",
   "deployDirectory": "/opt/dano/deploy",
   "receiptDirectory": "/opt/dano/deploy/releases",
@@ -7,7 +7,7 @@
     "sourcePath": "docs/skill-generator-ask-user-question-guide.md",
     "targetPath": "/opt/page-desk/doc/skill-generator-ask-user-question-guide.md"
   },
-  "baseUrl": "https://1.15.173.22/",
+  "baseUrl": "",
   "composeFiles": [
     "docker-compose.yml",
     "docker-compose.exposure.yml",
