@@ -10,7 +10,7 @@ const cli = fileURLToPath(new URL("../../../../../scripts/deploy-production.mjs"
 it("plans the fixed deployment without Git, build, remote mutation or acceptance", () => {
   const result = spawnSync(process.execPath, [cli, "--image", "dano-app:test", "--plan"], { encoding: "utf8" });
   expect(result.status, result.stderr).toBe(0);
-  expect(JSON.parse(result.stdout)).toMatchObject({ status: "plan", buildsImage: false, downloadsDependencies: false, browserAcceptance: "not_requested" });
+  expect(JSON.parse(result.stdout)).toMatchObject({ status: "plan", buildsImage: false, downloadsDependencies: false, browserSmoke: "required", browserAcceptance: "not_requested" });
   expect(JSON.parse(result.stdout).stages).toContain("publish-question-guide");
 });
 it("rejects a shell-shaped image argument before any remote action", () => {

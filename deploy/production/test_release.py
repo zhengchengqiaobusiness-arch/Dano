@@ -238,6 +238,18 @@ class CommandRelease(Release):
 
 
 class PreparationTests(unittest.TestCase):
+    def test_smoke_manifest_comes_from_the_verified_image_including_rollback(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryFile() as lock:
+            release = CommandRelease(directory)
+            with patch.dict(os.environ, {'DANO_DEPLOY_LOCK_FD': str(lock.fileno())}):
+                release.prepare()
+            release.image_artifacts = lambda image: {'assets': [image + '.js', image + '.css']}
+            release.verify('sha256:previous')
+            smoke = next(call for call in release.calls if '/smoke.mjs' in call)
+            value = next(arg for arg in smoke if arg.startswith('DANO_SMOKE_EXPECTED_ASSETS_JSON='))
+            self.assertEqual(json.loads(value.split('=', 1)[1]),
+                             ['sha256:previous.js', 'sha256:previous.css'])
+
     def test_changes_only_image_and_checks_system_identity(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryFile() as lock:
             release = CommandRelease(directory)
