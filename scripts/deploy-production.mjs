@@ -59,6 +59,7 @@ try {
     const encode = value => Buffer.from(value).toString("base64");
     const files = {
       "manifest.json": JSON.stringify(manifest),
+      "deploy.sh": readFileSync(join(root, "deploy/bundle/deploy.sh"), "utf8"),
       "release.py": readFileSync(join(root, "deploy/production/release.py"), "utf8"),
       "compose-filter.mjs": readFileSync(join(root, ".agents/skills/dano-production-deploy/scripts/summarize-compose-config.mjs"), "utf8"),
       "smoke.mjs": readFileSync(join(root, "scripts/smoke-dano-deploy.mjs"), "utf8"),
@@ -67,7 +68,7 @@ try {
     const script = ["#!/bin/bash", "set -euo pipefail", "umask 077", 'work=$(mktemp -d /tmp/dano-production-release.XXXXXX)'];
     for (const [name, content] of Object.entries(files)) script.push(`printf %s '${encode(content)}' | base64 -d > "$work/${name}"`);
     script.push("trap 'rm -rf \"$work\"' EXIT");
-    script.push('python3 "$work/release.py" "$work/manifest.json" "$work"');
+    script.push('sh "$work/deploy.sh" --production-transaction "$work/manifest.json" "$work"');
     const payload = join(temporary, "release.sh"); writeFileSync(payload, script.join("\n") + "\n", { mode: 0o600 });
     const profileSnapshot = join(temporary, "profile.json");
     writeFileSync(profileSnapshot, JSON.stringify(productionProfile), { mode: 0o600 });

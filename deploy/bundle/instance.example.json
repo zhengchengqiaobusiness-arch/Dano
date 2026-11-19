@@ -1,0 +1,9 @@
+{
+  "project": "dano",
+  "controlDirectory": "/opt/dano/deploy",
+  "runtimeDirectory": "/opt/dano/runtime-data",
+  "baseUrl": "https://dano.example.invalid/",
+  "exposure": "https",
+  "environmentFile": "dano.env",
+  "healthTimeoutSeconds": 180
+}

@@ -1,0 +1,8 @@
+services:
+  app:
+    networks: !override [default]
+  nginx:
+    image: ${DANO_NGINX_IMAGE:?DANO_NGINX_IMAGE is required}
+    networks: !override [default]
+networks:
+  skillmanner: !reset null

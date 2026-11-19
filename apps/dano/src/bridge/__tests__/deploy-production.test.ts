@@ -49,12 +49,12 @@ it("rejects a shell-shaped image argument before any remote action", () => {
   expect(result.status).toBe(1);
 });
 it("runs deployment transaction regression coverage with Python's standard library", () => {
-  const result = spawnSync("python3", ["-m", "unittest", "discover", "-s", "deploy/production", "-p", "test_release.py"], {
+  const result = spawnSync("python3", ["-m", "unittest", "discover", "-s", "deploy/production", "-p", "test_*.py"], {
     cwd: root, encoding: "utf8", env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
   });
   expect(result.status, result.stdout + result.stderr).toBe(0);
   expect(result.stderr).toMatch(/Ran \d+ tests/);
-});
+}, 60_000);
 
 it("quotes remote paths as literal shell arguments", async () => {
   // @ts-expect-error Public deployment module has no TypeScript declaration.
