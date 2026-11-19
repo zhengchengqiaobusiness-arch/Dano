@@ -45,7 +45,7 @@ def publish_document(source, target, expected_hash):
     return expected_hash
 
 
-class Release:
+class ReleaseHost:
     def __init__(self, manifest, work):
         self.m = manifest
         self.p = manifest['profile']
@@ -129,6 +129,42 @@ class Release:
         return json.loads(self.command(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'node', image, '-e',
             'const fs=require("fs");const p=JSON.parse(fs.readFileSync("/app/package-versions/package.json"));const h=fs.readFileSync("/app/dist/web/index.html","utf8");console.log(JSON.stringify({version:p.version,assets:[...h.matchAll(/assets\\/([^" ]+\\.(?:js|css))/g)].map(x=>x[1])}));'], capture=True))
 
+    def wait_for_app(self, expected_image):
+        deadline = time.monotonic() + self.p['healthTimeoutSeconds']
+        while time.monotonic() < deadline:
+            app = self.app()
+            if app['Image'] != expected_image:
+                raise RuntimeError('RUNNING_IMAGE_MISMATCH')
+            if app['State'].get('Health', {}).get('Status') == 'healthy':
+                break
+            time.sleep(2)
+        else:
+            raise RuntimeError('HEALTH_TIMEOUT')
+        if app['RestartCount'] or app['State'].get('OOMKilled'):
+            raise RuntimeError('APP_RESTARTED_OR_OOM')
+        return app
+
+    def smoke(self, expected_image, exposure):
+        self.command(['docker', 'run', '--rm', '--network', 'host', '--entrypoint', 'node',
+                      '-e', 'DANO_SMOKE_BASE_URL=' + self.p['baseUrl'],
+                      '-e', 'DANO_SMOKE_EXPECTED_ASSETS_JSON=' + json.dumps(self.image_artifacts(expected_image)['assets']),
+                      '-e', 'DANO_EXPOSURE_MODE=' + exposure, '-v', str(self.work / 'smoke.mjs') + ':/smoke.mjs:ro',
+                      expected_image, '/smoke.mjs'], timeout=self.p['smokeTimeoutSeconds'])
+
+
+    def record(self, status):
+        self.receipt.update(status=status, phase=self.phase, timings=self.timings,
+                            durationSeconds=round(time.monotonic() - self.started, 3),
+                            checkedAt=datetime.datetime.utcnow().isoformat() + 'Z')
+        pending = self.receipts / 'receipt.pending'
+        with pending.open('w', encoding='utf8') as output:
+            output.write(json.dumps(self.receipt, ensure_ascii=True, indent=2))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(str(pending), str(self.receipts / 'receipt.json'))
+
+
+class Release(ReleaseHost):
     def prepare(self):
         if not os.environ.get('DANO_DEPLOY_LOCK_FD'):
             raise RuntimeError('DEPLOY_LOCK_REQUIRED')
@@ -145,6 +181,20 @@ class Release:
         if app['State'].get('Health', {}).get('Status') != 'healthy':
             raise RuntimeError('BASELINE_UNHEALTHY')
         self.old_image = app['Image']
+        self.instance_state_file = self.directory / '.deployment.json'
+        self.instance_state = None
+        if self.instance_state_file.is_symlink():
+            raise RuntimeError('DEPLOY_DIRECTORY_INVALID')
+        if self.instance_state_file.is_file():
+            self.instance_state = json.loads(self.instance_state_file.read_text(encoding='utf8'))
+            baseline = self.instance_state.get('current') or {}
+            identity = self.instance_state['identity']
+            if (self.instance_state['pending'] or baseline.get('image') != self.old_image
+                    or identity['project'] != self.p['composeProject']
+                    or identity['composeFiles'] != self.compose_files
+                    or identity['baseUrl'] != self.p['baseUrl']
+                    or self.receipts.parent != self.directory / 'releases'):
+                raise RuntimeError('MANAGED_DEPLOYMENT_STATE_CONFLICT')
         self.before_containers = {c['Id']: c['Image'] for c in self.containers() if c['Id'] != app['Id']}
         self.neighbors = {}
         for name in self.p['preservedContainers']:
@@ -207,28 +257,6 @@ class Release:
         self.switched = True
         self.command(self.compose + ['up', '-d', '--no-build', '--no-deps', '--force-recreate', self.p['appService']])
 
-    def wait_for_app(self, expected_image):
-        deadline = time.monotonic() + self.p['healthTimeoutSeconds']
-        while time.monotonic() < deadline:
-            app = self.app()
-            if app['Image'] != expected_image:
-                raise RuntimeError('RUNNING_IMAGE_MISMATCH')
-            if app['State'].get('Health', {}).get('Status') == 'healthy':
-                break
-            time.sleep(2)
-        else:
-            raise RuntimeError('HEALTH_TIMEOUT')
-        if app['RestartCount'] or app['State'].get('OOMKilled'):
-            raise RuntimeError('APP_RESTARTED_OR_OOM')
-        return app
-
-    def smoke(self, expected_image, exposure):
-        self.command(['docker', 'run', '--rm', '--network', 'host', '--entrypoint', 'node',
-                      '-e', 'DANO_SMOKE_BASE_URL=' + self.p['baseUrl'],
-                      '-e', 'DANO_SMOKE_EXPECTED_ASSETS_JSON=' + json.dumps(self.image_artifacts(expected_image)['assets']),
-                      '-e', 'DANO_EXPOSURE_MODE=' + exposure, '-v', str(self.work / 'smoke.mjs') + ':/smoke.mjs:ro',
-                      expected_image, '/smoke.mjs'], timeout=self.p['smokeTimeoutSeconds'])
-
     def verify(self, expected_image):
         app = self.wait_for_app(expected_image)
         for action in [['-t'], ['-s', 'reload']]:
@@ -285,8 +313,30 @@ class Release:
             raise RuntimeError('ROLLBACK_INCOMPLETE')
 
     def finish(self):
-        self.run_app(['./deploy/system-prompt.mjs', 'discard', self.m['attemptId']])
-        self.backup.unlink()
+        if not getattr(self, 'instance_state', None):
+            self.run_app(['./deploy/system-prompt.mjs', 'discard', self.m['attemptId']])
+            self.backup.unlink()
+
+    def complete_instance_state(self):
+        state = getattr(self, 'instance_state', None)
+        if not state:
+            return
+        current = state['current']
+        previous = (dict(current, checkpoint=self.m['attemptId'], systemBackup=self.system_backup)
+                    if self.old_image != self.candidate_id else state['previous'])
+        value = dict(state, current={'image': self.candidate_id, 'version': self.m['version']},
+                     previous=previous, pending=None)
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf8',
+                                         dir=str(self.directory), delete=False) as output:
+            pending = output.name
+            json.dump(value, output)
+            output.flush()
+            os.fsync(output.fileno())
+        try:
+            os.replace(pending, str(self.instance_state_file))
+        finally:
+            if os.path.exists(pending):
+                os.unlink(pending)
 
     def publish_document(self):
         publication = self.m['documentPublication']
@@ -294,17 +344,6 @@ class Release:
             raise RuntimeError('DOCUMENT_COMMIT_MISMATCH')
         publish_document(self.work / 'question-guide.md', publication['targetPath'], publication['sha256'])
         self.receipt['documentPublication'] = dict(publication, status='synced')
-
-    def record(self, status):
-        self.receipt.update(status=status, phase=self.phase, timings=self.timings,
-                            durationSeconds=round(time.monotonic() - self.started, 3),
-                            checkedAt=datetime.datetime.utcnow().isoformat() + 'Z')
-        pending = self.receipts / 'receipt.pending'
-        with pending.open('w', encoding='utf8') as output:
-            output.write(json.dumps(self.receipt, ensure_ascii=True, indent=2))
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(str(pending), str(self.receipts / 'receipt.json'))
 
     def execute(self):
         try:
@@ -315,7 +354,7 @@ class Release:
                 action()
                 self.timings[name] = round(time.monotonic() - started, 3)
         except Exception as error:
-            known = ['COMMAND_FAILED', 'APP_TOPOLOGY_MISMATCH', 'DEPLOY_LOCK_REQUIRED', 'DEPLOY_DIRECTORY_INVALID', 'COMPOSE_PROFILE_DRIFT', 'LIVE_CONFIG_DRIFT', 'BASELINE_UNHEALTHY', 'NEIGHBOR_UNHEALTHY', 'PREPARED_IMAGE_UNAVAILABLE', 'IMAGE_PROVENANCE_MISMATCH', 'IMAGE_ARTIFACT_MISMATCH', 'SANDBOX_PROTECTION_DISABLED', 'IMAGE_ENV_INVALID', 'UPSTREAM_PROOF_EXPIRED', 'RUNNING_IMAGE_MISMATCH', 'HEALTH_TIMEOUT', 'APP_RESTARTED_OR_OOM', 'ADJACENT_SERVICE_CHANGED', 'SITE_SMOKE_NOT_SUCCESSFUL']
+            known = ['COMMAND_FAILED', 'APP_TOPOLOGY_MISMATCH', 'DEPLOY_LOCK_REQUIRED', 'DEPLOY_DIRECTORY_INVALID', 'COMPOSE_PROFILE_DRIFT', 'LIVE_CONFIG_DRIFT', 'BASELINE_UNHEALTHY', 'NEIGHBOR_UNHEALTHY', 'PREPARED_IMAGE_UNAVAILABLE', 'IMAGE_PROVENANCE_MISMATCH', 'IMAGE_ARTIFACT_MISMATCH', 'SANDBOX_PROTECTION_DISABLED', 'IMAGE_ENV_INVALID', 'UPSTREAM_PROOF_EXPIRED', 'MANAGED_DEPLOYMENT_STATE_CONFLICT', 'RUNNING_IMAGE_MISMATCH', 'HEALTH_TIMEOUT', 'APP_RESTARTED_OR_OOM', 'ADJACENT_SERVICE_CHANGED', 'SITE_SMOKE_NOT_SUCCESSFUL']
             self.receipt['error'] = str(error) if str(error) in known else 'DEPLOY_STEP_FAILED'
             failed_phase = self.phase
             try:
@@ -332,6 +371,7 @@ class Release:
         self.phase = 'complete'
         self.receipt['cleanup'] = 'pending'
         try:
+            self.complete_instance_state()
             self.record('deployed')
         except Exception:
             return 1

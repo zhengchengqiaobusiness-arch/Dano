@@ -49,11 +49,11 @@
 
 成功命令返回零并打印收据路径。检查收据中的 `status`、`operation`、`runningImageId`、`version`、`baseUrl`、`health` 和 `smoke`，并访问实际服务。真实 OA 登录回跳和登录后对话在浏览器中独立核验。
 
-首次启动失败时修正错误后用同一命令重试。更新切换或机器检查失败时脚本恢复旧服务。若回滚失败，保留控制目录、回滚文件和镜像，排除镜像缺失或运行环境故障后再次执行以恢复中断事务。若机器冒烟已通过但收据写入失败，检查控制目录可写性后重跑。服务日志可用 Docker 的 `docker logs` 查看相应容器，避免把原始生产日志或控制目录备份共享给他人。
+首次启动失败时用同一命令重试。如需修改首次安装的 OA 或 TLS 输入，修正环境文件后增加 `--retry-environment /绝对路径/dano.env`，由脚本沿用已保存的加密材料。更新切换或机器检查失败时脚本恢复旧服务。若回滚失败，保留控制目录、回滚文件和镜像，排除镜像缺失或运行环境故障后再次执行以恢复中断事务。若机器冒烟已通过但收据写入失败，检查控制目录可写性后重跑。服务日志可用 Docker 的 `docker logs` 查看相应容器，避免把原始生产日志或控制目录备份共享给他人。
 
 ## 发布维护者
 
-在构建端准备与发布版本和提交匹配的 Dano 镜像与 nginx 镜像。填写镜像清单中的 Linux 架构、Dano 提交、两个各自的镜像 ID 和按摘要固定的 registry 引用。通过 `docker image inspect` 获取镜像 ID 和 `RepoDigests`，离线包用 `docker save` 保存上述两个镜像。使用与 Dano 同一版本的源码运行下列打包命令，将输出目录压缩分发。仅分发联网包时省略 `--archive`。
+在构建端准备与发布版本和提交匹配的 Dano 镜像与 nginx 镜像。填写镜像清单中的 Linux 架构、Dano 提交、两个各自的镜像 ID 和按摘要固定的 registry 引用。通过 `docker image inspect` 获取镜像 ID 和 `RepoDigests`，离线包用 `docker save` 按镜像 ID 保存上述两个镜像，归档中不包含标签，避免加载时改变宿主机上的已有标签。使用与 Dano 同一版本的源码运行下列打包命令，将输出目录压缩分发。仅分发联网包时省略 `--archive`。
 
 ```sh
 pnpm deploy:package --images release-images.json --archive images.tar --output dano-deployment

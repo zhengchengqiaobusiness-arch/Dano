@@ -25,18 +25,24 @@ def compose():
     if command[0] == 'config':
         emit({'services': {'app': {'environment': env, 'volumes': [
             {'target': '/opt/dano/runtime-data', 'source': env['DANO_RUNTIME_DIR']}]},
-            'nginx': {'ports': [{'published': '38333'}]}}})
+            'nginx': {'image': env['DANO_NGINX_IMAGE'], 'ports': [{'published': '38333'}]}}})
     elif command[0] == 'up':
         files = [str(Path(args[i + 1]).resolve()) for i, value in enumerate(args) if value == '-f']
         state['current'] = env['DANO_IMAGE']
-        state['containers'] = [
-            {'Id': service, 'Image': env.get('DANO_NGINX_IMAGE') if service == 'nginx' else state['current'],
+        previous = {container['Config']['Labels']['com.docker.compose.service']: container
+                    for container in state['containers']}
+        state['generation'] = state.get('generation', 0) + 1
+        services = ['app'] if '--no-deps' in command else ['app', 'nginx']
+        changed = {
+            service: {'Id': service + '-' + str(state['generation']), 'Image': env.get('DANO_NGINX_IMAGE') if service == 'nginx' else state['current'],
              'RestartCount': 0, 'State': {'Health': {'Status': 'healthy'}},
              'Config': {'Labels': {'com.docker.compose.service': service,
                                    'com.docker.compose.project.working_dir': str(Path.cwd()),
                                    'com.docker.compose.project.config_files': ','.join(files)}},
-             'NetworkSettings': {}}
-            for service in ('app', 'nginx')]
+             'NetworkSettings': {}, 'Mounts': [{'Destination': '/opt/dano/runtime-data',
+                 'Source': env['DANO_RUNTIME_DIR'], 'RW': True}]}
+            for service in services}
+        state['containers'] = list(dict(previous, **changed).values())
         data_path.write_text(json.dumps(state))
     elif command[0] not in ('run', 'exec'):
         sys.exit(2)
@@ -51,9 +57,12 @@ elif args[:1] == ['ps']:
 elif args[:1] == ['inspect']:
     emit([c for c in state['containers'] if c['Id'] in args[1:]])
 elif args[:2] == ['image', 'inspect']:
-    image = state['images'][args[2]]
-    emit([{'Id': args[2], 'Os': 'linux', 'Architecture': 'amd64',
+    image_id = state['refs'].get(args[2], args[2])
+    image = state['images'][image_id]
+    emit([{'Id': image_id, 'Os': 'linux', 'Architecture': 'amd64',
            'Config': {'Labels': {'org.opencontainers.image.revision': image['revision']}}}])
+elif args[:2] in (['image', 'pull'], ['image', 'load']):
+    pass
 elif args[:1] == ['run']:
     if args[-1] == '/smoke.mjs':
         sys.exit(int(state.get('failImage') == state['current']))

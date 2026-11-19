@@ -54,7 +54,7 @@ it("runs deployment transaction regression coverage with Python's standard libra
   });
   expect(result.status, result.stdout + result.stderr).toBe(0);
   expect(result.stderr).toMatch(/Ran \d+ tests/);
-}, 30_000);
+}, 60_000);
 
 it("quotes remote paths as literal shell arguments", async () => {
   // @ts-expect-error Public deployment module has no TypeScript declaration.

@@ -1,6 +1,7 @@
 """Target-host deployment of an immutable Dano release bundle."""
 import argparse
 import base64
+import copy
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -14,11 +15,13 @@ import shutil
 import ssl
 import subprocess
 import sys
+import tarfile
 import tempfile
+import time
 from urllib.parse import urlsplit
 import uuid
 
-from release import Release
+from release import ReleaseHost
 
 DIGEST = r'sha256:[0-9a-f]{64}'
 PINNED = r'[a-zA-Z0-9][a-zA-Z0-9./:_-]*@' + DIGEST
@@ -60,6 +63,30 @@ def safe_relative(name):
     return not path.is_absolute() and '..' not in path.parts and bool(path.parts)
 
 
+def validate_archive(archive, images):
+    """Require Docker save by image ID so load cannot retag a neighbor's image."""
+    expected = {image['id'] for image in images.values()}
+    try:
+        with tarfile.open(archive, mode='r:') as stream:
+            data = stream.getmember('manifest.json')
+            if not data.isfile() or data.size > 64 * 1024:
+                raise ValueError()
+            records = json.load(stream.extractfile(data))
+            found = set()
+            for record in records:
+                config = record['Config']
+                if not safe_relative(config) or record.get('RepoTags'):
+                    raise ValueError()
+                member = stream.getmember(config)
+                if not member.isfile() or member.size > 16 * 1024 * 1024:
+                    raise ValueError()
+                found.add('sha256:' + hashlib.sha256(stream.extractfile(member).read()).hexdigest())
+            if found != expected or len(records) != len(expected):
+                raise ValueError()
+    except (tarfile.TarError, KeyError, ValueError, TypeError, AttributeError):
+        raise DeploymentError('Offline archive must contain exactly the declared images saved by ID') from None
+
+
 def verify_package(bundle):
     metadata = read_json(bundle / 'manifest.json')
     validate_images(metadata)
@@ -85,6 +112,7 @@ def verify_package(bundle):
         archive = bundle / 'images.tar'
         if archive.is_symlink() or not archive.is_file() or digest(archive) != metadata['archiveSha256']:
             raise DeploymentError('Package checksum mismatch: images.tar')
+        validate_archive(archive, metadata['images'])
     return metadata
 
 
@@ -143,6 +171,9 @@ def command(args, cwd=None, capture=False, input_data=None, timeout=120, environ
                             stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, timeout=timeout)
     if result.returncode:
+        if args[:2] == ['docker', 'compose'] and '--env-file' in args:
+            stage = args[args.index('--env-file') + 2]
+            raise DeploymentError('Compose ' + stage + ' failed. Check the instance environment and topology.')
         raise DeploymentError('Command failed: ' + ' '.join(args[:2]))
     return result.stdout.decode('utf8') if capture else None
 
@@ -200,7 +231,7 @@ def set_image(text, image):
     return '\n'.join(lines) + '\n'
 
 
-class BundleRelease(Release):
+class BundleRelease(ReleaseHost):
     def __init__(self, metadata, bundle, config, directory, files, operation):
         attempt = str(uuid.uuid4())
         self.config = config
@@ -222,19 +253,39 @@ class BundleRelease(Release):
         }, bundle)
         self.compose[2:2] = ['-p', config['project']]
         self.receipt['operation'] = operation
+        self.phase_started = time.monotonic()
         self.receipt.pop('documentPublication')
         self.receipt.pop('ci')
 
     def command(self, args, capture=False, input_data=None, timeout=None):
         return command(args, self.directory, capture, input_data, timeout or 120)
 
-    def verify(self, expected_image):
+    def begin(self, phase):
+        now = time.monotonic()
+        self.timings[self.phase] = round(now - self.phase_started, 3)
+        self.phase = phase
+        self.phase_started = now
+        self.record('running')
+
+    def verify(self, expected_image, report=False):
+        if report:
+            self.begin('container-health')
         app = self.wait_for_app(expected_image)
+        if report:
+            self.receipt['health'] = 'healthy'
+            self.begin('http-sse-smoke')
         self.command(self.compose + ['exec', '-T', 'nginx', 'nginx', '-t'])
         self.command(self.compose + ['exec', '-T', 'nginx', 'nginx', '-s', 'reload'])
         self.smoke(expected_image, self.exposure)
-        self.receipt.update(containerId=app['Id'], runningImageId=expected_image,
-                            health='healthy', smoke='passed')
+        if hasattr(self, 'adjacent') and self.adjacent != self.adjacent_containers():
+            raise DeploymentError('An adjacent Compose service changed during deployment')
+        if report:
+            self.receipt.update(containerId=app['Id'], runningImageId=expected_image,
+                                health='healthy', smoke='passed')
+
+    def adjacent_containers(self):
+        return {item['Id']: item['Image'] for item in self.containers()
+                if item['Config']['Labels'].get('com.docker.compose.service') != 'app'}
 
     def launch(self, first):
         args = ['up', '-d', '--no-build', '--pull', 'never']
@@ -267,7 +318,7 @@ class BundleRelease(Release):
             labels = container['Config']['Labels']
             files = labels.get('com.docker.compose.project.config_files', '').split(',')
             if (labels.get('com.docker.compose.project.working_dir') != str(self.directory)
-                    or set(files) != {str(self.directory / name) for name in self.compose_files}):
+                    or files != [str(self.directory / name) for name in self.compose_files]):
                 raise DeploymentError('Compose project belongs to another deployment')
 
     def acquire_images(self, metadata, source, first, download=True):
@@ -305,7 +356,7 @@ def standalone_files(exposure):
     return ['docker-compose.yml', 'compose/standalone.yml', 'compose/' + exposure + '.yml']
 
 
-def first_environment(config, contents, metadata, control, runtime):
+def first_environment(config, contents, metadata, control, runtime, existing_key=None):
     names = env_names(contents)
     if bool(KEY in names) != bool(KEY_VERSION in names):
         raise DeploymentError('Configure the OAuth credential key and version together')
@@ -314,7 +365,11 @@ def first_environment(config, contents, metadata, control, runtime):
         missing |= {'DANO_TLS_CERT_PATH', 'DANO_TLS_KEY_PATH'} - names
     if missing:
         raise DeploymentError('Missing deployment configuration: ' + ', '.join(sorted(missing)))
-    if KEY not in names:
+    if existing_key and KEY in names:
+        raise DeploymentError('Omit credential key assignments when retrying installation')
+    if existing_key:
+        contents += '\n' + ''.join("{}='{}'\n".format(name, existing_key[name]) for name in (KEY, KEY_VERSION))
+    elif KEY not in names:
         material = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip('=')
         contents += '\n{}={}\n{}=dano-deploy-v1\n'.format(KEY, material, KEY_VERSION)
     values = {
@@ -432,7 +487,8 @@ def deploy(bundle, metadata, config_path, args):
             if existing.strip() or resources:
                 raise DeploymentError('Compose project already owns resources')
             source = config_path.parent / config.get('environmentFile', 'dano.env')
-            contents = first_environment(config, read_environment(source), metadata, control, runtime)
+            contents = first_environment(config, read_environment(args.retry_environment or source),
+                                         metadata, control, runtime)
             control.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix='.dano-install-', dir=control.parent) as work:
                 staging = Path(work) / 'control'
@@ -459,12 +515,20 @@ def deploy(bundle, metadata, config_path, args):
             app = release.app()
             if app['State'].get('Health', {}).get('Status') != 'healthy':
                 raise DeploymentError('Existing instance must be healthy before enrollment')
+            verify_live_mounts(release, app, release.settings(release.env_file))
             old = release.image_artifacts(app['Image'])
             if not old['assets']:
                 raise DeploymentError('Existing app is not a supported Dano release')
             state = {'identity': identity, 'current': {'image': app['Image'], 'version': old['version']},
                      'previous': None, 'pending': None}
-            json_store(state_file, state)
+        if state['pending']:
+            marker = release.receipt_root / state['pending'] / 'machine-verified.json'
+            if marker.is_file():
+                recovered = read_json(marker)
+                if recovered['identity'] != identity or release.app()['Image'] != recovered['current']['image']:
+                    raise DeploymentError('Verified checkpoint does not match the running deployment')
+                json_store(state_file, recovered)
+                state = recovered
         run_transaction(release, state, state_file, metadata, args, images_ready=first_layout)
 
 
@@ -498,54 +562,112 @@ def auth_preflight(app, image):
     command(args + [image, './dist/server/main.js', '--validate-config'], environment=environment)
 
 
+def verify_live_mounts(release, app, resolved):
+    configured = resolved['services']['app'].get('volumes', [])
+    mounts = {item['Destination']: item for item in app['Mounts']}
+    for item in configured:
+        target = item['target']
+        live = mounts.get(target)
+        if item.get('type') == 'volume':
+            resource = resolved.get('volumes', {}).get(item.get('source'), {})
+            expected = resource.get('name')
+            actual = live.get('Name') if live else None
+        else:
+            expected = item.get('source')
+            actual = live.get('Source') if live else None
+        if not live or not expected or actual != expected or live['RW'] == bool(item.get('read_only')):
+            raise DeploymentError('Running app mounts differ from the configured topology')
+    runtime = mounts.get('/opt/dano/runtime-data')
+    if not runtime or runtime.get('Source') != release.config['runtimeDirectory']:
+        raise DeploymentError('Configured Runtime Data Directory differs from the running instance')
+
+
+def topology(config):
+    comparable = copy.deepcopy(config)
+    app = comparable['services']['app']
+    app.pop('image', None)
+    app.pop('environment', None)
+    return hashlib.sha256(json.dumps(comparable, sort_keys=True).encode()).hexdigest()
+
+
+def restore_baseline(release, checkpoint, current):
+    saved = (checkpoint / 'env.before').read_text(encoding='utf8')
+    store(release.env_file, set_image(saved, current['image']))
+    prompt_restored = True
+    if (checkpoint / 'prompt.before').is_file():
+        try:
+            release.run_app(['./deploy/system-prompt.mjs', 'restore', checkpoint.name])
+        except RuntimeError:
+            prompt_restored = False
+    release.launch(False)
+    release.verify(current['image'])
+    if not prompt_restored:
+        raise DeploymentError('Previous app recovered but system prompt restore failed')
+
+
 def run_transaction(release, state, state_file, metadata, args, images_ready=False):
     current = state['current']
     first = current is None
     target = state['previous'] if args.rollback else {
         'image': metadata['images']['app']['id'], 'version': metadata['version']}
-    if not target:
-        raise DeploymentError('No previous deployment is available')
-    release.receipt.update(operation=('rollback' if args.rollback else 'install' if first else
-                                      'rerun' if current == target else 'update'),
-                           previousVersion=current['version'] if current else None,
-                           previousImageId=current['image'] if current else None,
-                           version=target['version'], image=target['image'])
+    if args.retry_environment and current:
+        raise DeploymentError('--retry-environment is only for an unfinished initial installation')
     txn = release.receipts / 'candidate.env'
     checkpoint = release.receipts / 'env.before'
     changed = False
     passed = False
     recovery_failed = False
     try:
-        release.phase = 'recovery'
+        release.begin('recovery')
         if state['pending']:
             pending = state['pending']
             if current:
-                store(release.env_file, (release.receipt_root / pending / 'env.before').read_text())
-                release.launch(False)
-                release.verify(current['image'])
+                restore_baseline(release, release.receipt_root / pending, current)
             state['pending'] = None
             json_store(state_file, state)
+        if not target:
+            raise DeploymentError('No previous deployment is available')
+        release.receipt.update(operation=('rollback' if args.rollback else 'install' if first else
+                                          'rerun' if current == target else 'update'),
+                               previousVersion=current['version'] if current else None,
+                               previousImageId=current['image'] if current else None,
+                               version=target['version'], image=target['image'])
         if current:
             app = release.app()
+            release.adjacent = release.adjacent_containers()
             if app['Image'] != current['image']:
                 raise DeploymentError('Running Dano image differs from the managed deployment')
             if app['State'].get('Health', {}).get('Status') != 'healthy':
                 raise DeploymentError('Current Dano service is unhealthy. Restore the baseline before updating.')
-        release.phase = 'image-validation'
+        release.begin('image-validation')
         if args.rollback:
             archived = release.image_artifacts(target['image'])
             if archived['version'] != target['version'] or not archived['assets']:
                 raise DeploymentError('Rollback image is unavailable or invalid')
+            labels = release.docker_json('image', 'inspect', target['image'])[0]['Config'].get('Labels') or {}
+            revision = labels.get('org.opencontainers.image.revision')
+            if not revision or not re.fullmatch(r'[0-9a-f]{40}', revision):
+                raise DeploymentError('Rollback image revision is unavailable')
+            release.receipt.update(targetSha=revision, imageId=target['image'], assets=archived['assets'])
         else:
             release.acquire_images(metadata, args.source, first, download=not images_ready)
-        release.phase = 'configuration'
+        release.begin('configuration')
         original = release.env_file.read_text(encoding='utf8')
         inputs = original
         if args.rollback and target.get('checkpoint'):
             inputs = (release.receipt_root / target['checkpoint'] / 'env.before').read_text(encoding='utf8')
+        if args.retry_environment and not images_ready:
+            existing = release.settings(release.env_file)['services']['app']['environment']
+            material = {key: existing[key] for key in (KEY, KEY_VERSION)}
+            # The existing nginx image remains the owner of its local port.
+            saved_nginx = release.settings(release.env_file)['services']['nginx']['image']
+            metadata = copy.deepcopy(metadata)
+            metadata['images']['nginx']['id'] = saved_nginx
+            inputs = first_environment(release.config, read_environment(args.retry_environment), metadata,
+                                       release.directory, Path(release.config['runtimeDirectory']), material)
         if args.environment:
             overrides = read_environment(args.environment)
-            allowed = {'DANO_PRODUCT_NAME', 'DANO_URL', 'DANO_TENANT_KEY', 'AGENT_WORLD_API_KEY'}
+            allowed = {'DANO_URL', 'DANO_TENANT_KEY', 'AGENT_WORLD_API_KEY'}
             configured_app = release.settings(release.env_file)['services']['app'].get('environment', {})
             allowed.update(key for key in configured_app if key.endswith(('_API_KEY', '_API_KEY_FILE')))
             unexpected = env_names(overrides) - allowed
@@ -558,6 +680,11 @@ def run_transaction(release, state, state_file, metadata, args, images_ready=Fal
             check_ports(resolved)
         if current:
             before = release.settings(release.env_file)
+            verify_live_mounts(release, release.app(), before)
+            if topology(before) != topology(resolved):
+                raise DeploymentError('Candidate changes the existing Compose topology')
+            if state.get('topology') and state['topology'] != topology(before):
+                raise DeploymentError('Compose topology differs from the last successful deployment')
             live = release.app()['Config'].get('Env')
             if live is not None:
                 running_env = dict(item.split('=', 1) for item in live if '=' in item)
@@ -569,37 +696,51 @@ def run_transaction(release, state, state_file, metadata, args, images_ready=Fal
         runtime_mount = next((item for item in app_mounts if item['target'] == '/opt/dano/runtime-data'), None)
         if not runtime_mount or runtime_mount.get('source') != release.config['runtimeDirectory']:
             raise DeploymentError('Runtime Data Directory differs from the configured Compose mount')
+        if str(resolved['services']['app'].get('environment', {}).get('HEIMDALL_PROTECT_CONFIG_OVERLAY')) == '0':
+            raise DeploymentError('Container sandbox configuration protection must be enabled')
         release.gates(txn, resolved)
-        store(checkpoint, original)
-        release.phase = 'switch'
+        store(checkpoint, set_image(original, current['image']) if current else original)
+        release.begin('switch')
         state['pending'] = release.m['attemptId']
         json_store(state_file, state)
         changed = True
         store(release.env_file, txn.read_text(encoding='utf8'))
+        if release.legacy and current and current['image'] != target['image']:
+            attempt = release.m['attemptId']
+            release.run_app(['./deploy/system-prompt.mjs', 'backup', attempt])
+            store(release.receipts / 'prompt.before', '')
+            if args.rollback and target.get('systemBackup'):
+                release.run_app(['./deploy/system-prompt.mjs', 'restore', target['checkpoint']])
+            else:
+                for action in ('sync', 'check'):
+                    release.run_app(['./deploy/system-prompt.mjs', action])
         app = release.containers()
         if inputs != original or release.receipt['operation'] != 'rerun' or not any(
                 item['Image'] == target['image'] and item['State'].get('Health', {}).get('Status') == 'healthy'
                 for item in app):
             release.launch(first)
-        release.phase = 'health-and-smoke'
-        release.verify(target['image'])
+        release.verify(target['image'], report=True)
         passed = True
+        release.timings[release.phase] = round(time.monotonic() - release.phase_started, 3)
         release.phase = 'complete'
         previous = state['previous']
         if current and (current['image'] != target['image'] or inputs != original):
-            previous = dict(current, checkpoint=release.m['attemptId'])
-        json_store(state_file, dict(state, current={key: target[key] for key in ('image', 'version')},
-                                    previous=previous, pending=None))
+            previous = dict(current, checkpoint=release.m['attemptId'],
+                            systemBackup=(release.receipts / 'prompt.before').is_file())
+        final_state = dict(state, current={key: target[key] for key in ('image', 'version')},
+                           previous=previous, pending=None, topology=topology(resolved))
+        json_store(release.receipts / 'machine-verified.json', final_state)
+        json_store(state_file, final_state)
         release.record('deployed')
     except Exception as error:
         failed_phase = release.phase
-        release.receipt['error'] = str(error) if isinstance(error, DeploymentError) else 'DEPLOY_STEP_FAILED'
+        known = {'RUNNING_IMAGE_MISMATCH', 'HEALTH_TIMEOUT', 'APP_RESTARTED_OR_OOM', 'APP_TOPOLOGY_MISMATCH'}
+        release.receipt['error'] = (str(error) if isinstance(error, DeploymentError)
+                                    or (type(error) is RuntimeError and str(error) in known) else 'DEPLOY_STEP_FAILED')
         status = 'incomplete' if passed else 'failed'
         if changed and current and not passed:
             try:
-                store(release.env_file, checkpoint.read_text(encoding='utf8'))
-                release.launch(False)
-                release.verify(current['image'])
+                restore_baseline(release, release.receipts, current)
                 json_store(state_file, dict(state, pending=None))
                 status = 'rolled_back'
             except Exception:
@@ -607,7 +748,10 @@ def run_transaction(release, state, state_file, metadata, args, images_ready=Fal
                 recovery_failed = True
         if not passed:
             release.phase = failed_phase
-            release.record(status)
+            try:
+                release.record(status)
+            except OSError:
+                status += ' (receipt write failed)'
         guidance = 'Run the deployment again to retry recovery.' if recovery_failed else 'See the deployment receipt for the failed phase.'
         raise DeploymentError('{}: {}. {} Receipt directory: {}'.format(status, release.receipt['error'],
                               guidance, release.receipts)) from None
@@ -623,10 +767,13 @@ def main():
     parser.add_argument('--source', choices=['archive', 'registry', 'local'], default='archive')
     parser.add_argument('--rollback', action='store_true')
     parser.add_argument('--environment', type=Path, help='apply explicit application environment overrides')
+    parser.add_argument('--retry-environment', type=Path, help='replace inputs after a failed first installation')
     parser.add_argument('--verify-package', action='store_true')
     args = parser.parse_args()
-    if args.rollback and args.environment:
-        parser.error('--environment cannot be used with --rollback')
+    if args.rollback and (args.environment or args.retry_environment):
+        parser.error('Environment options cannot be used with --rollback')
+    if args.environment and args.retry_environment:
+        parser.error('Use one environment option at a time')
     try:
         metadata = verify_package(args.bundle)
         if args.verify_package:

@@ -7,7 +7,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'deploy/production'))
-from bundle import digest, validate_images
+from bundle import digest, validate_archive, validate_images
 
 
 def main():
@@ -19,6 +19,8 @@ def main():
     metadata = json.loads(args.images.read_text())
     validate_images(metadata)
     metadata['version'] = json.loads((ROOT / 'package.json').read_text())['version']
+    if args.archive:
+        validate_archive(args.archive, metadata['images'])
     args.output.mkdir()
     assets = {
         'deploy.sh': 'deploy/bundle/deploy.sh',

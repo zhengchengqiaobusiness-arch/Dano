@@ -1,9 +1,12 @@
 """Exercise the administrator's shell entry point against release artifacts."""
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -59,26 +62,52 @@ class BundleTests(unittest.TestCase):
             env_file.write_text('DANO_OAUTH_CLIENT_SECRET=synthetic-private\n')
             env_file.chmod(0o600)
             source = json.loads((ROOT / 'deploy/bundle/images.example.json').read_text())
+            layers = [b'{"fixture":"app"}', b'{"fixture":"nginx"}']
+            for name, payload in zip(('app', 'nginx'), layers):
+                source['images'][name]['id'] = 'sha256:' + hashlib.sha256(payload).hexdigest()
+            archive = root / 'images.tar'
+            with tarfile.open(archive, 'w') as stream:
+                records = []
+                for name, payload in zip(('app', 'nginx'), layers):
+                    member = tarfile.TarInfo(name + '.json')
+                    member.size = len(payload)
+                    stream.addfile(member, io.BytesIO(payload))
+                    records.append({'Config': member.name, 'RepoTags': None, 'Layers': []})
+                manifest = json.dumps(records).encode()
+                member = tarfile.TarInfo('manifest.json')
+                member.size = len(manifest)
+                stream.addfile(member, io.BytesIO(manifest))
             image_a = source['images']['app']['id']
             image_b = 'sha256:' + 'e' * 64
             version = json.loads((ROOT / 'package.json').read_text())['version']
+            old_version = version.rsplit('.', 1)[0] + '.' + str(int(version.rsplit('.', 1)[1]) - 1)
             engine = root / 'engine.json'
             engine.write_text(json.dumps({'images': {item: {'version': version, 'revision': source['revision']}
                                                      for item in (image_a, image_b, source['images']['nginx']['id'])},
-                                          'containers': []}))
+                                          'containers': [], 'refs': {source['images']['app']['ref']: image_b}}))
+            engine_state = json.loads(engine.read_text())
+            engine_state['images'][image_a]['version'] = old_version
+            engine.write_text(json.dumps(engine_state))
             bundles = {}
             for name, image in (('a', image_a), ('b', image_b)):
                 source['images']['app']['id'] = image
                 metadata = root / 'images.json'
                 metadata.write_text(json.dumps(source))
                 bundle = root / name
-                subprocess.run(['python3', str(ROOT / 'scripts/package-deploy.py'),
-                                '--output', str(bundle), '--images', str(metadata)], check=True)
+                command = ['python3', str(ROOT / 'scripts/package-deploy.py'),
+                           '--output', str(bundle), '--images', str(metadata)]
+                if name == 'a':
+                    command.extend(['--archive', str(archive)])
+                subprocess.run(command, check=True)
+                if name == 'a':
+                    path = bundle / 'manifest.json'
+                    payload = json.loads(path.read_text())
+                    path.write_text(json.dumps(dict(payload, version=old_version)))
                 bundles[name] = bundle
 
             def deploy(name, *extra, success=True):
                 result = subprocess.run([str(bundles[name] / 'deploy.sh'), '--config', str(config),
-                                         '--source', 'local', *extra],
+                                         '--source', 'archive' if name == 'a' else 'registry', *extra],
                                         env=cli_env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0 if success else 1, result.stderr)
                 self.assertNotIn('synthetic-private', result.stderr + result.stdout)
@@ -106,6 +135,23 @@ class BundleTests(unittest.TestCase):
             state = json.loads(engine.read_text())
             state.pop('failImage')
             engine.write_text(json.dumps(state))
-            self.assertEqual(deploy('b')['runningImageId'], image_b)
-            self.assertEqual(deploy('b', '--rollback')['runningImageId'], image_a)
+            updated = deploy('b')
+            self.assertEqual(updated['runningImageId'], image_b)
+            self.assertEqual(updated['previousVersion'], old_version)
+            restored = deploy('b', '--rollback')
+            self.assertEqual(restored['runningImageId'], image_a)
+            self.assertEqual(restored['version'], old_version)
             self.assertEqual((control / '.env').read_bytes(), before)
+
+            # Re-enroll Docker resources created by an existing Compose entry
+            # point, then prove a wrong data directory cannot claim them.
+            (control / '.deployment.json').unlink()
+            existing = json.loads(config.read_text())
+            existing['existingComposeFiles'] = ['docker-compose.yml', 'compose/standalone.yml',
+                                                'compose/http.yml']
+            config.write_text(json.dumps(dict(existing, runtimeDirectory=str(root / 'wrong-runtime'))))
+            self.assertIn('Runtime Data Directory', deploy('b', success=False))
+            self.assertFalse((control / '.deployment.json').exists())
+            config.write_text(json.dumps(existing))
+            self.assertEqual(deploy('b')['operation'], 'update')
+            self.assertEqual(deploy('b', '--rollback')['runningImageId'], image_a)
