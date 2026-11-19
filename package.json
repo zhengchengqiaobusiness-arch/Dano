@@ -1,6 +1,6 @@
 {
   "name": "@dano/dano",
-  "version": "1.0.47",
+  "version": "1.0.48",
   "private": true,
   "description": "Dano P0 web LLM chat",
   "type": "module",
@@ -43,6 +43,7 @@
     "test:watch": "vitest",
     "test:prepare": "node scripts/prepare-test-python.mjs",
     "test:container": "node scripts/run-tests.mjs --container",
+    "deploy:package": "python3 scripts/package-deploy.py",
     "deploy:production": "node scripts/deploy-production.mjs"
   },
   "devDependencies": {

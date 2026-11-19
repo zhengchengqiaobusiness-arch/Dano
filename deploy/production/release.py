@@ -207,7 +207,7 @@ class Release:
         self.switched = True
         self.command(self.compose + ['up', '-d', '--no-build', '--no-deps', '--force-recreate', self.p['appService']])
 
-    def verify(self, expected_image):
+    def wait_for_app(self, expected_image):
         deadline = time.monotonic() + self.p['healthTimeoutSeconds']
         while time.monotonic() < deadline:
             app = self.app()
@@ -220,13 +220,20 @@ class Release:
             raise RuntimeError('HEALTH_TIMEOUT')
         if app['RestartCount'] or app['State'].get('OOMKilled'):
             raise RuntimeError('APP_RESTARTED_OR_OOM')
-        for action in [['-t'], ['-s', 'reload']]:
-            self.command(self.compose + ['exec', '-T', self.p['nginxService'], 'nginx'] + action)
+        return app
+
+    def smoke(self, expected_image, exposure):
         self.command(['docker', 'run', '--rm', '--network', 'host', '--entrypoint', 'node',
                       '-e', 'DANO_SMOKE_BASE_URL=' + self.p['baseUrl'],
                       '-e', 'DANO_SMOKE_EXPECTED_ASSETS_JSON=' + json.dumps(self.image_artifacts(expected_image)['assets']),
-                      '-e', 'DANO_EXPOSURE_MODE=https', '-v', str(self.work / 'smoke.mjs') + ':/smoke.mjs:ro',
+                      '-e', 'DANO_EXPOSURE_MODE=' + exposure, '-v', str(self.work / 'smoke.mjs') + ':/smoke.mjs:ro',
                       expected_image, '/smoke.mjs'], timeout=self.p['smokeTimeoutSeconds'])
+
+    def verify(self, expected_image):
+        app = self.wait_for_app(expected_image)
+        for action in [['-t'], ['-s', 'reload']]:
+            self.command(self.compose + ['exec', '-T', self.p['nginxService'], 'nginx'] + action)
+        self.smoke(expected_image, 'https')
         site_status = self.command(['curl', '--disable', '--fail', '--silent', '--show-error', '--max-time', '15',
                                     '--output', '/dev/null', '--write-out', '%{http_code}',
                                     self.p['baseUrl'] + 'web/'], capture=True)
