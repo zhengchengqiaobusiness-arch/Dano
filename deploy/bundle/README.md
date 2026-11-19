@@ -4,7 +4,7 @@
 
 ## 环境要求
 
-目标机需使用 Linux x86-64 或 ARM64，运行本机 Docker Engine 和 Docker Compose v2.24.4 或更新版本，安装 Python 3.8+。运行账户需能访问 Docker 并拥有 Deploy Control Directory、Runtime Data Directory 的父目录和 `/var/lock/dano-production-deploy.lock` 的写权限。Docker 应支持 Dano 所需的容器沙箱和用户命名空间。为两个发布版本的镜像、运行数据和上传配额留足磁盘空间。目标机可解析公开域名，并可访问已配置的 OA 和模型服务。离线镜像方式无需访问镜像仓库。
+目标机需使用 Linux x86-64 或 ARM64，运行本机 Docker Engine 和 Docker Compose v2.24.4 或更新版本，安装 Python 3.8+。运行账户需能访问 Docker 并拥有 Deploy Control Directory、Runtime Data Directory 的父目录和 `/var/lock/dano-production-deploy.lock` 的写权限。Docker 应支持 Dano 所需的容器沙箱和用户命名空间。宿主安全策略须允许容器在自身挂载命名空间内启用 procfs 的 `hidepid=2`，并通过 Bubblewrap 隔离预检。为两个发布版本的镜像、运行数据和上传配额留足磁盘空间。目标机可解析公开域名，并可访问已配置的 OA 和模型服务。离线镜像方式无需访问镜像仓库。
 
 准备独立的 Compose 项目名、目标目录和公开端口。HTTPS 需要已配置的 DNS、有效证书及私钥，证书链须受客户端与运行镜像信任。HTTP 模式只适用于服务端 OAuth 策略允许的本地回调，面向用户的生产入口使用 HTTPS。
 

@@ -64,25 +64,49 @@ def safe_relative(name):
     return not path.is_absolute() and '..' not in path.parts and bool(path.parts)
 
 
+def read_archive_member(stream, name, limit):
+    member = stream.getmember(name)
+    if not member.isfile() or member.size > limit:
+        raise ValueError()
+    return stream.extractfile(member).read()
+
+
 def validate_archive(archive, images):
-    """Require Docker save by image ID so load cannot retag a neighbor's image."""
+    """Accept tag-free Docker archives from both image stores."""
     expected = {image['id'] for image in images.values()}
     try:
         with tarfile.open(archive, mode='r:') as stream:
-            data = stream.getmember('manifest.json')
-            if not data.isfile() or data.size > 64 * 1024:
+            records = json.loads(read_archive_member(stream, 'manifest.json', 64 * 1024))
+            if len(records) != len(expected):
                 raise ValueError()
-            records = json.load(stream.extractfile(data))
-            found = set()
+            configs = set()
             for record in records:
                 config = record['Config']
                 if not safe_relative(config) or record.get('RepoTags'):
                     raise ValueError()
-                member = stream.getmember(config)
-                if not member.isfile() or member.size > 16 * 1024 * 1024:
+                data = read_archive_member(stream, config, 16 * 1024 * 1024)
+                configs.add('sha256:' + hashlib.sha256(data).hexdigest())
+            try:
+                index = json.loads(read_archive_member(stream, 'index.json', 64 * 1024))
+            except KeyError:
+                index = None
+            descriptors = set()
+            if index is not None:
+                entries = index['manifests']
+                if len(entries) != len(expected):
                     raise ValueError()
-                found.add('sha256:' + hashlib.sha256(stream.extractfile(member).read()).hexdigest())
-            if found != expected or len(records) != len(expected):
+                for entry in entries:
+                    annotations = entry.get('annotations', {})
+                    if any(name in annotations for name in ('io.containerd.image.name', 'org.opencontainers.image.ref.name')):
+                        raise ValueError()
+                    image_id = entry['digest']
+                    if not re.fullmatch(DIGEST, image_id):
+                        raise ValueError()
+                    blob = read_archive_member(stream, 'blobs/' + image_id.replace(':', '/'), 16 * 1024 * 1024)
+                    if 'sha256:' + hashlib.sha256(blob).hexdigest() != image_id:
+                        raise ValueError()
+                    descriptors.add(image_id)
+            if expected not in (configs, descriptors):
                 raise ValueError()
     except (tarfile.TarError, KeyError, ValueError, TypeError, AttributeError):
         raise DeploymentError('Offline archive must contain exactly the declared images saved by ID') from None
@@ -306,8 +330,14 @@ class BundleRelease(ReleaseHost):
         previous = self.compose[-1]
         self.compose[-1] = str(file)
         try:
-            self.run_app(['./dist/server/main.js', '--validate-config'])
-            self.run_app(['./dist/server/bridge/sandbox-preflight.js'], user='0:0')
+            try:
+                self.run_app(['./dist/server/main.js', '--validate-config'])
+            except DeploymentError:
+                raise DeploymentError('Production Authentication Gate failed; verify OAuth configuration and TLS trust') from None
+            try:
+                self.run_app(['./dist/server/bridge/sandbox-preflight.js'], user='0:0')
+            except DeploymentError:
+                raise DeploymentError('Container sandbox preflight failed; verify host procfs privacy and Bubblewrap support') from None
             app = resolved['services']['app']
             if any(mount.get('target') == '/etc/dano-memory' for mount in app.get('volumes', [])):
                 self.run_app(['./deploy/memory-models.mjs', 'preflight', '/etc/dano-memory'])

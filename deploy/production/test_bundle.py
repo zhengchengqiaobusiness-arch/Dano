@@ -52,6 +52,37 @@ class BundleTests(unittest.TestCase):
             self.assertFalse(control.exists())
 
 
+    def test_package_accepts_tag_free_oci_index_image_ids(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            archive = root / 'images.tar'
+            metadata = json.loads((ROOT / 'deploy/bundle/images.example.json').read_text())
+            with tarfile.open(archive, 'w') as stream:
+                def add(name, payload):
+                    data = json.dumps(payload).encode()
+                    info = tarfile.TarInfo(name)
+                    info.size = len(data)
+                    stream.addfile(info, io.BytesIO(data))
+
+                indexes = []
+                configs = []
+                for name in ('app', 'nginx'):
+                    document = {'schemaVersion': 2, 'manifests': [], 'annotations': {'fixture': name}}
+                    image_id = 'sha256:' + hashlib.sha256(json.dumps(document).encode()).hexdigest()
+                    metadata['images'][name]['id'] = image_id
+                    add('blobs/' + image_id.replace(':', '/'), document)
+                    add(name + '.json', {'architecture': 'amd64', 'fixture': name})
+                    indexes.append({'digest': image_id})
+                    configs.append({'Config': name + '.json', 'RepoTags': None, 'Layers': []})
+                add('manifest.json', configs)
+                add('index.json', {'schemaVersion': 2, 'manifests': indexes})
+            images = root / 'metadata.json'
+            images.write_text(json.dumps(metadata))
+            bundle = root / 'deployment'
+            subprocess.run(['python3', str(ROOT / 'scripts/package-deploy.py'),
+                            '--output', str(bundle), '--images', str(images), '--archive', str(archive)], check=True)
+            subprocess.run([str(bundle / 'deploy.sh'), '--verify-package'], check=True)
+
     def test_installs_updates_recovers_and_rolls_back_through_shell(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
