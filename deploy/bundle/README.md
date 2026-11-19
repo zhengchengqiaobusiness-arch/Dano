@@ -30,6 +30,7 @@
 | `exposure` | 必填，`https` 或 `http`，与公开地址协议一致 |
 | `environmentFile` | 首次安装时读取的 Compose dotenv 文件，默认 `dano.env`，相对路径从实例配置所在目录解析 |
 | `healthTimeoutSeconds` | 健康等待秒数，默认 180，范围 1–3600 |
+| `trustedCaFile` | 可选，新实例使用的 PEM CA 证书绝对路径。以只读方式加入容器及冒烟程序的信任库。已有实例沿用 Compose 中配置的应用信任库，该字段同时供冒烟使用 |
 | `existingComposeFiles` | 已有实例首次接入时填写，按运行时 Compose 顺序列出控制目录内的相对路径 |
 
 `dano.env` 使用 Compose dotenv 格式。HTTPS 使用 `DANO_HTTPS_PORT`（默认 443）、`DANO_TLS_CERT_PATH` 和 `DANO_TLS_KEY_PATH`。HTTP 使用 `DANO_NGINX_PORT`（默认 80）。填写示例中所有必填 OA 变量。可用完整的 `DANO_OAUTH_CREDENTIAL_KEY` 和 `DANO_OAUTH_CREDENTIAL_KEY_VERSION` 复用已有密钥配对，两个值均未指定时由脚本生成并保存一次。将模型凭据填入部署环境文件的对应提供商变量。实例建立后可在受保护的控制目录 `.secrets` 下放置模型密钥文件，并按提供商要求设置 `*_API_KEY_FILE` 为容器内 `/run/secrets` 下的路径。

@@ -27,6 +27,7 @@ DIGEST = r'sha256:[0-9a-f]{64}'
 PINNED = r'[a-zA-Z0-9][a-zA-Z0-9./:_-]*@' + DIGEST
 KEY = 'DANO_OAUTH_CREDENTIAL_KEY'
 KEY_VERSION = KEY + '_VERSION'
+CA_TARGET = '/run/dano-trust/ca.pem'
 HOST_ARCH = {'x86_64': 'amd64', 'aarch64': 'arm64'}
 REQUIRED_OAUTH = ('ISSUER', 'AUTHORIZATION_ENDPOINT', 'TOKEN_ENDPOINT', 'IDENTITY_ENDPOINT',
                   'API_ORIGIN', 'CLIENT_ID', 'CLIENT_SECRET', 'SCOPE', 'REDIRECT_URI')
@@ -94,7 +95,7 @@ def verify_package(bundle):
         raise DeploymentError('Invalid package version')
     required = {'deploy.sh', 'bundle.py', 'release.py', 'smoke.mjs', 'README.md',
                 'instance.example.json', 'dano.env.example', 'docker-compose.yml',
-                'compose/standalone.yml', 'compose/http.yml', 'compose/https.yml',
+                'compose/standalone.yml', 'compose/http.yml', 'compose/https.yml', 'compose/trust.yml',
                 'nginx/http.conf.template', 'nginx/https.conf.template'}
     if required - metadata['files'].keys():
         raise DeploymentError('Package manifest is incomplete')
@@ -276,7 +277,7 @@ class BundleRelease(ReleaseHost):
             self.begin('http-sse-smoke')
         self.command(self.compose + ['exec', '-T', 'nginx', 'nginx', '-t'])
         self.command(self.compose + ['exec', '-T', 'nginx', 'nginx', '-s', 'reload'])
-        self.smoke(expected_image, self.exposure)
+        self.smoke(expected_image, self.exposure, self.config.get('trustedCaFile'))
         if hasattr(self, 'adjacent') and self.adjacent != self.adjacent_containers():
             raise DeploymentError('An adjacent Compose service changed during deployment')
         if report:
@@ -379,6 +380,8 @@ def first_environment(config, contents, metadata, control, runtime, existing_key
         'DANO_NGINX_SHARED_DIR': control / 'nginx' / 'shared',
         'DANO_NGINX_IMAGE': metadata['images']['nginx']['id'],
     }
+    if config.get('trustedCaFile'):
+        values['DANO_TRUSTED_CA_FILE'] = config['trustedCaFile']
     if names.intersection(values) or 'DANO_IMAGE' in names:
         raise DeploymentError('Remove generated image and directory assignments from the input environment')
     return contents.rstrip() + '\n' + ''.join("{}='{}'\n".format(k, v) for k, v in values.items())
@@ -443,6 +446,14 @@ def instance_config(path):
     for name in ('controlDirectory', 'runtimeDirectory'):
         if any(char in config[name] for char in "\n\r'\0:,"):
             raise DeploymentError('Invalid characters in ' + name)
+    if 'trustedCaFile' in config:
+        try:
+            ca = secure_path(Path(config['trustedCaFile']))
+            if any(char in str(ca) for char in "\n\r'\0:,") or not ca.is_file():
+                raise ValueError()
+            ssl.create_default_context(cafile=str(ca))
+        except (TypeError, ValueError, OSError):
+            raise DeploymentError('trustedCaFile must point to a readable absolute PEM CA file') from None
     config['baseUrl'] = config['baseUrl'].rstrip('/') + '/'
     return config
 
@@ -463,8 +474,12 @@ def deploy(bundle, metadata, config_path, args):
     runtime = secure_path(Path(config['runtimeDirectory']))
     legacy = config.get('existingComposeFiles')
     expected_files = legacy or standalone_files(config['exposure'])
+    if config.get('trustedCaFile') and not legacy:
+        expected_files.append('compose/trust.yml')
     identity = {key: config[key] for key in ('project', 'baseUrl', 'exposure', 'runtimeDirectory')}
     identity['composeFiles'] = expected_files
+    if config.get('trustedCaFile'):
+        identity['trustedCaFile'] = config['trustedCaFile']
     # Share the lock with the established production entry point.
     with lock(Path('/var/lock/dano-production-deploy.lock')):
         state_file = control / '.deployment.json'
@@ -500,7 +515,7 @@ def deploy(bundle, metadata, config_path, args):
                 resolved = validate_candidate(release, release.env_file, release.exposure)
                 check_ports(resolved)
                 release.acquire_images(metadata, args.source, first=True)
-                auth_preflight(resolved['services']['app'], metadata['images']['app']['id'])
+                auth_preflight(resolved['services']['app'], metadata['images']['app']['id'], config.get('trustedCaFile'))
                 state = {'identity': identity, 'current': None, 'previous': None, 'pending': None}
                 json_store(staging / state_file.name, state)
                 staging.rename(control)
@@ -551,12 +566,14 @@ def read_environment(path):
     return path.read_text(encoding='utf8')
 
 
-def auth_preflight(app, image):
+def auth_preflight(app, image, ca_file=None):
     values = {key: str(value) for key, value in app['environment'].items() if value is not None}
     environment = compose_environment()
     environment.update(values)
     args = ['docker', 'run', '--rm', '--pull', 'never', '--user', '1000:1000',
             '--entrypoint', 'node']
+    if ca_file:
+        args += ['-v', ca_file + ':' + CA_TARGET + ':ro']
     for key in values:
         args += ['--env', key]
     command(args + [image, './dist/server/main.js', '--validate-config'], environment=environment)

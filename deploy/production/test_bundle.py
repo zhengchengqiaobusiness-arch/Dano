@@ -31,6 +31,26 @@ class BundleTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('dano.env.example', result.stderr)
 
+    def test_invalid_trusted_ca_is_rejected_before_install(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            bundle = root / 'deployment'
+            subprocess.run(['python3', str(ROOT / 'scripts/package-deploy.py'),
+                            '--output', str(bundle), '--images',
+                            str(ROOT / 'deploy/bundle/images.example.json')], check=True)
+            bad_ca = root / 'invalid.pem'
+            bad_ca.write_text('This is not a PEM certificate')
+            control = root / 'control'
+            config = root / 'instance.json'
+            config.write_text(json.dumps({'project': 'test-dano', 'controlDirectory': str(control),
+                                         'runtimeDirectory': str(root / 'runtime'), 'exposure': 'https',
+                                         'baseUrl': 'https://localhost/', 'trustedCaFile': str(bad_ca)}))
+            result = subprocess.run([str(bundle / 'deploy.sh'), '--config', str(config)],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('trustedCaFile', result.stderr)
+            self.assertFalse(control.exists())
+
 
     def test_installs_updates_recovers_and_rolls_back_through_shell(self):
         with tempfile.TemporaryDirectory() as temporary:

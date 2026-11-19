@@ -31,6 +31,7 @@ def main():
         'release.py': 'deploy/production/release.py',
         'docker-compose.yml': 'docker-compose.yml',
         'compose/standalone.yml': 'deploy/bundle/standalone.yml',
+        'compose/trust.yml': 'deploy/bundle/trust.yml',
         'compose/http.yml': 'deploy/compose/http.yml',
         'compose/https.yml': 'deploy/compose/https.yml',
         'compose-filter.mjs': '.agents/skills/dano-production-deploy/scripts/summarize-compose-config.mjs',

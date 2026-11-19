@@ -144,12 +144,15 @@ class ReleaseHost:
             raise RuntimeError('APP_RESTARTED_OR_OOM')
         return app
 
-    def smoke(self, expected_image, exposure):
-        self.command(['docker', 'run', '--rm', '--network', 'host', '--entrypoint', 'node',
-                      '-e', 'DANO_SMOKE_BASE_URL=' + self.p['baseUrl'],
-                      '-e', 'DANO_SMOKE_EXPECTED_ASSETS_JSON=' + json.dumps(self.image_artifacts(expected_image)['assets']),
-                      '-e', 'DANO_EXPOSURE_MODE=' + exposure, '-v', str(self.work / 'smoke.mjs') + ':/smoke.mjs:ro',
-                      expected_image, '/smoke.mjs'], timeout=self.p['smokeTimeoutSeconds'])
+    def smoke(self, expected_image, exposure, ca_file=None):
+        args = ['docker', 'run', '--rm', '--network', 'host', '--entrypoint', 'node',
+                '-e', 'DANO_SMOKE_BASE_URL=' + self.p['baseUrl'],
+                '-e', 'DANO_SMOKE_EXPECTED_ASSETS_JSON=' + json.dumps(self.image_artifacts(expected_image)['assets']),
+                '-e', 'DANO_EXPOSURE_MODE=' + exposure, '-v', str(self.work / 'smoke.mjs') + ':/smoke.mjs:ro']
+        if ca_file:
+            args += ['-v', ca_file + ':/run/dano-trust/ca.pem:ro',
+                     '-e', 'NODE_EXTRA_CA_CERTS=/run/dano-trust/ca.pem']
+        self.command(args + [expected_image, '/smoke.mjs'], timeout=self.p['smokeTimeoutSeconds'])
 
 
     def record(self, status):

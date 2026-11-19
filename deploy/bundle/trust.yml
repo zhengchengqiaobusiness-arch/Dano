@@ -1,0 +1,11 @@
+services:
+  app:
+    environment:
+      NODE_EXTRA_CA_CERTS: /run/dano-trust/ca.pem
+    volumes:
+      - type: bind
+        source: ${DANO_TRUSTED_CA_FILE:?DANO_TRUSTED_CA_FILE is required}
+        target: /run/dano-trust/ca.pem
+        read_only: true
+        bind:
+          create_host_path: false
